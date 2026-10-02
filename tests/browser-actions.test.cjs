@@ -8,8 +8,9 @@ const source = readFileSync(join(__dirname, '../Docs/Helm-Glass-v8.html'), 'utf8
 
 // The standalone HTML has no module loader. Exercise its actual shared selector and renderers.
 function declaration(name) {
-  const start = source.indexOf(`function ${name}(`);
+  let start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `Missing ${name}`);
+  if (source.slice(start - 6, start) === 'async ') start -= 6;
   const firstLineEnd = source.indexOf('\n', start);
   const firstLine = source.slice(start, firstLineEnd);
   if (firstLine.endsWith('}')) return firstLine;
@@ -18,6 +19,7 @@ function declaration(name) {
 }
 
 function fixture() {
+  let keySequence = 0;
   const context = vm.createContext({
     URL, URLSearchParams,
     BROWSER_INSTANCE_H: 'this-window',
@@ -27,6 +29,7 @@ function fixture() {
     route: {path: '/tasks/101', query: new URLSearchParams()},
     LIVE7: {phase: 'demo'},
     isFinal: task => ['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(task.status),
+    isExternal: task => task.mode === 'EXTERNAL_MCP',
     domainH: url => new URL(url).hostname,
     connectionStatus: connection => connection.status === 'NEEDS_LOGIN'
       ? ['Нужен вход', 'warning'] : ['Вход сохранён', 'success'],
@@ -35,17 +38,30 @@ function fixture() {
     btn: (label, action, icon, style, attributes) => `<button data-action="${action}" ${attributes}>${label}</button>`,
     link: (label, path) => `<a href="#${path}">${label}</a>`,
     heading: label => `<h1>${label}</h1>`,
-    notice: (title, text, tone, controls = '') => `${title} ${text} ${controls}`
+    notice: (title, text, tone, controls = '') => `${title} ${text} ${controls}`,
+    newKey: () => `test-key-${++keySequence}`,
+    handleChatDemo8: () => false, handleTableAction6: () => false,
+    handleSiteActionA: () => false, handleAdminActionA: async () => false,
+    browserAdmissionA: () => null,
+    busy: async (_button, _key, operation) => operation(),
+    render: () => {}, toast: () => {},
+    brand: () => '', statusBadge: () => '', runTitle: task => task.goal,
+    runSummary: () => '', renderBrowser: task => `CURRENT_BROWSER:${task.continuation8.sessionId}`
   });
   for (const name of ['browserState', 'browserVState', 'taskConnectionH', 'liveUnavailable7',
     'browserActionsH', 'widgetTaskLink8', 'renderBrowserActionH', 'connectionTaskH',
-    'connectionBrowserActionH', 'connectionBadgeV', 'manualState', 'manualEntryH']) {
+    'connectionBrowserActionH', 'connectionBadgeV', 'manualState', 'manualEntryH',
+    'demoContinuityH', 'reopenDemoBrowserH', 'unknownEffectNoticeH', 'reviewUnknownEffectH',
+    'handleHelmAction', 'renderWidget', 'userAction']) {
     vm.runInContext(declaration(name), context);
   }
-  const task = {id: 101, version: 1, status: 'RUNNING', browser: 'available',
+  const task = {id: 101, version: 1, status: 'RUNNING', browser: 'available', mode: 'EXTERNAL_MCP',
     connections: ['account-a'], startUrl: 'https://example.com',
     siteAccess: {connectionId: 'account-a', state: 'AUTHENTICATED'}};
   context.S.runs.push(task);
+  context.findRun = id => context.S.runs.find(candidate => candidate.id === id);
+  context.persist = () => { context.savedState = JSON.stringify(context.S); };
+  context.showDialog = (title, body, controls) => { context.dialog = {title, body, controls}; };
   return {context, task, actions: widget => context.browserActionsH(task, !!widget)};
 }
 
@@ -276,4 +292,153 @@ test('session-only connection status describes the live login without claiming a
   assert.match(context.connectionBadgeV(connection), /Вход активен · без сохранения/);
   task.browser = 'closed';
   assert.match(context.connectionBadgeV(connection), /Нужен вход/);
+});
+
+test('reopen changes browser identity once and both views retain the task after reload', async () => {
+  const {context, task} = fixture();
+  task.status = 'PAUSED';
+  task.browser = 'released';
+  task.goal = 'Keep the confirmed result and the user clarification';
+  task.steps = [{id: 'confirmed-step'}];
+  task.result = {conclusion: 'Confirmed result'};
+  const continuity = context.demoContinuityH(task);
+  continuity.command.state = 'SUCCEEDED';
+  continuity.effects = 1;
+  continuity.instructionRevision = 2;
+  continuity.clarifications.push({text: 'Use available items only', revision: 2});
+  continuity.closeReason = 'The old browser expired';
+  const previousSessionId = continuity.sessionId;
+  const preserved = JSON.stringify({goal: task.goal, steps: task.steps, result: task.result,
+    command: continuity.command, clarifications: continuity.clarifications});
+  context.browserVState(task).history.push('https://example.com/private-form');
+  context.browserVState(task).closed = true;
+  context.U.viewer[task.id] = 'released';
+  context.S.chatViews8 = {
+    'demo-a': {taskId: task.id, notice: 'The old browser expired'},
+    'demo-b': {taskId: 102, notice: 'Another task is unchanged'}
+  };
+
+  await context.handleHelmAction('h-reopen-session', {dataset: {id: String(task.id)}});
+  assert.notEqual(continuity.sessionId, previousSessionId);
+  assert.equal(continuity.previousSessionId, previousSessionId);
+  assert.equal(continuity.browserStarts, 2);
+  assert.equal(continuity.closeReason, undefined);
+  assert.ok(continuity.contextResetReason);
+  assert.equal(context.S.chatViews8['demo-a'].notice, continuity.contextResetReason);
+  assert.equal(context.S.chatViews8['demo-b'].notice, 'Another task is unchanged');
+  assert.equal(task.status, 'PAUSED');
+  assert.equal(task.browser, 'available');
+  assert.equal(task.siteAccess, null);
+  assert.equal(task.browserControl, null);
+  assert.equal(context.browserVState(task).history.length, 1);
+  assert.equal(continuity.effects, 1);
+  assert.equal(JSON.stringify({goal: task.goal, steps: task.steps, result: task.result,
+    command: continuity.command, clarifications: continuity.clarifications}), preserved);
+
+  await context.handleHelmAction('h-reopen-session', {dataset: {id: String(task.id)}});
+  assert.equal(continuity.browserStarts, 2);
+  context.S = JSON.parse(context.savedState);
+  context.V.browser = {};
+  context.U.viewer = {};
+  const restored = context.findRun(task.id);
+  assert.equal(context.browserState(restored), 'available');
+  const widget = context.renderWidget(task.id);
+  assert.ok(widget.includes(`CURRENT_BROWSER:${continuity.sessionId}`));
+  assert.doesNotMatch(widget, /Новый браузер не создан|The old browser expired/);
+});
+
+test('a saved UNKNOWN command cannot be bypassed by paused state or a reopen action', async () => {
+  const {context, task, actions} = fixture();
+  task.status = 'PAUSED';
+  task.browser = 'released';
+  context.U.viewer[task.id] = 'released';
+  context.demoContinuityH(task).command.state = 'UNKNOWN';
+  assert.equal(actions().primary, null);
+  const before = JSON.stringify(task);
+  await context.handleHelmAction('h-reopen-session', {dataset: {id: String(task.id)}});
+  assert.equal(JSON.stringify(task), before);
+});
+
+test('reopen rechecks admission after a pending request loses its capacity', async () => {
+  const {context, task} = fixture();
+  task.status = 'PAUSED';
+  task.browser = 'released';
+  context.U.viewer[task.id] = 'released';
+  context.busy = async (_button, _key, operation) => {
+    context.browserAdmissionA = () => 'Capacity exhausted';
+    operation();
+  };
+  await context.handleHelmAction('h-reopen-session', {dataset: {id: String(task.id)}});
+  assert.equal(task.browser, 'released');
+  assert.equal(task.continuation8, undefined);
+});
+
+test('reopen rechecks task state after the pending UI operation', async () => {
+  const {context, task} = fixture();
+  task.status = 'PAUSED';
+  task.browser = 'released';
+  context.U.viewer[task.id] = 'released';
+  context.busy = async (_button, _key, operation) => {
+    context.S.runs = [{...task, status: 'CANCELLED'}];
+    return operation();
+  };
+  await context.handleHelmAction('h-reopen-session', {dataset: {id: String(task.id)}});
+  assert.equal(context.findRun(task.id).status, 'CANCELLED');
+  assert.equal(context.findRun(task.id).browser, 'released');
+  assert.equal(task.continuation8, undefined);
+  assert.equal(context.S.browserOwner, undefined);
+});
+
+test('resume waits for ChatGPT and cannot bypass a known or newly discovered unknown effect', async () => {
+  for (const failure of ['none', 'known', 'during-request']) {
+    const {context, task, actions} = fixture();
+    task.status = 'PAUSED';
+    if (failure === 'known') {
+      context.demoContinuityH(task).command.state = 'UNKNOWN';
+      assert.equal(actions().canPause, false);
+    }
+    if (failure === 'during-request') context.busy = async (_button, _key, operation) => {
+      task.unknownEffect = true;
+      operation();
+    };
+    await context.handleHelmAction('v-pause', {dataset: {id: String(task.id)}});
+    assert.equal(task.status, failure === 'none' ? 'WAITING_AGENT' : 'PAUSED');
+  }
+});
+
+test('a delayed pause cannot become resume after another window already paused the task', async () => {
+  const {context, task} = fixture();
+  context.busy = async (_button, _key, operation) => {
+    task.status = 'PAUSED';
+    task.version++;
+    operation();
+  };
+  await context.handleHelmAction('v-pause', {dataset: {id: String(task.id)}});
+  assert.equal(task.status, 'PAUSED');
+  assert.equal(task.version, 2);
+});
+
+test('unknown-result UI claims progress only for an accepted reconciliation operation', () => {
+  const {context, task} = fixture();
+  task.status = 'INTERRUPTED';
+  task.error = 'Confirmation was lost';
+  task.reconciliation = {state: 'RUNNING'};
+  assert.match(context.userAction(task), /Результат действия неизвестен/);
+  assert.match(context.userAction(task), /data-action="h-review-effect"/);
+  task.reconciliation.operationId = 'accepted-reconciliation';
+  assert.match(context.userAction(task), /Проверяем результат действия/);
+  task.reconciliation.state = 'NEEDS_ATTENTION';
+  assert.match(context.userAction(task), /Результат действия неизвестен/);
+});
+
+test('reviewing an unknown result cannot resolve it or repeat the action', async () => {
+  const {context, task} = fixture();
+  task.status = 'INTERRUPTED';
+  task.browser = 'released';
+  context.demoContinuityH(task).command.state = 'UNKNOWN';
+  const before = JSON.stringify(context.S);
+  await context.handleHelmAction('h-review-effect', {dataset: {id: String(task.id)}});
+  assert.equal(JSON.stringify(context.S), before);
+  assert.match(context.dialog.body, /проверка сайта не подключена/);
+  assert.doesNotMatch(context.dialog.controls, /reopen|resume|demo-command/);
 });
