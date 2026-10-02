@@ -4,7 +4,7 @@ const {join} = require('node:path');
 const {test} = require('node:test');
 const vm = require('node:vm');
 
-const source = readFileSync(join(__dirname, '../Docs/Helm-Glass-v8.html'), 'utf8');
+const source = readFileSync(join(__dirname, '../Docs/Helm-Glass-v8.html'), 'utf8').replace(/\r\n/g, '\n');
 
 // The standalone HTML has no module loader. Exercise its actual shared selector and renderers.
 function declaration(name) {
@@ -14,8 +14,16 @@ function declaration(name) {
   const firstLineEnd = source.indexOf('\n', start);
   const firstLine = source.slice(start, firstLineEnd);
   if (firstLine.endsWith('}')) return firstLine;
-  const end = source.indexOf('\n}', firstLineEnd);
-  return source.slice(start, end + 2);
+  for (let end = source.indexOf('\n}', firstLineEnd); end !== -1; end = source.indexOf('\n}', end + 2)) {
+    const candidate = source.slice(start, end + 2);
+    try {
+      new vm.Script(candidate);
+      return candidate;
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  assert.fail(`Unterminated function ${name}`);
 }
 
 function fixture() {
@@ -28,7 +36,6 @@ function fixture() {
     S: {connections: [{id: 'account-a', startUrl: 'https://example.com', status: 'SAVED'}], runs: []},
     route: {path: '/tasks/101', query: new URLSearchParams()},
     LIVE7: {phase: 'demo'},
-    isFinal: task => ['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(task.status),
     isExternal: task => task.mode === 'EXTERNAL_MCP',
     domainH: url => new URL(url).hostname,
     connectionStatus: connection => connection.status === 'NEEDS_LOGIN'
@@ -48,7 +55,9 @@ function fixture() {
     brand: () => '', statusBadge: () => '', runTitle: task => task.goal,
     runSummary: () => '', renderBrowser: task => `CURRENT_BROWSER:${task.continuation8.sessionId}`
   });
+  vm.runInContext(source.match(/^const isFinal=.*$/m)[0], context);
   for (const name of ['browserState', 'browserVState', 'taskConnectionH', 'liveUnavailable7',
+    'hasResolvedEffectH', 'hasUnknownEffectH', 'canResumeInterruptedH',
     'browserActionsH', 'widgetTaskLink8', 'renderBrowserActionH', 'connectionTaskH',
     'connectionBrowserActionH', 'connectionBadgeV', 'manualState', 'manualEntryH',
     'demoContinuityH', 'reopenDemoBrowserH', 'unknownEffectNoticeH', 'reviewUnknownEffectH',
@@ -441,4 +450,76 @@ test('reviewing an unknown result cannot resolve it or repeat the action', async
   assert.equal(JSON.stringify(context.S), before);
   assert.match(context.dialog.body, /проверка сайта не подключена/);
   assert.doesNotMatch(context.dialog.controls, /reopen|resume|demo-command/);
+});
+
+test('resolved interruption resumes the same task without repeating its action or resetting usage', async () => {
+  for (const effect of ['APPLIED', 'NOT_APPLIED']) {
+    const {context, task, actions} = fixture();
+    task.status = 'INTERRUPTED';
+    task.unknownEffect = true;
+    task.browserSec = 127;
+    task.goal = 'Read the instruction and answer the audio questions';
+    task.result = {conclusion: 'Existing partial result'};
+    task.steps = [{id: 'original-event', state: 'unknown'}];
+    const continuity = context.demoContinuityH(task);
+    continuity.command.state = 'UNKNOWN';
+    task.reconciliation = {resolutionId: 'verified-result', sourceCommandId: continuity.command.id, effect};
+    const original = JSON.stringify({command: continuity.command, result: task.result});
+    assert.equal(actions().primary.kind, 'resume');
+    assert.equal(actions(true).primary, null);
+    await context.handleHelmAction('h-resume-task', {dataset: {id: String(task.id)}});
+    await context.handleHelmAction('h-resume-task', {dataset: {id: String(task.id)}});
+    assert.equal(context.S.runs.length, 1);
+    assert.equal(context.S.runs[0], task);
+    assert.equal(task.id, 101);
+    assert.equal(task.status, 'WAITING_AGENT');
+    assert.equal(task.browserSec, 127);
+    assert.equal(task.goal, 'Read the instruction and answer the audio questions');
+    assert.equal(continuity.browserStarts, 1);
+    assert.equal(task.steps.length, 2);
+    assert.equal(task.steps[0].id, 'original-event');
+    assert.equal(JSON.stringify({command: continuity.command, result: task.result}), original);
+  }
+});
+
+test('interrupted resume rejects unrelated evidence and a stop arriving during the request', async () => {
+  for (const failure of ['unrelated', 'unresolved', 'stop', 'signed-out', 'readonly']) {
+    const {context, task, actions} = fixture();
+    task.status = 'INTERRUPTED';
+    const continuity = context.demoContinuityH(task);
+    continuity.command.state = 'UNKNOWN';
+    task.reconciliation = {resolutionId: 'verified-result', sourceCommandId: continuity.command.id, effect: 'APPLIED'};
+    if (failure === 'unrelated') task.reconciliation.sourceCommandId = 'another-command';
+    if (failure === 'unresolved') task.reconciliation.effect = 'UNRESOLVED';
+    if (failure === 'signed-out') context.U.signedOut = true;
+    if (failure === 'readonly') context.browserVState(task).mode = 'readonly';
+    if (failure === 'stop') context.busy = async (_button, _key, operation) => {
+      task.cancelRequestedAt = '2026-10-03T00:00:00Z';
+      operation();
+    };
+    else assert.equal(actions().primary, null);
+    await context.handleHelmAction('h-resume-task', {dataset: {id: String(task.id)}});
+    assert.equal(task.status, 'INTERRUPTED');
+    assert.equal(continuity.command.state, 'UNKNOWN');
+    assert.equal(continuity.browserStarts, 1);
+  }
+});
+
+test('explicit interrupted recovery opens one new session on the existing task and retains the warning', async () => {
+  const {context, task, actions} = fixture();
+  task.status = 'INTERRUPTED';
+  task.browser = 'released';
+  const continuity = context.demoContinuityH(task);
+  const oldSession = continuity.sessionId;
+  continuity.command.state = 'UNKNOWN';
+  task.reconciliation = {resolutionId: 'verified-result', sourceCommandId: continuity.command.id, effect: 'APPLIED'};
+  assert.match(context.userAction(task), /прежние вкладки и поля формы потеряны/);
+  assert.equal(actions().primary.label, 'Продолжить с новым браузером');
+  await context.handleHelmAction('h-resume-task', {dataset: {id: String(task.id)}});
+  await context.handleHelmAction('h-resume-task', {dataset: {id: String(task.id)}});
+  assert.equal(context.S.runs.length, 1);
+  assert.equal(task.status, 'WAITING_AGENT');
+  assert.notEqual(continuity.sessionId, oldSession);
+  assert.equal(continuity.browserStarts, 2);
+  assert.equal(continuity.command.state, 'UNKNOWN');
 });
