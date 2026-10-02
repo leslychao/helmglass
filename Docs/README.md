@@ -2,6 +2,7 @@
 
 - [Техническая спецификация](architecture.html) — канонический владелец архитектуры, контрактов и критериев готовности; HTML с оглавлением, поиском, диаграммами и печатью в PDF открывается без интернета.
 - [Последний HTML-дизайн](Helm-Glass-v8.html) — интерактивный демонстрационный макет, не подключённый к backend или ChatGPT.
+- Готовые компоненты: [матрица всей спецификации](architecture.html#reuse-matrix), [проверенные проекты и источники](architecture.html#reuse-candidates), [зависимости](architecture.html#reuse-adoption), [архитектурные изменения](architecture.html#architectural-diff).
 - Исполнение: [наблюдение страницы и действия](architecture.html#browser-observation), [аудио, расшифровка и акустические признаки](architecture.html#audio-analysis).
 - Восстановление и совместный просмотр: [связь задачи с браузером](architecture.html#browser-continuity), [передача управления](architecture.html#control-handoff), [контракт виджета](architecture.html#widget-transport), [приёмка](architecture.html#continuity-acceptance).
 - Действия браузера: [видимость, доступность и подписи кнопок в кабинете и виджете](architecture.html#browser-actions).
