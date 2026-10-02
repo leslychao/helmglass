@@ -22,19 +22,24 @@ function fixture() {
     URL, URLSearchParams,
     BROWSER_INSTANCE_H: 'this-window',
     BROWSER_STATES: {stale: [], disconnected: [], expired: [], paused: [], hidden: []},
-    V: {browser: {}}, U: {manual: {}, viewer: {}, signedOut: false},
+    V: {browser: {}, login: {}}, U: {manual: {}, viewer: {}, signedOut: false},
     S: {connections: [{id: 'account-a', startUrl: 'https://example.com', status: 'SAVED'}], runs: []},
     route: {path: '/tasks/101', query: new URLSearchParams()},
     LIVE7: {phase: 'demo'},
     isFinal: task => ['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(task.status),
     domainH: url => new URL(url).hostname,
+    connectionStatus: connection => connection.status === 'NEEDS_LOGIN'
+      ? ['Нужен вход', 'warning'] : ['Вход сохранён', 'success'],
     esc: value => String(value ?? '').replace(/"/g, '&quot;'),
     icon: () => '',
     btn: (label, action, icon, style, attributes) => `<button data-action="${action}" ${attributes}>${label}</button>`,
-    link: (label, path) => `<a href="#${path}">${label}</a>`
+    link: (label, path) => `<a href="#${path}">${label}</a>`,
+    heading: label => `<h1>${label}</h1>`,
+    notice: (title, text, tone, controls = '') => `${title} ${text} ${controls}`
   });
   for (const name of ['browserState', 'browserVState', 'taskConnectionH', 'liveUnavailable7',
-    'browserActionsH', 'widgetTaskLink8', 'renderBrowserActionH', 'connectionBrowserActionH']) {
+    'browserActionsH', 'widgetTaskLink8', 'renderBrowserActionH', 'connectionTaskH',
+    'connectionBrowserActionH', 'connectionBadgeV', 'manualState', 'manualEntryH']) {
     vm.runInContext(declaration(name), context);
   }
   const task = {id: 101, version: 1, status: 'RUNNING', browser: 'available',
@@ -201,4 +206,74 @@ test('connection entry uses its live task instead of starting another login brow
   assert.doesNotMatch(context.connectionBrowserActionH(connection), /Войти на сайт/);
   connection.status = 'UNAVAILABLE';
   assert.equal(context.connectionBrowserActionH(connection), '');
+});
+
+test('manual entry and demo scene navigation never acquire control', () => {
+  const {context, task} = fixture();
+  task.status = 'WAITING_USER';
+  task.request = {type: 'LOGIN', connectionId: 'account-a'};
+  context.route.path = '/manual';
+  context.route.query.set('scene', 'human');
+  const ctx = {t: task, connection: context.S.connections[0], key: 'run:101'};
+  const before = JSON.stringify(task);
+  const state = context.manualState(ctx);
+  assert.equal(state.phase, 'ready');
+  const markup = context.manualEntryH(ctx, state);
+  assert.match(markup, /Взять управление для входа/);
+  assert.doesNotMatch(markup, /Продолжить демовход/);
+  assert.equal(JSON.stringify(task), before);
+  assert.equal(task.browserControl, undefined);
+});
+
+test('a stale login deep link cannot restart login after session-only completion', () => {
+  const {context, task} = fixture();
+  context.S.connections[0].status = 'NEEDS_LOGIN';
+  const markup = context.manualEntryH(
+    {t: task, connection: context.S.connections[0], key: 'run:101'}, {phase: 'ready'});
+  assert.match(markup, /Вход сейчас не требуется/);
+  assert.doesNotMatch(markup, /manual-start|Продолжить демовход/);
+});
+
+test('read-only capabilities hide control instead of offering a disabled takeover', () => {
+  const {context, task, actions} = fixture();
+  context.browserVState(task).mode = 'readonly';
+  assert.equal(actions().primary, null);
+  assert.equal(actions().canInput, false);
+  assert.equal(actions().canPause, false);
+});
+
+test('two accounts on one site are resolved by current binding, never by first match', () => {
+  const {context, task, actions} = fixture();
+  context.S.connections.push({id: 'account-b', startUrl: 'https://example.com', status: 'NEEDS_LOGIN'});
+  task.connections.push('account-b');
+  task.status = 'WAITING_USER';
+  task.request = {type: 'LOGIN', connectionId: 'account-b'};
+  assert.equal(context.taskConnectionH(task).id, 'account-b');
+  assert.equal(actions().authenticated, false);
+  assert.equal(actions().primary.kind, 'login');
+  task.request = null;
+  task.siteAccess = null;
+  assert.equal(context.taskConnectionH(task), null);
+});
+
+test('stale local login UI cannot retain privacy or grant input after ownership changes', () => {
+  const {context, task} = fixture();
+  const ctx = {t: task, connection: context.S.connections[0], key: 'run:101'};
+  context.U.manual[ctx.key] = {phase: 'human'};
+  context.V.login[ctx.key] = 'verified';
+  task.status = 'WAITING_AGENT';
+  assert.equal(context.browserState(task), 'available');
+  assert.equal(context.manualState(ctx).phase, 'ready');
+  assert.equal(context.V.login[ctx.key], undefined);
+  assert.doesNotMatch(context.manualEntryH(ctx, context.manualState(ctx)), /manual-start/);
+});
+
+test('session-only connection status describes the live login without claiming a saved profile', () => {
+  const {context, task} = fixture();
+  const connection = context.S.connections[0];
+  connection.status = 'NEEDS_LOGIN';
+  connection.saved = false;
+  assert.match(context.connectionBadgeV(connection), /Вход активен · без сохранения/);
+  task.browser = 'closed';
+  assert.match(context.connectionBadgeV(connection), /Нужен вход/);
 });
