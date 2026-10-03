@@ -177,11 +177,6 @@ export const operationKinds = [
   },
   {
     "method": "POST",
-    "path": "/tasks/{id}/continue",
-    "kind": "tasks.continue:{id}"
-  },
-  {
-    "method": "POST",
     "path": "/tasks/{id}/connection-resolution",
     "kind": "connections.resolve:{id}"
   },

@@ -2580,55 +2580,6 @@
         }
       }
     },
-    "/api/v1/tasks/{id}/continue": {
-      "post": {
-        "operationId": "continueTask",
-        "x-operation-kind": "tasks.continue:{id}",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "minLength": 16,
-              "maxLength": 128
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ContinuationClaimRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Durable receipt",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MutationReceipt"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/tasks/{id}/connection-resolution": {
       "post": {
         "operationId": "resolveTaskConnection",

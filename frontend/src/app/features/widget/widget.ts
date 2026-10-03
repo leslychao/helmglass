@@ -277,6 +277,10 @@ export class Widget {
         if (!this.events) this.connectEvents(snapshot.eventTicket, generation);
       }
       this.scheduleAuthorizationRenewal(snapshot);
+      if (snapshot.presentation.presentationState === 'ACTIVE' && !this.events) {
+        this.error.set('Восстанавливаем канал обновлений просмотра.');
+        this.scheduleRecovery();
+      }
       this.updateAttention();
       await this.continueIfReady(snapshot, generation);
     } catch {

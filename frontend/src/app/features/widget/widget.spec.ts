@@ -332,7 +332,9 @@ describe('widget presentation lifecycle', () => {
   it('renews an event-only view at its active authorization deadline despite later snapshots', async () => {
     const initial = attached(null, true);
     if (!initial._meta) throw new Error('Expected event ticket');
-    initial._meta.eventTicket.viewerAuthorizationExpiresAt = new Date(Date.now() + 5000).toISOString();
+    initial._meta.eventTicket.viewerAuthorizationExpiresAt = new Date(
+      Date.now() + 5000,
+    ).toISOString();
     bridge.attach.mockResolvedValue(initial);
     await mount();
     const original = socket();
@@ -406,6 +408,33 @@ describe('widget presentation lifecycle', () => {
     await vi.advanceTimersByTimeAsync(10000);
     expect(bridge.attach).toHaveBeenCalledTimes(3);
     expect(fixture.componentInstance.inactive()).toBe(true);
+  });
+
+  it('recovers a channel after restart while the previous server lease expires', async () => {
+    bridge.attach.mockResolvedValue(attached());
+    const fixture = await mount();
+    await vi.advanceTimersByTimeAsync(45000);
+    expect(EventSocket.instances).toHaveLength(0);
+    expect(bridge.attach.mock.calls.length).toBeGreaterThan(2);
+    bridge.attach.mockResolvedValue(attached(null, true));
+    await vi.advanceTimersByTimeAsync(16000);
+    expect(EventSocket.instances).toHaveLength(1);
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    const attempts = bridge.attach.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(bridge.attach).toHaveBeenCalledTimes(attempts);
+    expect(fixture.componentInstance.error()).toBe('');
+  });
+
+  it('bounds recovery when snapshots never provide the missing event channel', async () => {
+    bridge.attach.mockResolvedValue(attached());
+    const fixture = await mount();
+    await vi.advanceTimersByTimeAsync(120000);
+    const attempts = bridge.attach.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(bridge.attach).toHaveBeenCalledTimes(attempts);
+    expect(fixture.componentInstance.error()).toContain('Связь не восстановлена');
   });
 
   it('shows attention from the durable deadline without polling or sending a message', async () => {

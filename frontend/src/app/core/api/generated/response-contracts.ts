@@ -312,11 +312,6 @@ export const responseContracts = [
   },
   {
     "method": "POST",
-    "path": "/tasks/{id}/continue",
-    "validator": "response2"
-  },
-  {
-    "method": "POST",
     "path": "/tasks/{id}/connection-resolution",
     "validator": "response25"
   },

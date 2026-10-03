@@ -948,22 +948,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tasks/{id}/continue": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["continueTask"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/tasks/{id}/connection-resolution": {
         parameters: {
             query?: never;
@@ -4728,34 +4712,6 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ReconcileRequest"];
-            };
-        };
-        responses: {
-            /** @description Durable receipt */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MutationReceipt"];
-                };
-            };
-        };
-    };
-    continueTask: {
-        parameters: {
-            query?: never;
-            header: {
-                "Idempotency-Key": string;
-            };
-            path: {
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ContinuationClaimRequest"];
             };
         };
         responses: {

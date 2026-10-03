@@ -120,17 +120,31 @@ describe('widget presentation and frame authorization', () => {
 
   it('requires a finite authorization deadline for event and video channels', () => {
     for (const deadline of [undefined, 'not-a-date']) {
-      expect(() => snapshotOf({ presentation, session }, {
-        viewTicket: { ...meta.viewTicket, viewerAuthorizationExpiresAt: deadline },
-      }, presentation, origin)).toThrow();
-      expect(() => snapshotOf({ presentation, session: null }, {
-        eventTicket: {
-          ticket: 'event-ticket',
-          url: `${origin.replace(/^http/, 'ws')}/events/v1/widget/tasks/${presentation.taskId}`,
-          viewGeneration: 1,
-          viewerAuthorizationExpiresAt: deadline,
-        },
-      }, presentation, origin)).toThrow();
+      expect(() =>
+        snapshotOf(
+          { presentation, session },
+          {
+            viewTicket: { ...meta.viewTicket, viewerAuthorizationExpiresAt: deadline },
+          },
+          presentation,
+          origin,
+        ),
+      ).toThrow();
+      expect(() =>
+        snapshotOf(
+          { presentation, session: null },
+          {
+            eventTicket: {
+              ticket: 'event-ticket',
+              url: `${origin.replace(/^http/, 'ws')}/events/v1/widget/tasks/${presentation.taskId}`,
+              viewGeneration: 1,
+              viewerAuthorizationExpiresAt: deadline,
+            },
+          },
+          presentation,
+          origin,
+        ),
+      ).toThrow();
     }
   });
 });
