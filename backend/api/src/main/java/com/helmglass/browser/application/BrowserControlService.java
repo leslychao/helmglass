@@ -39,12 +39,6 @@ public class BrowserControlService {
 
   public record ControlIntent(UUID workerId, Map<String, Object> message) {}
 
-  /** Physical closure makes an unacknowledged control transfer permanently unavailable. */
-  @Transactional
-  public void reconcileClosedOperations() {
-    operations.failClosedControls();
-  }
-
   public BrowserControlService(
       BrowserRepository browsers,
       ControlRepository controls,
@@ -62,6 +56,12 @@ public class BrowserControlService {
     this.events = events;
     this.policies = policies;
     this.connections = connections;
+  }
+
+  /** Physical closure makes an unacknowledged control transfer permanently unavailable. */
+  @Transactional
+  public void reconcileClosedOperations() {
+    operations.failClosedControls();
   }
 
   @Transactional

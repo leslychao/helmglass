@@ -226,7 +226,9 @@ public class ConnectionRepository {
             INSERT INTO operation_items(operation_id,item_key,target_id,phase)
             SELECT :operation,'task:'||id::text,id,'CONNECTION_REQUIRED' FROM (
               SELECT task_id id FROM task_connections WHERE connection_id=:connection
-              UNION SELECT task_id id FROM browser_sessions WHERE connection_id=:connection AND task_id IS NOT NULL
+                AND (selected OR preference_rank IS NOT NULL)
+              UNION SELECT task_id id FROM browser_sessions WHERE connection_id=:connection
+                AND task_id IS NOT NULL AND binding_released_at IS NULL
             ) tasks ON CONFLICT DO NOTHING
             """)
         .param("operation", operationId)

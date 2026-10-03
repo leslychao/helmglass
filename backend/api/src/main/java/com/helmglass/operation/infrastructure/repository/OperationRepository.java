@@ -218,7 +218,8 @@ public class OperationRepository {
                 """
                 WITH closed AS (
                   SELECT o.id FROM operations o JOIN browser_sessions s ON s.id=o.target_id
-                  WHERE o.target_type='browserSession' AND o.kind LIKE 'control.%'
+                  WHERE o.target_type='browserSession' AND o.user_id=s.user_id
+                    AND o.kind IN ('control.acquire:'||s.id::text,'control.release:'||s.id::text)
                     AND o.state IN ('PENDING','RUNNING')
                     AND o.human_checkpoint IS DISTINCT FROM 'UNKNOWN'
                     AND s.state='CLOSED' AND s.binding_released_at IS NOT NULL

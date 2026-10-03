@@ -349,6 +349,108 @@ class ControlOutboxIntegrationTest {
     assertThat(outbox.published(delivery.id())).isFalse();
   }
 
+  @Test
+  void physicalCloseRecoversLostControlAckWithoutFabricatingDeliveryOrChangingReplay() {
+    Fixture fixture = fixture();
+    var input =
+        new BrowserContracts.TakeControl(
+            browsers.owned(fixture.actor().userId(), fixture.session()).version(),
+            leases.get(fixture.session()).epoch(),
+            fixture.controller(),
+            false,
+            false);
+    var context = new MutationContext(UUID.randomUUID().toString(), UUID.randomUUID());
+    var accepted = controls.acquire(fixture.actor(), fixture.session(), input, context);
+    var delivery = intent(fixture);
+    transaction.executeWithoutResult(status -> registry.closed(fixture.session()));
+    assertThat(outbox.deliverable(delivery.id())).isFalse();
+    assertThat(operations.owned(fixture.actor().userId(), accepted.operationId()).state())
+        .isEqualTo("PENDING");
+
+    transaction.executeWithoutResult(
+        status -> {
+          controls.reconcileClosedOperations();
+          outbox.retireClosedBindings();
+          status.setRollbackOnly();
+        });
+    assertThat(operations.owned(fixture.actor().userId(), accepted.operationId()).state())
+        .isEqualTo("PENDING");
+    assertThat(failure(delivery.id())).isNull();
+    dispatcher.deliverControls();
+    var failed = operations.owned(fixture.actor().userId(), accepted.operationId());
+    assertThat(failed.state()).isEqualTo("FAILED");
+    assertThat(failed.failureCode()).isEqualTo("SESSION_CLOSED");
+    assertThat(outbox.published(delivery.id())).isFalse();
+    assertThat(failure(delivery.id())).isEqualTo("SESSION_CLOSED");
+    assertThat(controls.acquire(fixture.actor(), fixture.session(), input, context))
+        .isEqualTo(accepted);
+    assertThatThrownBy(
+            () ->
+                dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(delivery)))
+        .isInstanceOf(DomainException.class);
+    dispatcher.deliverControls();
+    assertThat(operations.owned(fixture.actor().userId(), accepted.operationId()))
+        .isEqualTo(failed);
+    assertThat(count(fixture)).isEqualTo(1);
+  }
+
+  @Test
+  void closeRecoveryPreservesActiveUnreleasedUnknownAndSuccessfulControlOperations() {
+    for (String scenario :
+        List.of(
+            "active",
+            "unreleased",
+            "allocation",
+            "unknown",
+            "checkpoint",
+            "succeeded",
+            "otherKind")) {
+      Fixture fixture = fixture();
+      UUID operation = acquire(fixture);
+      var delivery = intent(fixture);
+      if (scenario.equals("succeeded")) {
+        dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(delivery));
+      }
+      if (!scenario.equals("active")) {
+        transaction.executeWithoutResult(status -> registry.closed(fixture.session()));
+      }
+      switch (scenario) {
+        case "unreleased" ->
+            jdbc.sql("UPDATE browser_sessions SET binding_released_at=NULL WHERE id=:id")
+                .param("id", fixture.session())
+                .update();
+        case "allocation" ->
+            jdbc.sql(
+                    "UPDATE browser_allocations SET state='ASSIGNED',released_at=NULL WHERE"
+                        + " session_id=:id")
+                .param("id", fixture.session())
+                .update();
+        case "unknown" ->
+            jdbc.sql("UPDATE operations SET state='UNKNOWN' WHERE id=:id")
+                .param("id", operation)
+                .update();
+        case "checkpoint" ->
+            jdbc.sql("UPDATE operations SET human_checkpoint='UNKNOWN' WHERE id=:id")
+                .param("id", operation)
+                .update();
+        case "otherKind" ->
+            jdbc.sql("UPDATE operations SET kind='control.claim-fence' WHERE id=:id")
+                .param("id", operation)
+                .update();
+        default -> {}
+      }
+      var before = operations.owned(fixture.actor().userId(), operation);
+      dispatcher.deliverControls();
+      assertThat(operations.owned(fixture.actor().userId(), operation)).isEqualTo(before);
+      assertThat(outbox.published(delivery.id())).isEqualTo(scenario.equals("succeeded"));
+      // Leave each fixture fenced so a later scenario cannot send its outstanding intent.
+      transaction.executeWithoutResult(status -> registry.closed(fixture.session()));
+      jdbc.sql("UPDATE browser_control_leases SET epoch=epoch+1 WHERE session_id=:id")
+          .param("id", fixture.session())
+          .update();
+    }
+  }
+
   private UUID claimFixture(Fixture fixture, UUID claim) {
     return Objects.requireNonNull(
         transaction.execute(

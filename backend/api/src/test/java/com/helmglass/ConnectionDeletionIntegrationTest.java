@@ -195,7 +195,7 @@ class ConnectionDeletionIntegrationTest {
   void deletionWaitsForPhysicalClosureAndExpiredUploadLease() {
     var actor = actor();
     UUID id = connection(actor);
-    UUID session = session(actor, id);
+    UUID session = session(actor, id, null);
     UUID profile = profile(actor, id);
     UUID version = UUID.randomUUID();
     jdbc.sql(
@@ -291,11 +291,7 @@ class ConnectionDeletionIntegrationTest {
     UUID id = connection(actor);
     UUID other = connection(actor);
     UUID historicalSessionTask = task(actor, List.of(other));
-    UUID closed = session(actor, id);
-    jdbc.sql("UPDATE browser_sessions SET task_id=:task WHERE id=:id")
-        .param("task", historicalSessionTask)
-        .param("id", closed)
-        .update();
+    UUID closed = session(actor, id, historicalSessionTask);
     new TransactionTemplate(transactions).executeWithoutResult(status -> registry.closed(closed));
 
     UUID historicalSelectionTask = task(actor, List.of(other));
@@ -318,11 +314,7 @@ class ConnectionDeletionIntegrationTest {
         .param("id", id)
         .update();
     UUID currentTask = task(actor, List.of());
-    UUID current = session(actor, id);
-    jdbc.sql("UPDATE browser_sessions SET task_id=:task WHERE id=:id")
-        .param("task", currentTask)
-        .param("id", current)
-        .update();
+    UUID current = session(actor, id, currentTask);
 
     var receipt = connections.delete(actor, id, context());
     advance(receipt.operationId());
@@ -436,7 +428,7 @@ class ConnectionDeletionIntegrationTest {
         .id();
   }
 
-  private UUID session(AuthenticatedActor actor, UUID connection) {
+  private UUID session(AuthenticatedActor actor, UUID connection, UUID taskId) {
     UUID worker = UUID.randomUUID();
     UUID boot = UUID.randomUUID();
     jdbc.sql(
@@ -454,9 +446,9 @@ class ConnectionDeletionIntegrationTest {
                     status ->
                         browsers.reserve(
                             actor.userId(),
-                            null,
+                            taskId,
                             connection,
-                            "CONNECTION_LOGIN",
+                            taskId == null ? "CONNECTION_LOGIN" : "TASK",
                             new BrowserRepository.Worker(worker, boot, 1),
                             600)));
     jdbc.sql(
