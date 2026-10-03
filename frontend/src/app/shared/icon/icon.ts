@@ -29,6 +29,7 @@ const paths: Readonly<Record<string, string>> = {
   user: 'M4 21v-3a8 8 0 0 1 16 0v3M16 6a4 4 0 1 0-8 0 4 4 0 0 0 8 0',
   save: 'M4 3h13l4 4v14H3V3h1Zm3 0v7h10V3M7 21v-7h10v7',
   info: 'M21 12a9 9 0 1 0-18 0 9 9 0 0 0 18 0ZM12 11v6M12 7h.01',
+  alert: 'M12 3 2 21h20L12 3ZM12 9v5M12 18h.01',
   grid: 'M3 3h7v7H3ZM14 3h7v7h-7ZM3 14h7v7H3ZM14 14h7v7h-7Z',
   file: 'M5 3h10l4 4v14H5ZM15 3v5h4M8 12h8M8 16h8',
   image: 'M3 3h18v18H3ZM3 17l6-6 4 4 3-3 5 5M9 7h.01',

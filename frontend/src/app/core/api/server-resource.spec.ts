@@ -1,4 +1,4 @@
-import { provideHttpClient } from '@angular/common/http';
+import { HttpErrorResponse, provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 import { effect, signal } from '@angular/core';
@@ -160,6 +160,91 @@ describe('visible server resources', () => {
 });
 
 describe('nested paginated resources', () => {
+  it('keeps independent snapshots and recovers a shrinking named page without changing its peers', () => {
+    interface Pool {
+      workers: Page<string>;
+      queue: Page<string>;
+    }
+    const refresh = new Subject<ReadonlySet<string> | null>();
+    const get = vi.fn(() => new Subject<Pool>());
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: Api, useValue: { get } },
+        { provide: Realtime, useValue: { refresh } },
+      ],
+    });
+    const resource = TestBed.runInInjectionContext(
+      () =>
+        new ServerResource<Pool>(['nodes'], {
+          workers: (value) => value.workers,
+          queue: (value) => value.queue,
+        }),
+    );
+    const page = (page: number, total: number, snapshot: string): Page<string> => ({
+      items: [],
+      page,
+      pageSize: 10,
+      total,
+      sort: null,
+      snapshot,
+    });
+    const initial = {
+      workers: page(2, 20, 'workers-1'),
+      queue: page(1, 25, 'queue-1'),
+    };
+    resource.load('/admin/browsers', { 'workers.page': 2, 'queue.page': 1 });
+    get.mock.results[0].value.next(initial);
+    resource.load('/admin/browsers', { 'workers.page': 2, 'queue.page': 3 });
+    expect(get).toHaveBeenLastCalledWith('/admin/browsers', {
+      'workers.page': 2,
+      'workers.snapshot': 'workers-1',
+      'queue.page': 3,
+      'queue.snapshot': 'queue-1',
+    });
+    get.mock.results[1].value.next({ ...initial, queue: page(3, 25, 'queue-1') });
+    refresh.next(new Set(['nodes']));
+    expect(get).toHaveBeenLastCalledWith('/admin/browsers', {
+      'workers.page': 2,
+      'workers.snapshot': undefined,
+      'queue.page': 3,
+      'queue.snapshot': undefined,
+    });
+    get.mock.results[2].value.next({ ...initial, queue: page(3, 12, 'queue-2') });
+    expect(get).toHaveBeenLastCalledWith('/admin/browsers', {
+      'workers.page': 2,
+      'workers.snapshot': 'workers-1',
+      'queue.page': 2,
+      'queue.snapshot': 'queue-2',
+    });
+    get.mock.results[3].value.next({ ...initial, queue: page(2, 12, 'queue-2') });
+    expect(resource.data()?.queue.page).toBe(2);
+    resource.load('/admin/browsers', {
+      'workers.page': 2,
+      'queue.page': 1,
+      'queue.q': 'changed filter',
+    });
+    expect(get).toHaveBeenLastCalledWith('/admin/browsers', {
+      'workers.page': 2,
+      'workers.snapshot': 'workers-1',
+      'queue.page': 1,
+      'queue.q': 'changed filter',
+      'queue.snapshot': undefined,
+    });
+    get.mock.results[4].value.error(
+      new HttpErrorResponse({
+        status: 409,
+        error: { code: 'LIST_SNAPSHOT_EXPIRED' },
+      }),
+    );
+    expect(get).toHaveBeenLastCalledWith('/admin/browsers', {
+      'workers.page': 2,
+      'workers.snapshot': undefined,
+      'queue.page': 1,
+      'queue.q': 'changed filter',
+      'queue.snapshot': undefined,
+    });
+  });
+
   it('keeps the selected nested snapshot and corrects the selected page after shrink', () => {
     interface Nested {
       measurements: Page<string>;

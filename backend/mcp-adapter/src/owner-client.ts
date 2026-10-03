@@ -23,11 +23,11 @@ export class OwnerClient {
   }
 
   async call(name: ToolName, args: unknown, bearer: string, requestId: string,
-    hostContext?: HostConversationContext): Promise<CallToolResult> {
+    hostContext?: HostConversationContext, signal?: AbortSignal): Promise<CallToolResult> {
     const url = new URL(`${this.endpoint.pathname.replace(/\/$/, '')}/tools/${encodeURIComponent(name)}`, this.endpoint);
     const body = Buffer.from(JSON.stringify({ arguments: args, requestId, hostContext }));
     return new Promise<CallToolResult>((resolve, reject) => {
-      const req = request(url, { method: 'POST', agent: this.agent, timeout: 25_000,
+      const req = request(url, { method: 'POST', agent: this.agent, timeout: 25_000, signal,
         headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'content-length': body.byteLength, 'x-request-id': requestId } }, (res) => {
         const buffers: Buffer[] = [];
         let size = 0;

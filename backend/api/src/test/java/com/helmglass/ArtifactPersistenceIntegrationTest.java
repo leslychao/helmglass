@@ -32,13 +32,26 @@ import com.helmglass.identity.application.UserPolicyService;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.identity.infrastructure.repository.PolicyRepository;
+import com.helmglass.media.application.MediaAnalysisService;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -63,7 +76,8 @@ class ArtifactPersistenceIntegrationTest {
     PolicyRepository.class,
     UserPolicyService.class,
     ArtifactRepository.class,
-    ArtifactService.class
+    ArtifactService.class,
+    MediaAnalysisService.class
   })
   static class TestConfiguration {
     @Bean
@@ -84,6 +98,7 @@ class ArtifactPersistenceIntegrationTest {
   private final IdentityRepository identities;
   private final ArtifactRepository repository;
   private final ArtifactService service;
+  private final MediaAnalysisService media;
   private final ObjectStorage storage;
   private final MultipartStorage multipart;
   private final TransactionTemplate transaction;
@@ -94,6 +109,7 @@ class ArtifactPersistenceIntegrationTest {
       IdentityRepository identities,
       ArtifactRepository repository,
       ArtifactService service,
+      MediaAnalysisService media,
       ObjectStorage storage,
       MultipartStorage multipart,
       PlatformTransactionManager transactions) {
@@ -101,6 +117,7 @@ class ArtifactPersistenceIntegrationTest {
     this.identities = identities;
     this.repository = repository;
     this.service = service;
+    this.media = media;
     this.storage = storage;
     this.multipart = multipart;
     transaction = new TransactionTemplate(transactions);
@@ -335,6 +352,151 @@ class ArtifactPersistenceIntegrationTest {
   }
 
   @Test
+  void inlineAudioReadsExactCompleteWavAndRejectsForeignTaskUserAndRevokedGrant() throws Exception {
+    Fixture fixture = fixture();
+    var grant = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());
+    var artifact = repository.artifact(grant.artifactId());
+    jdbc.sql("UPDATE task_artifacts SET state='READY',ready_at=now() WHERE id=:id")
+        .param("id", artifact.id())
+        .update();
+    UUID clientGrant =
+        Objects.requireNonNull(
+            transaction.execute(
+                status ->
+                    identities.admitGrant(
+                        fixture.actor().userId(),
+                        "helm-mcp",
+                        UUID.randomUUID().toString(),
+                        List.of("tasks:read"))));
+    var actor =
+        new AuthenticatedActor(
+            fixture.actor().userId(),
+            null,
+            clientGrant,
+            "helm-mcp",
+            "Fixture",
+            "fixture@example.com",
+            1,
+            Set.of("tasks:read"),
+            true);
+    var audio = media.inline(actor, artifact.id(), artifact.taskId());
+    when(storage.open(anyString(), anyString(), any(), any())).thenReturn(stream(fixture.bytes()));
+    var output = new ByteArrayOutputStream();
+    media.deliver(actor, audio, output, Instant.now().plusSeconds(5));
+    assertThat(output.toByteArray()).isEqualTo(fixture.bytes());
+    assertThat(new String(output.toByteArray(), 0, 4, StandardCharsets.US_ASCII)).isEqualTo("RIFF");
+    assertThat(audio.metadata())
+        .containsEntry(
+            "delivery", Map.of("status", "UNVERIFIED", "reason", "HOST_AUDIO_ACCESS_NOT_VERIFIED"));
+    assertThatThrownBy(() -> media.inline(actor, artifact.id(), UUID.randomUUID()))
+        .isInstanceOf(DomainException.class);
+    assertThatThrownBy(() -> media.inline(fixture().actor(), artifact.id(), artifact.taskId()))
+        .isInstanceOf(DomainException.class);
+    jdbc.sql("UPDATE client_grants SET status='REVOKED' WHERE id=:id")
+        .param("id", clientGrant)
+        .update();
+    assertThatThrownBy(() -> media.inline(actor, artifact.id(), artifact.taskId()))
+        .isInstanceOf(DomainException.class);
+  }
+
+  @Test
+  void inlineAudioLimitDoesNotReadOrModifyLargeArtifactsAndRejectsNonAudioMime() {
+    Fixture fixture = fixture();
+    var allocated = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());
+    var artifact = repository.artifact(allocated.artifactId());
+    jdbc.sql("UPDATE task_artifacts SET state='READY',ready_at=now(),size=:size WHERE id=:id")
+        .param("size", MediaAnalysisService.MAX_INLINE_AUDIO_BYTES)
+        .param("id", artifact.id())
+        .update();
+    assertThat(
+            media.inline(fixture.actor(), artifact.id(), artifact.taskId()).source().byteLength())
+        .isEqualTo(MediaAnalysisService.MAX_INLINE_AUDIO_BYTES);
+    jdbc.sql("UPDATE task_artifacts SET size=size+1 WHERE id=:id")
+        .param("id", artifact.id())
+        .update();
+    assertThatThrownBy(() -> media.inline(fixture.actor(), artifact.id(), artifact.taskId()))
+        .isInstanceOfSatisfying(
+            DomainException.class,
+            error -> assertThat(error.getCode()).isEqualTo("INLINE_AUDIO_LIMIT"));
+    assertThat(repository.artifact(artifact.id()).state()).isEqualTo("READY");
+    assertThat(repository.artifact(artifact.id()).size())
+        .isEqualTo(MediaAnalysisService.MAX_INLINE_AUDIO_BYTES + 1);
+    jdbc.sql("UPDATE task_artifacts SET size=8,mime='video/webm' WHERE id=:id")
+        .param("id", artifact.id())
+        .update();
+    assertThatThrownBy(() -> media.inline(fixture.actor(), artifact.id(), artifact.taskId()))
+        .isInstanceOfSatisfying(
+            DomainException.class,
+            error -> assertThat(error.getCode()).isEqualTo("INLINE_AUDIO_FORMAT_UNSUPPORTED"));
+    verifyNoInteractions(storage, multipart);
+  }
+
+  @Test
+  void downloadDeadlineAbortsAStalledStorageStreamAndClientFailureAbortsUnreadBytes()
+      throws Exception {
+    Fixture fixture = fixture();
+    var allocated = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());
+    var artifact = repository.artifact(allocated.artifactId());
+    jdbc.sql("UPDATE task_artifacts SET state='READY',ready_at=now() WHERE id=:id")
+        .param("id", artifact.id())
+        .update();
+    var content = service.content(fixture.actor(), artifact.id(), null);
+    var aborted = new CountDownLatch(1);
+    InputStream stalled =
+        new InputStream() {
+          @Override
+          public int read() throws IOException {
+            try {
+              if (!aborted.await(2, TimeUnit.SECONDS)) {
+                throw new IOException("Fixture deadline did not abort storage");
+              }
+            } catch (InterruptedException error) {
+              Thread.currentThread().interrupt();
+              throw new IOException(error);
+            }
+            throw new IOException("Storage aborted");
+          }
+        };
+    when(storage.open(anyString(), anyString(), any(), any()))
+        .thenReturn(
+            new ResponseInputStream<>(
+                GetObjectResponse.builder().contentLength(artifact.size()).build(),
+                AbortableInputStream.create(stalled, aborted::countDown)));
+    assertThatThrownBy(
+            () ->
+                service.download(
+                    fixture.actor(),
+                    artifact.id(),
+                    content,
+                    OutputStream.nullOutputStream(),
+                    Instant.now().plusMillis(100)))
+        .isInstanceOf(IOException.class)
+        .hasMessageContaining("Storage aborted");
+    assertThat(aborted.getCount()).isZero();
+    var disconnected = new AtomicBoolean();
+    when(storage.open(anyString(), anyString(), any(), any()))
+        .thenReturn(
+            new ResponseInputStream<>(
+                GetObjectResponse.builder().contentLength(artifact.size()).build(),
+                AbortableInputStream.create(
+                    new ByteArrayInputStream(fixture.bytes()), () -> disconnected.set(true))));
+    OutputStream failed =
+        new OutputStream() {
+          @Override
+          public void write(int value) throws IOException {
+            throw new IOException("Client closed");
+          }
+        };
+    assertThatThrownBy(
+            () ->
+                service.download(
+                    fixture.actor(), artifact.id(), content, failed, Instant.now().plusSeconds(5)))
+        .isInstanceOf(IOException.class)
+        .hasMessage("Client closed");
+    assertThat(disconnected).isTrue();
+  }
+
+  @Test
   void byteRangesAreBoundedAndMultiRangesRejected() {
     assertThat(ByteRange.parse("bytes=2-1000", 10)).isEqualTo(new ByteRange(2, 9, 10, true));
     assertThat(ByteRange.parse("bytes=-3", 10)).isEqualTo(new ByteRange(7, 9, 10, true));
@@ -429,7 +591,7 @@ class ArtifactPersistenceIntegrationTest {
                   .param("user", user.id())
                   .param("sid", login.toString())
                   .update();
-              byte[] bytes = new byte[] {1, 2, 3, 4, 5, 6, 7, 8};
+              byte[] bytes = wav();
               Metadata metadata =
                   new Metadata(
                       1,
@@ -449,7 +611,7 @@ class ArtifactPersistenceIntegrationTest {
                       BigDecimal.ONE,
                       "pcm_s16le",
                       1,
-                      48000,
+                      8000,
                       List.of(),
                       null);
               var actor =
@@ -471,5 +633,18 @@ class ArtifactPersistenceIntegrationTest {
     return new ResponseInputStream<>(
         GetObjectResponse.builder().contentLength((long) bytes.length).build(),
         AbortableInputStream.create(new ByteArrayInputStream(bytes)));
+  }
+
+  private static byte[] wav() {
+    var bytes = ByteBuffer.allocate(16044).order(ByteOrder.LITTLE_ENDIAN);
+    bytes.put("RIFF".getBytes(StandardCharsets.US_ASCII)).putInt(16036);
+    bytes.put("WAVEfmt ".getBytes(StandardCharsets.US_ASCII)).putInt(16);
+    bytes.putShort((short) 1).putShort((short) 1).putInt(8000).putInt(16000);
+    bytes.putShort((short) 2).putShort((short) 16);
+    bytes.put("data".getBytes(StandardCharsets.US_ASCII)).putInt(16000);
+    while (bytes.hasRemaining()) {
+      bytes.putShort((short) 1000);
+    }
+    return bytes.array();
   }
 }

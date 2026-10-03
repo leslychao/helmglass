@@ -2,6 +2,7 @@ package com.helmglass;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -27,6 +28,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import tools.jackson.databind.json.JsonMapper;
 
 class RealtimeDeliveryTest {
@@ -71,6 +73,38 @@ class RealtimeDeliveryTest {
         json.read("{\"type\":\"invalidate\",\"resources\":[\"tasks\"]}"),
         json.read(messages.getAllValues().getLast().getPayload()));
     verify(outbox).published(ownIntent);
+  }
+
+  @Test
+  void slowClientCannotPreventDeliveryToAnotherClientOrAcknowledgingTheInvalidation()
+      throws Exception {
+    var owner = actor(false);
+    var slow = socket(owner);
+    var healthy = socket(owner);
+    for (var socket : List.of(slow, healthy)) {
+      realtime.afterConnectionEstablished(socket);
+      realtime.handleMessage(
+          socket, new TextMessage("{\"type\":\"subscribe\",\"channels\":[\"self\"]}"));
+    }
+    doThrow(
+            new SessionLimitExceededException(
+                "Fixture send limit", CloseStatus.SESSION_NOT_RELIABLE))
+        .when(slow)
+        .sendMessage(any());
+    var intent =
+        new OutboxRepository.Intent(
+            UUID.randomUUID(), owner.userId(), UUID.randomUUID(), "tasks", "{}");
+    when(outbox.due()).thenReturn(List.of(intent));
+
+    realtime.relay();
+
+    verify(slow).close(new CloseStatus(4503, "DELIVERY_FAILED"));
+    var messages = ArgumentCaptor.forClass(TextMessage.class);
+    verify(healthy, times(2)).sendMessage(messages.capture());
+    assertEquals(
+        json.read("{\"type\":\"invalidate\",\"resources\":[\"tasks\"]}"),
+        json.read(messages.getAllValues().getLast().getPayload()));
+    verify(outbox).published(intent.id());
   }
 
   @Test

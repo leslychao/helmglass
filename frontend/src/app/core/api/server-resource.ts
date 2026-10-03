@@ -17,12 +17,14 @@ export class ServerResource<T> {
   private dirty = false;
   private path = '';
   private query: Query = {};
-  private scope = '';
+  private readonly pages: readonly [string, (value: T) => unknown][];
 
   constructor(
     names: ResourceName[],
-    private readonly pageOf: (value: T) => unknown = (value) => value,
+    pageOf: ((value: T) => unknown) | Readonly<Record<string, (value: T) => unknown>> = (value) =>
+      value,
   ) {
+    this.pages = typeof pageOf === 'function' ? [['', pageOf]] : Object.entries(pageOf);
     inject(Realtime)
       .refresh.pipe(takeUntilDestroyed(this.destroy))
       .subscribe((changed) => {
@@ -36,18 +38,22 @@ export class ServerResource<T> {
     this.generation++;
     this.dirty = false;
     if (path !== this.path) this.data.set(null);
-    const scope = queryScope(path, query);
     const data = untracked(this.data);
-    const previous = data === null ? null : pageMetadata(untracked(() => this.pageOf(data)));
+    const nextQuery = { ...query };
+    for (const [prefix, select] of this.pages) {
+      const previous = data === null ? null : pageMetadata(untracked(() => select(data)));
+      const sameScope =
+        queryScope(path, query, prefix) === queryScope(this.path, this.query, prefix);
+      nextQuery[pageKey(prefix, 'snapshot')] = sameScope ? previous?.snapshot : undefined;
+    }
     this.path = path;
-    this.query = { ...query, snapshot: scope === this.scope ? previous?.snapshot : undefined };
-    this.scope = scope;
+    this.query = nextQuery;
     this.read();
   }
 
   refresh() {
     if (!this.path) return;
-    this.query = { ...this.query, snapshot: undefined };
+    this.clearSnapshots();
     if (untracked(this.loading)) {
       this.dirty = true;
       return;
@@ -60,7 +66,6 @@ export class ServerResource<T> {
     this.generation++;
     this.dirty = false;
     this.path = '';
-    this.scope = '';
     this.query = {};
     this.data.set(null);
     this.error.set(null);
@@ -74,15 +79,22 @@ export class ServerResource<T> {
     this.request = this.api.get<T>(this.path, this.query).subscribe({
       next: (data) => {
         if (generation !== this.generation) return;
-        const page = data === null ? null : pageMetadata(untracked(() => this.pageOf(data)));
-        if (page) {
+        let needsCorrection = false;
+        const query = { ...this.query };
+        for (const [prefix, select] of this.pages) {
+          const page = data === null ? null : pageMetadata(untracked(() => select(data)));
+          if (!page) continue;
           const lastPage = Math.max(1, Math.ceil(page.total / page.pageSize));
-          this.query = { ...this.query, snapshot: this.dirty ? undefined : page.snapshot };
+          query[pageKey(prefix, 'snapshot')] = this.dirty ? undefined : page.snapshot;
           if (!corrected && page.page > lastPage) {
-            this.query = { ...this.query, page: lastPage };
-            this.read(recovered, true);
-            return;
+            query[pageKey(prefix, 'page')] = lastPage;
+            needsCorrection = true;
           }
+        }
+        this.query = query;
+        if (needsCorrection) {
+          this.read(recovered, true);
+          return;
         }
         this.data.set(data);
         this.finish();
@@ -91,7 +103,7 @@ export class ServerResource<T> {
         if (generation !== this.generation) return;
         const problem = problemOf(error);
         if (!recovered && problem.code === 'LIST_SNAPSHOT_EXPIRED') {
-          this.query = { ...this.query, snapshot: undefined };
+          this.clearSnapshots();
           this.read(true, corrected);
           return;
         }
@@ -103,6 +115,12 @@ export class ServerResource<T> {
     });
   }
 
+  private clearSnapshots() {
+    const query = { ...this.query };
+    for (const [prefix] of this.pages) query[pageKey(prefix, 'snapshot')] = undefined;
+    this.query = query;
+  }
+
   private finish() {
     this.loading.set(false);
     if (this.dirty) {
@@ -112,12 +130,21 @@ export class ServerResource<T> {
   }
 }
 
-function queryScope(path: string, query: Query): string {
+function pageKey(prefix: string, name: string): string {
+  return prefix ? prefix + '.' + name : name;
+}
+
+function queryScope(path: string, query: Query, prefix: string): string {
   return (
     path +
     JSON.stringify(
       Object.keys(query)
-        .filter((key) => key !== 'page' && key !== 'snapshot')
+        .filter(
+          (key) =>
+            (!prefix || key.startsWith(prefix + '.') || !key.includes('.')) &&
+            key !== pageKey(prefix, 'page') &&
+            key !== pageKey(prefix, 'snapshot'),
+        )
         .sort()
         .map((key) => [key, query[key]]),
     )

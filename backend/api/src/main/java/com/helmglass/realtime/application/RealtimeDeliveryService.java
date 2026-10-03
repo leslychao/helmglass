@@ -37,6 +37,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
@@ -627,7 +628,7 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
               .socket()
               .sendMessage(
                   new TextMessage(json.write(Map.of("type", "invalidate", "resources", visible))));
-        } catch (IOException error) {
+        } catch (IOException | SessionLimitExceededException error) {
           close(viewer, 4503, "DELIVERY_FAILED");
         }
       }

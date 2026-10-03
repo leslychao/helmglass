@@ -25,6 +25,7 @@ import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.usage.application.UsageProjectionService;
+import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -32,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -39,6 +41,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -87,6 +91,9 @@ public class ArtifactService {
   private final JsonSupport json;
   private final TransactionTemplate transaction;
   private final SecureRandom random = new SecureRandom();
+  private final ScheduledThreadPoolExecutor downloadTimeouts =
+      new ScheduledThreadPoolExecutor(
+          1, Thread.ofPlatform().daemon().name("artifact-download-deadline").factory());
   private String cleanupKeyMarker;
   private String cleanupUploadMarker;
 
@@ -112,6 +119,12 @@ public class ArtifactService {
     this.json = json;
     transaction = new TransactionTemplate(transactions);
     transaction.setTimeout(5);
+    downloadTimeouts.setRemoveOnCancelPolicy(true);
+  }
+
+  @PreDestroy
+  void closeDownloadTimeouts() {
+    downloadTimeouts.shutdownNow();
   }
 
   public Allocation allocate(UUID workerId, UUID bootId, CaptureMetadata metadata) {
@@ -260,19 +273,48 @@ public class ArtifactService {
         id, artifact.taskId(), artifact.mime(), artifact.size(), artifact.checksum(), metadata);
   }
 
-  public void download(AuthenticatedActor actor, UUID id, Content content, OutputStream output)
+  public void download(
+      AuthenticatedActor actor, UUID id, Content content, OutputStream output, Instant deadline)
       throws IOException {
     Artifact artifact = readable(actor, id);
     ByteRange range = content.range();
     if (range.total() != artifact.size() || !content.checksum().equals(artifact.checksum())) {
       throw DomainException.conflict("ARTIFACT_CHANGED", "Artifact changed before download");
     }
-    try (var input = storage.open(artifact.bucket(), artifact.objectKey(), range.requestHeader())) {
-      if (input.response().contentLength() != range.length()) {
-        throw new DomainException(
-            503, "ARTIFACT_STORAGE_MISMATCH", "Stored artifact length is unverified");
+    Duration remaining = Duration.between(Instant.now(), deadline);
+    if (remaining.isNegative() || remaining.isZero()) {
+      throw new DomainException(
+          504, "ARTIFACT_DOWNLOAD_TIMEOUT", "Artifact download deadline expired");
+    }
+    try (var input =
+        storage.open(artifact.bucket(), artifact.objectKey(), range.requestHeader(), remaining)) {
+      long remainingNanos = Math.max(0, Duration.between(Instant.now(), deadline).toNanos());
+      var timeout = downloadTimeouts.schedule(input::abort, remainingNanos, TimeUnit.NANOSECONDS);
+      boolean complete = false;
+      try {
+        if (input.response().contentLength() != range.length()) {
+          throw new DomainException(
+              503, "ARTIFACT_STORAGE_MISMATCH", "Stored artifact length is unverified");
+        }
+        copyBounded(
+            input,
+            output,
+            range.length(),
+            () -> {
+              if (Thread.currentThread().isInterrupted() || !Instant.now().isBefore(deadline)) {
+                throw new DomainException(
+                    504, "ARTIFACT_DOWNLOAD_TIMEOUT", "Artifact download deadline expired");
+              }
+              readable(actor, id);
+            },
+            null);
+        complete = true;
+      } finally {
+        timeout.cancel(false);
+        if (!complete) {
+          input.abort();
+        }
       }
-      copyBounded(input, output, range.length(), () -> readable(actor, id), null);
     }
   }
 

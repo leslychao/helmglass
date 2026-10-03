@@ -106,6 +106,7 @@ export class RemoteBrowser {
   private frames?: PresentedFrames;
   private frameTimeout?: ReturnType<typeof setTimeout>;
   private captureTimeout?: ReturnType<typeof setTimeout>;
+  private captureExpiresAt = 0;
   private heartbeat?: ReturnType<typeof setInterval>;
   private reconnect?: ReturnType<typeof setTimeout>;
   private readonly recovery = new ReconnectWindow();
@@ -347,6 +348,7 @@ export class RemoteBrowser {
               this.markStale();
               return;
             }
+            this.captureExpiresAt = performance.now() + 2000;
             if (this.frames?.fresh && this.state() !== 'LIVE') {
               this.state.set('LIVE');
               this.live.emit(true);
@@ -449,6 +451,7 @@ export class RemoteBrowser {
           if (
             generation !== this.generation ||
             this.current?.captureState !== 'ACTIVE' ||
+            performance.now() >= this.captureExpiresAt ||
             this.state() === 'LIVE'
           )
             return;
@@ -468,6 +471,7 @@ export class RemoteBrowser {
     });
   }
   private markStale() {
+    this.captureExpiresAt = 0;
     this.state.set('CONNECTING');
     this.message.set('Ждём подтверждения свежести изображения. Ввод временно недоступен.');
     if (!this.destroy.destroyed) this.live.emit(false);
@@ -653,6 +657,7 @@ export class RemoteBrowser {
     this.inputRequest?.unsubscribe();
     clearTimeout(this.frameTimeout);
     clearTimeout(this.captureTimeout);
+    this.captureExpiresAt = 0;
     this.frames?.stop();
     this.frames = undefined;
     clearInterval(this.heartbeat);

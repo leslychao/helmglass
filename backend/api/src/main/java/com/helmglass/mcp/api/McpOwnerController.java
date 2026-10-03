@@ -12,6 +12,7 @@ import com.helmglass.continuation.api.ContinuationContracts;
 import com.helmglass.continuation.application.TaskContinuationService;
 import com.helmglass.continuation.application.TaskPresentationService;
 import com.helmglass.identity.api.Actors;
+import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.media.application.MediaAnalysisService;
 import com.helmglass.operation.application.OperationService;
 import com.helmglass.realtime.domain.HostConversationContext;
@@ -24,10 +25,17 @@ import com.helmglass.task.application.ResultService;
 import com.helmglass.task.application.TaskContextService;
 import com.helmglass.task.application.TaskLifecycleService;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Validator;
+import java.io.FilterOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Semaphore;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -58,6 +66,7 @@ public class McpOwnerController {
   private final JsonSupport json;
   private final ObjectMapper mapper;
   private final Validator validator;
+  private final Semaphore audioDeliveries = new Semaphore(2);
 
   public McpOwnerController(
       TaskLifecycleService tasks,
@@ -90,9 +99,72 @@ public class McpOwnerController {
     this.requests = requests;
   }
 
-  @PostMapping("/{name}")
-  Object call(
-      @PathVariable String name, @RequestBody ToolRequest input, HttpServletRequest request) {
+  /** The existing audio tool streams one complete bounded source without buffering its bytes. */
+  @PostMapping("/audio.get")
+  void audio(
+      @RequestBody ToolRequest input, HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    AuthenticatedActor actor = delegatedActor(input, request);
+    Instant expiry = authorizationExpiresAt(request);
+    Instant deadline = Instant.now().plusSeconds(20);
+    if (expiry.isBefore(deadline)) {
+      deadline = expiry;
+    }
+    if (!deadline.isAfter(Instant.now())) {
+      throw new DomainException(401, "TOKEN_EXPIRED", "Audio authorization has expired");
+    }
+    if (!audioDeliveries.tryAcquire()) {
+      throw new DomainException(429, "AUDIO_DELIVERY_BUSY", "Audio delivery capacity is occupied");
+    }
+    try {
+      JsonNode args = input.arguments();
+      var audio =
+          media.inline(
+              actor,
+              UUID.fromString(args.path("artifactId").asString()),
+              UUID.fromString(args.path("taskId").asString()));
+      byte[] prefix =
+          ("{\"structuredContent\":"
+                  + json.write(audio.metadata())
+                  + ",\"content\":[{\"type\":\"audio\",\"mimeType\":"
+                  + json.write(audio.source().mimeType())
+                  + ",\"data\":\"")
+              .getBytes(StandardCharsets.UTF_8);
+      if (prefix.length > 262_144) {
+        throw new DomainException(
+            413, "INLINE_AUDIO_METADATA_LIMIT", "Audio metadata exceeds the inline delivery limit");
+      }
+      response.setContentType("application/json");
+      response.setHeader("Cache-Control", "no-store");
+      OutputStream output = response.getOutputStream();
+      output.write(prefix);
+      try (var encoded = Base64.getEncoder().wrap(new NonClosingOutput(output))) {
+        media.deliver(actor, audio, encoded, deadline);
+      }
+      output.write("\"}]}".getBytes(StandardCharsets.US_ASCII));
+      output.flush();
+    } finally {
+      audioDeliveries.release();
+    }
+  }
+
+  private static final class NonClosingOutput extends FilterOutputStream {
+    private NonClosingOutput(OutputStream output) {
+      super(output);
+    }
+
+    @Override
+    public void write(byte[] bytes, int offset, int length) throws IOException {
+      out.write(bytes, offset, length);
+    }
+
+    @Override
+    public void close() throws IOException {
+      flush();
+    }
+  }
+
+  private static AuthenticatedActor delegatedActor(ToolRequest input, HttpServletRequest request) {
     var actor = Actors.current(request);
     if (!actor.mcp()
         || input.requestId() == null
@@ -100,6 +172,13 @@ public class McpOwnerController {
         || !input.arguments().isObject()) {
       throw new DomainException(400, "INVALID_MCP_DELEGATION", "MCP delegation is invalid");
     }
+    return actor;
+  }
+
+  @PostMapping("/{name}")
+  Object call(
+      @PathVariable String name, @RequestBody ToolRequest input, HttpServletRequest request) {
+    var actor = delegatedActor(input, request);
     JsonNode args = input.arguments();
     UUID taskId = args.has("taskId") ? UUID.fromString(args.get("taskId").asString()) : null;
     MutationContext context =
@@ -253,8 +332,6 @@ public class McpOwnerController {
             required(context),
             input.hostContext());
       }
-      case "audio.get" ->
-          media.get(actor, UUID.fromString(args.path("artifactId").asString()), required(taskId));
       case "audio.segments" ->
           media.segments(
               actor,

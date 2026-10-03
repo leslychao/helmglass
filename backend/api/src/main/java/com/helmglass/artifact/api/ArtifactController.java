@@ -12,6 +12,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotNull;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.ContentDisposition;
@@ -106,7 +107,8 @@ public class ArtifactController {
       response.setStatus(206);
       response.setHeader("Content-Range", content.range().responseHeader());
     }
-    artifacts.download(actor, id, content, response.getOutputStream());
+    artifacts.download(
+        actor, id, content, response.getOutputStream(), Instant.now().plusSeconds(120));
   }
 
   @DeleteMapping("/api/v1/artifacts/{id}")

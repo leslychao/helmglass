@@ -25,9 +25,10 @@ const authenticated = authenticatedAdapter(handler, async (token) => {
   const scopes = typeof payload.scope === 'string' ? payload.scope.split(' ') : [];
   return { token, clientId: payload.azp, scopes, expiresAt: payload.exp };
 }, publicOrigin, config.OIDC_ISSUER);
-const serve = toNodeHandler(authenticated, { maxRequestBodySize: 1_048_576 });
 const server = createServer((request, response) => {
   const incoming = Object.assign(request, { method: request.method ?? 'GET', url: request.url ?? '/' });
+  const serve = toNodeHandler({ fetch: webRequest => authenticated.fetch(webRequest, () => response.destroy()) },
+    { maxRequestBodySize: 1_048_576 });
   void serve(incoming, response).catch(() => { response.destroy(); });
 });
 server.requestTimeout = 30_000;

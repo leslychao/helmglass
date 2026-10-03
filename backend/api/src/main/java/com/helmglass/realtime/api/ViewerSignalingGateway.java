@@ -31,6 +31,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
@@ -350,7 +351,10 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
       } else {
         close(viewer.socket(), 4503, event.code());
       }
-    } catch (IOException | DataAccessException | DomainException error) {
+    } catch (IOException
+        | SessionLimitExceededException
+        | DataAccessException
+        | DomainException error) {
       close(viewer.socket(), 4503, "STREAM_UNAVAILABLE");
     }
   }

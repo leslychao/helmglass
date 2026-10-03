@@ -22,6 +22,7 @@ import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 import tools.jackson.core.JacksonException;
 
@@ -166,7 +167,7 @@ public class WidgetEventGateway extends TextWebSocketHandler {
             .sendMessage(
                 new TextMessage(
                     json.write(Map.of("type", "invalidate", "resources", List.of("task")))));
-      } catch (IOException error) {
+      } catch (IOException | SessionLimitExceededException error) {
         close(connection, 4503, "DELIVERY_FAILED");
       }
     }

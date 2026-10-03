@@ -230,6 +230,74 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     fixture.detectChanges();
   }
 
+  it('requires a fresh capture confirmation as well as decoded frames before reporting LIVE', async () => {
+    vi.useFakeTimers();
+    const element: unknown = fixture.nativeElement;
+    if (!(element instanceof HTMLElement)) throw new Error('Viewer root is missing');
+    const video = element.querySelector('video');
+    if (!video) throw new Error('Viewer video is missing');
+    let frame: VideoFrameRequestCallback | undefined;
+    Object.defineProperty(video, 'requestVideoFrameCallback', {
+      value: (callback: VideoFrameRequestCallback) => {
+        frame = callback;
+        return 1;
+      },
+    });
+    vi.spyOn(video, 'play').mockResolvedValue();
+    const socket = TestSocket.instances.at(-1);
+    if (!socket) throw new Error('Viewer socket is missing');
+    const capture = {
+      type: 'streamState',
+      sessionId: session.id,
+      producerId: 'producer-1',
+      pageEpoch: 2,
+      privacyEpoch: 1,
+      mediaGeneration: 1,
+      viewGeneration: 1,
+      viewport: session.viewport,
+      captureState: 'ACTIVE',
+      iceServers: [],
+    };
+    socket.receive(capture);
+    expect(fixture.componentInstance.state()).not.toBe('LIVE');
+    fixture.componentInstance.state.set('AUTOPLAY');
+    fixture.componentInstance.retry();
+    await Promise.resolve();
+    const present = () => {
+      if (!frame) throw new Error('Frame callback is missing');
+      frame(performance.now(), {
+        expectedDisplayTime: 0,
+        width: 1280,
+        height: 720,
+        mediaTime: 0,
+        presentationTime: 0,
+        presentedFrames: 1,
+      });
+    };
+    present();
+    expect(fixture.componentInstance.state()).toBe('LIVE');
+    await vi.advanceTimersByTimeAsync(1000);
+    present();
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(fixture.componentInstance.state()).toBe('CONNECTING');
+    present();
+    expect(fixture.componentInstance.state()).toBe('CONNECTING');
+    socket.receive(capture);
+    expect(fixture.componentInstance.state()).toBe('LIVE');
+    const late = frame;
+    fixture.componentRef.setInput('session', { ...session, privacyEpoch: 2 });
+    fixture.detectChanges();
+    late?.(performance.now(), {
+      expectedDisplayTime: 0,
+      width: 1280,
+      height: 720,
+      mediaTime: 0,
+      presentationTime: 0,
+      presentedFrames: 2,
+    });
+    expect(fixture.componentInstance.state()).not.toBe('LIVE');
+  });
+
   it('renews private control before video arrives and throughout media recovery', async () => {
     vi.useFakeTimers();
     privateControl();

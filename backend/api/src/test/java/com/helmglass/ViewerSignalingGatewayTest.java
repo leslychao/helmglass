@@ -3,6 +3,7 @@ package com.helmglass;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -35,6 +36,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -217,6 +219,29 @@ class ViewerSignalingGatewayTest {
     ArgumentCaptor<ViewerFence> close = ArgumentCaptor.forClass(ViewerFence.class);
     verify(realtime).requestViewerFence(eq(userId), close.capture());
     assertThat(close.getValue().binding()).isEqualTo(current.binding());
+  }
+
+  @Test
+  void slowViewerIsDetachedWithoutFailingTheWorkerEvent() throws Exception {
+    var socket = socket(Surface.WEB);
+    authenticate(socket, ticket(Surface.WEB));
+    doThrow(
+            new SessionLimitExceededException(
+                "Fixture send limit", CloseStatus.SESSION_NOT_RELIABLE))
+        .when(socket)
+        .sendMessage(any());
+    var event =
+        new WorkerSignalingGateway.ViewerMessage(
+            fence(workerId, bootId, sessionId, ALLOCATION, VIEW), json.read("{}"), "");
+
+    gateway.message(event);
+    gateway.message(event);
+    gateway.renew();
+
+    verify(socket).close(new CloseStatus(4503, "STREAM_UNAVAILABLE"));
+    verify(socket).sendMessage(any());
+    verify(realtime).requestViewerFence(eq(userId), any());
+    verify(workers).send(eq(workerId), any());
   }
 
   @Test

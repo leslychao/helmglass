@@ -36,7 +36,7 @@ public class AdministrationRepository {
         jdbc.sql(
                 """
                 WITH occupied AS (
-                  SELECT a.id,(a.state='ASSIGNED' AND b.state='ACTIVE' AND b.worker_boot_id=w.boot_id
+                  SELECT a.id,(a.state='ASSIGNED' AND b.state IN ('STARTING','ACTIVE','STOPPING') AND b.worker_boot_id=w.boot_id
                     AND a.allocation_epoch=b.allocation_epoch AND w.observed_state='READY'
                     AND w.heartbeat_at>now()-interval '15 seconds') IS TRUE AS confirmed
                   FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
@@ -46,7 +46,8 @@ public class AdministrationRepository {
                 (SELECT count(*) FROM occupied WHERE NOT confirmed) AS "unconfirmedOccupied",
                 (SELECT count(*) FROM tasks WHERE state IN ('WAITING_AGENT','WAITING_USER','QUEUED')) AS "waitingTasks",
                 (SELECT count(*) FROM tasks WHERE state='QUEUED') AS "queuedForBrowser",
-                (SELECT count(*) FROM browser_workers WHERE heartbeat_at<now()-interval '15 seconds') AS "unavailableWorkers",
+                (SELECT count(*) FROM browser_workers WHERE observed_state<>'READY'
+                  OR heartbeat_at<=now()-interval '15 seconds') AS "unavailableWorkers",
                 (SELECT count(*) FROM operations WHERE state IN ('PENDING','RUNNING','NEEDS_ATTENTION')) AS "pendingOperations",
                 (SELECT count(*) FROM application_users WHERE state='BLOCKED') AS "blockedUsers",
                 (SELECT count(*) FROM application_users WHERE state<>'DELETED') AS "totalUsers",
@@ -161,7 +162,8 @@ public class AdministrationRepository {
 
   public PageResult<Map<String, Object>> users(UUID actorId, PageQuery query) {
     String snapshot = changes.snapshot(actorId, "users", query);
-    String population = """
+    String population =
+        """
         WITH users AS (
           SELECT u.id,u.display_name AS "displayName",u.email,u.state AS "accountState",u.version,
             u.created_at AS "createdAt",u.last_activity_at AS "lastActivityAt",
@@ -178,39 +180,75 @@ public class AdministrationRepository {
     parameters.put("exact", query.query());
     List<String> states = query.filters().get("accountState");
     if (states != null && !states.isEmpty()) {
-      if (states.size() > 5 || !List.of("ACTIVE", "BLOCKED", "DELETING", "PURGING", "DELETED").containsAll(states)) {
+      if (states.size() > 5
+          || !List.of("ACTIVE", "BLOCKED", "DELETING", "PURGING", "DELETED").containsAll(states)) {
         throw new DomainException(400, "INVALID_FILTER", "Unsupported account state filter");
       }
       where += " AND u.\"accountState\" IN (:states)";
       parameters.put("states", states);
     }
-    if (enabledFilter(query, "pending")) { where += " AND u.\"pendingOperations\">0"; }
-    if (enabledFilter(query, "waiting")) { where += " AND u.\"queuedTasks\">0"; }
-    long total = jdbc.sql(population + "SELECT count(*) FROM users u" + where)
-        .params(parameters).query(Long.class).single();
-    var users = jdbc.sql(population + """
-        SELECT u.*,l.version AS "limitVersion",l.browser_mode AS "browserMode",l.browser_custom AS "browserCustom",
-          l.queued_mode AS "queuedMode",l.queued_custom AS "queuedCustom",
-          p.browser_limit AS "personalBrowserLimit",p.queued_limit AS "personalQueuedLimit",
-          s.standard_browser_limit AS "standardBrowserLimit"
-        FROM users u LEFT JOIN admin_user_limits l ON l.user_id=u.id
-          LEFT JOIN user_policies p ON p.user_id=u.id CROSS JOIN platform_settings s
-        """ + where + " ORDER BY " + query.sqlOrder(Map.of(
-          "displayName", "\"displayName\"", "email", "email", "accountState", "\"accountState\"",
-          "occupiedBrowsers", "\"occupiedBrowsers\"", "queuedTasks", "\"queuedTasks\"",
-          "createdAt", "\"createdAt\"", "lastActiveAt", "\"lastActivityAt\"", "lastActivityAt", "\"lastActivityAt\""),
-          "\"lastActivityAt\" DESC,id") + " LIMIT :limit OFFSET :offset")
-        .params(parameters).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
+    if (enabledFilter(query, "pending")) {
+      where += " AND u.\"pendingOperations\">0";
+    }
+    if (enabledFilter(query, "waiting")) {
+      where += " AND u.\"queuedTasks\">0";
+    }
+    long total =
+        jdbc.sql(population + "SELECT count(*) FROM users u" + where)
+            .params(parameters)
+            .query(Long.class)
+            .single();
+    var users =
+        jdbc.sql(
+                population
+                    + """
+                    SELECT u.*,l.version AS "limitVersion",l.browser_mode AS "browserMode",l.browser_custom AS "browserCustom",
+                      l.queued_mode AS "queuedMode",l.queued_custom AS "queuedCustom",
+                      p.browser_limit AS "personalBrowserLimit",p.queued_limit AS "personalQueuedLimit",
+                      s.standard_browser_limit AS "standardBrowserLimit"
+                    FROM users u LEFT JOIN admin_user_limits l ON l.user_id=u.id
+                      LEFT JOIN user_policies p ON p.user_id=u.id CROSS JOIN platform_settings s
+                    """
+                    + where
+                    + " ORDER BY "
+                    + query.sqlOrder(
+                        Map.of(
+                            "displayName",
+                            "\"displayName\"",
+                            "email",
+                            "email",
+                            "accountState",
+                            "\"accountState\"",
+                            "occupiedBrowsers",
+                            "\"occupiedBrowsers\"",
+                            "queuedTasks",
+                            "\"queuedTasks\"",
+                            "createdAt",
+                            "\"createdAt\"",
+                            "lastActiveAt",
+                            "\"lastActivityAt\"",
+                            "lastActivityAt",
+                            "\"lastActivityAt\""),
+                        "\"lastActivityAt\" DESC,id")
+                    + " LIMIT :limit OFFSET :offset")
+            .params(parameters)
+            .param("limit", query.pageSize())
+            .param("offset", query.offset())
+            .query()
+            .listOfRows();
     for (var user : users) {
       Map<String, Object> limits = limitsFromRow(user);
       user.put("limits", "DELETED".equals(user.get("accountState")) ? null : limits);
     }
-    return new PageResult<>(users, total, query.page(), query.pageSize(), query.sortDescriptor(), snapshot);
+    return new PageResult<>(
+        users, total, query.page(), query.pageSize(), query.sortDescriptor(), snapshot);
   }
 
   private static boolean enabledFilter(PageQuery query, String name) {
     List<String> values = query.filters().get(name);
-    if (values == null) { return false; }
+    if (values == null) {
+      return false;
+    }
     if (values.size() != 1 || !List.of("true", "false").contains(values.getFirst())) {
       throw new DomainException(400, "INVALID_FILTER", "Expected one boolean filter");
     }
@@ -298,18 +336,27 @@ public class AdministrationRepository {
   }
 
   public Map<String, Object> browsers(UUID actorId, AdminContracts.BrowserQuery query) {
-    return Map.of("workers", workers(actorId, query.workers()),
-        "allocations", allocations(actorId, query.allocations()), "queue", browserQueue(actorId, query.queue()));
+    return Map.of(
+        "workers",
+        workers(actorId, query.workers()),
+        "allocations",
+        allocations(actorId, query.allocations()),
+        "queue",
+        browserQueue(actorId, query.queue()));
   }
 
   private PageResult<Map<String, Object>> workers(UUID actorId, PageQuery query) {
-    String population = """
+    String population =
+        """
         WITH workers AS (
           SELECT w.id,w.boot_id AS "bootId",w.capacity,w.version,w.desired_mode AS "desiredMode",
             w.observed_state AS "observedState",w.image_version AS "imageVersion",w.heartbeat_at AS "heartbeatAt",
-            CASE WHEN w.heartbeat_at<=now()-interval '15 seconds' OR w.observed_state='LOST' THEN 'OFFLINE'
+            CASE WHEN w.heartbeat_at<=now()-interval '15 seconds' OR w.observed_state<>'READY' THEN 'OFFLINE'
               WHEN w.desired_mode='DRAINING' THEN 'DRAINING' ELSE w.observed_state END AS state,
-            (SELECT count(*) FROM browser_allocations a WHERE a.worker_id=w.id AND a.state<>'RELEASED') AS "lastKnownOccupied"
+            (SELECT count(*) FROM browser_allocations a WHERE a.worker_id=w.id AND a.state<>'RELEASED') AS "lastKnownOccupied",
+            NOT EXISTS(SELECT 1 FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
+              WHERE a.worker_id=w.id AND a.state<>'RELEASED'
+                AND (b.worker_boot_id IS DISTINCT FROM w.boot_id OR a.allocation_epoch<>b.allocation_epoch)) AS occupation_known
           FROM browser_workers w
         )
         """;
@@ -324,58 +371,149 @@ public class AdministrationRepository {
       where += " AND w.state IN (:states)";
       parameters.put("states", states);
     }
-    var workers = jdbc.sql(population + """
-        SELECT w.*,CASE WHEN w.state='OFFLINE' THEN NULL ELSE w."lastKnownOccupied" END AS occupied,
-          CASE WHEN w.state='OFFLINE' THEN NULL
-            WHEN w.state='READY' AND w."desiredMode"='ENABLED' AND p.accepting_allocations
-            THEN greatest(0,w.capacity-w."lastKnownOccupied") ELSE 0 END AS free
-        FROM workers w CROSS JOIN platform_settings p
-        """ + where + " ORDER BY " + query.sqlOrder(Map.of("id", "w.id", "state", "w.state",
-          "occupied", "occupied", "capacity", "w.capacity", "free", "free"), "w.id") + " LIMIT :limit OFFSET :offset")
-        .params(parameters).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
-    long workerTotal = jdbc.sql(population + "SELECT count(*) FROM workers w" + where)
-        .params(parameters).query(Long.class).single();
-    return new PageResult<>(workers, workerTotal, query.page(), query.pageSize(), query.sortDescriptor(),
+    var workers =
+        jdbc.sql(
+                population
+                    + """
+                    SELECT w.id,w."bootId",w.capacity,w.version,w."desiredMode",w."observedState",
+                      w."imageVersion",w."heartbeatAt",w.state,w."lastKnownOccupied",
+                      CASE WHEN w.state='OFFLINE' OR NOT w.occupation_known THEN NULL ELSE w."lastKnownOccupied" END AS occupied,
+                      CASE WHEN w.state='OFFLINE' OR NOT w.occupation_known THEN NULL
+                        WHEN w.state='READY' AND w."desiredMode"='ENABLED' AND p.accepting_allocations
+                        THEN greatest(0,w.capacity-w."lastKnownOccupied") ELSE 0 END AS free
+                    FROM workers w CROSS JOIN platform_settings p
+                    """
+                    + where
+                    + " ORDER BY "
+                    + query.sqlOrder(
+                        Map.of(
+                            "id",
+                            "w.id",
+                            "state",
+                            "w.state",
+                            "occupied",
+                            "occupied",
+                            "capacity",
+                            "w.capacity",
+                            "free",
+                            "free"),
+                        "w.id")
+                    + " LIMIT :limit OFFSET :offset")
+            .params(parameters)
+            .param("limit", query.pageSize())
+            .param("offset", query.offset())
+            .query()
+            .listOfRows();
+    long workerTotal =
+        jdbc.sql(population + "SELECT count(*) FROM workers w" + where)
+            .params(parameters)
+            .query(Long.class)
+            .single();
+    return new PageResult<>(
+        workers,
+        workerTotal,
+        query.page(),
+        query.pageSize(),
+        query.sortDescriptor(),
         changes.snapshot(actorId, "nodes", query));
   }
 
   private PageResult<Map<String, Object>> allocations(UUID actorId, PageQuery query) {
-    String from = """
+    String from =
+        """
         FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
           JOIN application_users u ON u.id=a.user_id JOIN browser_workers w ON w.id=a.worker_id
         WHERE a.state<>'RELEASED' AND (u.display_name ILIKE :q OR a.session_id::text ILIKE :q OR b.task_id::text ILIKE :q)
         """;
-    long total = jdbc.sql("SELECT count(*) " + from).param("q", query.escapedQuery()).query(Long.class).single();
-    var rows = jdbc.sql("""
-        SELECT a.id,a.session_id AS "sessionId",a.user_id AS "userId",u.display_name AS "userName",
-          a.worker_id AS "workerId",a.slot_index AS "slotIndex",a.state,a.version,b.task_id AS "taskId",
-          CASE WHEN w.heartbeat_at<=now()-interval '15 seconds' OR w.observed_state<>'READY'
-            OR b.worker_boot_id IS DISTINCT FROM w.boot_id OR a.allocation_epoch<>b.allocation_epoch
-            THEN 'UNKNOWN' ELSE b.state END AS "sessionState"
-        """ + from + " ORDER BY " + query.sqlOrder(Map.of("sessionId", "a.session_id", "userName", "u.display_name",
-          "workerId", "a.worker_id", "sessionState", "\"sessionState\"", "taskId", "b.task_id"), "a.created_at,a.id")
-          + " LIMIT :limit OFFSET :offset")
-        .param("q", query.escapedQuery()).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
-    return new PageResult<>(rows, total, query.page(), query.pageSize(), query.sortDescriptor(),
+    long total =
+        jdbc.sql("SELECT count(*) " + from)
+            .param("q", query.escapedQuery())
+            .query(Long.class)
+            .single();
+    var rows =
+        jdbc.sql(
+                """
+                SELECT a.id,a.session_id AS "sessionId",a.user_id AS "userId",u.display_name AS "userName",
+                  a.worker_id AS "workerId",a.slot_index AS "slotIndex",a.state,a.version,b.task_id AS "taskId",
+                  CASE WHEN w.heartbeat_at<=now()-interval '15 seconds' OR w.observed_state<>'READY'
+                    OR b.worker_boot_id IS DISTINCT FROM w.boot_id OR a.allocation_epoch<>b.allocation_epoch
+                    THEN 'UNKNOWN' ELSE b.state END AS "sessionState"
+                """
+                    + from
+                    + " ORDER BY "
+                    + query.sqlOrder(
+                        Map.of(
+                            "sessionId",
+                            "a.session_id",
+                            "userName",
+                            "u.display_name",
+                            "workerId",
+                            "a.worker_id",
+                            "sessionState",
+                            "\"sessionState\"",
+                            "taskId",
+                            "b.task_id"),
+                        "a.created_at,a.id")
+                    + " LIMIT :limit OFFSET :offset")
+            .param("q", query.escapedQuery())
+            .param("limit", query.pageSize())
+            .param("offset", query.offset())
+            .query()
+            .listOfRows();
+    return new PageResult<>(
+        rows,
+        total,
+        query.page(),
+        query.pageSize(),
+        query.sortDescriptor(),
         changes.snapshot(actorId, "sessions", query));
   }
 
   private PageResult<Map<String, Object>> browserQueue(UUID actorId, PageQuery query) {
-    String queued = """
+    String queued =
+        """
         FROM tasks t JOIN application_users u ON u.id=t.user_id
         WHERE (u.display_name ILIKE :q OR t.id::text ILIKE :q) AND (t.state='QUEUED' OR EXISTS(SELECT 1 FROM browser_sessions b
           WHERE b.task_id=t.id AND b.state='REQUESTED' AND b.binding_released_at IS NULL))
           AND NOT EXISTS(SELECT 1 FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
             WHERE b.task_id=t.id AND a.state<>'RELEASED')
         """;
-    long total = jdbc.sql("SELECT count(*) " + queued).param("q", query.escapedQuery()).query(Long.class).single();
-    var rows = jdbc.sql("""
-        SELECT t.id,t.id AS "taskId",t.user_id AS "userId",u.display_name AS "userName",
-          t.wait_reason AS "waitReason",t.created_at AS "createdAt"
-        """ + queued + " ORDER BY " + query.sqlOrder(Map.of("taskId", "t.id", "userName", "u.display_name",
-          "waitReason", "t.wait_reason", "createdAt", "t.created_at"), "t.created_at,t.id") + " LIMIT :limit OFFSET :offset")
-        .param("q", query.escapedQuery()).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
-    return new PageResult<>(rows, total, query.page(), query.pageSize(), query.sortDescriptor(),
+    long total =
+        jdbc.sql("SELECT count(*) " + queued)
+            .param("q", query.escapedQuery())
+            .query(Long.class)
+            .single();
+    var rows =
+        jdbc.sql(
+                """
+                SELECT t.id,t.id AS "taskId",t.user_id AS "userId",u.display_name AS "userName",
+                  t.wait_reason AS "waitReason",t.created_at AS "createdAt"
+                """
+                    + queued
+                    + " ORDER BY "
+                    + query.sqlOrder(
+                        Map.of(
+                            "taskId",
+                            "t.id",
+                            "userName",
+                            "u.display_name",
+                            "waitReason",
+                            "t.wait_reason",
+                            "createdAt",
+                            "t.created_at"),
+                        "t.created_at,t.id")
+                    + " LIMIT :limit OFFSET :offset")
+            .param("q", query.escapedQuery())
+            .param("limit", query.pageSize())
+            .param("offset", query.offset())
+            .query()
+            .listOfRows();
+    return new PageResult<>(
+        rows,
+        total,
+        query.page(),
+        query.pageSize(),
+        query.sortDescriptor(),
         changes.snapshot(actorId, "userTasks", query));
   }
 
@@ -516,11 +654,13 @@ public class AdministrationRepository {
   }
 
   public PageResult<Map<String, Object>> audit(UUID actorId, UUID userId, PageQuery query) {
-    String joins = """
+    String joins =
+        """
         FROM admin_audit_log a LEFT JOIN application_users u ON a.target_type='user' AND u.id=a.target_id
           LEFT JOIN operations o ON o.id=a.operation_id
         """;
-    String where = """
+    String where =
+        """
         WHERE (a.reason ILIKE :q OR a.action ILIKE :q OR a.actor_name ILIKE :q
           OR a.actor_id::text ILIKE :q OR a.target_id::text ILIKE :q OR u.display_name ILIKE :q)
         """;
@@ -538,36 +678,82 @@ public class AdministrationRepository {
       where += " AND a.action=:action";
       parameters.put("action", action);
     }
-    long total = jdbc.sql("SELECT count(*) " + joins + where).params(parameters).query(Long.class).single();
-    var rows = jdbc.sql("""
-        SELECT a.id,a.actor_id AS "actorId",a.actor_name AS "actorName",a.target_id AS "targetId",
-          coalesce(u.display_name,CASE WHEN a.target_type='platform' THEN 'Платформа' ELSE a.target_id::text END) AS "targetName",
-          a.target_type AS "targetType",a.action,a.reason,a.operation_id AS "operationId",
-          o.state AS "operationState",a.occurred_at AS "occurredAt",
-        """ + auditValueSql("previous_value") + " AS previous," + auditValueSql("new_value") + " AS next "
-        + joins + where + " ORDER BY " + query.sqlOrder(Map.of(
-          "occurredAt", "a.occurred_at", "actorName", "a.actor_name", "targetName", "\"targetName\"",
-          "action", "a.action", "reason", "a.reason"), "a.occurred_at DESC,a.id") + " LIMIT :limit OFFSET :offset")
-        .params(parameters).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
+    long total =
+        jdbc.sql("SELECT count(*) " + joins + where).params(parameters).query(Long.class).single();
+    var rows =
+        jdbc.sql(
+                """
+                SELECT a.id,a.actor_id AS "actorId",a.actor_name AS "actorName",a.target_id AS "targetId",
+                  coalesce(u.display_name,CASE WHEN a.target_type='platform' THEN 'Платформа' ELSE a.target_id::text END) AS "targetName",
+                  a.target_type AS "targetType",a.action,a.reason,a.operation_id AS "operationId",
+                  o.state AS "operationState",a.occurred_at AS "occurredAt",
+                """
+                    + auditValueSql("previous_value")
+                    + " AS previous,"
+                    + auditValueSql("new_value")
+                    + " AS next "
+                    + joins
+                    + where
+                    + " ORDER BY "
+                    + query.sqlOrder(
+                        Map.of(
+                            "occurredAt",
+                            "a.occurred_at",
+                            "actorName",
+                            "a.actor_name",
+                            "targetName",
+                            "\"targetName\"",
+                            "action",
+                            "a.action",
+                            "reason",
+                            "a.reason"),
+                        "a.occurred_at DESC,a.id")
+                    + " LIMIT :limit OFFSET :offset")
+            .params(parameters)
+            .param("limit", query.pageSize())
+            .param("offset", query.offset())
+            .query()
+            .listOfRows();
     for (var row : rows) {
       row.put("previousValue", json.map((String) row.remove("previous")));
       row.put("newValue", json.map((String) row.remove("next")));
     }
     var parametersForSnapshot = new LinkedMultiValueMap<>(query.filters());
     parametersForSnapshot.set("targetUserId", userId == null ? "all" : userId.toString());
-    return new PageResult<>(rows, total, query.page(), query.pageSize(), query.sortDescriptor(),
+    return new PageResult<>(
+        rows,
+        total,
+        query.page(),
+        query.pageSize(),
+        query.sortDescriptor(),
         changes.snapshot(actorId, "audit", PageQuery.from(parametersForSnapshot)));
   }
 
   private static String auditValueSql(String column) {
     return "jsonb_strip_nulls(jsonb_build_object("
-        + "'accountState',a." + column + "->'accountState',"
-        + "'browserMode',a." + column + "->'browserMode',"
-        + "'browserCustom',a." + column + "->'browserCustom',"
-        + "'queuedMode',a." + column + "->'queuedMode',"
-        + "'queuedCustom',a." + column + "->'queuedCustom',"
-        + "'acceptingAllocations',a." + column + "->'acceptingAllocations',"
-        + "'desiredMode',a." + column + "->'desiredMode',"
-        + "'state',a." + column + "->'state'))::text";
+        + "'accountState',a."
+        + column
+        + "->'accountState',"
+        + "'browserMode',a."
+        + column
+        + "->'browserMode',"
+        + "'browserCustom',a."
+        + column
+        + "->'browserCustom',"
+        + "'queuedMode',a."
+        + column
+        + "->'queuedMode',"
+        + "'queuedCustom',a."
+        + column
+        + "->'queuedCustom',"
+        + "'acceptingAllocations',a."
+        + column
+        + "->'acceptingAllocations',"
+        + "'desiredMode',a."
+        + column
+        + "->'desiredMode',"
+        + "'state',a."
+        + column
+        + "->'state'))::text";
   }
 }

@@ -125,5 +125,5 @@ function auditValue(value: AuditEntry['previousValue']): string {
 function quotaValue(mode: string, count: number | undefined): string {
   if (mode === 'CUSTOM') return count === undefined ? 'нет данных' : String(count);
   if (mode === 'STANDARD') return 'стандартный лимит';
-  return mode === 'ENTIRE_POOL' ? 'весь пул' : 'без ограничения';
+  return mode === 'POOL' ? 'весь пул' : 'без ограничения';
 }

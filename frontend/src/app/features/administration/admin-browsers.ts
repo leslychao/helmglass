@@ -79,7 +79,7 @@ interface BrowserIntent {
           [caption]="
             overview.unconfirmedOccupied
               ? 'Ещё ' + overview.unconfirmedOccupied + ': состояние уточняется'
-              : 'Подтверждённые сессии'
+              : 'Работающие и завершаемые браузеры'
           "
         />
       </div>
@@ -99,20 +99,31 @@ interface BrowserIntent {
             <hg-icon name="filter" />Поиск и фильтры
           </button>
         </header>
-        @if (filters().length) {
-          <div class="a-filter-feedback">
+        <div class="a-filter-feedback">
+          @if (overview.data(); as overview) {
+            <button
+              class="btn quiet small"
+              [attr.aria-pressed]="onlyOffline()"
+              (click)="toggleOffline()"
+            >
+              <hg-icon name="alert" />Нет связи: {{ overview.unavailableWorkers }}
+            </button>
+          }
+          @if (filters().length) {
             @for (filter of filters(); track filter) {
               <span class="chip">{{ filter }}</span>
             }
             <button class="btn quiet" (click)="query.clear()">Сбросить фильтры</button>
-          </div>
-        }
+          }
+        </div>
         <p class="a-effective-note">
           Узел — сервис, который запускает браузеры. Вместимость показывает, сколько браузеров он
           может держать одновременно.
         </p>
         <hg-data-table
-          [page]="pool.workers" (changed)="query.change($event)" [columns]="workerColumns"
+          [page]="pool.workers"
+          (changed)="query.change($event)"
+          [columns]="workerColumns"
           [rows]="workerRows()"
           [showEmpty]="true"
           [actions]="true"
@@ -127,7 +138,9 @@ interface BrowserIntent {
           <small>Одна строка — один браузер</small>
         </header>
         <hg-data-table
-          [page]="pool.allocations" (changed)="allocationQuery.change($event)" [columns]="allocationColumns"
+          [page]="pool.allocations"
+          (changed)="allocationQuery.change($event)"
+          [columns]="allocationColumns"
           [rows]="allocationRows()"
           [showEmpty]="true"
           [actions]="true"
@@ -142,7 +155,9 @@ interface BrowserIntent {
           <small>Браузер ещё не выделен</small>
         </header>
         <hg-data-table
-          [page]="pool.queue" (changed)="queueQuery.change($event)" [columns]="queueColumns"
+          [page]="pool.queue"
+          (changed)="queueQuery.change($event)"
+          [columns]="queueColumns"
           [rows]="queueRows()"
           [showEmpty]="true"
           emptyTitle="Очередь пуста"
@@ -196,7 +211,11 @@ export class AdminBrowsers {
   readonly query = new TableQuery({ prefix: 'workers' });
   readonly allocationQuery = new TableQuery({ prefix: 'allocations' });
   readonly queueQuery = new TableQuery({ prefix: 'queue' });
-  readonly pool = new ServerResource<BrowserPool>(['nodes', 'sessions', 'userTasks', 'users']);
+  readonly pool = new ServerResource<BrowserPool>(['nodes', 'sessions', 'userTasks', 'users'], {
+    workers: (pool) => pool.workers,
+    allocations: (pool) => pool.allocations,
+    queue: (pool) => pool.queue,
+  });
   readonly overview = new ServerResource<AdminOverview>([
     'nodes',
     'sessions',
@@ -207,6 +226,10 @@ export class AdminBrowsers {
   readonly intent = signal<BrowserIntent | null>(null);
   readonly filtersOpen = signal(false);
   readonly states = ['READY', 'DRAINING', 'OFFLINE'];
+  readonly onlyOffline = computed(() => {
+    const states = this.query.values('state');
+    return states.length === 1 && states[0] === 'OFFLINE';
+  });
   readonly filters = computed(() =>
     [
       this.query.text('q') ? 'Поиск: ' + this.query.text('q') : '',
@@ -242,9 +265,9 @@ export class AdminBrowsers {
       })) ?? [],
   );
   readonly allocationColumns: Column[] = [
+    { key: 'session', title: 'Браузер · ID', sort: 'sessionId' },
+    { key: 'state', title: 'Состояние', kind: 'status', sort: 'sessionState' },
     { key: 'user', title: 'Пользователь', kind: 'person', sort: 'userName' },
-    { key: 'session', title: 'Браузер', sort: 'sessionId' },
-    { key: 'state', title: 'Состояние', kind: 'status' },
     { key: 'worker', title: 'Узел', sort: 'workerId' },
     { key: 'task', title: 'Задача', sort: 'taskId' },
   ];
@@ -253,7 +276,7 @@ export class AdminBrowsers {
       this.pool.data()?.allocations.items.map((allocation) => ({
         id: allocation.id,
         link: '/admin/users/' + allocation.userId,
-        actionDisabled: allocation.taskId === null,
+        actionDisabled: allocation.taskId === null || allocation.sessionState === 'STOPPING',
         values: {
           user: allocation.userName,
           session: allocation.sessionId,
@@ -265,7 +288,7 @@ export class AdminBrowsers {
       })) ?? [],
   );
   readonly queueColumns: Column[] = [
-    { key: 'user', title: 'Пользователь', kind: 'person' },
+    { key: 'user', title: 'Пользователь', kind: 'person', sort: 'userName' },
     { key: 'task', title: 'Задача', sort: 'taskId' },
     { key: 'reason', title: 'Причина ожидания', sort: 'waitReason' },
   ];
@@ -286,9 +309,19 @@ export class AdminBrowsers {
   constructor() {
     this.overview.load('/admin/overview');
     effect(() => {
-      const queries = { workers: this.query.value(), allocations: this.allocationQuery.value(), queue: this.queueQuery.value() };
-      this.pool.load('/admin/browsers', Object.fromEntries(Object.entries(queries).flatMap(([prefix, query]) =>
-        Object.entries(query).map(([name, value]) => [prefix + '.' + name, value]))));
+      const queries = {
+        workers: this.query.value(),
+        allocations: this.allocationQuery.value(),
+        queue: this.queueQuery.value(),
+      };
+      this.pool.load(
+        '/admin/browsers',
+        Object.fromEntries(
+          Object.entries(queries).flatMap(([prefix, query]) =>
+            Object.entries(query).map(([name, value]) => [prefix + '.' + name, value]),
+          ),
+        ),
+      );
     });
   }
   openFilters() {
@@ -300,6 +333,9 @@ export class AdminBrowsers {
     this.draftStates = this.draftStates.includes(state)
       ? this.draftStates.filter((value) => value !== state)
       : [...this.draftStates, state];
+  }
+  toggleOffline() {
+    this.query.filter({ state: this.onlyOffline() ? [] : ['OFFLINE'] });
   }
   applyFilters() {
     this.query.filter({ q: this.draftQuery.trim() || null, state: this.draftStates });
@@ -337,7 +373,9 @@ export class AdminBrowsers {
     });
   }
   stopAllocationTask(id: string) {
-    const taskId = this.pool.data()?.allocations.items.find((item) => item.id === id)?.taskId;
+    const allocation = this.pool.data()?.allocations.items.find((item) => item.id === id);
+    if (allocation?.sessionState === 'STOPPING') return;
+    const taskId = allocation?.taskId;
     if (!taskId || this.action.pending() || this.action.unknown()) return;
     this.reason = '';
     this.intent.set({
