@@ -307,6 +307,7 @@ public class BrowserControlService {
     if (!workerId.equals(session.workerId())
         || !bootId.equals(session.workerBootId())
         || receipt.path("controlEpoch").asLong(-1) != lease.epoch()
+        || receipt.path("pageEpoch").asLong(-1) < session.pageEpoch()
         || !receipt.path("mode").asString().equals("QUIESCED")) {
       throw DomainException.conflict(
           "INPUT_FENCE_MISMATCH", "Input fencing receipt does not match");
@@ -316,6 +317,8 @@ public class BrowserControlService {
     if (accepted < 0 || applied < 0 || applied > accepted) {
       throw DomainException.conflict("INPUT_CHECKPOINT_MISSING", "Input checkpoint is unknown");
     }
+    browsers.runtimeEpochs(workerId, bootId, sessionId, receipt);
+    session = browsers.owned(lease.ownerId(), sessionId);
     controls.finishInputFence(lease, accepted, applied);
     var account = identities.find(session.userId()).orElseThrow(DomainException::notFound);
     if (accepted == applied

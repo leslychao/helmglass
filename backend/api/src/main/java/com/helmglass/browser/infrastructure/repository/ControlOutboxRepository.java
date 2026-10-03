@@ -26,7 +26,9 @@ public class ControlOutboxRepository {
       AND (o.payload->'message'->>'allocationEpoch')::bigint=s.allocation_epoch
       AND (o.payload->'message'->>'controlEpoch')::bigint=c.epoch
       AND (o.payload->'message'->>'privacyEpoch')::bigint=s.privacy_epoch
-      AND (o.payload->'message'->>'pageEpoch')::bigint=s.page_epoch
+      AND ((o.payload->'message'->>'pageEpoch')::bigint=s.page_epoch OR
+        (o.payload->'message'->>'mode'='QUIESCED'
+        AND (o.payload->'message'->>'pageEpoch')::bigint<s.page_epoch))
       AND o.aggregate_version=c.version AND c.state IN ('TRANSFERRING','QUIESCING')
       AND (o.payload->>'operationId')::uuid IS NOT DISTINCT FROM c.operation_id
       AND u.state='ACTIVE'
@@ -187,10 +189,17 @@ public class ControlOutboxRepository {
         || !message.path("mode").asString().equals(value.path("mode").asString())) {
       throw DomainException.conflict("CONTROL_ACK_FENCED", "Control receipt binding changed");
     }
-    for (String field : List.of("allocationEpoch", "controlEpoch", "pageEpoch", "privacyEpoch")) {
+    for (String field : List.of("allocationEpoch", "controlEpoch", "privacyEpoch")) {
       if (message.path(field).asLong(-1) != value.path(field).asLong(-2)) {
         throw DomainException.conflict("CONTROL_ACK_FENCED", "Control receipt epoch changed");
       }
+    }
+    long requestedPage = message.path("pageEpoch").asLong();
+    long observedPage = value.path("pageEpoch").asLong(-1);
+    if (!value.path("pageEpoch").isIntegralNumber()
+        || observedPage < requestedPage
+        || !message.path("mode").asString().equals("QUIESCED") && observedPage != requestedPage) {
+      throw DomainException.conflict("CONTROL_ACK_FENCED", "Control receipt epoch changed");
     }
     return Optional.of(new Receipt(id, stored.userId()));
   }

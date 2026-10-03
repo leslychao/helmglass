@@ -3,7 +3,6 @@ package com.helmglass.media.application;
 import com.helmglass.api.DomainException;
 import com.helmglass.artifact.application.ArtifactService;
 import com.helmglass.artifact.application.ArtifactService.AudioSource;
-import com.helmglass.identity.application.UserPolicyService;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -23,11 +22,9 @@ public class MediaAnalysisService {
   public record InlineAudio(AudioSource source, Map<String, Object> metadata) {}
 
   private final ArtifactService artifacts;
-  private final UserPolicyService policies;
 
-  public MediaAnalysisService(ArtifactService artifacts, UserPolicyService policies) {
+  public MediaAnalysisService(ArtifactService artifacts) {
     this.artifacts = artifacts;
-    this.policies = policies;
   }
 
   public Map<String, Object> get(AuthenticatedActor actor, UUID artifactId, UUID expectedTaskId) {
@@ -67,7 +64,6 @@ public class MediaAnalysisService {
     if (expectedTaskId != null && !source.taskId().equals(expectedTaskId)) {
       throw DomainException.notFound();
     }
-    policies.authorize(actor.userId(), "READ_MEDIA", null);
     return source;
   }
 

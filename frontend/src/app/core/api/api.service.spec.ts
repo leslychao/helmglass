@@ -1,4 +1,9 @@
-import { HttpErrorResponse, provideHttpClient } from '@angular/common/http';
+import {
+  HttpErrorResponse,
+  HttpHeaderResponse,
+  HttpHeaders,
+  provideHttpClient,
+} from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { TestBed } from '@angular/core/testing';
 import { firstValueFrom, timeout, TimeoutError } from 'rxjs';
@@ -48,7 +53,7 @@ describe('optional mutation diagnostics', () => {
     vi.useRealTimers();
   });
 
-  it('reports only stages and the existing request identity without changing the validated response', async () => {
+  it('reports headers and safe server identity without changing the validated response', async () => {
     const progress: MutationProgress[] = [];
     const result = firstValueFrom(
       api.mutate('POST', path, body, 'stable-key', (event) => {
@@ -58,18 +63,89 @@ describe('optional mutation diagnostics', () => {
     );
     const request = http.expectOne(`/api/v1${path}`);
     expect(request.request.body).toEqual(body);
+    expect(request.request.reportProgress).toBe(true);
     expect(request.request.headers.get('Idempotency-Key')).toBe('stable-key');
     const requestId = request.request.headers.get('X-Request-Id');
     expect(requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(progress.map((event) => event.stage)).toEqual(['SUBSCRIBED', 'SENT']);
+    const serverRequestId = 'b365ff9fcfb546f7473c6969283c8023';
+    request.event(
+      new HttpHeaderResponse({
+        status: 200,
+        headers: new HttpHeaders({ 'X-Request-ID': serverRequestId }),
+      }),
+    );
+    expect(progress.at(-1)).toEqual({ stage: 'RESPONSE_HEADERS', requestId, serverRequestId });
     request.flush(response);
     await expect(result).resolves.toEqual(response);
-    expect(progress).toEqual(
-      ['SUBSCRIBED', 'SENT', 'RESPONSE_RECEIVED', 'VALIDATED'].map((stage) => ({
+    expect(progress.slice(2)).toEqual(
+      ['RESPONSE_HEADERS', 'RESPONSE_RECEIVED', 'VALIDATED'].map((stage) => ({
         stage,
         requestId,
+        serverRequestId,
       })),
     );
+  });
+
+  it('does not enable download progress without a diagnostic observer', async () => {
+    const result = firstValueFrom(api.mutate('POST', path, body, 'stable-key'));
+    const request = http.expectOne(`/api/v1${path}`);
+    expect(request.request.reportProgress).toBe(false);
+    request.flush(response);
+    await expect(result).resolves.toEqual(response);
+  });
+
+  it.each([null, 'private content', 'a'.repeat(31), 'a'.repeat(33), 'g'.repeat(32)])(
+    'omits invalid server request identity %s',
+    async (serverRequestId) => {
+      const progress: MutationProgress[] = [];
+      const result = firstValueFrom(
+        api.mutate('POST', path, body, 'stable-key', (event) => progress.push(event)),
+      );
+      const request = http.expectOne(`/api/v1${path}`);
+      request.event(
+        new HttpHeaderResponse({
+          status: 200,
+          headers: new HttpHeaders(
+            serverRequestId === null ? {} : { 'X-Request-ID': serverRequestId },
+          ),
+        }),
+      );
+      expect(progress.at(-1)?.stage).toBe('RESPONSE_HEADERS');
+      request.flush(response);
+      await expect(result).resolves.toEqual(response);
+      expect(progress.every((event) => !('serverRequestId' in event))).toBe(true);
+    },
+  );
+
+  it('identifies headers received while the body stalls and still aborts at four seconds', async () => {
+    vi.useFakeTimers();
+    const progress: MutationProgress[] = [];
+    const received = vi.fn();
+    let failure: unknown;
+    api
+      .mutate('POST', path, body, 'stable-key', (event) => progress.push(event))
+      .pipe(timeout(4000))
+      .subscribe({ next: received, error: (error: unknown) => (failure = error) });
+    const request = http.expectOne(`/api/v1${path}`);
+    await vi.advanceTimersByTimeAsync(3000);
+    request.event(
+      new HttpHeaderResponse({
+        status: 200,
+        headers: new HttpHeaders({ 'X-Request-ID': 'B365FF9FCFB546F7473C6969283C8023' }),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(999);
+    expect(failure).toBeUndefined();
+    expect(request.cancelled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(failure).toBeInstanceOf(TimeoutError);
+    expect(request.cancelled).toBe(true);
+    expect(received).not.toHaveBeenCalled();
+    expect(progress.at(-1)).toMatchObject({
+      stage: 'RESPONSE_HEADERS',
+      serverRequestId: 'B365FF9FCFB546F7473C6969283C8023',
+    });
   });
 
   it('identifies SENT without RESPONSE and still aborts exactly at the caller timeout', async () => {

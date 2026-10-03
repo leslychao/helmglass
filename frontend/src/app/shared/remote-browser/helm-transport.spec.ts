@@ -521,15 +521,16 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     expect(mutate).toHaveBeenCalledTimes(calls);
   });
 
-  it.each(['SENT', 'RESPONSE_RECEIVED'] as const)(
+  it.each(['SENT', 'RESPONSE_HEADERS', 'RESPONSE_RECEIVED'] as const)(
     'retains the %s stage on a four-second renewal timeout without restarting control',
     async (stage) => {
       vi.useFakeTimers();
       const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
       const requestId = '049221e3-6e39-43ef-9c36-4dab85d49760';
+      const serverRequestId = stage === 'SENT' ? undefined : 'b365ff9fcfb546f7473c6969283c8023';
       privateControl();
       mutate.mockImplementationOnce((_method, _path, _body, _key, observe) => {
-        observe?.({ stage, requestId });
+        observe?.({ stage, requestId, serverRequestId });
         return new Subject<never>();
       });
       await vi.advanceTimersByTimeAsync(0);
@@ -538,7 +539,8 @@ describe('remote viewer with the pinned upstream signaling client', () => {
       clock.mockReturnValue(4100);
       await vi.advanceTimersByTimeAsync(1);
       expect(fixture.componentInstance.technicalDetails()).toBe(
-        `CONTROL_RENEW_TIMEOUT · stage=${stage} · elapsedMs=4000 · gapMs=first · visible=true/true · requestId=${requestId}`,
+        `CONTROL_RENEW_TIMEOUT · stage=${stage} · elapsedMs=4000 · gapMs=first · visible=true/true · requestId=${requestId}` +
+          (serverRequestId ? ` · serverRequestId=${serverRequestId}` : ''),
       );
       expect(fixture.componentInstance.state()).toBe('ERROR');
       expect(fixture.componentInstance.inputReady()).toBe(false);
@@ -557,6 +559,7 @@ describe('remote viewer with the pinned upstream signaling client', () => {
       const progress = {
         stage: 'SENT' as const,
         requestId: 'private content',
+        serverRequestId: 'private server content',
         url: 'https://secret.test',
         body: 'secret body',
         token: 'secret token',

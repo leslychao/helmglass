@@ -64,7 +64,14 @@ runtime.on('message', (raw: unknown) => {
       inventory: inventory ? [inventory] : [], state: draining ? 'DRAINING' : 'READY', capabilities });
     return;
   }
-  if (raw.type === 'fatal') { safeLog('runtime_fenced', 'RUNTIME_FATAL'); process.exit(1); }
+  if (raw.type === 'fatal') {
+    // Preserve known failure categories without logging arbitrary runtime content.
+    const code = 'code' in raw && typeof raw.code === 'string'
+      && ['RUNTIME_CLOSURE_UNCONFIRMED', 'FENCING_FAILED', 'INVALID_INTERNAL_MESSAGE'].includes(raw.code)
+      ? raw.code : 'RUNTIME_FATAL';
+    safeLog('runtime_fenced', code);
+    process.exit(1);
+  }
   if (raw.type === 'viewerMessage' || raw.type === 'viewerClosed' || raw.type === 'viewerEnded'
     || (typeof raw.type === 'string' && /^(viewOpen|viewRenew|signal)Ack$/.test(raw.type))) {
     if (signalingSocket?.readyState === WebSocket.OPEN && signalingSocket.bufferedAmount <= 1_048_576) signalingSocket.send(JSON.stringify(raw));

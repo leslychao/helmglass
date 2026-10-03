@@ -51,6 +51,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import tools.jackson.databind.JsonNode;
 
 /** Owns private immutable artifact admission, resumable transfer, verification and retrieval. */
 @Service
@@ -265,10 +266,11 @@ public class ArtifactService {
 
   public AudioSource audioSource(AuthenticatedActor actor, UUID id) {
     Artifact artifact = readable(actor, id);
-    if (!json.read(artifact.provenance()).path("kind").asString().equals("AUDIO")) {
+    JsonNode provenance = json.read(artifact.provenance());
+    if (!provenance.path("kind").asString().equals("AUDIO")) {
       throw DomainException.notFound();
     }
-    Metadata metadata = json.read(artifact.provenance(), Metadata.class);
+    Metadata metadata = json.convert(provenance, Metadata.class);
     return new AudioSource(
         id, artifact.taskId(), artifact.mime(), artifact.size(), artifact.checksum(), metadata);
   }
@@ -540,7 +542,11 @@ public class ArtifactService {
         actor.userId(), actor.loginId(), actor.grantId(), actor.accessEpoch())) {
       throw new DomainException(403, "ARTIFACT_ACCESS_REVOKED", "Artifact access has been revoked");
     }
-    return artifacts.owned(actor.userId(), id);
+    Artifact artifact = artifacts.owned(actor.userId(), id);
+    if (artifact.purpose().equals("AUDIO")) {
+      policies.authorize(actor.userId(), "READ_MEDIA", null);
+    }
+    return artifact;
   }
 
   private static void validateScope(

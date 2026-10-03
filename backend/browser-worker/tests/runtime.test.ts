@@ -245,6 +245,25 @@ test('standalone login creates no observer and initial permit returns no private
     assert.equal(applied['inputPageEpoch'], inputPageEpoch, 'Input keeps its admitted page after navigation');
     assert.ok(assignment.pageEpoch > inputPageEpoch, 'Real Enter input navigated the same Page');
     assert.equal(JSON.stringify(applied).includes('/next'), false, 'Private input receipt contains no URL');
+    const quiesce: ControlMessage = { schemaVersion: 1, type: 'control', requestId: randomUUID(),
+      browserSessionId: assignment.browserSessionId, allocationEpoch: 1, controlEpoch: 2,
+      pageEpoch: inputPageEpoch, privacyEpoch: 2, policyVersion: 1, mode: 'QUIESCED',
+      controllerInstance, leaseExpiresAt: new Date(Date.now() + 5000).toISOString() };
+    await assert.rejects(runtime.control({ ...quiesce, allocationEpoch: 2 }), /STALE_CONTROL/);
+    await assert.rejects(runtime.control({ ...quiesce, controlEpoch: 1 }), /STALE_CONTROL/);
+    await assert.rejects(runtime.control({ ...quiesce, privacyEpoch: 1 }), /STALE_CONTROL/);
+    await assert.rejects(runtime.control({ ...quiesce, mode: 'HUMAN_PRIVATE' }), /STALE_CONTROL/);
+    const currentPageEpoch = assignment.pageEpoch;
+    const fenced = await runtime.control(quiesce);
+    assert.equal(fenced['mode'], 'QUIESCED');
+    assert.equal(fenced['pageEpoch'], currentPageEpoch, 'Fence reports the actual Page, without rolling navigation back');
+    assert.equal(fenced['lastAcceptedInputSequence'], 1);
+    assert.equal(fenced['lastAppliedInputSequence'], 1);
+    assert.deepEqual(await runtime.control(quiesce), fenced, 'Lost fence ACK has an immutable replay receipt');
+    assert.equal(assignment.pageEpoch, currentPageEpoch);
+    await assert.rejects(runtime.input({ schemaVersion: 1, type: 'input', requestId: randomUUID(),
+      browserSessionId: assignment.browserSessionId, controlEpoch: 2, pageEpoch: currentPageEpoch,
+      controllerInstance, inputSequence: 2, action: { type: 'keyDown', key: 'Enter' } }), /INPUT_FENCED/);
     await runtime.close();
     const neverReady = runtime.usageCheckpoint();
     assert.ok(neverReady);

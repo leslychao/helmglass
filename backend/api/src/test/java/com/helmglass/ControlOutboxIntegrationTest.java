@@ -128,6 +128,95 @@ class ControlOutboxIntegrationTest {
   }
 
   @Test
+  void quiescentReceiptReconcilesNavigationBeforeReconnectingHumanControl() {
+    var fixture = fixture();
+    acquire(fixture);
+    var acquired = intent(fixture);
+    dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(acquired));
+    UUID channel = UUID.randomUUID();
+    assertThat(
+            leases.claimInput(
+                fixture.session(),
+                leases.get(fixture.session()).epoch(),
+                fixture.controller(),
+                fixture.actor().loginId(),
+                channel))
+        .isTrue();
+    controls.inputDisconnected(fixture.actor().userId(), fixture.session(), channel);
+    var fence = intent(fixture);
+    ObjectNode receipt = acknowledgement(fence);
+    long nextPage = receipt.path("pageEpoch").asLong() + 1;
+    receipt.put("pageEpoch", nextPage);
+    receipt.put("lastAcceptedInputSequence", 1);
+    receipt.put("lastAppliedInputSequence", 1);
+
+    dispatcher.acknowledge(fixture.worker(), fixture.boot(), receipt);
+
+    assertThat(outbox.published(fence.id())).isTrue();
+    assertThat(browsers.owned(fixture.actor().userId(), fixture.session()).pageEpoch())
+        .isEqualTo(nextPage);
+    var resumed = intent(fixture);
+    assertThat(resumed.id()).isNotEqualTo(fence.id());
+    assertThat(json.read(resumed.message()).path("pageEpoch").asLong()).isEqualTo(nextPage);
+    assertThat(json.read(resumed.message()).path("mode").asString()).isEqualTo("HUMAN");
+    assertThat(leases.get(fixture.session()).state()).isEqualTo("TRANSFERRING");
+    long intents = count(fixture);
+    dispatcher.acknowledge(fixture.worker(), fixture.boot(), receipt);
+    assertThat(count(fixture)).isEqualTo(intents);
+    dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(resumed));
+    assertThat(leases.get(fixture.session()).state()).isEqualTo("ACTIVE");
+  }
+
+  @Test
+  void navigationDoesNotStrandImmutableQuiesceAndOtherReceiptEpochsRemainFenced() {
+    var fixture = fixture();
+    acquire(fixture);
+    var acquired = intent(fixture);
+    ObjectNode wrongActivePage = acknowledgement(acquired);
+    wrongActivePage.put("pageEpoch", wrongActivePage.path("pageEpoch").asLong() + 1);
+    assertThatThrownBy(
+            () -> dispatcher.acknowledge(fixture.worker(), fixture.boot(), wrongActivePage))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("Control receipt epoch changed");
+    dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(acquired));
+    transaction.executeWithoutResult(
+        status -> {
+          leases.beginSessionBoundary(
+              fixture.session(), leases.get(fixture.session()).operationId());
+          controls.publishControl(fixture.actor().userId(), fixture.session(), "QUIESCED");
+        });
+    var fence = intent(fixture);
+    ObjectNode receipt = acknowledgement(fence);
+    receipt.put("pageEpoch", receipt.path("pageEpoch").asLong() + 1);
+    transaction.executeWithoutResult(
+        status ->
+            browsers.runtimeEpochs(fixture.worker(), fixture.boot(), fixture.session(), receipt));
+    assertThat(outbox.deliverable(fence.id())).isTrue();
+    assertThat(outbox.due()).anyMatch(delivery -> delivery.id().equals(fence.id()));
+    assertThat(intent(fixture).message()).isEqualTo(fence.message());
+    for (String field : List.of("allocationEpoch", "controlEpoch", "privacyEpoch")) {
+      ObjectNode changed = receipt.deepCopy();
+      changed.put(field, changed.path(field).asLong() + 1);
+      assertThatThrownBy(() -> dispatcher.acknowledge(fixture.worker(), fixture.boot(), changed))
+          .isInstanceOf(DomainException.class)
+          .hasMessageContaining("Control receipt epoch changed");
+    }
+    ObjectNode older = receipt.deepCopy();
+    older.put("pageEpoch", json.read(fence.message()).path("pageEpoch").asLong() - 1);
+    assertThatThrownBy(() -> dispatcher.acknowledge(fixture.worker(), fixture.boot(), older))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("Control receipt epoch changed");
+    ObjectNode beforeNavigation = acknowledgement(fence);
+    assertThatThrownBy(
+            () -> dispatcher.acknowledge(fixture.worker(), fixture.boot(), beforeNavigation))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("Input fencing receipt does not match");
+    assertThat(outbox.published(fence.id())).isFalse();
+    dispatcher.acknowledge(fixture.worker(), fixture.boot(), receipt);
+    assertThat(outbox.published(fence.id())).isTrue();
+  }
+
+  @Test
   void committedControlSurvivesLostCallbackAndExactAckCommitsWithItsOperation() {
     var fixture = fixture();
     transaction.executeWithoutResult(

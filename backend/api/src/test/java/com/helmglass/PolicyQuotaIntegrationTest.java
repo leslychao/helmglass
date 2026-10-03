@@ -14,11 +14,15 @@ import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.api.PageQuery;
+import com.helmglass.command.api.CommandContracts;
+import com.helmglass.command.application.CommandExecutionService;
 import com.helmglass.identity.api.PolicyContracts;
 import com.helmglass.identity.application.UserPolicyService;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
+import com.helmglass.task.api.TaskContracts;
+import com.helmglass.task.application.TaskLifecycleService;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +50,8 @@ class PolicyQuotaIntegrationTest {
   private final TransactionTemplate transaction;
   private final JdbcClient jdbc;
   private final RealtimeDeliveryService realtime;
+  private final TaskLifecycleService tasks;
+  private final CommandExecutionService commands;
 
   @Autowired
   PolicyQuotaIntegrationTest(
@@ -55,6 +61,8 @@ class PolicyQuotaIntegrationTest {
       JsonSupport json,
       JdbcClient jdbc,
       RealtimeDeliveryService realtime,
+      TaskLifecycleService tasks,
+      CommandExecutionService commands,
       PlatformTransactionManager transactions) {
     this.policies = policies;
     this.identities = identities;
@@ -62,7 +70,98 @@ class PolicyQuotaIntegrationTest {
     this.json = json;
     this.jdbc = jdbc;
     this.realtime = realtime;
+    this.tasks = tasks;
+    this.commands = commands;
     transaction = new TransactionTemplate(transactions);
+  }
+
+  @Test
+  void mediaCategoryBlocksCaptureAdmissionWithoutBlockingOrdinaryRead() {
+    var user = actor(false);
+    blockedActions(user, List.of("MEDIA"));
+    assertThat(policies.get(user).blockedActions()).containsExactly("MEDIA");
+    policies.authorize(user.userId(), "READ", null);
+    policies.authorize(user.userId(), "OBSERVE", null);
+    var created =
+        tasks.create(
+            user,
+            new TaskContracts.Create(
+                "Read permitted media",
+                "https://example.com",
+                List.of(),
+                "TEXT",
+                false,
+                1800,
+                "PREPARE"),
+            context(),
+            null);
+    var task = tasks.get(user, created.resource().id());
+    UUID commandId = UUID.randomUUID();
+    var action =
+        json.read(
+            json.write(
+                Map.of(
+                    "type",
+                    "READ_MEDIA",
+                    "observationId",
+                    UUID.randomUUID(),
+                    "mediaRef",
+                    UUID.randomUUID(),
+                    "maxDurationSeconds",
+                    10,
+                    "maxBytes",
+                    4096,
+                    "coverage",
+                    "FULL")));
+    var input =
+        new CommandContracts.Submit(
+            commandId,
+            task.version(),
+            task.instructionRevision(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            action);
+    assertThatThrownBy(() -> commands.accept(user, task.id(), input, context(), null))
+        .isInstanceOfSatisfying(
+            DomainException.class,
+            error -> assertThat(error.getCode()).isEqualTo("ACTION_PROHIBITED"));
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM task_commands WHERE id=:id")
+                .param("id", commandId)
+                .query(Long.class)
+                .single())
+        .isZero();
+    blockedActions(user, List.of("READ"));
+    assertThatThrownBy(() -> policies.authorize(user.userId(), "READ", null))
+        .isInstanceOfSatisfying(
+            DomainException.class,
+            error -> assertThat(error.getCode()).isEqualTo("ACTION_PROHIBITED"));
+    assertThat(commands.accept(user, task.id(), input, context(), null).resource().id())
+        .isEqualTo(commandId);
+  }
+
+  private void blockedActions(AuthenticatedActor actor, List<String> actions) {
+    policies.update(
+        actor,
+        new PolicyContracts.Update(
+            policies.get(actor).version(),
+            "ALL",
+            "AUTO",
+            actions,
+            false,
+            List.of(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null),
+        context());
   }
 
   @Test
@@ -74,7 +173,7 @@ class PolicyQuotaIntegrationTest {
     update(target, 2, 4);
     assertThat(policyIntents(target.userId())).isEqualTo(1);
     // Personal and assigned policies now both reach version 2: their events must not collide.
-    realtime.relay();
+    relayPolicyChanges(target.userId());
     var otherBefore = policies.get(other);
     var targetSocket = subscribe(target);
     var otherSocket = subscribe(other);
@@ -84,7 +183,7 @@ class PolicyQuotaIntegrationTest {
       var receipt = administration.limits(admin, target.userId(), input, mutation);
       assertThat(administration.limits(admin, target.userId(), input, mutation)).isEqualTo(receipt);
       assertThat(policyIntents(receipt.operationId())).isEqualTo(1);
-      realtime.relay();
+      relayPolicyChanges(target.userId());
       var messages = ArgumentCaptor.forClass(TextMessage.class);
       verify(targetSocket, times(2)).sendMessage(messages.capture());
       assertThat(json.read(messages.getAllValues().getLast().getPayload()))
@@ -133,6 +232,27 @@ class PolicyQuotaIntegrationTest {
         .param("id", operationId)
         .query(Long.class)
         .single();
+  }
+
+  private void relayPolicyChanges(UUID userId) {
+    // Other integration cases share this database; one bounded relay batch may precede our rows.
+    for (int batch = 0; batch < 20; batch++) {
+      realtime.relay();
+      long pending =
+          jdbc.sql(
+                  """
+                  SELECT count(*) FROM transactional_outbox
+                  WHERE user_id=:user AND published_at IS NULL
+                    AND event_type IN ('policy','tasks','users','operations')
+                  """)
+              .param("user", userId)
+              .query(Long.class)
+              .single();
+      if (pending == 0) {
+        return;
+      }
+    }
+    throw new AssertionError("Target policy changes were not delivered within 20 relay batches");
   }
 
   private WebSocketSession subscribe(AuthenticatedActor actor) throws Exception {

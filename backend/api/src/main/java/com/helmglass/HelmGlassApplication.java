@@ -10,6 +10,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @SpringBootApplication
 public class HelmGlassApplication {
   public static void main(String[] args) {
+    if (args.length == 1 && args[0].equals("confirm-worker-stopped")) {
+      WorkerRetirementApplication.confirmStopped();
+      return;
+    }
     if (args.length == 1 && args[0].equals("retire-workers")) {
       WorkerRetirementApplication.run();
       return;

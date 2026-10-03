@@ -73,6 +73,19 @@ public class EnrollmentRepository {
         .update();
   }
 
+  public int revokeBoot(String installation, UUID workerId, UUID bootId) {
+    return jdbc.sql(
+            """
+            UPDATE worker_enrollments SET state='REVOKED'
+            WHERE installation_id=:installation AND worker_id=:worker AND boot_id=:boot
+              AND state<>'REVOKED'
+            """)
+        .param("installation", installation)
+        .param("worker", workerId)
+        .param("boot", bootId)
+        .update();
+  }
+
   public boolean hasOtherLiveBoot(String installation, UUID workerId, UUID bootId) {
     return jdbc.sql(
             """

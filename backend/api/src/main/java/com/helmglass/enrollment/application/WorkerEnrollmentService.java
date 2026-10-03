@@ -131,6 +131,17 @@ public class WorkerEnrollmentService {
     return retired;
   }
 
+  /** Revokes only the inspected boot, participating in the caller's closure transaction. */
+  public void retireStoppedBoot(UUID workerId, UUID bootId) {
+    transaction.executeWithoutResult(
+        status -> {
+          repository.lockInstallation(secrets.installationId());
+          repository.find(secrets.installationId(), workerId, bootId)
+              .orElseThrow(DomainException::notFound);
+          repository.revokeBoot(secrets.installationId(), workerId, bootId);
+        });
+  }
+
   private Reservation reserve(Request request, String digest, X509Certificate peer) {
     repository.lockInstallation(secrets.installationId());
     Enrollment existing =

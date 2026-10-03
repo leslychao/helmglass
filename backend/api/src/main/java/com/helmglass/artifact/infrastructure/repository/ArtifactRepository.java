@@ -36,6 +36,7 @@ public class ArtifactRepository {
       UUID id,
       UUID userId,
       UUID taskId,
+      String purpose,
       String bucket,
       String objectKey,
       String mime,

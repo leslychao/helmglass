@@ -15,6 +15,7 @@ import static org.mockito.Mockito.when;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
+import com.helmglass.api.MutationContext;
 import com.helmglass.artifact.api.ArtifactContracts.Coverage;
 import com.helmglass.artifact.api.ArtifactContracts.Interval;
 import com.helmglass.artifact.api.ArtifactContracts.Metadata;
@@ -28,6 +29,7 @@ import com.helmglass.artifact.infrastructure.MultipartStorage.Pending;
 import com.helmglass.artifact.infrastructure.ObjectStorage;
 import com.helmglass.artifact.infrastructure.ObjectStorage.ObjectMetadata;
 import com.helmglass.artifact.infrastructure.repository.ArtifactRepository;
+import com.helmglass.identity.api.PolicyContracts;
 import com.helmglass.identity.application.UserPolicyService;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
@@ -52,6 +54,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -99,6 +102,7 @@ class ArtifactPersistenceIntegrationTest {
   private final ArtifactRepository repository;
   private final ArtifactService service;
   private final MediaAnalysisService media;
+  private final UserPolicyService policies;
   private final ObjectStorage storage;
   private final MultipartStorage multipart;
   private final TransactionTemplate transaction;
@@ -110,6 +114,7 @@ class ArtifactPersistenceIntegrationTest {
       ArtifactRepository repository,
       ArtifactService service,
       MediaAnalysisService media,
+      UserPolicyService policies,
       ObjectStorage storage,
       MultipartStorage multipart,
       PlatformTransactionManager transactions) {
@@ -118,9 +123,158 @@ class ArtifactPersistenceIntegrationTest {
     this.repository = repository;
     this.service = service;
     this.media = media;
+    this.policies = policies;
     this.storage = storage;
     this.multipart = multipart;
     transaction = new TransactionTemplate(transactions);
+  }
+
+  @Test
+  void mediaBlockDeniesCaptureAllocationAndEverySavedAudioReadWithoutDeletingTheArtifact()
+      throws Exception {
+    Fixture fixture = fixture();
+    var grant = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());
+    var artifact = repository.artifact(grant.artifactId());
+    jdbc.sql("UPDATE task_artifacts SET state='READY',ready_at=now() WHERE id=:id")
+        .param("id", artifact.id())
+        .update();
+    var audio = media.inline(fixture.actor(), artifact.id(), artifact.taskId());
+    var content = service.content(fixture.actor(), artifact.id(), null);
+    blockedActions(fixture.actor(), List.of("MEDIA"));
+    assertMediaDenied(
+        () -> service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata()));
+    assertMediaDenied(() -> media.get(fixture.actor(), artifact.id(), artifact.taskId()));
+    assertMediaDenied(() -> media.inline(fixture.actor(), artifact.id(), artifact.taskId()));
+    assertMediaDenied(
+        () ->
+            media.segments(
+                fixture.actor(), artifact.id(), artifact.taskId(), "CAPTIONS", null, 100));
+    assertMediaDenied(() -> service.metadata(fixture.actor(), artifact.id()));
+    assertMediaDenied(() -> service.content(fixture.actor(), artifact.id(), null));
+    assertMediaDenied(() -> service.content(fixture.actor(), artifact.id(), "bytes=0-7"));
+    assertMediaDenied(
+        () ->
+            service.download(
+                fixture.actor(),
+                artifact.id(),
+                content,
+                OutputStream.nullOutputStream(),
+                Instant.now().plusSeconds(5)));
+    assertMediaDenied(
+        () ->
+            media.deliver(
+                fixture.actor(),
+                audio,
+                OutputStream.nullOutputStream(),
+                Instant.now().plusSeconds(5)));
+    verifyNoInteractions(storage, multipart);
+    assertThat(repository.artifact(artifact.id()).state()).isEqualTo("READY");
+    blockedActions(fixture.actor(), List.of("READ"));
+    assertThat(
+            media.inline(fixture.actor(), artifact.id(), artifact.taskId()).source().artifactId())
+        .isEqualTo(artifact.id());
+    when(storage.open(anyString(), anyString(), any(), any())).thenReturn(stream(fixture.bytes()));
+    var output = new ByteArrayOutputStream();
+    media.deliver(fixture.actor(), audio, output, Instant.now().plusSeconds(5));
+    assertThat(output.toByteArray()).isEqualTo(fixture.bytes());
+  }
+
+  @Test
+  void mediaPolicyUsesStoredPurposeEvenWhenHistoricalProvenanceIsEmpty() throws Exception {
+    Fixture fixture = fixture();
+    var grant = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());
+    UUID artifactId = grant.artifactId();
+    jdbc.sql("UPDATE task_artifacts SET state='READY',ready_at=now(),provenance='{}' WHERE id=:id")
+        .param("id", artifactId)
+        .update();
+    var content = service.content(fixture.actor(), artifactId, null);
+    blockedActions(fixture.actor(), List.of("MEDIA"));
+    assertMediaDenied(() -> service.metadata(fixture.actor(), artifactId));
+    assertMediaDenied(() -> service.content(fixture.actor(), artifactId, "bytes=0-7"));
+    assertMediaDenied(
+        () -> service.download(fixture.actor(), artifactId, content,
+            OutputStream.nullOutputStream(), Instant.now().plusSeconds(5)));
+    verifyNoInteractions(storage, multipart);
+    assertThat(repository.artifact(artifactId).state()).isEqualTo("READY");
+
+    // Policy is about artifact purpose, not a MIME heuristic or optional provenance field.
+    jdbc.sql("UPDATE task_artifacts SET purpose='FILE' WHERE id=:id")
+        .param("id", artifactId)
+        .update();
+    assertThat(service.metadata(fixture.actor(), artifactId)).containsEntry("id", artifactId);
+    when(storage.open(anyString(), anyString(), any(), any())).thenReturn(stream(fixture.bytes()));
+    var output = new ByteArrayOutputStream();
+    service.download(fixture.actor(), artifactId, content, output, Instant.now().plusSeconds(5));
+    assertThat(output.toByteArray()).isEqualTo(fixture.bytes());
+  }
+
+  @Test
+  void mediaBlockDuringDownloadStopsTheExistingStreamAtItsAuthorizationCheckpoint() {
+    Fixture fixture = fixture();
+    var grant = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());
+    var artifact = repository.artifact(grant.artifactId());
+    byte[] bytes = new byte[2 * 1_048_576];
+    jdbc.sql("UPDATE task_artifacts SET state='READY',ready_at=now(),size=:size WHERE id=:id")
+        .param("id", artifact.id())
+        .param("size", bytes.length)
+        .update();
+    var content = service.content(fixture.actor(), artifact.id(), null);
+    AtomicBoolean aborted = new AtomicBoolean();
+    when(storage.open(anyString(), anyString(), any(), any()))
+        .thenReturn(
+            new ResponseInputStream<>(
+                GetObjectResponse.builder().contentLength((long) bytes.length).build(),
+                AbortableInputStream.create(
+                    new ByteArrayInputStream(bytes), () -> aborted.set(true))));
+    var delivered = new ByteArrayOutputStream();
+    var output =
+        new OutputStream() {
+          @Override
+          public void write(int value) {
+            throw new AssertionError("Expected bounded block writes");
+          }
+
+          @Override
+          public void write(byte[] block, int offset, int length) {
+            if (delivered.size() == 0) {
+              blockedActions(fixture.actor(), List.of("MEDIA"));
+            }
+            delivered.write(block, offset, length);
+          }
+        };
+    assertMediaDenied(
+        () ->
+            service.download(
+                fixture.actor(), artifact.id(), content, output, Instant.now().plusSeconds(5)));
+    assertThat(delivered.size()).isPositive().isLessThanOrEqualTo(1_048_576);
+    assertThat(aborted).isTrue();
+    assertThat(repository.artifact(artifact.id()).state()).isEqualTo("READY");
+  }
+
+  private void blockedActions(AuthenticatedActor actor, List<String> actions) {
+    policies.update(
+        actor,
+        new PolicyContracts.Update(
+            policies.get(actor).version(),
+            "ALL",
+            "AUTO",
+            actions,
+            false,
+            List.of(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null),
+        new MutationContext(UUID.randomUUID().toString(), UUID.randomUUID()));
+  }
+
+  private static void assertMediaDenied(ThrowingCallable action) {
+    assertThatThrownBy(action)
+        .isInstanceOfSatisfying(
+            DomainException.class,
+            error -> assertThat(error.getCode()).isEqualTo("ACTION_PROHIBITED"));
   }
 
   @BeforeEach

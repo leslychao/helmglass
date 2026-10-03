@@ -51,7 +51,8 @@ export class Api {
         if (!observe || !active) return;
         if (headers) {
           const value = headers.get('X-Request-ID');
-          serverRequestId = value?.length === 32 && /^[a-f0-9]{32}$/i.test(value) ? value : undefined;
+          serverRequestId =
+            value?.length === 32 && /^[a-f0-9]{32}$/i.test(value) ? value : undefined;
         }
         try {
           observe({ stage, requestId, ...(serverRequestId ? { serverRequestId } : {}) });

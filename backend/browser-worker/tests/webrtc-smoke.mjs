@@ -179,6 +179,9 @@ ws.on('connection', (client, request) => {
         workerBootId: binding.workerBootId, browserSessionId: binding.browserSessionId,
         allocationEpoch: binding.allocationEpoch, viewGeneration: binding.viewGeneration, payload });
     } catch (error) {
+      console.log('VIEWER_FIXTURE_REJECTION=' + JSON.stringify({ source: 'signal', surface: viewer.surface,
+        generation: binding.viewGeneration, currentGeneration: viewer.binding?.viewGeneration,
+        socketCurrent: viewer.socket === client, ended: viewer.ended.at(-1), code: error.code }));
       recordViewerDiagnostic(viewer, 'failures', String(error.code ?? error.message));
     }
   });
@@ -188,7 +191,12 @@ ws.on('connection', (client, request) => {
   void media.accept(binding).then(() => {
     viewer.renew = setInterval(() => void media.accept({ ...binding, type: 'viewRenew',
       requestId: randomUUID(), leaseExpiresAt: new Date(Date.now() + 4500).toISOString() })
-      .catch(error => recordViewerDiagnostic(viewer, 'failures', String(error.code ?? error.message))), 1000);
+      .catch(error => {
+        console.log('VIEWER_FIXTURE_REJECTION=' + JSON.stringify({ source: 'renew', surface: viewer.surface,
+          generation: binding.viewGeneration, currentGeneration: viewer.binding?.viewGeneration,
+          socketCurrent: viewer.socket === client, ended: viewer.ended.at(-1), code: error.code }));
+        recordViewerDiagnostic(viewer, 'failures', String(error.code ?? error.message));
+      }), 1000);
   }).catch(error => { recordViewerDiagnostic(viewer, 'failures', String(error.code ?? error.message)); client.close(); });
 });
 
@@ -359,7 +367,22 @@ try {
     allocationEpoch: 1, controlEpoch: 1, pageEpoch: 1, privacyEpoch: 1, policyVersion: 1, originPolicy: 'PUBLIC', allowedOrigins: [],
     deadline: new Date(Date.now() + lifetimeMs).toISOString(), viewport };
   runtime = await BrowserSession.create(assignment, { headless: false, display: ':99', stagingDirectory: '/runtime/sessions',
-    mediaBarrier: () => { mediaBarrier = media.closeAll(); return mediaBarrier; } });
+    mediaBarrier: () => {
+      const retired = [];
+      for (const viewer of viewers.values()) {
+        clearInterval(viewer.renew);
+        if (viewer.binding) retired.push(viewer.binding);
+      }
+      // The API stops renewing a retired binding before awaiting physical teardown.
+      // A late old renewal must still be rejected, rather than reviving that peer.
+      const closing = media.closeAll();
+      mediaBarrier = Promise.all([closing, ...retired.map(binding => assert.rejects(
+        media.accept({ ...binding, type: 'viewRenew', requestId: randomUUID(),
+          leaseExpiresAt: new Date(Date.now() + 4500).toISOString() }),
+        { code: 'VIEW_LEASE_EXPIRED' },
+      ))]).then(() => undefined);
+      return mediaBarrier;
+    } });
   await runtime.context.pages()[0].goto(`http://127.0.0.1:8099/performance/source.html?run=${measurementRun}&inputDelayMs=${inputDelayMs}`);
   await runtime.control({ schemaVersion: 1, type: 'control', requestId: randomUUID(), browserSessionId: assignment.browserSessionId,
     allocationEpoch: 1, controlEpoch: 2, privacyEpoch: 1, pageEpoch: assignment.pageEpoch, policyVersion: 1,

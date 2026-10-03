@@ -95,7 +95,8 @@ public class UserPolicyService {
   }
 
   public void authorize(PolicyContracts.Policy policy, String actionType, String url) {
-    if (policy.blockedActions().contains(actionType)) {
+    String category = actionType.equals("READ_MEDIA") ? "MEDIA" : actionType;
+    if (policy.blockedActions().contains(category)) {
       throw new DomainException(403, "ACTION_PROHIBITED", "Action is prohibited by user policy");
     }
     if (url == null) {

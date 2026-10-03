@@ -294,7 +294,7 @@ export class BrowserSession {
       if (Date.now() >= Date.parse(this.assignment.deadline) && cleanupDeadline === undefined) throw new WorkerError('BROWSER_DEADLINE');
       if (message.browserSessionId !== this.assignment.browserSessionId || message.allocationEpoch !== this.assignment.allocationEpoch
           || message.controlEpoch < this.assignment.controlEpoch || message.privacyEpoch < this.assignment.privacyEpoch
-          || message.pageEpoch < this.assignment.pageEpoch) throw new WorkerError('STALE_CONTROL');
+          || (message.mode !== 'QUIESCED' && message.pageEpoch < this.assignment.pageEpoch)) throw new WorkerError('STALE_CONTROL');
       if ((message.connectionId === undefined) !== (message.scopeVersion === undefined)) throw new WorkerError('CONNECTION_BINDING_FENCED');
       if (message.connectionId !== undefined) {
         const existing = this.assignment.connectionId !== undefined;
@@ -328,7 +328,9 @@ export class BrowserSession {
       }
       if (this.mutationUnknown && message.mode !== 'QUIESCED') throw new WorkerError('UNKNOWN_EFFECT_BARRIER');
       if (message.controlEpoch > this.assignment.controlEpoch) { this.inputSequence = 0; this.appliedInputSequence = 0; }
-      Object.assign(this.assignment, { controlEpoch: message.controlEpoch, privacyEpoch: message.privacyEpoch, pageEpoch: message.pageEpoch, policyVersion: message.policyVersion });
+      // Quiescence revokes execution on the current Page; navigation cannot invalidate that fence.
+      Object.assign(this.assignment, { controlEpoch: message.controlEpoch, privacyEpoch: message.privacyEpoch,
+        pageEpoch: Math.max(message.pageEpoch, this.assignment.pageEpoch), policyVersion: message.policyVersion });
       if (message.connectionId !== undefined) {
         this.assignment.connectionId = message.connectionId;
         this.assignment.scopeVersion = message.scopeVersion;

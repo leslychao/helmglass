@@ -1,12 +1,96 @@
 import { TestBed } from '@angular/core/testing';
-import { NEVER, Subject } from 'rxjs';
+import { NEVER, of, Subject } from 'rxjs';
 import { describe, expect, it, vi } from 'vitest';
 import { Api } from '../../core/api/api.service';
-import { Policy } from '../../core/api/models';
+import { Policy, Receipt } from '../../core/api/models';
 import { Realtime } from '../../core/realtime/realtime.service';
 import { Profile } from './profile';
 
 describe('personal queue limits', () => {
+  it.each([false, true])(
+    'submits the rendered Save button with loaded policy, edited=%s',
+    (edited) => {
+      const policy: Policy = {
+        version: 7,
+        siteMode: 'ALL',
+        origins: [],
+        connectionMode: 'AUTO',
+        requireConfirmationBeforeChanges: true,
+        blockedActions: [],
+        maxCommandsPerRun: null,
+        maxActiveSecondsPerRun: null,
+        maxParallelRuns: null,
+        maxQueuedRuns: null,
+        maxRetainedMediaBytes: null,
+        maxBrowserSessions: null,
+        quotas: {
+          assignedBrowserLimit: 2,
+          assignedQueuedLimit: null,
+          effectiveBrowserLimit: 2,
+          effectiveQueuedLimit: null,
+        },
+      };
+      const receipt = new Subject<Receipt>();
+      const get = vi.fn(() => of(policy));
+      const mutate = vi.fn(() => receipt);
+      TestBed.configureTestingModule({
+        providers: [
+          { provide: Api, useValue: { get, mutate } },
+          { provide: Realtime, useValue: { refresh: new Subject() } },
+        ],
+      });
+      const fixture = TestBed.createComponent(Profile);
+      fixture.detectChanges();
+      const element: HTMLElement = fixture.nativeElement;
+      const form = element.querySelector('form');
+      const button = element.querySelector<HTMLButtonElement>('.form-footer button');
+      const origins = element.querySelector<HTMLTextAreaElement>('#origins');
+      if (!form || !button || !origins) throw new Error('Profile form is not rendered');
+      const submitted = vi.fn();
+      form.addEventListener('submit', submitted);
+      if (edited) {
+        origins.value = 'https://example.org';
+        origins.dispatchEvent(new Event('input', { bubbles: true }));
+        fixture.detectChanges();
+      }
+      expect(form.checkValidity()).toBe(true);
+      expect(button.disabled).toBe(false);
+      expect(button.type).toBe('submit');
+      button.click();
+      fixture.detectChanges();
+      expect(submitted).toHaveBeenCalledTimes(1);
+      expect(mutate).toHaveBeenCalledExactlyOnceWith(
+        'PATCH',
+        '/me/policy',
+        expect.objectContaining({
+          expectedVersion: 7,
+          origins: edited ? ['https://example.org'] : [],
+          requireConfirmationBeforeChanges: true,
+          maxBrowserSessions: null,
+        }),
+        expect.any(String),
+      );
+      expect(fixture.componentInstance.mutation.pending()).toBe(true);
+      expect(button.disabled).toBe(true);
+      button.click();
+      expect(mutate).toHaveBeenCalledTimes(1);
+      get.mockReturnValueOnce(of({ ...policy, version: 8 }));
+      receipt.next({
+        operationId: '11111111-1111-4111-8111-111111111111',
+        resource: { type: 'policy', id: '22222222-2222-4222-8222-222222222222', version: 8 },
+        statusUrl: '/api/v1/operations/11111111-1111-4111-8111-111111111111',
+        requestId: '33333333-3333-4333-8333-333333333333',
+      });
+      fixture.detectChanges();
+      expect(fixture.componentInstance.mutation.pending()).toBe(false);
+      expect(fixture.componentInstance.form.pristine).toBe(true);
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(button.disabled).toBe(false);
+      form.removeEventListener('submit', submitted);
+      fixture.destroy();
+    },
+  );
+
   it('refreshes assigned quotas on policy push without overwriting unsaved preferences', () => {
     const refresh = new Subject<ReadonlySet<string> | null>();
     const responses: Subject<Policy>[] = [];

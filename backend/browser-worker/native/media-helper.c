@@ -100,11 +100,23 @@ static void teardown(void) {
   g_hash_table_destroy(old_consumers);
 }
 
+static void configure_encoder(GstElement *encoder) {
+  const gchar *factory = gst_plugin_feature_get_name(gst_element_get_factory(encoder));
+  if (strcmp(factory, "nvh264enc")) return;
+  /* Modern NVENC presets are required by current NVIDIA drivers. Test the same
+   * low-latency configuration that each viewer uses, without changing its bitrate. */
+  gst_util_set_object_arg(G_OBJECT(encoder), "preset", "p1");
+  gst_util_set_object_arg(G_OBJECT(encoder), "tune", "ultra-low-latency");
+  g_object_set(encoder, "bframes", 0, "rc-lookahead", 0, "zerolatency", TRUE, NULL);
+}
+
 static gboolean smoke_encoder(const char *factory) {
-  if (!gst_element_factory_find(factory)) return FALSE;
+  GstElementFactory *available = gst_element_factory_find(factory);
+  if (!available) return FALSE;
+  gst_object_unref(available);
   gchar *description = g_strdup_printf(
     "videotestsrc num-buffers=4 ! video/x-raw,width=320,height=180,framerate=15/1 ! "
-    "videoconvert ! %s ! h264parse ! avdec_h264 ! fakesink sync=false", factory);
+    "videoconvert ! %s name=smoke_encoder ! h264parse ! avdec_h264 ! fakesink sync=false", factory);
   GError *failure = NULL;
   GstElement *test = gst_parse_launch(description, &failure);
   g_free(description);
@@ -113,6 +125,9 @@ static gboolean smoke_encoder(const char *factory) {
     if (test) gst_object_unref(test);
     return FALSE;
   }
+  GstElement *encoder = gst_bin_get_by_name(GST_BIN(test), "smoke_encoder");
+  configure_encoder(encoder);
+  gst_object_unref(encoder);
   GstBus *bus = gst_element_get_bus(test);
   gst_element_set_state(test, GST_STATE_PLAYING);
   GstMessage *result = gst_bus_timed_pop_filtered(bus, 8 * GST_SECOND, GST_MESSAGE_EOS | GST_MESSAGE_ERROR);
@@ -148,9 +163,7 @@ static GstPadProbeReturn raw_buffer(GstPad *pad, GstPadProbeInfo *info, gpointer
 static gboolean encoder_setup(GstElement *element, const gchar *consumer_id, const gchar *pad_name,
                               GstElement *encoder, gpointer data) {
   (void)element; (void)consumer_id; (void)pad_name; (void)data;
-  if (encoder_name && !strcmp(encoder_name, "nvh264enc")) {
-    g_object_set(encoder, "bframes", 0, "rc-lookahead", 0, "zerolatency", TRUE, NULL);
-  }
+  configure_encoder(encoder);
   return FALSE;
 }
 
