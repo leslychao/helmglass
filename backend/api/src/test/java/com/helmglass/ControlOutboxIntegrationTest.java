@@ -375,7 +375,7 @@ class ControlOutboxIntegrationTest {
         });
     assertThat(operations.owned(fixture.actor().userId(), accepted.operationId()).state())
         .isEqualTo("PENDING");
-    assertThat(failure(delivery.id())).isNull();
+    assertThat(failure(delivery.id())).isEmpty();
     dispatcher.deliverControls();
     var failed = operations.owned(fixture.actor().userId(), accepted.operationId());
     assertThat(failed.state()).isEqualTo("FAILED");
@@ -622,7 +622,7 @@ class ControlOutboxIntegrationTest {
   }
 
   private String failure(UUID id) {
-    return jdbc.sql("SELECT last_failure_code FROM transactional_outbox WHERE id=:id")
+    return jdbc.sql("SELECT coalesce(last_failure_code,'') FROM transactional_outbox WHERE id=:id")
         .param("id", id)
         .query(String.class)
         .single();

@@ -374,7 +374,11 @@ class ConnectionDeletionIntegrationTest {
                       2,
                       false);
                 });
-    advance(Objects.requireNonNull(receipt).operationId());
+    UUID operationId = Objects.requireNonNull(receipt).operationId();
+    jdbc.sql("UPDATE operations SET deadline=now()-interval '1 hour' WHERE id=:id")
+        .param("id", operationId)
+        .update();
+    advance(operationId);
     assertThat(connections.get(actor, id).status()).isEqualTo("DELETED");
   }
 
