@@ -39,11 +39,9 @@ public class OutboxRepository {
   public List<Intent> due() {
     return jdbc.sql(
             """
-            UPDATE transactional_outbox SET delivery_attempts=delivery_attempts+1,
-              retry_at=now()+make_interval(secs=>least(30,power(2,delivery_attempts+1)::int)),
-              last_failure_code='EVENT_PUBLICATION_PENDING'
+            UPDATE transactional_outbox SET retry_at=now()+interval '10 seconds'
             WHERE id IN (SELECT id FROM transactional_outbox WHERE published_at IS NULL AND retry_at<=now()
-            AND event_type IN (:types) AND delivery_attempts<8
+            AND event_type IN (:types)
             ORDER BY retry_at,id LIMIT 100 FOR UPDATE SKIP LOCKED)
             RETURNING id,user_id,aggregate_id,event_type,payload::text
             """)
@@ -54,21 +52,9 @@ public class OutboxRepository {
 
   public void published(UUID id) {
     jdbc.sql(
-            "UPDATE transactional_outbox SET published_at=now(),last_failure_code=NULL WHERE id=:id"
+            "UPDATE transactional_outbox SET published_at=now() WHERE id=:id"
                 + " AND published_at IS NULL AND event_type IN (:types)")
         .param("id", id)
-        .param("types", UI_EVENTS)
-        .update();
-  }
-
-  public void failed(UUID id, String code) {
-    jdbc.sql(
-            """
-            UPDATE transactional_outbox SET last_failure_code=:code
-            WHERE id=:id AND published_at IS NULL AND event_type IN (:types)
-            """)
-        .param("id", id)
-        .param("code", code)
         .param("types", UI_EVENTS)
         .update();
   }

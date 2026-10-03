@@ -42,7 +42,13 @@ public class ChangeRepository {
       long version,
       Instant notBefore) {
     List<String> resources =
-        resource.equals("tasks") ? List.of("tasks", "usage") : List.of(resource);
+        switch (resource) {
+          case "tasks" -> List.of("tasks", "usage", "users", "userTasks", "userDays");
+          case "operations" -> List.of("operations", "users", "audit");
+          case "usage" -> List.of("usage", "userDays");
+          case "sessions" -> List.of("sessions", "users");
+          default -> List.of(resource);
+        };
     int inserted =
         jdbc.sql(
                 """

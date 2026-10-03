@@ -74,6 +74,9 @@ export interface TableItem {
                 <td>
                   @if (column.kind === 'status') {
                     <hg-status [value]="row.values[column.key]" />
+                    @if (row.metadata?.[column.key]; as meta) {
+                      <span class="cell-meta">{{ meta }}</span>
+                    }
                   } @else if (column.kind === 'person') {
                     <div class="person-cell">
                       <span class="avatar" aria-hidden="true">{{

@@ -72,7 +72,6 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
   private final ApplicationEventPublisher events;
   private final ChangeRepository changes;
 
-
   private record Viewer(
       AuthenticatedActor actor,
       WebSocketSession socket,
@@ -607,19 +606,27 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       JsonNode payload = json.read(intent.payload());
       List<String> resources = resources(intent, payload);
       String resourceId = payload.path("resourceId").asString();
-      if (resourceId.matches("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}")) {
-        events.publishEvent(new TaskInvalidation(intent.userId(), UUID.fromString(resourceId), resources));
+      if (resourceId.matches(
+          "[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}")) {
+        events.publishEvent(
+            new TaskInvalidation(intent.userId(), UUID.fromString(resourceId), resources));
       }
       for (Viewer viewer : viewers.values()) {
-        boolean own = viewer.channels().contains("self") && viewer.actor().userId().equals(intent.userId());
+        boolean own =
+            viewer.channels().contains("self") && viewer.actor().userId().equals(intent.userId());
         boolean administration = viewer.channels().contains("administration");
-        List<String> visible = resources.stream()
-            .filter(resource -> ADMIN_RESOURCES.contains(resource) ? administration : own).toList();
+        List<String> visible =
+            resources.stream()
+                .filter(resource -> ADMIN_RESOURCES.contains(resource) ? administration : own)
+                .toList();
         if (visible.isEmpty() || !authorized(viewer)) {
           continue;
         }
         try {
-          viewer.socket().sendMessage(new TextMessage(json.write(Map.of("type", "invalidate", "resources", visible))));
+          viewer
+              .socket()
+              .sendMessage(
+                  new TextMessage(json.write(Map.of("type", "invalidate", "resources", visible))));
         } catch (IOException error) {
           close(viewer, 4503, "DELIVERY_FAILED");
         }

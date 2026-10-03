@@ -38,13 +38,25 @@ import { AdminAudit } from './admin-audit';
   imports: [RouterLink, RouterLinkActive, RouterOutlet, Icon],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `<nav class="a-admin-nav" aria-label="Администрирование">
-    <div class="a-admin-tabs">
-      <a class="a-admin-tab" routerLink="/admin" [class.active]="!browsers.isActive"
-        [attr.aria-current]="!browsers.isActive ? 'page' : null"><hg-icon name="user" />Пользователи и журнал</a>
-      <a class="a-admin-tab" routerLink="/admin/browsers" routerLinkActive="active"
-        #browsers="routerLinkActive" ariaCurrentWhenActive="page"><hg-icon name="browser" />Браузеры</a>
-    </div>
-  </nav><section class="a-admin-page"><router-outlet /></section>`,
+      <div class="a-admin-tabs">
+        <a
+          class="a-admin-tab"
+          routerLink="/admin"
+          [class.active]="!browsers.isActive"
+          [attr.aria-current]="!browsers.isActive ? 'page' : null"
+          ><hg-icon name="user" />Пользователи и журнал</a
+        >
+        <a
+          class="a-admin-tab"
+          routerLink="/admin/browsers"
+          routerLinkActive="active"
+          #browsers="routerLinkActive"
+          ariaCurrentWhenActive="page"
+          ><hg-icon name="browser" />Браузеры</a
+        >
+      </div>
+    </nav>
+    <section class="a-admin-page"><router-outlet /></section>`,
 })
 export class AdminShell {}
 
@@ -434,20 +446,50 @@ export { AdminAudit } from './admin-audit';
   imports: [AdminUsers, AdminAudit, Feedback, Metric, Icon],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `<h1 class="sr-only" tabindex="-1">Администрирование</h1>
-    <hg-feedback [loading]="overview.loading()" [error]="overview.error()" (retry)="overview.refresh()" />
+    <hg-feedback
+      [loading]="overview.loading()"
+      [error]="overview.error()"
+      (retry)="overview.refresh()"
+    />
     @if (overview.data(); as overview) {
       <div class="metrics a-user-summary">
-        <hg-metric label="Пользователей" [value]="overview.totalUsers" icon="user" caption="Без удалённых аккаунтов" />
-        <hg-metric label="Заблокировано" [value]="overview.blockedUsers" icon="lock" caption="Пользователи с закрытым доступом" />
-        <hg-metric label="Ожидающих задач" [value]="overview.waitingTasks" icon="clock" caption="Очередь, ChatGPT или участие пользователя" />
+        <hg-metric
+          label="Пользователей"
+          [value]="overview.totalUsers"
+          icon="user"
+          caption="Без удалённых аккаунтов"
+        />
+        <hg-metric
+          label="Заблокировано"
+          [value]="overview.blockedUsers"
+          icon="lock"
+          caption="Пользователи с закрытым доступом"
+        />
+        <hg-metric
+          label="Ожидающих задач"
+          [value]="overview.waitingTasks"
+          icon="clock"
+          caption="Очередь, ChatGPT или участие пользователя"
+        />
       </div>
     }
     <hg-admin-users /><hg-admin-audit />
-    <p class="privacy-note"><hg-icon name="lock" />Только служебные сведения. Содержимое задач, результаты, документы и секреты пользователей здесь недоступны.</p>`,
+    <p class="privacy-note">
+      <hg-icon name="lock" />Только служебные сведения. Содержимое задач, результаты, документы и
+      секреты пользователей здесь недоступны.
+    </p>`,
 })
 export class AdminOverview {
-  readonly overview = new ServerResource<OverviewDto>(['nodes', 'sessions', 'users', 'tasks', 'operations']);
-  constructor() { this.overview.load('/admin/overview'); }
+  readonly overview = new ServerResource<OverviewDto>([
+    'nodes',
+    'sessions',
+    'users',
+    'tasks',
+    'operations',
+  ]);
+  constructor() {
+    this.overview.load('/admin/overview');
+  }
 }
 
 export { AdminBrowsers } from './admin-browsers';
