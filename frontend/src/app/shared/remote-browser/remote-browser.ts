@@ -14,7 +14,7 @@ import {
   viewChild,
 } from '@angular/core';
 import { HttpErrorResponse } from '@angular/common/http';
-import { Subscription, switchMap } from 'rxjs';
+import { Subscription, exhaustMap, switchMap, timeout, timer } from 'rxjs';
 import GstWebRTCAPI from 'gstwebrtc-api/src/gstwebrtc-api.js';
 import type ConsumerSession from 'gstwebrtc-api/types/consumer-session';
 import { Api, problemOf } from '../../core/api/api.service';
@@ -24,6 +24,8 @@ import { Icon } from '../icon/icon';
 import { committedTextActions, InputAction, pointerAction } from './input-action';
 import { ReconnectWindow } from '../../core/realtime/reconnect-window';
 import { PresentedFrames } from './presented-frames';
+
+export type ViewerState = 'CONNECTING' | 'LIVE' | 'HIDDEN' | 'UNAVAILABLE' | 'ERROR' | 'AUTOPLAY';
 
 @Component({
   selector: 'hg-remote-browser',
@@ -86,7 +88,8 @@ export class RemoteBrowser {
   paused = input(false);
   refresh = output<void>();
   live = output<boolean>();
-  readonly state = signal<'CONNECTING' | 'LIVE' | 'HIDDEN' | 'ERROR' | 'AUTOPLAY'>('CONNECTING');
+  stateChanged = output<ViewerState>();
+  readonly state = signal<ViewerState>('CONNECTING');
   readonly message = signal('Подключаемся к текущему браузеру…');
   readonly inputReady = signal(false);
   private video = viewChild<ElementRef<HTMLVideoElement>>('video');
@@ -113,6 +116,7 @@ export class RemoteBrowser {
   composing = false;
   private escape = false;
   private visible = signal(!document.hidden);
+  private readonly retryAttempt = signal(0);
   constructor() {
     const visibility = () => {
       this.visible.set(!document.hidden);
@@ -146,17 +150,20 @@ export class RemoteBrowser {
       const session = this.session();
       return [
         session.id,
+        session.state,
         session.pageEpoch,
         session.privacyEpoch,
         session.mediaGeneration,
         this.surface() === 'WEB' ? session.controlEpoch : '',
         this.surface() === 'WEB' ? session.controlMode : '',
+        this.surface() === 'WEB' ? session.controlState : '',
         this.surface() === 'WEB' ? session.controllerRelation : '',
         session.capabilities['view']?.allowed,
       ].join(':');
     });
     effect(() => {
       binding();
+      this.retryAttempt();
       const video = this.video(),
         visible = this.visible(),
         paused = this.paused(),
@@ -174,7 +181,7 @@ export class RemoteBrowser {
           return;
         }
         if (!session.capabilities['view']?.allowed) {
-          this.state.set('HIDDEN');
+          this.state.set('UNAVAILABLE');
           this.message.set(session.capabilities['view']?.reason || 'Просмотр сейчас недоступен');
           return;
         }
@@ -187,15 +194,75 @@ export class RemoteBrowser {
         } else this.acquireTicket();
       });
     });
+    // Control has a 15-second lease. Its heartbeat must not wait for the first
+    // video frame or stop while the media transport reconnects.
+    const controlBinding = computed(() => {
+      const session = this.session();
+      return [
+        session.id,
+        session.state,
+        session.controlEpoch,
+        session.controlState,
+        session.controlMode,
+        session.controllerRelation,
+      ].join(':');
+    });
+    effect((onCleanup) => {
+      controlBinding();
+      this.retryAttempt();
+      const visible = this.visible(),
+        paused = this.paused(),
+        surface = this.surface();
+      const instanceId = this.instanceId();
+      untracked(() => {
+        const session = this.session();
+        if (
+          !visible ||
+          paused ||
+          surface !== 'WEB' ||
+          session.state !== 'ACTIVE' ||
+          session.controlState !== 'ACTIVE' ||
+          session.controlMode !== 'HUMAN' ||
+          session.controllerRelation !== 'SELF'
+        )
+          return;
+        const renewal = timer(0, 5000)
+          .pipe(
+            exhaustMap(() =>
+              this.api
+                .mutate<unknown>(
+                  'POST',
+                  `/browser-sessions/${session.id}/control/renew`,
+                  { controllerInstanceId: instanceId, controlEpoch: session.controlEpoch },
+                  crypto.randomUUID(),
+                )
+                .pipe(timeout(4000)),
+            ),
+          )
+          .subscribe({
+            error: () => {
+              this.fail(
+                'Не удалось продлить управление браузером. Обновляем его состояние.',
+                false,
+              );
+              this.refresh.emit();
+            },
+          });
+        onCleanup(() => renewal.unsubscribe());
+      });
+    });
+    effect(() => this.stateChanged.emit(this.state()));
   }
   title() {
     return this.state() === 'ERROR'
       ? 'Не удалось показать браузер'
       : this.state() === 'AUTOPLAY'
         ? 'Нажмите, чтобы начать просмотр'
-        : this.state() === 'HIDDEN'
-          ? 'Просмотр приостановлен'
-          : 'Подключаем браузер';
+        : this.state() === 'UNAVAILABLE'
+          ? 'Просмотр недоступен'
+          : this.state() === 'HIDDEN'
+            ? 'Просмотр приостановлен'
+            : 'Подключаем браузер';
   }
   private acquireTicket() {
     this.state.set('CONNECTING');
@@ -556,9 +623,7 @@ export class RemoteBrowser {
           .catch(() => this.fail('Воспроизведение заблокировано браузером'));
       return;
     }
-    this.teardown();
-    this.recovery.reset();
-    if (this.surface() === 'WEB') this.acquireTicket();
+    if (this.surface() === 'WEB') this.retryAttempt.update((attempt) => attempt + 1);
     else this.refresh.emit();
   }
   fail(message: string, recover = true, retryAfterMs = 0) {
@@ -569,7 +634,7 @@ export class RemoteBrowser {
     const delay = this.recovery.nextDelay(Date.now(), retryAfterMs);
     if (delay === null) return;
     this.state.set('CONNECTING');
-    this.message.set('Восстанавливаем просмотр существующего браузера…');
+    this.message.set(`${message}. Повторяем подключение к текущему браузеру…`);
     this.reconnect = setTimeout(() => {
       this.reconnect = undefined;
       this.acquireTicket();

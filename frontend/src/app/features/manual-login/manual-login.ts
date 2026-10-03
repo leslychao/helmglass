@@ -60,6 +60,7 @@ import { Dialog } from '../../shared/dialog/dialog';
           @if (login.sessionId; as sessionId) {
             <hg-browser-panel
               [sessionId]="sessionId"
+              [activeLoginOperationId]="id"
               [taskId]="login.taskId ?? undefined"
               (changed)="refresh()"
             />

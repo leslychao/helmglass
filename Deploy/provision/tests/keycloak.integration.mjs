@@ -170,9 +170,16 @@ test('real Keycloak provisioning, repeat run, role revocation and conflict handl
     const offline = (await client.request('GET', 'admin/realms/helm/client-scopes'))
       .find(item => item.name === 'offline_access');
     await client.request('DELETE', `${mcpPath}/optional-client-scopes/${offline.id}`);
+    const legacyAttributes = { ...(await client.request('GET', mcpPath)).attributes };
+    for (const field of ['access.token.lifespan', 'client.offline.session.idle.timeout', 'client.offline.session.max.lifespan']) {
+      delete legacyAttributes[field];
+    }
+    await client.request('PUT', mcpPath, { attributes: legacyAttributes });
     await client.request('PUT', 'admin/realms/helm', {
       offlineSessionIdleTimeout: 2592000, offlineSessionMaxLifespanEnabled: true,
     });
+    const legacyRealm = await client.request('GET', 'admin/realms/helm');
+    const legacyMcp = await client.request('GET', mcpPath);
     await reconcileMcpOfflineAccess(client, configuration.installationId);
     await reconcileMcpOfflineAccess(client, configuration.installationId);
     assert.deepEqual(await client.request('GET', `admin/realms/helm/clients/${web.id}`), webBefore);
@@ -181,6 +188,20 @@ test('real Keycloak provisioning, repeat run, role revocation and conflict handl
     assert.equal(policyRealm.offlineSessionMaxLifespanEnabled, false);
     assert.equal(policyRealm.ssoSessionIdleTimeout, initialRealm.ssoSessionIdleTimeout);
     assert.equal(policyRealm.ssoSessionMaxLifespan, initialRealm.ssoSessionMaxLifespan);
+    const reconciledRealm = structuredClone(policyRealm);
+    for (const field of ['offlineSessionIdleTimeout', 'offlineSessionMaxLifespanEnabled']) {
+      delete legacyRealm[field]; delete reconciledRealm[field];
+    }
+    assert.deepEqual(reconciledRealm, legacyRealm, 'Only the two reviewed realm policy fields change');
+    const reconciledMcp = await client.request('GET', mcpPath);
+    for (const field of ['access.token.lifespan', 'client.offline.session.idle.timeout', 'client.offline.session.max.lifespan']) {
+      delete legacyMcp.attributes[field]; delete reconciledMcp.attributes[field];
+    }
+    reconciledMcp.optionalClientScopes = reconciledMcp.optionalClientScopes.filter(scope => scope !== 'offline_access').sort();
+    legacyMcp.optionalClientScopes = (legacyMcp.optionalClientScopes ?? []).filter(scope => scope !== 'offline_access').sort();
+    reconciledMcp.defaultClientScopes.sort();
+    legacyMcp.defaultClientScopes.sort();
+    assert.deepEqual(reconciledMcp, legacyMcp, 'Only reviewed MCP policy fields change');
     assert.ok((await client.request('GET', `${mcpPath}/optional-client-scopes`))
       .some(item => item.name === 'offline_access'));
     // The base Keycloak fixture has no application theme; the real browser fixture owns theme checks.

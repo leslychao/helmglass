@@ -8,6 +8,64 @@ import { Realtime } from '../../core/realtime/realtime.service';
 import { BrowserPanel } from './browser-panel';
 
 describe('browser address editing', () => {
+  it('shows actual viewer readiness and omits navigation to the current login operation', () => {
+    TestBed.configureTestingModule({
+      providers: [
+        provideRouter([]),
+        { provide: Api, useValue: { get: () => NEVER } },
+        { provide: Realtime, useValue: { refresh: new Subject() } },
+      ],
+    });
+    TestBed.overrideComponent(BrowserPanel, { set: { template: '', imports: [] } });
+    const fixture = TestBed.createComponent(BrowserPanel);
+    fixture.componentRef.setInput('sessionId', 'session');
+    fixture.detectChanges();
+    const panel = fixture.componentInstance;
+    const session: BrowserSession = {
+      id: 'session',
+      version: 1,
+      state: 'ACTIVE',
+      controlState: 'ACTIVE',
+      controlMode: 'HUMAN',
+      controllerRelation: 'SELF',
+      controlEpoch: 1,
+      pageEpoch: 1,
+      privacyEpoch: 1,
+      privacyMode: 'LOGIN_PRIVATE',
+      siteAccess: 'PRIVATE_LOGIN',
+      loginOperationId: 'login-1',
+      viewport: { width: 1280, height: 720 },
+      savePolicy: 'ASK',
+      capabilities: { view: { allowed: true }, continueLogin: { allowed: true, visible: true } },
+    };
+    panel.session.data.set(session);
+    expect(panel.primary()?.key).toBe('continueLogin');
+    fixture.componentRef.setInput('activeLoginOperationId', 'login-1');
+    expect(panel.primary()).toBeNull();
+    expect(panel.viewStatus()).toBe('VIEW_CONNECTING');
+    panel.viewState.set('LIVE');
+    expect(panel.viewStatus()).toBe('VIEW_LIVE');
+    panel.viewState.set('CONNECTING');
+    expect(panel.viewStatus()).toBe('VIEW_CONNECTING');
+    panel.viewState.set('ERROR');
+    expect(panel.viewStatus()).toBe('VIEW_ERROR');
+    panel.session.data.set({
+      ...session,
+      controlState: 'QUIESCED',
+      controllerRelation: 'NONE',
+      capabilities: {
+        view: { allowed: false },
+        acquire: { allowed: true, visible: true },
+        continueLogin: { allowed: false, visible: true },
+      },
+    });
+    expect(panel.viewStatus()).toBe('VIEW_UNAVAILABLE');
+    expect(panel.controlStatus()).toBe('NONE');
+    expect(panel.primary()?.label).toBe('Восстановить управление');
+    panel.session.data.set({ ...session, state: 'CLOSED' });
+    expect(panel.viewStatus()).toBe('CLOSED');
+  });
+
   it('preserves a draft on session refresh and follows confirmed page changes', () => {
     TestBed.configureTestingModule({
       providers: [

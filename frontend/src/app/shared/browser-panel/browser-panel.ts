@@ -25,7 +25,7 @@ import {
 import { ServerResource } from '../../core/api/server-resource';
 import { Mutation } from '../../core/api/mutation';
 import { BrowserInstance } from './browser-instance';
-import { RemoteBrowser } from '../remote-browser/remote-browser';
+import { RemoteBrowser, ViewerState } from '../remote-browser/remote-browser';
 import { Icon } from '../icon/icon';
 import { Status, LabelPipe } from '../status/status';
 import { Feedback, MutationFeedback } from '../feedback/feedback';
@@ -54,7 +54,7 @@ import { AsyncOperation } from '../async-operation/async-operation';
         <div class="flex">
           <hg-icon name="browser" /><strong>Браузер</strong>
           @if (session.data(); as browser) {
-            <hg-status [value]="browser.state" />
+            <hg-status [value]="viewStatus()" />
           }
         </div>
         <div class="flex">
@@ -182,6 +182,7 @@ import { AsyncOperation } from '../async-operation/async-operation';
               [paused]="paused()"
               (refresh)="refreshSnapshot()"
               (live)="live.set($event)"
+              (stateChanged)="viewState.set($event)"
             />
           </div>
           @if (historyOpen()) {
@@ -224,12 +225,10 @@ import { AsyncOperation } from '../async-operation/async-operation';
           }
         </div>
         <footer class="browser-foot">
-          <span>{{ browser.controlMode | label }}</span
+          <span>{{ controlStatus() | label }}</span
           ><span>·</span><span>{{ browser.siteAccess | label }}</span
           ><span class="spacer"></span
-          ><span role="status">{{
-            live() ? 'Живой просмотр' : paused() ? 'Просмотр на паузе' : 'Ожидание кадров'
-          }}</span>
+          ><span role="status">{{ live() ? 'Живой просмотр' : (viewStatus() | label) }}</span>
         </footer>
       }
       <hg-feedback
@@ -271,6 +270,7 @@ export class BrowserPanel {
   viewerInstanceId = input<string>();
   sessionId = input.required<string>();
   taskId = input<string | undefined>();
+  activeLoginOperationId = input<string>();
   changed = output<void>();
   openTask = output<void>();
   readonly instance = inject(BrowserInstance);
@@ -281,6 +281,23 @@ export class BrowserPanel {
   readonly menu = signal(false);
   readonly paused = signal(false);
   readonly live = signal(false);
+  readonly viewState = signal<ViewerState>('CONNECTING');
+  readonly viewStatus = computed(() => {
+    const browser = this.session.data();
+    if (browser?.state !== 'ACTIVE') return browser?.state;
+    if (!browser.capabilities['view']?.allowed) return 'VIEW_UNAVAILABLE';
+    return this.viewState() === 'LIVE' ? 'VIEW_LIVE' : `VIEW_${this.viewState()}`;
+  });
+  readonly controlStatus = computed(() => {
+    const browser = this.session.data();
+    if (browser?.controlState !== 'ACTIVE') return 'NONE';
+    if (browser.controlMode !== 'HUMAN') return browser.controlMode;
+    return browser.controllerRelation === 'SELF'
+      ? 'HUMAN'
+      : browser.controllerRelation === 'OTHER'
+        ? 'OTHER_CONTROLLER'
+        : 'NONE';
+  });
   readonly historyOpen = signal(false);
   readonly closeDialog = signal(false);
   readonly notice = signal('');
@@ -346,7 +363,11 @@ export class BrowserPanel {
                   : 'Взять управление',
             },
             { key: 'check', label: 'Проверить вход' },
-          ];
+          ].filter(
+            (candidate) =>
+              candidate.key !== 'continueLogin' ||
+              browser.loginOperationId !== this.activeLoginOperationId(),
+          );
     return (
       candidates.find(
         (candidate) =>

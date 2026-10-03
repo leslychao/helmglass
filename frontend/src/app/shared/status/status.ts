@@ -20,6 +20,13 @@ const labels: Readonly<Record<string, string>> = {
   AUTHENTICATED: 'Вход подтверждён',
   SESSION_ONLY: 'Вход в этой сессии',
   ACTIVE: 'Активен',
+  VIEW_LIVE: 'Подключён',
+  VIEW_CONNECTING: 'Подключение',
+  VIEW_HIDDEN: 'Просмотр приостановлен',
+  VIEW_UNAVAILABLE: 'Просмотр недоступен',
+  VIEW_ERROR: 'Ошибка подключения',
+  VIEW_AUTOPLAY: 'Ожидает воспроизведения',
+  OTHER_CONTROLLER: 'Управление в другой вкладке',
   BLOCKED: 'Заблокирован',
   DELETING: 'Удаляется',
   READY: 'Готов',
@@ -114,12 +121,20 @@ export class BytesPipe implements PipeTransform {
 export class Status {
   value = input<string | null | undefined>();
   good() {
-    return ['SUCCESS', 'COMPLETED', 'AUTHENTICATED', 'READY', 'ACTIVE', 'SUCCEEDED'].includes(
-      this.value() ?? '',
-    );
+    return [
+      'SUCCESS',
+      'COMPLETED',
+      'AUTHENTICATED',
+      'READY',
+      'ACTIVE',
+      'VIEW_LIVE',
+      'SUCCEEDED',
+    ].includes(this.value() ?? '');
   }
   bad() {
-    return ['FAILED', 'INTERRUPTED', 'BLOCKED', 'FORBIDDEN'].includes(this.value() ?? '');
+    return ['FAILED', 'INTERRUPTED', 'BLOCKED', 'FORBIDDEN', 'VIEW_ERROR'].includes(
+      this.value() ?? '',
+    );
   }
   attention() {
     return ['WAITING_USER', 'UNKNOWN', 'NEEDS_LOGIN', 'PENDING', 'DELETING'].includes(

@@ -46,34 +46,47 @@ public class BrowserSessionService {
   public Map<String, Object> get(AuthenticatedActor actor, UUID id, UUID controller) {
     var session = browsers.owned(actor.userId(), id);
     var control = controls.get(id);
+    boolean humanLease =
+        control.ownerKind().equals("HUMAN") && control.expiresAt().isAfter(Instant.now());
     boolean self =
-        !actor.mcp()
+        humanLease
+            && !actor.mcp()
             && actor.loginId() != null
             && controller != null
             && actor.loginId().equals(control.loginId())
-            && controller.equals(control.controllerInstanceId())
-            && control.expiresAt().isAfter(Instant.now());
+            && controller.equals(control.controllerInstanceId());
     String relation = "NONE";
-    if (control.ownerKind().equals("HUMAN")) {
+    if (humanLease) {
       relation = self ? "SELF" : "OTHER";
     }
-    boolean active = session.state().equals("ACTIVE") && control.state().equals("ACTIVE");
+    boolean runtimeActive = session.state().equals("ACTIVE");
+    boolean active = runtimeActive && control.state().equals("ACTIVE");
     boolean privateMode = session.privacy().equals("LOGIN_PRIVATE");
     var login = logins.forSession(id);
     var access = logins.sessionAccess(id);
     boolean web = !actor.mcp();
-    boolean otherHuman =
-        control.ownerKind().equals("HUMAN") && !self && control.expiresAt().isAfter(Instant.now());
+    boolean otherHuman = humanLease && !self;
+    boolean canAcquire =
+        runtimeActive
+            && web
+            && !control.state().equals("TRANSFERRING")
+            && !controls.sessionOperationPending(id);
     Map<String, Capability> capabilities = new HashMap<>();
     capabilities.put(
-        "view", capability(active && (!privateMode || self), true, "Browser is unavailable"));
+        "view",
+        capability(
+            active && (!privateMode || self),
+            true,
+            viewUnavailableReason(session.state(), control.state(), otherHuman)));
     capabilities.put(
         "acquire",
         capability(
-            active && !self && !otherHuman && web, web && !otherHuman, "Control is unavailable"));
+            canAcquire && !self && !otherHuman,
+            web && !otherHuman,
+            "Управление пока недоступно. Дождитесь готовности браузера."));
     capabilities.put(
         "transfer",
-        capability(active && otherHuman && web, otherHuman && web, "Control is unavailable"));
+        capability(canAcquire && otherHuman, otherHuman && web, "Дождитесь передачи управления."));
     capabilities.put(
         "login",
         capability(
@@ -87,7 +100,8 @@ public class BrowserSessionService {
             login.isPresent() && web,
             "Acquire private control to continue login"));
     capabilities.put(
-        "release", capability(active && self && !privateMode, self, "Finish private login first"));
+        "release",
+        capability(active && self && !privateMode, self && !privateMode, "Finish private login first"));
     capabilities.put("input", capability(active && self, self, "Acquire control to interact"));
     capabilities.put(
         "close",
@@ -210,6 +224,26 @@ public class BrowserSessionService {
 
   private static Capability capability(boolean allowed, boolean visible, String reason) {
     return new Capability(allowed, visible, allowed ? null : reason);
+  }
+
+  private static String viewUnavailableReason(
+      String sessionState, String controlState, boolean otherHuman) {
+    if (!sessionState.equals("ACTIVE")) {
+      return switch (sessionState) {
+        case "CLOSED" -> "Браузер закрыт. Вернитесь к подключению или задаче.";
+        case "STOPPING" -> "Браузер закрывается.";
+        case "LOST" -> "Связь с браузером потеряна.";
+        case "RECOVERING" -> "Восстанавливается связь с браузером. Дождитесь подключения.";
+        default -> "Браузер ещё не готов. Дождитесь завершения запуска.";
+      };
+    }
+    if (controlState.equals("TRANSFERRING") || controlState.equals("QUIESCING")) {
+      return "Подготавливаем безопасную передачу управления. Дождитесь её завершения.";
+    }
+    if (otherHuman) {
+      return "Приватный браузер открыт в другой вкладке. Перенесите управление сюда.";
+    }
+    return "Сеанс управления прерван. Нажмите «Восстановить управление», чтобы продолжить вход.";
   }
 
   private static String siteAccess(

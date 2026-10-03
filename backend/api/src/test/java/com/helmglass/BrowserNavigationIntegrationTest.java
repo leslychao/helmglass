@@ -43,6 +43,8 @@ import java.util.UUID;
 import javax.imageio.ImageIO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -323,6 +325,57 @@ class BrowserNavigationIntegrationTest {
     assertThat(view.path("capabilities").path("input").path("allowed").asBoolean()).isFalse();
     assertThat(view.path("capabilities").path("view").path("allowed").asBoolean()).isFalse();
     assertThat(view.path("capabilities").path("transfer").path("allowed").asBoolean()).isTrue();
+    assertThat(view.path("capabilities").path("view").path("reason").asString())
+        .contains("другой вкладке");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"ACTIVE", "QUIESCED"})
+  void expiredPrivateControlCanBeAcquiredAgainWithoutCreatingAnotherBrowser(String controlState) {
+    var fixture = fixture(true);
+    jdbc.sql(
+            "UPDATE browser_control_leases SET state=:state,expires_at=now()-interval '1 second'"
+                + " WHERE session_id=:id")
+        .param("state", controlState)
+        .param("id", fixture.session())
+        .update();
+    var view =
+        json.read(json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
+    assertThat(view.path("state").asString()).isEqualTo("ACTIVE");
+    assertThat(view.path("controllerRelation").asString()).isEqualTo("NONE");
+    assertThat(view.path("capabilities").path("view").path("allowed").asBoolean()).isFalse();
+    assertThat(view.path("capabilities").path("view").path("reason").asString())
+        .contains("Сеанс управления прерван");
+    assertThat(view.path("capabilities").path("acquire").path("allowed").asBoolean()).isTrue();
+    assertThatThrownBy(
+            () ->
+                controls.renew(
+                    fixture.actor(),
+                    fixture.session(),
+                    new BrowserContracts.Renew(1L, fixture.controller())))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("acquired again");
+    var receipt =
+        controls.acquire(
+            fixture.actor(),
+            fixture.session(),
+            new BrowserContracts.TakeControl(1L, 1L, fixture.controller(), true, false),
+            context());
+    assertThat(receipt.resource().id()).isEqualTo(fixture.session());
+    var transferring =
+        json.read(json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
+    assertThat(transferring.path("controlState").asString()).isEqualTo("TRANSFERRING");
+    assertThat(transferring.path("capabilities").path("acquire").path("allowed").asBoolean())
+        .isFalse();
+    assertThat(transferring.path("capabilities").path("view").path("reason").asString())
+        .contains("передачу управления");
+    controls.acknowledge(fixture.worker(), fixture.boot(), fixture.session(), 2L);
+    var restored =
+        json.read(json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
+    assertThat(restored.path("capabilities").path("view").path("allowed").asBoolean()).isTrue();
+    assertThat(restored.path("privacyMode").asString()).isEqualTo("LOGIN_PRIVATE");
+    assertThat(restored.path("capabilities").path("release").path("visible").asBoolean()).isFalse();
+    assertThat(restored.path("id").asString()).isEqualTo(fixture.session().toString());
   }
 
   @Test

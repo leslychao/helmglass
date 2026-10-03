@@ -18,7 +18,6 @@ case "$relay_ip" in *[!0-9.]*|'') exit 1 ;; esac
 printf '%s' "$relay_ip" | jq -Re 'split(".") | length == 4 and all(.[]; (tonumber >= 0 and tonumber <= 255))' >/dev/null
 cat > /run/helm/turnserver.conf <<EOF
 listening-port=3478
-tcp-proxy-port=5555
 no-tls
 no-dtls
 listening-ip=$relay_ip

@@ -13,6 +13,7 @@ test('private TURN allocations exchange data through two Nginx proxies without p
     const turnImage = process.env.TURN_IMAGE ?? 'helmglass-coturn:dev-107';
     const nginxImage = process.env.NGINX_IMAGE ?? 'helmglass-nginx:dev-107';
     const provisionImage = process.env.PROVISION_IMAGE ?? 'helmglass-provision:dev-107';
+    const egressImage = process.env.EGRESS_IMAGE ?? 'helmglass-egress-proxy:dev-107';
     const docker = (args, options) => run('docker', ['--context', context, ...args], options);
     const label = `helmglass.acceptance=${fixture}`;
     const networks = [];
@@ -22,7 +23,7 @@ test('private TURN allocations exchange data through two Nginx proxies without p
     const directory = await mkdtemp(resolve(cache, 'turn-transport-'));
     const sharedSecret = randomBytes(32).toString('base64url');
     const name = purpose => `helm-turn-${purpose}-${fixture}`;
-    const network = Object.fromEntries(['front', 'edge', 'relay'].map(purpose => [purpose, name(purpose)]));
+    const network = Object.fromEntries(['front', 'edge', 'relay', 'worker'].map(purpose => [purpose, name(purpose)]));
     const environment = ['--env', 'TURN_REALM=helm.integration.test',
       '--env', 'TURN_RELAY_MIN=49160', '--env', 'TURN_RELAY_MAX=49259'];
     const limited = ['--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true'];
@@ -46,17 +47,17 @@ test('private TURN allocations exchange data through two Nginx proxies without p
       assert.fail('Fixture service did not become ready');
     }
 
-    async function client(purpose, flags, allowedExitCodes = [0], identity = 'identity.json') {
+    async function client(purpose, flags, allowedExitCodes = [0], identity = 'identity.json', endpoint = { network: network.front, host: 'gateway' }) {
       const container = name(purpose);
       containers.push(container);
       const result = await docker(['run', '--rm', '--name', container, '--label', label,
-        '--network', network.front, ...limited,
+        '--network', endpoint.network, ...limited,
         '--mount', `type=bind,src=${resolve(directory, identity)},dst=/fixture/${identity},readonly`,
         '--mount', `type=bind,src=${resolve(directory, 'tls.crt')},dst=/fixture/tls.crt,readonly`,
         '--entrypoint', 'sh', turnImage,
         '-c', 'secret=$(jq -er .turnSharedSecret "/fixture/$1"); shift; '
           + 'exec timeout 15 turnutils_uclient -W "$secret" "$@"', 'turn-client',
-        identity, '-c', '-n', '5', '-z', '100', '-K', '0', ...flags, 'gateway'], { allowedExitCodes, timeout: 25_000 });
+        identity, '-c', '-n', '5', '-z', '100', '-K', '0', ...flags, endpoint.host], { allowedExitCodes, timeout: 25_000 });
       return result.stdout + result.stderr;
     }
 
@@ -85,6 +86,56 @@ test('private TURN allocations exchange data through two Nginx proxies without p
       assert.equal(Object.keys(turnState.HostConfig.PortBindings ?? {}).length, 0);
       assert.deepEqual((await docker(['exec', turn, 'sh', '-c',
         'find /run/helm -type f -name "*.pem"'])).stdout.trim(), '');
+
+      await writeFile(resolve(directory, 'egress.json'), JSON.stringify({ schemaVersion: 1,
+        mediaProxyUsername: 'helm-media', mediaProxyPassword: randomBytes(32).toString('base64url') }));
+      const egress = await start('egress-proxy', egressImage, network.relay, [...limited,
+        '--mount', `type=bind,src=${resolve(directory, 'egress.json')},dst=/run/secrets/egress_identity,readonly`,
+        '--tmpfs', '/run:size=32m,uid=10001,gid=10001,mode=0700', '--tmpfs', '/tmp:size=32m']);
+      await docker(['network', 'connect', '--alias', 'egress-proxy', network.worker, egress]);
+      await ready(egress, ['/opt/helm/bin/healthcheck']);
+      // turnutils has no HTTP-proxy option. This test-only bridge performs the same
+      // authenticated CONNECT as libnice, then pipes the real TURN exchange with backpressure.
+      await writeFile(resolve(directory, 'connect.mjs'), `
+import { createServer, connect } from 'node:net';
+import { readFile } from 'node:fs/promises';
+const identity = JSON.parse(await readFile('/fixture/egress.json', 'utf8'));
+const authorization = Buffer.from(identity.mediaProxyUsername + ':' + identity.mediaProxyPassword).toString('base64');
+const server = createServer(client => {
+  client.pause();
+  const proxy = connect(3128, 'egress-proxy');
+  const close = () => { client.destroy(); proxy.destroy(); };
+  client.setTimeout(20000, close); proxy.setTimeout(20000, close);
+  client.on('error', close); proxy.on('error', close);
+  client.on('close', () => proxy.destroy()); proxy.on('close', () => client.destroy());
+  proxy.once('connect', () => proxy.write('CONNECT coturn:3478 HTTP/1.1\\r\\nHost: coturn:3478\\r\\nProxy-Authorization: Basic ' + authorization + '\\r\\n\\r\\n'));
+  let header = Buffer.alloc(0);
+  const handshake = chunk => {
+    header = Buffer.concat([header, chunk]);
+    if (header.length > 8192) { close(); return; }
+    const end = header.indexOf('\\r\\n\\r\\n');
+    if (end < 0) return;
+    if (header.toString('ascii', 0, end).split(' ')[1] !== '200') { close(); return; }
+    proxy.off('data', handshake);
+    if (header.length > end + 4) client.write(header.subarray(end + 4));
+    proxy.pipe(client); client.pipe(proxy); client.resume();
+  };
+  proxy.on('data', handshake);
+});
+server.maxConnections = 8;
+server.listen(13478, '0.0.0.0');
+`);
+      const bridge = await start('worker-turn', provisionImage, network.worker, [...limited,
+        '--mount', `type=bind,src=${resolve(directory, 'egress.json')},dst=/fixture/egress.json,readonly`,
+        '--mount', `type=bind,src=${resolve(directory, 'connect.mjs')},dst=/fixture/connect.mjs,readonly`,
+        '--entrypoint', 'node'], ['/fixture/connect.mjs']);
+      await ready(bridge, ['node', '-e', "const s=require('net').connect(13478,'127.0.0.1');s.once('connect',()=>s.destroy());s.once('error',()=>process.exit(1));"]);
+      await t.test('worker TURN/TCP traverses the authenticated Squid CONNECT route', async () => {
+        const output = await client('worker-connect', ['-y', '-t', '-p', '13478'], [0],
+          'identity.json', { network: network.worker, host: 'worker-turn' });
+        assert.match(output, /tot_recv_msgs=10\b/);
+        assert.match(output, /Total lost packets 0\b/);
+      });
 
       await writeFile(resolve(directory, 'global.conf'), `
 events {}

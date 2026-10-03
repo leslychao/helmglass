@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { Api } from '../../core/api/api.service';
 import { BrowserSession } from '../../core/api/models';
 import { HelmTransport, streamStateOf } from './helm-transport';
@@ -110,6 +110,17 @@ describe('authenticated upstream transport', () => {
 
 describe('remote viewer with the pinned upstream signaling client', () => {
   let fixture: ComponentFixture<RemoteBrowser>;
+  let currentSession: BrowserSession;
+  const mutate = vi.fn((_method: string, path: string) =>
+    of(
+      path.endsWith('/control/renew')
+        ? {
+            controlEpoch: currentSession.controlEpoch,
+            expiresAt: new Date(Date.now() + 15000).toISOString(),
+          }
+        : { ticket: 'scoped-ticket', signalingUrl: 'wss://helm.test/stream', viewGeneration: 1 },
+    ),
+  );
   const session: BrowserSession = {
     id: 'browser-1',
     version: 1,
@@ -134,6 +145,8 @@ describe('remote viewer with the pinned upstream signaling client', () => {
   );
 
   beforeEach(() => {
+    currentSession = session;
+    mutate.mockClear();
     TestSocket.instances = [];
     vi.stubGlobal('WebSocket', TestSocket);
     vi.stubGlobal('MediaStream', class {});
@@ -149,13 +162,8 @@ describe('remote viewer with the pinned upstream signaling client', () => {
         {
           provide: Api,
           useValue: {
-            get: () => of(session),
-            mutate: () =>
-              of({
-                ticket: 'scoped-ticket',
-                signalingUrl: 'wss://helm.test/stream',
-                viewGeneration: 1,
-              }),
+            get: () => of(currentSession),
+            mutate,
           },
         },
       ],
@@ -174,6 +182,7 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     else Reflect.deleteProperty(HTMLVideoElement.prototype, 'cancelVideoFrameCallback');
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('waits for listener readiness and preserves a producer across upstream list replacement', async () => {
@@ -208,5 +217,124 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     socket.receive({ type: 'list', producers: [] });
     await Promise.resolve();
     expect(socket.closed).toBe(true);
+  });
+
+  function privateControl() {
+    currentSession = {
+      ...session,
+      privacyMode: 'LOGIN_PRIVATE',
+      controlMode: 'HUMAN',
+      controllerRelation: 'SELF',
+    };
+    fixture.componentRef.setInput('session', currentSession);
+    fixture.detectChanges();
+  }
+
+  it('renews private control before video arrives and throughout media recovery', async () => {
+    vi.useFakeTimers();
+    privateControl();
+    await vi.advanceTimersByTimeAsync(0);
+    const renewalCount = () =>
+      mutate.mock.calls.filter((call) => call[1].endsWith('/control/renew')).length;
+    expect(renewalCount()).toBe(1);
+    expect(fixture.componentInstance.state()).toBe('CONNECTING');
+    fixture.componentInstance.fail('Видеоканал прерван');
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(renewalCount()).toBe(5);
+    expect(fixture.componentInstance.state()).not.toBe('LIVE');
+
+    fixture.componentRef.setInput('paused', true);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(renewalCount()).toBe(5);
+    fixture.componentRef.setInput('paused', false);
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(renewalCount()).toBe(6);
+    fixture.destroy();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(renewalCount()).toBe(6);
+  });
+
+  it('stops renewals when hidden, transferred to another controller, or mounted as a widget', async () => {
+    vi.useFakeTimers();
+    privateControl();
+    await vi.advanceTimersByTimeAsync(0);
+    mutate.mockClear();
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    document.dispatchEvent(new Event('visibilitychange'));
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(mutate).not.toHaveBeenCalled();
+
+    currentSession = { ...currentSession, controllerRelation: 'OTHER' };
+    fixture.componentRef.setInput('session', currentSession);
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    document.dispatchEvent(new Event('visibilitychange'));
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mutate.mock.calls.some((call) => call[1].endsWith('/control/renew'))).toBe(false);
+
+    fixture.componentRef.setInput('surface', 'WIDGET');
+    fixture.componentRef.setInput('session', { ...currentSession, controllerRelation: 'SELF' });
+    fixture.detectChanges();
+    mutate.mockClear();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it('stops video on a failed control renewal and reads the updated authorization once', async () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    fixture.componentInstance.refresh.subscribe(refresh);
+    privateControl();
+    mutate.mockImplementationOnce(() => throwError(() => new Error('CONTROL_EXPIRED')));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.componentInstance.state()).toBe('ERROR');
+    expect(fixture.componentInstance.inputReady()).toBe(false);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(TestSocket.instances.at(-1)?.closed).toBe(true);
+    const calls = mutate.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(mutate).toHaveBeenCalledTimes(calls);
+  });
+
+  it('cancels a pending renewal on transfer so its late error cannot close the new viewer', async () => {
+    vi.useFakeTimers();
+    privateControl();
+    const pending = new Subject<never>();
+    mutate.mockImplementationOnce(() => pending);
+    await vi.advanceTimersByTimeAsync(0);
+    currentSession = { ...session, controlEpoch: 2 };
+    fixture.componentRef.setInput('session', currentSession);
+    fixture.detectChanges();
+    pending.error(new Error('late failure'));
+    expect(fixture.componentInstance.state()).toBe('CONNECTING');
+    expect(TestSocket.instances.at(-1)?.closed).toBe(false);
+  });
+
+  it('distinguishes denied viewing from a user pause and keeps the concrete failure during retries', () => {
+    currentSession = {
+      ...session,
+      capabilities: {
+        view: {
+          allowed: false,
+          reason: 'Сеанс управления прерван. Восстановите управление.',
+        },
+      },
+    };
+    fixture.componentRef.setInput('session', currentSession);
+    fixture.detectChanges();
+    expect(fixture.componentInstance.state()).toBe('UNAVAILABLE');
+    expect(fixture.componentInstance.title()).toBe('Просмотр недоступен');
+    expect(fixture.componentInstance.message()).toContain('Сеанс управления прерван');
+    fixture.componentRef.setInput('paused', true);
+    fixture.detectChanges();
+    expect(fixture.componentInstance.title()).toBe('Просмотр приостановлен');
+    fixture.componentRef.setInput('paused', false);
+    fixture.componentRef.setInput('session', session);
+    fixture.detectChanges();
+    fixture.componentInstance.fail('Не удалось согласовать поток');
+    expect(fixture.componentInstance.message()).toContain('Не удалось согласовать поток');
   });
 });
