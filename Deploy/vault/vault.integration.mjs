@@ -172,12 +172,19 @@ test('real Raft Vault preserves scoped TLS, Transit keys and Shamir restart',
       assert.ok(audit.includes('hmac-sha256:'), 'Audit redacts secret material');
       assert.ok(!audit.includes(secret), 'Audit must not expose the fixture KV secret');
 
+      assert.equal(cli.read('auth/approle/role/helm-backup', true), undefined);
+      const profileKey = `profiles-${randomUUID()}`;
+      cli.write(`helm-transit/keys/${profileKey}`, { type: 'aes256-gcm96' });
+      const plaintext = randomBytes(32).toString('base64');
+      const wrapped = cli.write(`helm-transit/encrypt/${profileKey}`, { plaintext }).ciphertext;
+      assert.equal(cli.write(`helm-transit/decrypt/${profileKey}`, { ciphertext: wrapped }).plaintext, plaintext);
       docker(['restart', container]);
       assert.equal((await statusAfterStart()).status, 503);
       assert.equal((await request(port, ca, 'PUT', 'sys/unseal', { key: shares[0] })).data.sealed, true);
       assert.equal((await request(port, ca, 'PUT', 'sys/unseal', { key: shares[2] })).data.sealed, false);
       const persisted = JSON.parse(vault(['read', '-format=json', 'helm-kv/data/services/provision']));
       assert.ok(persisted.data.data.fixture === secret, 'Raft retains secrets across cold restart');
+      assert.equal(cli.write(`helm-transit/decrypt/${profileKey}`, { ciphertext: wrapped }).plaintext, plaintext);
       docker(['exec', container, '/opt/helm/bin/healthcheck']);
       write('auth/approle/role/helm-provision/secret-id/destroy', {
         secret_id: installation.credentials.provision.secretId,

@@ -8,7 +8,7 @@ RUN go mod download
 COPY Deploy/provision/minio-admin/*.go ./
 RUN CGO_ENABLED=0 go build -mod=readonly -trimpath -o /minio-admin .
 FROM ${NODE_IMAGE}
-RUN apt-get update && apt-get install -y --no-install-recommends jq ca-certificates openssl coreutils \
+RUN apt-get update && apt-get install -y --no-install-recommends jq ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 helm && useradd --uid 10001 --gid helm --no-create-home helm
 WORKDIR /opt/helm/provision

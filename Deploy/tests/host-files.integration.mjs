@@ -94,6 +94,7 @@ test('daemon-side delivery migrates TURN atomically, retires managed edge TLS an
     assert.equal(migrated.gid, 10001);
     assert.equal(migrated.mode, 0o400);
     assert.ok(!migrated.files.includes('edge-tls') && !migrated.files.includes('turn-bootstrap.pending'));
+    assert.ok(!migrated.files.includes('backup-recipient'));
     assert.equal((await deliver(input)).code, 0);
     assert.deepEqual(JSON.parse((await inspect()).stdout), migrated, 'Replay preserves the committed file');
     await docker([...containerArguments, '--input-type=module', '-e',
