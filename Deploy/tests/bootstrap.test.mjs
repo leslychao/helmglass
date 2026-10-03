@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes, X509Certificate } from 'node:crypto';
-import { mkdtemp, readFile, realpath, rm, unlink } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -54,7 +54,11 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     assert.equal(secrets.services.api.s3AccessKey.length, 20);
     assert.equal(secrets.services.api.s3SecretKey.length, 40);
     assert.notEqual(secrets.services.api.databasePassword, secrets.services.migration.databasePassword);
+    const aclPath = join(first.directory, 'redis-bootstrap.acl');
+    const currentAcl = await readFile(aclPath, 'utf8');
+    await writeFile(aclPath, currentAcl.replace(' +msetnx +mset +mget +getrange', ''));
     assert.equal((await prepareBootstrap(configuration, environment)).created, false);
+    assert.equal(await readFile(aclPath, 'utf8'), currentAcl);
     assert.deepEqual(await readFile(join(first.directory, 'vault-services-input')), kvBefore);
     await assert.rejects(prepareBootstrap({ ...configuration, PUBLIC_ORIGIN: 'https://changed.example.test' }, environment), /different installation/);
     await unlink(join(first.directory, 'worker-bootstrap'));

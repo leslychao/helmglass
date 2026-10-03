@@ -301,7 +301,8 @@ networks:
   application:
     internal: true
     ipam:
-      config: [{subnet: 172.28.40.0/24}]
+      # Keep dynamic endpoints outside the fixed Nginx address, regardless of startup order.
+      config: [{subnet: 172.28.40.0/24, ip_range: 172.28.40.128/25}]
   data: {internal: true}
   mcp-control: {internal: true}
   secrets: {internal: true}

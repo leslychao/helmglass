@@ -15,6 +15,7 @@ WORKDIR /opt/helm/provision
 COPY Deploy/provision/package.json Deploy/provision/package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev
 COPY Deploy/provision/src ./src
+COPY Deploy/redis/users.acl.template /opt/helm/redis/users.acl.template
 COPY --from=vault-cli /bin/vault /usr/local/bin/vault
 COPY --from=minio-admin /minio-admin /opt/helm/bin/minio-admin
 COPY Deploy/runtime/vault-bootstrap /opt/helm/bin/vault-bootstrap

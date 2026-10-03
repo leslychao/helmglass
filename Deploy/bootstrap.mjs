@@ -3,10 +3,11 @@ import { readFile, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOOTSTRAP_FILES } from './configuration.mjs';
-import { isInside, protectDirectory, readProtectedFile, writeProtectedFile } from './protected-files.mjs';
+import { isInside, protectDirectory, readProtectedFile, replaceProtectedFile, writeProtectedFile } from './protected-files.mjs';
 import { createAuthority, createIdentity, readTlsBundle, validateBackupRecipient, validateInternalIdentity } from './tls.mjs';
 import { VAULT_ROLES } from './provision/src/vault-services.mjs';
 import { validatePredefinedInput } from './provision/src/predefined-users.mjs';
+import { upgradeRedisAcl } from './provision/src/redis-acl-upgrade.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const secret = () => randomBytes(32).toString('base64url');
@@ -53,6 +54,12 @@ export async function prepareBootstrap(configuration, environment = process.env)
       minio: 'minio-bootstrap', 'mcp-adapter': 'mcp-adapter-bootstrap' })) {
       const installed = JSON.parse((await readProtectedFile(join(directory, file))).toString());
       validateInternalIdentity(installed.tls, name, name === 'mcp-adapter');
+    }
+    const aclPath = join(directory, 'redis-bootstrap.acl');
+    const previousAcl = await readProtectedFile(aclPath);
+    const upgradedAcl = upgradeRedisAcl(previousAcl);
+    if (!previousAcl.equals(upgradedAcl)) {
+      await replaceProtectedFile(aclPath, upgradedAcl, createHash('sha256').update(previousAcl).digest('hex'));
     }
     return { directory, created: false };
   }

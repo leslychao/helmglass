@@ -115,6 +115,19 @@ async function main() {
     input: JSON.stringify({ schemaVersion: 1, installationId: configuration.INSTALLATION_ID, mode: 'stage', files: delivery }),
   });
   await compose(['config', '--quiet']);
+  const redisContainers = await identifiers('redis');
+  if (redisContainers.length > 1) throw new Error('Expected at most one Redis container');
+  if (redisContainers.length) {
+    const redisState = await inspect(redisContainers[0]);
+    const expectedAcl = delivery.find(file => file.name === 'redis-bootstrap.acl').sha256;
+    const installedAcl = redisState.State.Running
+      ? (await docker(['exec', redisContainers[0], 'sha256sum', '/run/helm/users.acl'])).stdout.split(/\s/)[0]
+      : undefined;
+    if (installedAcl !== expectedAcl) {
+      progress('reloading Redis with its verified bootstrap policy and existing data volume');
+      await compose(['up', '-d', '--no-deps', '--force-recreate', 'redis']);
+    }
+  }
   progress('starting PostgreSQL, Redis, MinIO and sealed Vault');
   await compose(['up', '-d', '--no-deps', 'postgres', 'redis', 'minio', 'vault']);
   const vaultId = await single('vault');

@@ -14,7 +14,7 @@ const IMAGE = 'nginx:1.30.5-alpine3.24@sha256:0985e772fb9f729e6fa0980da05fca5d9c
 const nginxDirectory = fileURLToPath(new URL('../', import.meta.url));
 
 function docker(args) {
-  const result = spawnSync('docker', args, { encoding: 'utf8', timeout: 30_000, maxBuffer: 1_048_576 });
+  const result = spawnSync('docker', ['--context', 'desktop-linux', ...args], { encoding: 'utf8', timeout: 30_000, maxBuffer: 1_048_576 });
   if (result.status !== 0) throw new Error(`Docker ${args[0]} failed (exit ${result.status}): ${result.stderr}`);
   return (args[0] === 'logs' ? result.stdout + result.stderr : result.stdout).trim();
 }
@@ -54,6 +54,7 @@ test('renders and starts real Nginx with TLS, preserving variables and private r
   const keyPath = join(directory, 'key.pem');
   const certificatePath = join(directory, 'certificate.pem');
   const bundlePath = join(directory, 'edge-tls.pem');
+  const oauthConfigurationPath = join(directory, 'oauth.conf');
   const openssl = process.env.OPENSSL_BIN ?? (process.platform === 'win32'
     ? 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe' : 'openssl');
   const generated = spawnSync(openssl, [
@@ -64,10 +65,35 @@ test('renders and starts real Nginx with TLS, preserving variables and private r
   assert.equal(generated.status, 0, 'A temporary TLS fixture must be generated');
   const certificate = await readFile(certificatePath);
   await writeFile(bundlePath, Buffer.concat([certificate, await readFile(keyPath)]), { mode: 0o600 });
+  // The redirect boundary needs a real forward-auth HTTP 401, without a full identity stack.
+  await writeFile(oauthConfigurationPath, `
+pid /tmp/oauth.pid;
+error_log /dev/stderr crit;
+events { worker_connections 32; }
+http {
+  access_log off;
+  client_body_temp_path /tmp/body;
+  proxy_temp_path /tmp/proxy;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
+  server { listen 4180; location / { return 401; } }
+}
+`);
   let containerId;
+  let oauthId;
+  let network;
   try {
+    network = docker(['network', 'create', '--label', `helmglass.acceptance=${testId}`,
+      `helmglass-nginx-it-${testId}`]);
+    oauthId = docker(['run', '--detach', '--network', network, '--network-alias', 'oauth2-proxy',
+      '--label', `helmglass.acceptance=${testId}`, '--user', '101:101', '--read-only', '--cap-drop', 'ALL',
+      '--security-opt', 'no-new-privileges:true', '--memory', '64m', '--pids-limit', '16',
+      '--tmpfs', '/tmp:size=16m', '--mount', `type=bind,source=${oauthConfigurationPath},target=/etc/oauth.conf,readonly`,
+      '--entrypoint', 'nginx', IMAGE, '-c', '/etc/oauth.conf', '-g', 'daemon off;']);
     containerId = docker([
       'run', '--detach', '--name', `helmglass-nginx-it-${testId}`,
+      '--network', network,
       '--label', `helmglass.acceptance=${testId}`, '--user', '101:101', '--read-only', '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges:true', '--memory', '128m', '--pids-limit', '32',
       '--tmpfs', '/tmp:size=16m', '--tmpfs', '/run:size=16m,uid=101,gid=101,mode=0700',
@@ -83,8 +109,8 @@ test('renders and starts real Nginx with TLS, preserving variables and private r
     let address;
     try {
       address = docker(['port', containerId, '8443/tcp']);
-    } catch {
-      assert.fail(`Nginx exited during startup: ${docker(['logs', containerId])}`);
+    } catch (error) {
+      assert.fail(`Nginx port unavailable: ${error.message}; ${docker(['logs', containerId])}`);
     }
     assert.match(address, /^127\.0\.0\.1:\d+$/);
     const port = Number(address.split(':')[1]);
@@ -113,22 +139,37 @@ test('renders and starts real Nginx with TLS, preserving variables and private r
     const httpAddress = docker(['port', containerId, '8080/tcp']);
     assert.equal(await untrustedHttpRequest(httpAddress), 403,
       'Spoofed forwarding headers cannot authorize the HTTP peer');
-    const trusted = spawnSync('docker', ['exec', containerId, 'wget', '-S', '-O', '-',
+    const trusted = spawnSync('docker', ['--context', 'desktop-linux', 'exec', containerId, 'wget', '-S', '-O', '-',
       '--header=Host: helm.integration.test', '--header=X-Forwarded-For: 203.0.113.8',
       'http://127.0.0.1:8080/mcp'], { encoding: 'utf8', timeout: 5000 });
     assert.match(trusted.stderr, /HTTP\/1\.1 503/,
       'The trusted gateway uses the existing authenticated application route');
+    const trustedWeb = spawnSync('docker', ['--context', 'desktop-linux', 'exec', containerId, 'wget', '-S', '-O', '-',
+      '--header=Host: helm.integration.test', '--header=X-Forwarded-For: 203.0.113.8',
+      'http://127.0.0.1:8080/'], { encoding: 'utf8', timeout: 5000 });
+    assert.match(trustedWeb.stderr, /HTTP\/1\.1 302/);
+    const httpLocation = /(?:^|\n)\s*Location:\s*(\S+)/i.exec(trustedWeb.stderr)?.[1];
+    assert.equal(httpLocation, '/oauth2/start?rd=%2F', 'HTTP upstream redirects preserve the public HTTPS origin');
+    const tlsWeb = await request(port, certificate, '/');
+    assert.equal(tlsWeb.status, 302);
+    assert.equal(tlsWeb.headers.location, httpLocation, 'Direct TLS uses the same origin-relative redirect');
+    assert.equal(new URL(httpLocation, 'https://helm.integration.test:8443').origin,
+      'https://helm.integration.test:8443');
     const configuration = docker(['exec', containerId, 'cat', '/run/nginx.conf']);
     assert.ok(configuration.includes('proxy_set_header Authorization $upstream_authorization;'));
     assert.ok(configuration.includes('proxy_set_header X-Forwarded-Port 8443;'));
     assert.ok(configuration.includes('wss://helm.integration.test:8443'));
     assert.ok(!configuration.includes('set_real_ip_from 192.0.2.10'));
   } finally {
-    if (containerId) {
-      assert.equal(docker(['inspect', '--format', '{{index .Config.Labels "helmglass.acceptance"}}', containerId]), testId);
-      docker(['rm', '--force', containerId]);
+    for (const id of [containerId, oauthId].filter(Boolean)) {
+      assert.equal(docker(['inspect', '--format', '{{index .Config.Labels "helmglass.acceptance"}}', id]), testId);
+      docker(['rm', '--force', id]);
     }
-    for (const path of [keyPath, certificatePath, bundlePath]) await unlink(path);
+    if (network) {
+      assert.equal(docker(['network', 'inspect', '--format', '{{index .Labels "helmglass.acceptance"}}', network]), testId);
+      docker(['network', 'rm', network]);
+    }
+    for (const path of [keyPath, certificatePath, bundlePath, oauthConfigurationPath]) await unlink(path);
     await rmdir(directory);
   }
 });

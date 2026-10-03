@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { chown, chmod, lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { upgradeRedisAcl } from './redis-acl-upgrade.mjs';
 
 // Runs once with no network and one explicit daemon-side bootstrap-directory mount.
 // Secrets arrive through stdin, never Docker environment, image layers, command arguments or logs.
@@ -11,7 +12,7 @@ const allowed = new Set(['edge-tls', 'api-bootstrap', 'worker-bootstrap', 'turn-
 const directory = '/bootstrap';
 const checksum = bytes => createHash('sha256').update(bytes).digest('hex');
 const ownerUid = name => name === 'edge-tls' ? 101
-  : ['postgres-bootstrap', 'backup-recipient'].includes(name) ? 0 : 10001;
+  : name === 'postgres-bootstrap' ? 999 : name === 'backup-recipient' ? 0 : 10001;
 const fileMode = name => name === 'backup-recipient' ? 0o444 : 0o400;
 
 async function main() {
@@ -66,6 +67,8 @@ async function main() {
     if (!existing.isFile() || existing.isSymbolicLink()) throw new Error('Unsafe destination');
     const current = await readFile(path);
     if (checksum(current) === file.sha256) continue;
+    if (input.mode === 'stage' && file.name === 'redis-bootstrap.acl'
+        && upgradeRedisAcl(current).equals(file.bytes)) continue;
     throw new Error('Credential drift');
   }
   if (input.mode !== 'verify') {
@@ -75,6 +78,10 @@ async function main() {
       const path = join(directory, file.name);
       const pending = `${path}.pending`;
       if (entries.includes(file.name) && checksum(await readFile(path)) === file.sha256) {
+        // The validated credential is unchanged; repair its canonical ownership on upgrades.
+        const uid = ownerUid(file.name);
+        await chown(path, uid, uid);
+        await chmod(path, fileMode(file.name));
         if (entries.includes(`${file.name}.pending`)) await unlink(pending);
         continue;
       }
