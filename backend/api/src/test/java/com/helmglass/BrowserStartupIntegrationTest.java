@@ -447,7 +447,8 @@ class BrowserStartupIntegrationTest {
                   null,
                   null,
                   json.read("{\"type\":\"OBSERVE\"}")),
-              context());
+              context(),
+              null);
     }
     UUID workerId = UUID.randomUUID();
     UUID bootId = UUID.randomUUID();
