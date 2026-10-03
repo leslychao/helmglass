@@ -141,7 +141,8 @@ public class ConnectionLoginService {
       }
     }
     if (input.taskId() != null) {
-      events.publishEvent(new TaskContinuationService.Waiting(input.taskId(), id, null, "LOGIN_COMPLETED"));
+      events.publishEvent(
+          new TaskContinuationService.Waiting(input.taskId(), id, null, "LOGIN_COMPLETED"));
     }
     changes.changed(actor.userId(), "connections", connectionId, connection.version());
     return receipt;
@@ -400,9 +401,13 @@ public class ConnectionLoginService {
             false);
     logins.completeRequested(id, receipt.operationId(), input);
     if (login.taskId() != null) {
-      events.publishEvent(new TaskContinuationService.Consent(login.taskId(), input.continuationIntent().equals("CONTINUE")));
+      events.publishEvent(
+          new TaskContinuationService.Consent(
+              login.taskId(), input.continuationIntent().equals("CONTINUE")));
       if (input.continuationIntent().equals("CONTINUE")) {
-        events.publishEvent(new TaskContinuationService.Waiting(login.taskId(), login.id(), null, "LOGIN_COMPLETED"));
+        events.publishEvent(
+            new TaskContinuationService.Waiting(
+                login.taskId(), login.id(), null, "LOGIN_COMPLETED"));
       }
     }
     controls.quiesceInput(session.id());
@@ -782,4 +787,3 @@ public class ConnectionLoginService {
     }
   }
 }
-

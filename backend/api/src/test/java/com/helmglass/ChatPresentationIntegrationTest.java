@@ -8,6 +8,8 @@ import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
+import com.helmglass.identity.infrastructure.UserEphemeralState;
+import com.helmglass.realtime.application.ChannelTicketService;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
 import com.helmglass.realtime.domain.ChatPresentation;
@@ -30,15 +32,22 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.containers.GenericContainer;
 import tools.jackson.databind.json.JsonMapper;
 
 class ChatPresentationIntegrationTest {
   private static final PostgreSQLContainer DATABASE =
       new PostgreSQLContainer("postgres:18.3-bookworm");
+  private static final GenericContainer<?> REDIS = new GenericContainer<>("redis:8.4.6-alpine")
+      .withExposedPorts(6379);
+  private static LettuceConnectionFactory redisConnection;
+  private static ChannelTicketService tickets;
   private static JdbcClient jdbc;
   private static TransactionTemplate transaction;
   private static RealtimeDeliveryService realtime;
@@ -48,6 +57,7 @@ class ChatPresentationIntegrationTest {
   @BeforeAll
   static void database() throws Exception {
     DATABASE.start();
+    REDIS.start();
     new CommandScope("update")
         .addArgumentValue("changelogFile", "db/changelog/master.xml")
         .addArgumentValue("url", DATABASE.getJdbcUrl())
@@ -61,20 +71,58 @@ class ChatPresentationIntegrationTest {
     transaction = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
     var json = new JsonSupport(JsonMapper.builder().findAndAddModules().build());
     var changes = new ChangeRepository(jdbc, json);
+    var identities = new IdentityRepository(jdbc, json);
+    redisConnection = new LettuceConnectionFactory(REDIS.getHost(), REDIS.getMappedPort(6379));
+    redisConnection.afterPropertiesSet();
+    redisConnection.start();
+    var redis = new StringRedisTemplate(redisConnection);
+    redis.afterPropertiesSet();
+    tickets = new ChannelTicketService(redis, json, new UserEphemeralState(redis, identities));
     presentations = new ChatPresentationRepository(jdbc);
     outbox = new OutboxRepository(jdbc);
     realtime =
         new RealtimeDeliveryService(
             outbox,
-            new IdentityRepository(jdbc, json),
+            identities,
             json,
             presentations,
-            new OperationRepository(jdbc, json, changes));
+            new OperationRepository(jdbc, json, changes), event -> {});
   }
 
   @AfterAll
   static void stopDatabase() {
+    if (redisConnection != null) {
+      redisConnection.destroy();
+    }
+    REDIS.stop();
     DATABASE.stop();
+  }
+
+  @Test
+  void eventTicketsAreOneUseBoundToOriginAndCannotReviveAfterRedisLoss() {
+    Fixture fixture = fixture();
+    ChatPresentation slot = publish(fixture, null, 0, mutation()).slot();
+    UUID viewer = UUID.randomUUID();
+    slot = attach(fixture, slot.id(), 1, viewer).slot();
+    String origin = "https://helm-test.web-sandbox.oaiusercontent.com";
+    ChatPresentation current = slot;
+    var wrongOrigin = tx(() -> tickets.eventTicket(current, origin, "wss://helm.test/events"));
+    assertThatThrownBy(() -> tickets.consumeTaskEvents((String) wrongOrigin.get("ticket"), fixture.task(), "https://other.test"))
+        .isInstanceOf(DomainException.class).extracting("code").isEqualTo("TICKET_BINDING_MISMATCH");
+    var issued = tx(() -> tickets.eventTicket(current, origin, "wss://helm.test/events"));
+    var binding = tickets.consumeTaskEvents((String) issued.get("ticket"), fixture.task(), origin);
+    assertThatThrownBy(() -> tickets.consumeTaskEvents((String) issued.get("ticket"), fixture.task(), origin))
+        .isInstanceOf(DomainException.class).extracting("code").isEqualTo("TICKET_EXPIRED");
+    assertThat(tx(() -> realtime.connectWidgetEvents(binding))).isTrue();
+    assertThat(tx(() -> realtime.connectWidgetEvents(binding))).isFalse();
+    assertThat(tx(() -> realtime.renewWidget(binding))).isTrue();
+    try (var connection = redisConnection.getConnection()) {
+      connection.serverCommands().flushDb();
+    }
+    assertThat(realtime.widgetAuthorized(binding)).isTrue();
+    publish(fixture, current.id(), 1, mutation());
+    assertThat(realtime.widgetAuthorized(binding)).isFalse();
+    assertThat(attach(fixture, current.id(), 1, viewer).state()).isEqualTo("SUPERSEDED");
   }
 
   @Test

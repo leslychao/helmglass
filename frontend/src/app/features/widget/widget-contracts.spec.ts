@@ -33,6 +33,7 @@ describe('widget presentation and frame authorization', () => {
       signalingUrl: `${origin.replace(/^http/, 'ws')}/stream/v1/widget/signaling/${session.id}`,
       viewGeneration: 5,
       expiresAt: '2026-10-03T00:00:30Z',
+      viewerAuthorizationExpiresAt: '2026-10-03T00:05:00Z',
     },
   };
 

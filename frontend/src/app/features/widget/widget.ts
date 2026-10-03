@@ -104,6 +104,7 @@ export class Widget {
   readonly instanceId = crypto.randomUUID();
   private readonly destroy = inject(DestroyRef);
   private events?: WebSocket;
+  private activeEventTicket?: WidgetSnapshot['eventTicket'];
   private heartbeat?: ReturnType<typeof setInterval>;
   private renewal?: ReturnType<typeof setTimeout>;
   private reconnect?: ReturnType<typeof setTimeout>;
@@ -267,23 +268,15 @@ export class Widget {
         this.message.set(
           'Этот клиент не поддерживает защищённый просмотр. Откройте задачу в кабинете.',
         );
-      } else if (snapshot.eventTicket && !this.events)
-        this.connectEvents(snapshot.eventTicket, generation);
-      if (snapshot.viewTicket && snapshot.viewTicket !== previous?.viewTicket) {
-        clearTimeout(this.renewal);
-        const authorizationDeadline = snapshot.viewTicket.viewerAuthorizationExpiresAt;
-        const remaining = authorizationDeadline
-          ? Date.parse(authorizationDeadline) - Date.now() - 10000
-          : 240000;
-        this.renewal = setTimeout(
-          () => {
-            this.disconnectEvents();
-            this.snapshot.set(null);
-            void this.attach();
-          },
-          Math.max(1000, Math.min(240000, remaining)),
-        );
+      } else if (snapshot.eventTicket) {
+        if (
+          this.activeEventTicket &&
+          this.activeEventTicket.viewGeneration !== snapshot.eventTicket.viewGeneration
+        )
+          this.disconnectEvents();
+        if (!this.events) this.connectEvents(snapshot.eventTicket, generation);
       }
+      this.scheduleAuthorizationRenewal(snapshot);
       this.updateAttention();
       await this.continueIfReady(snapshot, generation);
     } catch {
@@ -302,6 +295,27 @@ export class Widget {
         }
       }
     }
+  }
+  private scheduleAuthorizationRenewal(snapshot: WidgetSnapshot) {
+    clearTimeout(this.renewal);
+    const deadlines = [
+      this.activeEventTicket?.viewerAuthorizationExpiresAt,
+      snapshot.viewTicket?.viewerAuthorizationExpiresAt,
+    ].filter((value): value is string => value !== undefined);
+    if (!deadlines.length) return;
+    const remaining = Math.min(...deadlines.map((value) => Date.parse(value))) - Date.now();
+    if (remaining <= 0) {
+      this.disconnectEvents();
+      this.snapshot.set(null);
+      throw new Error('Срок доступа к просмотру истёк');
+    }
+    // The host may retain its access token until expiry. Renew once at that deadline,
+    // including event-only views, instead of repeatedly reconnecting with the same token.
+    this.renewal = setTimeout(() => {
+      this.disconnectEvents();
+      this.snapshot.set(null);
+      void this.attach();
+    }, remaining);
   }
   private scheduleRecovery(window: ReconnectWindow = this.recovery) {
     if (
@@ -359,9 +373,10 @@ export class Widget {
         `Продолжи задачу ${snapshot.presentation.taskId} после моего участия. Не создавай новую задачу.`,
     );
   }
-  private connectEvents(ticket: { ticket: string; url: string }, generation: number) {
+  private connectEvents(ticket: NonNullable<WidgetSnapshot['eventTicket']>, generation: number) {
     const socket = new WebSocket(ticket.url);
     this.events = socket;
+    this.activeEventTicket = ticket;
     let lastPong = Date.now();
     socket.onopen = () => {
       if (this.events === socket)
@@ -406,7 +421,10 @@ export class Widget {
         this.inactive.set(true);
         return;
       }
-      if (event.code === 4401 || event.code === 4403) {
+      const expiredTicket =
+        event.code === 4401 &&
+        ['AUTHORIZATION_EXPIRED', 'TICKET_EXPIRED', 'TICKET_TIMEOUT'].includes(event.reason);
+      if ((event.code === 4401 && !expiredTicket) || event.code === 4403) {
         this.stopForAccess(event.code === 4401 ? 'authentication' : 'authorization');
         return;
       }
@@ -605,6 +623,8 @@ export class Widget {
     clearInterval(this.heartbeat);
     clearTimeout(this.attention);
     this.eventsReady = false;
+    this.activeEventTicket = undefined;
+    clearTimeout(this.renewal);
     this.snapshotFresh = false;
     this.updateAttention();
     if (this.events) {

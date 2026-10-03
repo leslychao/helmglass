@@ -25,7 +25,10 @@ public class TaskAggregate {
   private long displayNumber;
   @Version private long version;
   private long instructionRevision;
-  @Column(length = 16000) private String goal;
+
+  @Column(length = 16000)
+  private String goal;
+
   private String title;
   private String startUrl;
   private UUID startSiteId;
@@ -33,7 +36,10 @@ public class TaskAggregate {
   private boolean confirmImportantActions;
   private int browserTimeLimitSeconds;
   private String origin;
-  @Enumerated(EnumType.STRING) private TaskState state;
+
+  @Enumerated(EnumType.STRING)
+  private TaskState state;
+
   private String outcome;
   private String waitReason;
   private String failureCode;
@@ -47,8 +53,16 @@ public class TaskAggregate {
   private Instant startedAt;
   private Instant endedAt;
 
-  public TaskAggregate(UUID userId, long displayNumber, String goal, String startUrl,
-      UUID siteId, String format, boolean confirmations, int budget, String origin) {
+  public TaskAggregate(
+      UUID userId,
+      long displayNumber,
+      String goal,
+      String startUrl,
+      UUID siteId,
+      String format,
+      boolean confirmations,
+      int budget,
+      String origin) {
     id = UUID.randomUUID();
     this.userId = userId;
     this.displayNumber = displayNumber;
@@ -68,8 +82,8 @@ public class TaskAggregate {
     updatedAt = createdAt;
   }
 
-  public void edit(String goal, String startUrl, UUID siteId, String format,
-      boolean confirmations, int budget) {
+  public void edit(
+      String goal, String startUrl, UUID siteId, String format, boolean confirmations, int budget) {
     requireState(TaskState.DRAFT);
     this.goal = goal;
     title = goal.length() > 200 ? goal.substring(0, 200) : goal;
@@ -152,7 +166,8 @@ public class TaskAggregate {
 
   public void requireState(TaskState expected) {
     if (state != expected) {
-      throw DomainException.conflict("INVALID_TASK_STATE", "Task state does not permit this action");
+      throw DomainException.conflict(
+          "INVALID_TASK_STATE", "Task state does not permit this action");
     }
   }
 }

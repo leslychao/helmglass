@@ -51,7 +51,7 @@ public class WidgetEventGateway extends TextWebSocketHandler {
   public void afterConnectionEstablished(WebSocketSession socket) throws IOException {
     if (origin.isBlank() || !origin.equals(socket.getHandshakeHeaders().getOrigin())
         || socket.getUri() == null || socket.getUri().getRawQuery() != null
-        || socket.getHandshakeHeaders().containsKey("Authorization")) {
+        || socket.getHandshakeHeaders().getFirst("Authorization") != null) {
       socket.close(new CloseStatus(4403, "CHANNEL_ORIGIN_REJECTED"));
       return;
     }

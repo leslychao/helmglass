@@ -4,6 +4,7 @@ import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.PageQuery;
 import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
@@ -56,7 +57,7 @@ public class ChangeRepository {
             .param("version", version)
             .param("resource", resource)
             .param("payload", json.write(Map.of("resources", resources, "resourceId", resourceId)))
-            .param("notBefore", notBefore)
+        .param("notBefore", Timestamp.from(notBefore))
             .update();
     if (inserted != 0) {
       for (String changedResource : resources) {

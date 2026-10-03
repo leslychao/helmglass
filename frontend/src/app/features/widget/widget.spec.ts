@@ -50,9 +50,9 @@ class EventSocket {
   receive(type: string) {
     this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type }) }));
   }
-  fail(code: number) {
+  fail(code: number, reason = '') {
     this.readyState = 3;
-    this.onclose?.(new CloseEvent('close', { code }));
+    this.onclose?.(new CloseEvent('close', { code, reason }));
   }
 }
 
@@ -75,6 +75,8 @@ describe('widget presentation lifecycle', () => {
             _meta: {
               eventTicket: {
                 ticket: 'event-ticket',
+                viewGeneration: 1,
+                viewerAuthorizationExpiresAt: new Date(Date.now() + 300000).toISOString(),
                 url: `wss://helm.example.test/events/v1/widget/tasks/${presentation.taskId}`,
               },
             },

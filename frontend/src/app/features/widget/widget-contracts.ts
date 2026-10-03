@@ -20,7 +20,12 @@ export interface WidgetSnapshot {
     deliveredAt?: string;
     manualMessage?: string;
   } | null;
-  eventTicket?: { ticket: string; url: string };
+  eventTicket?: {
+    ticket: string;
+    url: string;
+    viewGeneration: number;
+    viewerAuthorizationExpiresAt: string;
+  };
   viewTicket: ViewTicket | null;
 }
 export function record(value: unknown): value is Record<string, unknown> {
@@ -155,6 +160,8 @@ export function snapshotOf(
     if (record(events))
       eventTicket = {
         ticket: string(events['ticket']),
+        viewGeneration: number(events['viewGeneration']),
+        viewerAuthorizationExpiresAt: deadline(events['viewerAuthorizationExpiresAt']),
         url: channelUrl(
           events['url'],
           publicOrigin,
@@ -173,7 +180,7 @@ export function snapshotOf(
         ),
         viewGeneration: number(video['viewGeneration']),
         expiresAt: string(video['expiresAt']),
-        viewerAuthorizationExpiresAt: optional(video['viewerAuthorizationExpiresAt']),
+        viewerAuthorizationExpiresAt: deadline(video['viewerAuthorizationExpiresAt']),
       };
   }
   return {
@@ -183,6 +190,12 @@ export function snapshotOf(
     eventTicket,
     viewTicket,
   };
+}
+
+function deadline(value: unknown): string {
+  const text = string(value);
+  if (!Number.isFinite(Date.parse(text))) throw new Error('Некорректный срок доступа');
+  return text;
 }
 
 function channelUrl(value: unknown, publicOrigin: string, expectedPath: string): string {

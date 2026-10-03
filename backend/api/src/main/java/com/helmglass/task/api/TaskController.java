@@ -130,7 +130,8 @@ public class TaskController {
       @PathVariable UUID id,
       @Valid @RequestBody ContinuationContracts.Claim input,
       HttpServletRequest request) {
-    return continuations.claim(Actors.current(request), null, id, input, MutationContext.from(request));
+    return continuations.claim(
+        Actors.current(request), null, id, input, MutationContext.from(request));
   }
 
   @PostMapping("/{id}/completion")

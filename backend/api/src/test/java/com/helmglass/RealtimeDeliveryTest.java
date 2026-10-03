@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -37,7 +38,7 @@ class RealtimeDeliveryTest {
           identities,
           json,
           mock(ChatPresentationRepository.class),
-          mock(OperationRepository.class));
+          mock(OperationRepository.class), mock(ApplicationEventPublisher.class));
 
   @Test
   void subscribesBeforeReadyAndOnlyReceivesOwnSafeResources() throws Exception {

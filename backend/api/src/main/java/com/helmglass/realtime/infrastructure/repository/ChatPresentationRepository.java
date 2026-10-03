@@ -3,6 +3,7 @@ package com.helmglass.realtime.infrastructure.repository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.realtime.domain.ChatPresentation;
 import com.helmglass.realtime.domain.ViewerFence;
+import java.sql.Timestamp;
 import com.helmglass.realtime.application.ChannelTicketService.TicketBinding;
 import java.time.Instant;
 import java.util.List;
@@ -233,8 +234,8 @@ public class ChatPresentationRepository {
             .param("id", slot.id())
             .param("revision", slot.presentationRevision())
             .param("viewer", viewer)
-            .param("lease", leaseExpiresAt)
-            .param("authorization", authorizationExpiresAt)
+        .param("lease", Timestamp.from(leaseExpiresAt))
+        .param("authorization", Timestamp.from(authorizationExpiresAt))
             .param("grant", actor.grantId())
             .param("grantVersion", grantVersion)
             .param("epoch", actor.accessEpoch())
