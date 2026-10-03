@@ -451,13 +451,6 @@ public class WorkerRegistryRepository {
             """)
         .param("id", sessionId)
         .update();
-    jdbc.sql(
-            """
-            UPDATE tasks SET state='CANCELLED',ended_at=now(),updated_at=now(),version=version+1
-            WHERE id=(SELECT task_id FROM browser_sessions WHERE id=:id) AND state='STOPPING'
-            """)
-        .param("id", sessionId)
-        .update();
     closeOutbox.confirmed(sessionId);
     return List.copyOf(changed);
   }

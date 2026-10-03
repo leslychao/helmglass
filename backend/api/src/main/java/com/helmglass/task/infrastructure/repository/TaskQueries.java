@@ -508,12 +508,33 @@ public class TaskQueries {
   public boolean resources(UUID taskId) {
     return jdbc.sql(
                 """
-                SELECT count(*) FROM browser_sessions WHERE task_id=:task AND binding_released_at IS NULL
+                SELECT count(*) FROM browser_sessions s WHERE s.task_id=:task
+                AND (s.binding_released_at IS NULL OR EXISTS(
+                  SELECT 1 FROM browser_allocations a WHERE a.session_id=s.id AND a.state<>'RELEASED'))
                 """)
             .param("task", taskId)
             .query(Long.class)
             .single()
         > 0;
+  }
+
+  public record StoppedTask(UUID userId, UUID taskId) {}
+
+  public List<StoppedTask> uncompletedStops() {
+    return jdbc.sql(
+            """
+            SELECT t.user_id,t.id task_id FROM tasks t
+            WHERE (t.state='STOPPING' OR (t.state='CANCELLED' AND EXISTS(
+              SELECT 1 FROM operations o WHERE o.user_id=t.user_id AND o.target_type='task'
+              AND o.target_id=t.id AND o.kind='tasks.stop:'||t.id::text
+              AND o.state IN ('PENDING','RUNNING'))))
+            AND NOT EXISTS(SELECT 1 FROM browser_sessions s WHERE s.task_id=t.id
+              AND (s.binding_released_at IS NULL OR EXISTS(
+                SELECT 1 FROM browser_allocations a WHERE a.session_id=s.id AND a.state<>'RELEASED')))
+            ORDER BY t.user_id,t.id LIMIT 100
+            """)
+        .query(StoppedTask.class)
+        .list();
   }
 
   public List<UUID> cancelUnstarted(UUID taskId, String code) {

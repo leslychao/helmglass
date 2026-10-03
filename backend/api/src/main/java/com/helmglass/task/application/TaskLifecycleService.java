@@ -204,6 +204,28 @@ public class TaskLifecycleService {
     return changed(actor, task, "tasks.stop:" + id, input, context, !resources, "Stop requested");
   }
 
+  /** Completes the accepted stop only after its physical resources are confirmed released. */
+  @Transactional
+  public void confirmStopped(UUID userId, UUID taskId) {
+    identities.lockState(userId);
+    var task = tasks.lockOwned(taskId, userId).orElseThrow(DomainException::notFound);
+    if ((task.getState() != TaskState.STOPPING && task.getState() != TaskState.CANCELLED)
+        || queries.resources(taskId)) {
+      return;
+    }
+    if (task.getState() == TaskState.STOPPING) {
+      task.completeStop();
+      tasks.flush();
+      queries.event(task, "SYSTEM", "TASK_STOPPED", "Task resources closed");
+      changes.changed(userId, "tasks", taskId, task.getVersion());
+    }
+    operations.completeTaskStop(userId, taskId);
+  }
+
+  public List<TaskQueries.StoppedTask> uncompletedStops() {
+    return queries.uncompletedStops();
+  }
+
   @Transactional
   public MutationReceipt clarify(
       AuthenticatedActor actor,

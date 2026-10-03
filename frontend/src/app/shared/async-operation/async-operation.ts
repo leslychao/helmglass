@@ -13,7 +13,7 @@ import { Feedback } from '../feedback/feedback';
       <p>
         <hg-status [value]="operation.state" /> <span class="small">{{ operation.id }}</span>
       </p>
-      @if (operation.failureCode) {
+      @if (operation.state !== 'SUCCEEDED' && operation.failureCode) {
         <p role="alert">{{ operation.failureCode }}</p>
       }
       @if (operation.reconciliationOutcome; as outcome) {

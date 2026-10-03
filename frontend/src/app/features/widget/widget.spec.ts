@@ -119,6 +119,7 @@ describe('widget presentation lifecycle', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-03T12:00:00Z'));
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
     EventSocket.instances = [];
     vi.stubGlobal('WebSocket', EventSocket);
@@ -210,6 +211,63 @@ describe('widget presentation lifecycle', () => {
     expect(fixture.componentInstance.snapshot()?.presentation).toEqual(presentation);
     expect(fixture.componentInstance.error()).toBe('');
     expect(bridge.attach.mock.calls[1]?.[0]).toEqual(bridge.attach.mock.calls[0]?.[0]);
+  });
+
+  it('reports one safe attach timeout diagnostic without logging the host error content', async () => {
+    bridge.attach.mockRejectedValueOnce(
+      Object.assign(new Error('private host payload and ticket'), { code: -32001 }),
+    );
+    await mount();
+
+    expect(console.warn).toHaveBeenCalledOnce();
+    expect(console.warn).toHaveBeenCalledWith(
+      'Helm widget',
+      expect.objectContaining({ stage: 'ATTACH', category: 'HOST_TIMEOUT' }),
+    );
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('private');
+  });
+
+  it('distinguishes a rejected event channel from an invalid attach response', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    socket().fail(4503, 'VIEW_GENERATION_CHANGED');
+    expect(console.warn).toHaveBeenLastCalledWith(
+      'Helm widget',
+      expect.objectContaining({
+        stage: 'EVENT_CHANNEL',
+        category: 'CHANNEL_CLOSED',
+        status: 4503,
+        code: 'VIEW_GENERATION_CHANGED',
+      }),
+    );
+    bridge.attach.mockResolvedValue({ structuredContent: { session: 'private invalid body' } });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(console.warn).toHaveBeenLastCalledWith(
+      'Helm widget',
+      expect.objectContaining({ stage: 'ATTACH', category: 'CONTRACT_INVALID' }),
+    );
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('private');
+  });
+
+  it('identifies a browser-rejected channel constructor without logging its URL or reason', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        constructor() {
+          throw new DOMException('private connection URL', 'SecurityError');
+        }
+      },
+    );
+    await mount();
+    expect(console.warn).toHaveBeenCalledOnce();
+    expect(console.warn).toHaveBeenCalledWith(
+      'Helm widget',
+      expect.objectContaining({ stage: 'EVENT_CHANNEL', category: 'CHANNEL_OPEN_FAILED' }),
+    );
+    expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('private');
   });
 
   it('coalesces duplicate host events and updates into the pending recovery', async () => {
@@ -572,7 +630,9 @@ describe('widget presentation lifecycle', () => {
         expiresAt: new Date(Date.now() + 30000).toISOString(),
       },
     });
-    const prepare = vi.fn(async (_arguments: Record<string, unknown>) => prepared());
+    const prepare = vi.fn(async (_arguments: Record<string, unknown>): Promise<unknown> =>
+      prepared(),
+    );
     const recordDelivery = vi.fn(async (_arguments: Record<string, unknown>) => ({}));
     bridge.attach.mockImplementation(
       (request: { name: string; arguments: Record<string, unknown> }) => {
@@ -609,6 +669,34 @@ describe('widget presentation lifecycle', () => {
     expect(protocol.recordDelivery).toHaveBeenCalledOnce();
   });
 
+  it.each(['CONTINUATION_BLOCKED', 'PRIVATE_SERVER_CONTENT'])(
+    'reports the prepare stage with an allowlisted code only (%s)',
+    async (code) => {
+      const protocol = deliveryScenario();
+      protocol.prepare.mockResolvedValueOnce({
+        isError: true,
+        content: [{ type: 'text', text: JSON.stringify({ status: 409, code, detail: 'secret' }) }],
+      });
+      await mount();
+      socket().open();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(console.warn).toHaveBeenCalledOnce();
+      expect(console.warn).toHaveBeenCalledWith(
+        'Helm widget',
+        expect.objectContaining({
+          stage: 'PREPARE_MESSAGE',
+          category: 'TOOL_REJECTED',
+          status: 409,
+        }),
+      );
+      const diagnostic = vi.mocked(console.warn).mock.calls[0]?.[1];
+      expect(diagnostic.code).toBe(code === 'CONTINUATION_BLOCKED' ? code : undefined);
+      expect(JSON.stringify(diagnostic)).not.toMatch(/PRIVATE_SERVER_CONTENT|secret/);
+      expect(bridge.sendMessage).not.toHaveBeenCalled();
+    },
+  );
+
   it('retries a lost delivery receipt with the same key without resending to ChatGPT', async () => {
     const protocol = deliveryScenario();
     protocol.recordDelivery.mockRejectedValueOnce(new Error('Receipt response lost'));
@@ -616,6 +704,10 @@ describe('widget presentation lifecycle', () => {
     socket().open();
     await vi.advanceTimersByTimeAsync(0);
     expect(bridge.sendMessage).toHaveBeenCalledOnce();
+    expect(console.warn).toHaveBeenCalledWith(
+      'Helm widget',
+      expect.objectContaining({ stage: 'RECORD_DELIVERY', category: 'HOST_REQUEST_FAILED' }),
+    );
 
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -728,6 +820,14 @@ describe('widget presentation lifecycle', () => {
     expect(protocol.recordDelivery).toHaveBeenCalledTimes(attempts);
     expect(attempts).toBeGreaterThan(1);
     expect(bridge.sendMessage).toHaveBeenCalledOnce();
+    expect(console.warn).toHaveBeenLastCalledWith(
+      'Helm widget',
+      expect.objectContaining({
+        stage: 'RECOVERY',
+        category: 'RECOVERY_EXHAUSTED',
+        recovery: 'DELIVERY',
+      }),
+    );
   });
 
   it('does not mistake the prepare transaction invalidation for a rejected delivery', async () => {

@@ -67,6 +67,9 @@ public class BrowserScheduler {
     for (var target : tasks.pendingStops()) {
       tasks.processStop(target);
     }
+    for (var target : tasks.uncompletedStops()) {
+      tasks.confirmStopped(target.userId(), target.taskId());
+    }
     for (UUID id : logins.pending()) {
       try {
         logins.allocate(id).ifPresent(intent -> gateway.send(intent.workerId(), intent.message()));

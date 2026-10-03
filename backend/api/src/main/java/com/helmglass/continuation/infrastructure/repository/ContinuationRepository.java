@@ -349,6 +349,20 @@ public class ContinuationRepository {
         .single();
   }
 
+  public Continuation recoveredReady(UUID id, long epoch, long pageEpoch) {
+    return jdbc.sql(
+            """
+            UPDATE task_continuations SET control_epoch=:epoch,page_epoch=:page,version=version+1
+              WHERE id=:id AND state='READY' AND dispatch_id IS NULL AND claim_id IS NULL
+              AND control_epoch<:epoch RETURNING *
+            """)
+        .param("id", id)
+        .param("epoch", epoch)
+        .param("page", pageEpoch)
+        .query(Continuation.class)
+        .single();
+  }
+
   public Continuation claimRecovered(UUID id, long epoch) {
     return jdbc.sql(
             """

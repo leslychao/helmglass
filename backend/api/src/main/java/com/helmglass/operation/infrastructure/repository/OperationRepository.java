@@ -278,6 +278,26 @@ public class OperationRepository {
     completed.forEach(this::changed);
   }
 
+  public void completeTaskStop(UUID userId, UUID taskId) {
+    var completed =
+        jdbc.sql(
+                """
+                UPDATE operations SET state='SUCCEEDED',version=version+1,progress=100,
+                  updated_at=now(),finished_at=now()
+                WHERE id IN (SELECT id FROM operations
+                  WHERE user_id=:user AND target_type='task' AND target_id=:task
+                    AND kind=:kind AND state IN ('PENDING','RUNNING')
+                  ORDER BY created_at,id LIMIT 100)
+                RETURNING id,user_id,version
+                """)
+            .param("user", userId)
+            .param("task", taskId)
+            .param("kind", "tasks.stop:" + taskId)
+            .query(Transition.class)
+            .list();
+    completed.forEach(this::changed);
+  }
+
   public void completeCommandTarget(UUID commandId, String kind, String state) {
     var completed =
         jdbc.sql(

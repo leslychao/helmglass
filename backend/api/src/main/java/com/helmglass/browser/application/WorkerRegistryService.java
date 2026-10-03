@@ -7,7 +7,9 @@ import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository;
 import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository.Claim;
 import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository.CommandDisposition;
 import com.helmglass.command.application.CommandExecutionService;
+import com.helmglass.continuation.application.TaskContinuationService;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
+import com.helmglass.task.application.TaskLifecycleService;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -19,6 +21,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,6 +37,8 @@ public class WorkerRegistryService {
   private final CommandExecutionService commands;
   private final BrowserOpenService opens;
   private final ChangeRepository changes;
+  private final TaskLifecycleService tasks;
+  private final ApplicationEventPublisher events;
 
   public WorkerRegistryService(
       WorkerRegistryRepository workers,
@@ -42,7 +47,9 @@ public class WorkerRegistryService {
       ControlRepository controls,
       CommandExecutionService commands,
       BrowserOpenService opens,
-      ChangeRepository changes) {
+      ChangeRepository changes,
+      TaskLifecycleService tasks,
+      ApplicationEventPublisher events) {
     this.workers = workers;
     this.protocol = protocol;
     this.json = json;
@@ -50,6 +57,8 @@ public class WorkerRegistryService {
     this.commands = commands;
     this.opens = opens;
     this.changes = changes;
+    this.tasks = tasks;
+    this.events = events;
   }
 
   public record StoppedAllocation(UUID sessionId, long allocationEpoch, UUID runtimeGeneration) {
@@ -511,6 +520,11 @@ public class WorkerRegistryService {
           "RECOVERY_CONTROL_STALE", "Recovery needs its new control epoch receipt");
     }
     workers.recovered(sessionId, claim.recoveryMode());
+    if (claim.taskId() != null && claim.recoveryMode().equals("AGENT")) {
+      events.publishEvent(
+          new TaskContinuationService.RuntimeRecovered(
+              claim.userId(), claim.taskId(), sessionId, claim.controlEpoch()));
+    }
     return true;
   }
 
@@ -566,6 +580,9 @@ public class WorkerRegistryService {
       return;
     }
     dispositionsChanged(workers.closed(claim.sessionId()));
+    if (claim.taskId() != null) {
+      tasks.confirmStopped(claim.userId(), claim.taskId());
+    }
     lifecycleChanged(claim);
   }
 

@@ -228,6 +228,7 @@ export class Widget {
     this.loading.set(true);
     this.error.set('');
     const generation = this.generation;
+    let diagnostic: WidgetDiagnostic = { stage: 'ATTACH', category: 'HOST_REQUEST_FAILED' };
     try {
       const result = await this.app.callServerTool(
         {
@@ -244,13 +245,16 @@ export class Widget {
       );
       if (generation !== this.generation) return;
       if (result.isError) {
+        diagnostic = toolDiagnostic('ATTACH', result);
         const denied = accessFailure(result);
         if (denied) {
+          this.warn(diagnostic);
           this.stopForAccess(denied);
           return;
         }
         throw new Error('Доступ к просмотру не подтверждён');
       }
+      diagnostic = { stage: 'ATTACH', category: 'CONTRACT_INVALID' };
       const previous = this.snapshot(),
         snapshot = retainActiveTicket(
           previous,
@@ -277,17 +281,23 @@ export class Widget {
           this.activeEventTicket.viewGeneration !== snapshot.eventTicket.viewGeneration
         )
           this.disconnectEvents();
-        if (!this.events) this.connectEvents(snapshot.eventTicket, generation);
+        if (!this.events) {
+          diagnostic = { stage: 'EVENT_CHANNEL', category: 'CHANNEL_OPEN_FAILED' };
+          this.connectEvents(snapshot.eventTicket, generation);
+        }
       }
+      diagnostic = { stage: 'ATTACH', category: 'AUTHORIZATION_EXPIRED' };
       this.scheduleAuthorizationRenewal(snapshot);
       if (snapshot.presentation.presentationState === 'ACTIVE' && !this.events) {
+        this.warn({ stage: 'ATTACH', category: 'EVENT_TICKET_MISSING' });
         this.error.set('Восстанавливаем канал обновлений просмотра.');
         this.scheduleRecovery();
       }
       this.updateAttention();
       await this.continueIfReady(snapshot, generation);
-    } catch {
+    } catch (error) {
       if (generation === this.generation) {
+        this.warn(requestDiagnostic(diagnostic, error));
         this.snapshotFresh = false;
         this.updateAttention();
         this.error.set('Не удалось обновить просмотр. Действия задачи не повторялись.');
@@ -337,6 +347,11 @@ export class Widget {
     const delay = window.nextDelay();
     if (delay === null) {
       this.recoveryExhausted = true;
+      this.warn({
+        stage: 'RECOVERY',
+        category: 'RECOVERY_EXHAUSTED',
+        recovery: window === this.recovery ? 'CHANNEL' : 'DELIVERY',
+      });
       this.error.set('Связь не восстановлена. Откройте ту же задачу в кабинете.');
       return;
     }
@@ -425,6 +440,12 @@ export class Widget {
     }, 15000);
     socket.onclose = (event) => {
       if (generation !== this.generation || this.events !== socket) return;
+      this.warn({
+        stage: 'EVENT_CHANNEL',
+        category: 'CHANNEL_CLOSED',
+        status: event.code,
+        code: diagnosticCode(event.reason),
+      });
       this.disconnectEvents();
       this.snapshot.set(null);
       if (event.code === 4412) {
@@ -499,6 +520,10 @@ export class Widget {
     }
     if (!attempt) return;
     this.dispatching = true;
+    let diagnostic: WidgetDiagnostic | undefined = {
+      stage: 'PREPARE_MESSAGE',
+      category: 'HOST_REQUEST_FAILED',
+    };
     try {
       if (!attempt.prepared) {
         const prepared = await this.app.callServerTool(
@@ -516,9 +541,11 @@ export class Widget {
           { timeout: 15000 },
         );
         if (prepared.isError) {
+          diagnostic = toolDiagnostic('PREPARE_MESSAGE', prepared);
           attempt.stopped = !unknownToolOutcome(prepared);
           throw new Error();
         }
+        diagnostic = { stage: 'PREPARE_MESSAGE', category: 'CONTRACT_INVALID' };
         if (!record(prepared.structuredContent)) throw new Error();
         const dispatchId = string(prepared.structuredContent['dispatchId']),
           text = string(prepared.structuredContent['text']),
@@ -561,9 +588,12 @@ export class Widget {
       } catch {
         attempt.outcome = 'UNKNOWN';
       }
+      diagnostic = undefined;
       await this.recordDelivery(attempt);
       this.showDelivery(attempt, generation);
-    } catch {
+    } catch (error) {
+      if (diagnostic && generation === this.generation)
+        this.warn(requestDiagnostic(diagnostic, error));
       this.deliveryFailed(attempt, generation);
     } finally {
       this.dispatching = false;
@@ -584,22 +614,40 @@ export class Widget {
   }
   private async recordDelivery(attempt: DeliveryAttempt) {
     if (!attempt.prepared || !attempt.outcome) return;
-    const receipt = await this.app.callServerTool(
-      {
-        name: 'continuations.record_delivery',
-        arguments: {
-          dispatchId: attempt.prepared.dispatchId,
-          outcome: attempt.outcome,
-          idempotencyKey: attempt.recordKey,
+    let diagnostic: WidgetDiagnostic = {
+      stage: 'RECORD_DELIVERY',
+      category: 'HOST_REQUEST_FAILED',
+    };
+    try {
+      const receipt = await this.app.callServerTool(
+        {
+          name: 'continuations.record_delivery',
+          arguments: {
+            dispatchId: attempt.prepared.dispatchId,
+            outcome: attempt.outcome,
+            idempotencyKey: attempt.recordKey,
+          },
         },
-      },
-      { timeout: 15000 },
-    );
-    if (receipt.isError) {
-      attempt.stopped = !unknownToolOutcome(receipt);
-      throw new Error();
+        { timeout: 15000 },
+      );
+      if (receipt.isError) {
+        diagnostic = toolDiagnostic('RECORD_DELIVERY', receipt);
+        attempt.stopped = !unknownToolOutcome(receipt);
+        throw new Error();
+      }
+      attempt.recorded = true;
+    } catch (error) {
+      this.warn(requestDiagnostic(diagnostic, error));
+      throw error;
     }
-    attempt.recorded = true;
+  }
+  private warn(diagnostic: WidgetDiagnostic) {
+    console.warn('Helm widget', {
+      ...diagnostic,
+      eventsReady: this.eventsReady,
+      snapshotFresh: this.snapshotFresh,
+      viewGeneration: this.activeEventTicket?.viewGeneration,
+    });
   }
   private showDelivery(attempt: DeliveryAttempt, generation: number) {
     if (generation !== this.generation) return;
@@ -698,6 +746,91 @@ interface DeliveryAttempt {
   recovery: ReconnectWindow;
   prepared?: { dispatchId: string; text: string; expiresAt: number };
   outcome?: 'DELIVERED' | 'UNKNOWN' | 'REJECTED';
+}
+
+interface WidgetDiagnostic {
+  stage: 'ATTACH' | 'EVENT_CHANNEL' | 'PREPARE_MESSAGE' | 'RECORD_DELIVERY' | 'RECOVERY';
+  category:
+    | 'HOST_REQUEST_FAILED'
+    | 'HOST_TIMEOUT'
+    | 'TOOL_REJECTED'
+    | 'CONTRACT_INVALID'
+    | 'AUTHORIZATION_EXPIRED'
+    | 'EVENT_TICKET_MISSING'
+    | 'CHANNEL_OPEN_FAILED'
+    | 'CHANNEL_CLOSED'
+    | 'RECOVERY_EXHAUSTED';
+  code?: string;
+  status?: number;
+  recovery?: 'CHANNEL' | 'DELIVERY';
+}
+
+const diagnosticCodes = new Set([
+  'OWNER_RESPONSE_UNKNOWN',
+  'OWNER_CONTRACT_INVALID',
+  'UNAUTHENTICATED',
+  'FORBIDDEN',
+  'INSUFFICIENT_SCOPE',
+  'NOT_FOUND',
+  'CONTINUATION_BLOCKED',
+  'CONTINUATION_NOT_READY',
+  'CONTINUATION_EXPIRED',
+  'CONTINUATION_DESTINATION_CHANGED',
+  'AUTOMATIC_CONTINUATION_UNAVAILABLE',
+  'DISPATCH_NOT_SENDABLE',
+  'STALE_PRESENTATION',
+  'VIEW_ALREADY_ATTACHED',
+  'VIEW_LEASE_EXPIRED',
+  'VIEW_GENERATION_CHANGED',
+  'PRESENTATION_SUPERSEDED',
+  'GRANT_REVOKED',
+  'AUTHORIZATION_EXPIRED',
+  'AUTHORIZATION_UNAVAILABLE',
+  'CHANNEL_ORIGIN_REJECTED',
+  'CONNECTION_LIMIT',
+  'AUTHENTICATION_LIMIT',
+  'TICKET_REQUIRED',
+  'TICKET_EXPIRED',
+  'TICKET_TIMEOUT',
+  'HEARTBEAT_TIMEOUT',
+  'DELIVERY_FAILED',
+  'INVALID_MESSAGE',
+]);
+
+function diagnosticCode(value: unknown): string | undefined {
+  return typeof value === 'string' && diagnosticCodes.has(value) ? value : undefined;
+}
+
+function toolDiagnostic(stage: WidgetDiagnostic['stage'], result: unknown): WidgetDiagnostic {
+  const diagnostic: WidgetDiagnostic = { stage, category: 'TOOL_REJECTED' };
+  if (!record(result) || !Array.isArray(result['content'])) return diagnostic;
+  for (const item of result['content'].slice(0, 8)) {
+    if (
+      !record(item) ||
+      item['type'] !== 'text' ||
+      typeof item['text'] !== 'string' ||
+      item['text'].length > 4096
+    )
+      continue;
+    try {
+      const problem: unknown = JSON.parse(item['text']);
+      if (!record(problem)) continue;
+      const status = problem['status'];
+      diagnostic.code = diagnosticCode(problem['code']);
+      if (typeof status === 'number' && Number.isInteger(status) && status >= 400 && status <= 599)
+        diagnostic.status = status;
+      return diagnostic;
+    } catch {
+      diagnostic.code = diagnosticCode(item['text']);
+    }
+  }
+  return diagnostic;
+}
+
+function requestDiagnostic(diagnostic: WidgetDiagnostic, error: unknown): WidgetDiagnostic {
+  return diagnostic.category === 'HOST_REQUEST_FAILED' && record(error) && error['code'] === -32001
+    ? { ...diagnostic, category: 'HOST_TIMEOUT' }
+    : diagnostic;
 }
 
 function unknownToolOutcome(result: unknown): boolean {

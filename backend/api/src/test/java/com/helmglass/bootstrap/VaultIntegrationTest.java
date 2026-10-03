@@ -487,12 +487,15 @@ class VaultIntegrationTest {
               assertThat(context).doesNotHaveBean("dispatcherServlet");
               assertThat(context).doesNotHaveBean("usageProjectionStartup");
               var enrollment = context.getBean(WorkerEnrollmentService.class);
+              var transactionalRepository = context.getBean(EnrollmentRepository.class);
               var transaction =
                   new TransactionTemplate(context.getBean(PlatformTransactionManager.class));
               transaction.executeWithoutResult(
                   status -> {
                     enrollment.retireStoppedBoot(request.workerId(), request.bootId());
-                    assertThat(repository.find("fixture", request.workerId(), request.bootId()))
+                    assertThat(
+                            transactionalRepository.find(
+                                "fixture", request.workerId(), request.bootId()))
                         .hasValueSatisfying(
                             value -> assertThat(value.state()).isEqualTo("REVOKED"));
                     status.setRollbackOnly();

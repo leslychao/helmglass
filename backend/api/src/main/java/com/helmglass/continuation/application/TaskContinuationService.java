@@ -45,6 +45,8 @@ public class TaskContinuationService {
 
   public record ClaimFenced(UUID taskId, UUID claimId, long oldClaimEpoch, long newEpoch) {}
 
+  public record RuntimeRecovered(UUID userId, UUID taskId, UUID sessionId, long controlEpoch) {}
+
   private final ContinuationRepository continuations;
   private final CommandRepository tasks;
   private final IdentityRepository identities;
@@ -508,6 +510,55 @@ public class TaskContinuationService {
   }
 
   @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
+  public void runtimeRecovered(RuntimeRecovered recovered) {
+    if (!identities.lockState(recovered.userId()).equals("ACTIVE")) {
+      return;
+    }
+    TaskBinding task = continuations.lockTask(recovered.taskId());
+    var current = continuations.current(task.id());
+    if (!task.userId().equals(recovered.userId()) || current.isEmpty()) {
+      return;
+    }
+    Continuation value = current.get();
+    if (!value.state().equals("READY")
+        || value.dispatchId() != null
+        || value.claimId() != null
+        || !recovered.sessionId().equals(value.sessionId())
+        || value.controlEpoch() == null
+        || value.controlEpoch() >= recovered.controlEpoch()
+        || !value.expiresAt().isAfter(Instant.now())
+        || !task.state().equals("WAITING_AGENT")
+        || task.mutationBarrier()
+        || tasks.outstanding(task.id())
+        || task.instructionRevision() != value.instructionRevision()
+        || task.continuationBindingVersion() != value.bindingVersion()) {
+      return;
+    }
+    if (value.destinationGrantId() != null
+        && (value.destinationGrantVersion() == null
+            || value.destinationAccessEpoch() == null
+            || !identities.grantAuthorizationActive(
+                value.userId(),
+                value.destinationGrantId(),
+                value.destinationGrantVersion(),
+                value.destinationAccessEpoch()))) {
+      return;
+    }
+    var binding = browsers.binding(task.id());
+    if (binding.isEmpty() || !binding.get().id().equals(recovered.sessionId())) {
+      return;
+    }
+    var session = binding.get();
+    var lease = controls.lock(session.id());
+    if (lease.epoch() != recovered.controlEpoch() || !readyControl(session, lease)) {
+      return;
+    }
+    changed(
+        continuations.recoveredReady(value.id(), lease.epoch(), session.pageEpoch()),
+        value.dispatchNotBefore());
+  }
+
+  @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
   public void claimFenced(ClaimFenced fence) {
     TaskBinding task = continuations.lockTask(fence.taskId());
     var current = continuations.current(task.id());
@@ -637,15 +688,20 @@ public class TaskContinuationService {
   private void requireReadyControl(Continuation value) {
     var session = browsers.owned(value.userId(), value.sessionId());
     var lease = controls.lock(session.id());
-    if (!session.state().equals("ACTIVE")
-        || !session.privacy().equals("NORMAL")
-        || !session.budgetDeadlineAt().isAfter(Instant.now())
-        || !lease.ownerKind().equals("AGENT")
-        || !lease.state().equals("ACTIVE")
-        || !lease.expiresAt().isAfter(Instant.now())
-        || !Objects.equals(value.controlEpoch(), lease.epoch())) {
+    if (!readyControl(session, lease) || !Objects.equals(value.controlEpoch(), lease.epoch())) {
       throw DomainException.conflict("CONTINUATION_BLOCKED", "Browser control is not ready");
     }
+  }
+
+  private static boolean readyControl(
+      BrowserRepository.Session session, ControlRepository.Lease lease) {
+    Instant now = Instant.now();
+    return session.state().equals("ACTIVE")
+        && session.privacy().equals("NORMAL")
+        && session.budgetDeadlineAt().isAfter(now)
+        && lease.ownerKind().equals("AGENT")
+        && lease.state().equals("ACTIVE")
+        && lease.expiresAt().isAfter(now);
   }
 
   private void changed(Continuation value, Instant notBefore) {

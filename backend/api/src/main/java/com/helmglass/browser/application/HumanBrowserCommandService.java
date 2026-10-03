@@ -414,7 +414,8 @@ public class HumanBrowserCommandService {
       String effect,
       String digest,
       String code) {
-    long version = navigations.finish(navigation.id(), state, effect, digest, code);
+    String failureCode = state.equals("SUCCEEDED") ? null : code;
+    long version = navigations.finish(navigation.id(), state, effect, digest, failureCode);
     if (state.equals("UNKNOWN") && !isSnapshot(navigation)) {
       navigations.interruptTask(session.id());
     }

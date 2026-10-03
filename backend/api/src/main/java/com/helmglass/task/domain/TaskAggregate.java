@@ -138,6 +138,14 @@ public class TaskAggregate {
     }
   }
 
+  /** Finishes an accepted stop after every physical browser binding has been released. */
+  public void completeStop() {
+    requireState(TaskState.STOPPING);
+    state = TaskState.CANCELLED;
+    endedAt = Instant.now();
+    updatedAt = endedAt;
+  }
+
   public void clarify() {
     requirePrepared();
     instructionRevision++;

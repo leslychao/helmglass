@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.helmglass.api.DomainException;
 import com.helmglass.api.MutationContext;
 import com.helmglass.browser.application.BrowserControlService;
+import com.helmglass.browser.application.WorkerRegistryService;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.command.api.CommandContracts;
@@ -30,6 +31,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -38,6 +41,7 @@ import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 @SpringJUnitConfig(WorkflowIntegrationTest.Owners.class)
 @TestPropertySource(
@@ -56,6 +60,7 @@ class ContinuationDeliveryIntegrationTest {
   private final BrowserRepository browsers;
   private final BrowserControlService controls;
   private final ControlRepository leases;
+  private final WorkerRegistryService registry;
 
   @Autowired
   ContinuationDeliveryIntegrationTest(
@@ -71,7 +76,8 @@ class ContinuationDeliveryIntegrationTest {
       PlatformTransactionManager transactions,
       BrowserRepository browsers,
       BrowserControlService controls,
-      ControlRepository leases) {
+      ControlRepository leases,
+      WorkerRegistryService registry) {
     this.owner = owner;
     this.repository = repository;
     this.tasks = tasks;
@@ -85,6 +91,7 @@ class ContinuationDeliveryIntegrationTest {
     this.browsers = browsers;
     this.controls = controls;
     this.leases = leases;
+    this.registry = registry;
   }
 
   private record Fixture(
@@ -890,6 +897,241 @@ class ContinuationDeliveryIntegrationTest {
         .isInstanceOf(DomainException.class)
         .extracting("code")
         .isEqualTo("MCP_GRANT_REQUIRED");
+  }
+
+  @Test
+  void readyContinuationSurvivesConfirmedSameRuntimeRecoveryWithoutChangingDestination() {
+    Fixture fixture = fixture(false);
+    var session = runtime(fixture);
+    finish(fixture, "SUCCEEDED");
+    var before = repository.get(fixture.continuation());
+    ObjectNode receipt = beginRecovery(session);
+    assertThatThrownBy(
+            () ->
+                owner.prepareMessage(
+                    fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context()))
+        .isInstanceOf(DomainException.class)
+        .extracting("code")
+        .isEqualTo("CONTINUATION_BLOCKED");
+    assertThatThrownBy(
+            () ->
+                registry.acknowledgeRecovery(
+                    session.workerId(), UUID.randomUUID(), session.id(), receipt))
+        .isInstanceOf(DomainException.class);
+    assertThat(repository.get(fixture.continuation())).isEqualTo(before);
+
+    transaction.executeWithoutResult(
+        status -> {
+          assertThat(
+                  registry.acknowledgeRecovery(
+                      session.workerId(), session.workerBootId(), session.id(), receipt))
+              .isTrue();
+          status.setRollbackOnly();
+        });
+    assertThat(repository.get(fixture.continuation())).isEqualTo(before);
+    assertThat(browsers.owned(fixture.actor().userId(), session.id()).state())
+        .isEqualTo("RECOVERING");
+
+    assertThat(
+            registry.acknowledgeRecovery(
+                session.workerId(), session.workerBootId(), session.id(), receipt))
+        .isTrue();
+    var recovered = repository.get(fixture.continuation());
+    assertThat(recovered.controlEpoch()).isEqualTo(receipt.path("controlEpoch").asLong());
+    assertThat(recovered.state()).isEqualTo("READY");
+    assertThat(recovered.sessionId()).isEqualTo(before.sessionId());
+    assertThat(recovered.viewScopeId()).isEqualTo(before.viewScopeId());
+    assertThat(recovered.expiresAt()).isEqualTo(before.expiresAt());
+    assertThat(recovered.dispatchNotBefore()).isEqualTo(before.dispatchNotBefore());
+    assertThat(recovered.version()).isEqualTo(before.version() + 1);
+    assertThat(recovered.dispatchId()).isNull();
+    assertThat(
+            registry.acknowledgeRecovery(
+                session.workerId(), session.workerBootId(), session.id(), receipt))
+        .isFalse();
+    assertThat(repository.get(fixture.continuation())).isEqualTo(recovered);
+    assertThat(count("SELECT count(*) FROM task_continuations WHERE task_id=:id", fixture.task()))
+        .isEqualTo(1);
+    assertThat(
+            count(
+                "SELECT count(*) FROM transactional_outbox WHERE aggregate_id=:id"
+                    + " AND aggregate_version="
+                    + recovered.version()
+                    + " AND event_type='tasks'",
+                fixture.continuation()))
+        .isEqualTo(1);
+
+    HostConversationContext otherHost = host();
+    var other =
+        realtime.publishPresentation(
+            fixture.actor(),
+            fixture.task(),
+            null,
+            0,
+            context(),
+            otherHost,
+            Instant.now().plusSeconds(300));
+    UUID otherViewer = UUID.randomUUID();
+    realtime.attachPresentation(
+        fixture.actor(),
+        fixture.task(),
+        other.slot().id(),
+        other.slot().presentationRevision(),
+        otherViewer,
+        otherHost,
+        Instant.now().plusSeconds(300));
+    assertThatThrownBy(
+            () ->
+                owner.prepareMessage(
+                    fixture.actor(),
+                    otherHost,
+                    fixture.task(),
+                    new ContinuationContracts.PrepareMessage(
+                        fixture.continuation(),
+                        other.slot().id(),
+                        other.slot().presentationRevision(),
+                        otherViewer),
+                    context()))
+        .isInstanceOf(DomainException.class)
+        .extracting("code")
+        .isEqualTo("CONTINUATION_DESTINATION_CHANGED");
+    assertThat(
+            owner
+                .prepareMessage(
+                    fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context())
+                .dispatchId())
+        .isNotNull();
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"PAUSED", "UNKNOWN", "EXPIRED", "REVISION", "REVOKED", "PRIVATE"})
+  void recoveryDoesNotRefreshReadinessAcrossChangedGuards(String guard) {
+    Fixture fixture = fixture(false);
+    var session = runtime(fixture);
+    finish(fixture, "SUCCEEDED");
+    ObjectNode receipt = beginRecovery(session);
+    switch (guard) {
+      case "PAUSED" ->
+          jdbc.sql("UPDATE tasks SET state='PAUSED' WHERE id=:id")
+              .param("id", fixture.task())
+              .update();
+      case "UNKNOWN" ->
+          jdbc.sql("UPDATE tasks SET state='INTERRUPTED',mutation_barrier=true WHERE id=:id")
+              .param("id", fixture.task())
+              .update();
+      case "EXPIRED" ->
+          jdbc.sql(
+                  "UPDATE task_continuations SET expires_at=now()-interval '1 second' WHERE id=:id")
+              .param("id", fixture.continuation())
+              .update();
+      case "REVISION" ->
+          jdbc.sql("UPDATE tasks SET instruction_revision=instruction_revision+1 WHERE id=:id")
+              .param("id", fixture.task())
+              .update();
+      case "REVOKED" ->
+          jdbc.sql("UPDATE client_grants SET status='REVOKED' WHERE id=:id")
+              .param("id", fixture.actor().grantId())
+              .update();
+      case "PRIVATE" ->
+          jdbc.sql("UPDATE browser_sessions SET privacy='LOGIN_PRIVATE' WHERE id=:id")
+              .param("id", session.id())
+              .update();
+      default -> throw new IllegalArgumentException(guard);
+    }
+    var before = repository.get(fixture.continuation());
+    assertThat(
+            registry.acknowledgeRecovery(
+                session.workerId(), session.workerBootId(), session.id(), receipt))
+        .isTrue();
+    assertThat(repository.get(fixture.continuation())).isEqualTo(before);
+    assertThatThrownBy(
+            () ->
+                owner.prepareMessage(
+                    fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context()))
+        .isInstanceOf(DomainException.class);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"DISPATCHING", "DELIVERED", "DELIVERY_UNKNOWN"})
+  void recoveryPreservesPriorDispatchAndNeverAuthorizesAnotherSend(String state) {
+    Fixture fixture = fixture(false);
+    var session = runtime(fixture);
+    finish(fixture, "SUCCEEDED");
+    var dispatch =
+        owner.prepareMessage(
+            fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context());
+    if (!state.equals("DISPATCHING")) {
+      owner.recordDelivery(
+          fixture.actor(),
+          fixture.host(),
+          new ContinuationContracts.RecordDelivery(
+              dispatch.dispatchId(),
+              state.equals("DELIVERED") ? DeliveryOutcome.DELIVERED : DeliveryOutcome.UNKNOWN),
+          context());
+    }
+    var before = repository.get(fixture.continuation());
+    ObjectNode receipt = beginRecovery(session);
+    assertThat(
+            registry.acknowledgeRecovery(
+                session.workerId(), session.workerBootId(), session.id(), receipt))
+        .isTrue();
+    assertThat(repository.get(fixture.continuation())).isEqualTo(before);
+    assertThatThrownBy(
+            () ->
+                owner.prepareMessage(
+                    fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context()))
+        .isInstanceOf(DomainException.class);
+  }
+
+  private ObjectNode beginRecovery(BrowserRepository.Session session) {
+    UUID permit = UUID.randomUUID();
+    UUID generation = UUID.randomUUID();
+    jdbc.sql(
+            "UPDATE browser_sessions SET runtime_generation=:generation,ready_at=now() WHERE"
+                + " id=:id")
+        .param("generation", generation)
+        .param("id", session.id())
+        .update();
+    jdbc.sql(
+            "UPDATE browser_allocations SET state='ASSIGNED',start_permit_id=:permit WHERE"
+                + " session_id=:id")
+        .param("permit", permit)
+        .param("id", session.id())
+        .update();
+    var mapper = JsonMapper.builder().build();
+    ObjectNode inventory = mapper.createObjectNode();
+    inventory.put("browserSessionId", session.id().toString());
+    inventory.put("taskId", session.taskId().toString());
+    inventory.put("allocationEpoch", session.allocationEpoch());
+    inventory.put("controlEpoch", leases.get(session.id()).epoch());
+    inventory.put("pageEpoch", session.pageEpoch());
+    inventory.put("privacyEpoch", session.privacyEpoch());
+    inventory.put("runtimeGeneration", generation.toString());
+    inventory.put("pageId", UUID.randomUUID().toString());
+    inventory.put("startPermitId", permit.toString());
+    inventory.put("mode", "QUIESCED");
+    inventory.put("closed", false);
+    inventory.put("unknown", false);
+    inventory.putArray("pendingResults");
+    inventory.put("lastAcceptedInputSequence", 0);
+    inventory.put("lastAppliedInputSequence", 0);
+    ObjectNode registration = mapper.createObjectNode();
+    registration.put("schemaVersion", 1);
+    registration.put("type", "register");
+    registration.put("requestId", UUID.randomUUID().toString());
+    registration.put("workerId", session.workerId().toString());
+    registration.put("bootId", session.workerBootId().toString());
+    registration.put("protocolVersion", 1);
+    registration.put("version", "0.1.0");
+    registration.put("imageDigest", "fixture");
+    registration.put("capacity", 1);
+    registration.put("state", "READY");
+    registration.putArray("inventory").add(inventory);
+    registration.putObject("capabilities");
+    registry.register(session.workerId(), session.workerBootId(), registration);
+    inventory.put("controlEpoch", leases.get(session.id()).epoch());
+    inventory.put("mode", "AGENT");
+    return inventory;
   }
 
   private BrowserRepository.Session runtime(Fixture fixture) {

@@ -106,6 +106,25 @@ class BrowserOpenIntegrationTest {
   }
 
   @Test
+  void stoppingAQueuedBrowserCompletesAfterItsUnallocatedBindingIsReleased() {
+    var actor = actor();
+    UUID task = pausedTask(actor);
+    var open = opens.open(actor, task, input(actor, task, null, false), context());
+    var request = context();
+    var stop = tasks.stop(actor, task, request);
+    assertThat(operations.owned(actor.userId(), stop.operationId()).state()).isEqualTo("PENDING");
+    assertThat(tasks.uncompletedStops()).noneMatch(target -> target.taskId().equals(task));
+    assertThat(opens.advance(open.resource().id())).isEmpty();
+    assertThat(browsers.binding(task)).isEmpty();
+    assertThat(count("browser_allocations", "session_id", open.resource().id())).isZero();
+    assertThat(tasks.uncompletedStops()).anyMatch(target -> target.taskId().equals(task));
+    tasks.confirmStopped(actor.userId(), task);
+    assertThat(tasks.get(actor, task).state()).isEqualTo("CANCELLED");
+    assertThat(operations.owned(actor.userId(), stop.operationId()).state()).isEqualTo("SUCCEEDED");
+    assertThat(tasks.stop(actor, task, request)).isEqualTo(stop);
+  }
+
+  @Test
   void launchRequiresDurableOpenIntentAndReadyReusesSameEmptyContext() {
     var actor = actor();
     UUID task = pausedTask(actor);

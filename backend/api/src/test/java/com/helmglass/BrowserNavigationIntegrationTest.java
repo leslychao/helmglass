@@ -235,6 +235,47 @@ class BrowserNavigationIntegrationTest {
         .hasMessageContaining("already has a receipt");
   }
 
+  @ParameterizedTest
+  @ValueSource(strings = {"SUCCEEDED", "FAILED", "UNKNOWN"})
+  void reloadFailureCodeReflectsDispositionRatherThanReceiptSummary(String status) {
+    var fixture = fixture(false);
+    var receipt =
+        navigation.navigate(
+            fixture.actor(),
+            fixture.session(),
+            new BrowserContracts.Navigation("RELOAD", null, 1L, 1L, 1L, fixture.controller()),
+            context());
+    var command =
+        Objects.requireNonNull(
+            transaction.execute(transactionStatus -> repository.lock(receipt.operationId())));
+    if (!status.equals("FAILED")) {
+      navigation.permit(fixture.worker(), fixture.boot(), request(command));
+    }
+    String effect =
+        switch (status) {
+          case "SUCCEEDED" -> "CONFIRMED";
+          case "FAILED" -> "NOT_STARTED";
+          default -> "UNKNOWN";
+        };
+    String code = status.equals("SUCCEEDED") ? "HANDLER_COMPLETED" : "NAVIGATION_FAILED";
+    var result = result(command, status, effect, Map.of("code", code));
+    navigation.result(fixture.worker(), fixture.boot(), result);
+    var operation = operations.owned(fixture.actor().userId(), receipt.operationId());
+    assertThat(operation.state()).isEqualTo(status.equals("UNKNOWN") ? "NEEDS_ATTENTION" : status);
+    String failureCode = status.equals("SUCCEEDED") ? null : code;
+    assertThat(operation.failureCode()).isEqualTo(failureCode);
+    assertThat(
+            jdbc.sql("SELECT failure_code FROM human_browser_commands WHERE id=:id")
+                .param("id", receipt.operationId())
+                .query(String.class)
+                .optional()
+                .orElse(null))
+        .isEqualTo(failureCode);
+    navigation.result(fixture.worker(), fixture.boot(), result);
+    assertThat(operations.owned(fixture.actor().userId(), receipt.operationId()))
+        .isEqualTo(operation);
+  }
+
   @Test
   void controllerLoginAndEpochAreRequiredAtAdmissionAndImmediatelyBeforePermit() {
     var fixture = fixture(false);
@@ -493,6 +534,7 @@ class BrowserNavigationIntegrationTest {
     navigation.result(fixture.worker(), fixture.boot(), result);
     var operation = operations.owned(fixture.actor().userId(), receipt.operationId());
     assertThat(operation.state()).isEqualTo("SUCCEEDED");
+    assertThat(operation.failureCode()).isNull();
     assertThat(operation.targetType()).isEqualTo("artifact");
     assertThat(operation.targetId()).isEqualTo(ready.artifactId());
     assertThat(
@@ -586,6 +628,8 @@ class BrowserNavigationIntegrationTest {
     navigation.reconcile();
     assertThat(operations.owned(fixture.actor().userId(), receipt.operationId()).state())
         .isEqualTo("SUCCEEDED");
+    assertThat(operations.owned(fixture.actor().userId(), receipt.operationId()).failureCode())
+        .isNull();
     assertThat(operations.owned(fixture.actor().userId(), receipt.operationId()).targetId())
         .isEqualTo(grant.artifactId());
     assertThat(

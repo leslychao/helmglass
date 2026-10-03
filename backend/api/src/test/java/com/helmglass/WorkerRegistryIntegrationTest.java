@@ -19,6 +19,7 @@ import com.helmglass.command.application.CommandExecutionService;
 import com.helmglass.command.infrastructure.repository.CommandRepository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
+import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.task.api.TaskContracts;
 import com.helmglass.task.application.TaskLifecycleService;
 import java.sql.Timestamp;
@@ -31,9 +32,12 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
+import org.springframework.transaction.IllegalTransactionStateException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
@@ -53,6 +57,7 @@ class WorkerRegistryIntegrationTest {
   private final JdbcClient jdbc;
   private final TransactionTemplate transaction;
   private final BrowserCloseOutboxRepository closeOutbox;
+  private final OperationRepository operations;
 
   @Autowired
   WorkerRegistryIntegrationTest(
@@ -67,6 +72,7 @@ class WorkerRegistryIntegrationTest {
       JsonSupport json,
       JdbcClient jdbc,
       BrowserCloseOutboxRepository closeOutbox,
+      OperationRepository operations,
       PlatformTransactionManager transactions) {
     this.registry = registry;
     this.workers = workers;
@@ -79,6 +85,7 @@ class WorkerRegistryIntegrationTest {
     this.json = json;
     this.jdbc = jdbc;
     this.closeOutbox = closeOutbox;
+    this.operations = operations;
     transaction = new TransactionTemplate(transactions);
   }
 
@@ -87,6 +94,185 @@ class WorkerRegistryIntegrationTest {
       JsonNode assignment,
       Map<String, Object> permit,
       UUID generation) {}
+
+  @ParameterizedTest
+  @ValueSource(booleans = {false, true})
+  void stopReceiptCompletesOnlyWithPhysicalClosureAndReplaysStably(boolean operator) {
+    Runtime runtime = allocate();
+    ready(runtime);
+    complete(runtime);
+    if (operator) {
+      lose(runtime);
+    }
+    var dispatch = runtime.dispatch();
+    var actor = taskActor(runtime);
+    var request = context();
+    var receipt = tasks.stop(actor, dispatch.taskId(), request);
+    assertThat(operationState(receipt.operationId())).isEqualTo("PENDING");
+    var proof = operator ? stoppedProof(runtime) : null;
+    transaction.executeWithoutResult(
+        status -> {
+          if (operator) {
+            registry.confirmStopped(proof);
+          } else {
+            registry.closed(
+                dispatch.workerId(),
+                dispatch.workerBootId(),
+                dispatch.sessionId(),
+                inventory(runtime));
+          }
+          assertThat(operationState(receipt.operationId())).isEqualTo("SUCCEEDED");
+          status.setRollbackOnly();
+        });
+    assertThat(workers.claim(dispatch.sessionId()).taskState()).isEqualTo("STOPPING");
+    assertThat(operationState(receipt.operationId())).isEqualTo("PENDING");
+    if (operator) {
+      confirm(proof);
+    } else {
+      registry.closed(
+          dispatch.workerId(), dispatch.workerBootId(), dispatch.sessionId(), inventory(runtime));
+    }
+    assertThat(workers.claim(dispatch.sessionId()).taskState()).isEqualTo("CANCELLED");
+    assertThat(operationState(receipt.operationId())).isEqualTo("SUCCEEDED");
+    assertThat(
+            jdbc.sql("SELECT progress=100 AND finished_at IS NOT NULL FROM operations WHERE id=:id")
+                .param("id", receipt.operationId())
+                .query(Boolean.class)
+                .single())
+        .isTrue();
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM transactional_outbox WHERE aggregate_id=:id AND"
+                        + " event_type='operations'")
+                .param("id", receipt.operationId())
+                .query(Long.class)
+                .single())
+        .isEqualTo(2);
+    var closed = workers.claim(dispatch.sessionId());
+    registry.closed(
+        dispatch.workerId(), dispatch.workerBootId(), dispatch.sessionId(), inventory(runtime));
+    assertThat(tasks.stop(actor, dispatch.taskId(), request)).isEqualTo(receipt);
+    assertThat(workers.claim(dispatch.sessionId())).isEqualTo(closed);
+    assertThat(
+            jdbc.sql("SELECT version FROM operations WHERE id=:id")
+                .param("id", receipt.operationId())
+                .query(Long.class)
+                .single())
+        .isEqualTo(2);
+  }
+
+  private AuthenticatedActor taskActor(Runtime runtime) {
+    return new AuthenticatedActor(
+        runtime.dispatch().userId(),
+        UUID.randomUUID(),
+        null,
+        "helm-web",
+        "Worker test",
+        "worker@example.test",
+        1,
+        Set.of(),
+        false);
+  }
+
+  private String operationState(UUID id) {
+    return jdbc.sql("SELECT state FROM operations WHERE id=:id")
+        .param("id", id)
+        .query(String.class)
+        .single();
+  }
+
+  @Test
+  void stopCompletionKeepsUnknownCommandAndBarrierWithoutReplayingEffect() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    start(runtime);
+    lose(runtime);
+    var dispatch = runtime.dispatch();
+    var receipt = tasks.stop(taskActor(runtime), dispatch.taskId(), context());
+    confirm(stoppedProof(runtime));
+    assertThat(operationState(receipt.operationId())).isEqualTo("SUCCEEDED");
+    assertThat(workers.claim(dispatch.sessionId()).taskState()).isEqualTo("CANCELLED");
+    assertThat(commandState(dispatch.commandId())).isEqualTo("UNKNOWN");
+    assertThat(commandOperationState(dispatch.commandId())).isEqualTo("NEEDS_ATTENTION");
+    assertThat(
+            jdbc.sql("SELECT mutation_barrier FROM tasks WHERE id=:id")
+                .param("id", dispatch.taskId())
+                .query(Boolean.class)
+                .single())
+        .isTrue();
+    assertThat(registry.claimCommandDelivery(dispatch.commandId())).isFalse();
+  }
+
+  @Test
+  void reconcilesOnlyOwnedStoppedReceiptsAfterEveryBindingIsReleased() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    complete(runtime);
+    var dispatch = runtime.dispatch();
+    var actor = taskActor(runtime);
+    var request = context();
+    var receipt = tasks.stop(actor, dispatch.taskId(), request);
+    Runtime foreign = allocate();
+    UUID unrelated =
+        Objects.requireNonNull(
+            transaction.execute(
+                status ->
+                    operations.createSystem(
+                        dispatch.userId(),
+                        "tasks.pause:" + dispatch.taskId(),
+                        "task",
+                        dispatch.taskId())));
+    UUID foreignOperation =
+        Objects.requireNonNull(
+            transaction.execute(
+                status ->
+                    operations.createSystem(
+                        foreign.dispatch().userId(),
+                        "tasks.stop:" + dispatch.taskId(),
+                        "task",
+                        dispatch.taskId())));
+
+    // This is the stored state left by the former closure path: task terminal, receipt pending.
+    jdbc.sql("UPDATE tasks SET state='CANCELLED',version=version+1 WHERE id=:id")
+        .param("id", dispatch.taskId())
+        .update();
+    assertThat(tasks.uncompletedStops())
+        .noneMatch(target -> target.taskId().equals(dispatch.taskId()));
+    tasks.confirmStopped(dispatch.userId(), dispatch.taskId());
+    assertThat(operationState(receipt.operationId())).isEqualTo("PENDING");
+    transaction.executeWithoutResult(status -> workers.closed(dispatch.sessionId()));
+    transaction.executeWithoutResult(
+        status -> {
+          for (int index = 0; index < 101; index++) {
+            operations.createSystem(
+                dispatch.userId(), "tasks.stop:" + dispatch.taskId(), "task", dispatch.taskId());
+          }
+        });
+    assertThat(tasks.uncompletedStops())
+        .anyMatch(target -> target.taskId().equals(dispatch.taskId()));
+    var closed = workers.claim(dispatch.sessionId());
+    tasks.confirmStopped(dispatch.userId(), dispatch.taskId());
+    assertThat(operationState(receipt.operationId())).isEqualTo("SUCCEEDED");
+    assertThat(operationState(unrelated)).isEqualTo("PENDING");
+    assertThat(operationState(foreignOperation)).isEqualTo("PENDING");
+    assertThat(workers.claim(dispatch.sessionId())).isEqualTo(closed);
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM operations WHERE user_id=:user AND target_id=:task"
+                        + " AND kind=:kind AND state='PENDING'")
+                .param("user", dispatch.userId())
+                .param("task", dispatch.taskId())
+                .param("kind", "tasks.stop:" + dispatch.taskId())
+                .query(Long.class)
+                .single())
+        .isEqualTo(2);
+    assertThat(tasks.uncompletedStops())
+        .anyMatch(target -> target.taskId().equals(dispatch.taskId()));
+    tasks.confirmStopped(dispatch.userId(), dispatch.taskId());
+    assertThat(tasks.uncompletedStops())
+        .noneMatch(target -> target.taskId().equals(dispatch.taskId()));
+    assertThat(tasks.stop(actor, dispatch.taskId(), request)).isEqualTo(receipt);
+  }
 
   @Test
   void operatorProofClosesLostRuntimePreservesResultAndReplaysWithoutMutation() {
@@ -282,7 +468,7 @@ class WorkerRegistryIntegrationTest {
     assertThat(workers.claim(runtime.dispatch().sessionId())).isEqualTo(before);
     assertThat(lifecycleEvents(runtime)).isEqualTo(events);
     assertThatThrownBy(() -> registry.confirmStopped(proof))
-        .isInstanceOf(org.springframework.transaction.IllegalTransactionStateException.class);
+        .isInstanceOf(IllegalTransactionStateException.class);
   }
 
   @Test
