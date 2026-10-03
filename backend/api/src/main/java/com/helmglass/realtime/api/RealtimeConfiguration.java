@@ -47,6 +47,7 @@ public class RealtimeConfiguration implements WebSocketConfigurer {
         .addInterceptors(actor).setAllowedOrigins(origin);
     if (!widgetOrigin.isBlank()) {
       registry.addHandler(widgetEvents, "/events/v1/widget/tasks/*").setAllowedOrigins(widgetOrigin);
+      registry.addHandler(viewers, "/stream/v1/widget/signaling/*").setAllowedOrigins(widgetOrigin);
     }
   }
 }

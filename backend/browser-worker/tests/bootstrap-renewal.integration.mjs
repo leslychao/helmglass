@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 
 const execute = promisify(execFile);
 
-test('production bootstrap renews an intermediate-issued identity and retries a lost response',
+test('production bootstrap handles noisy RSA generation, renews identity and retries a lost response',
   { timeout: 135_000 }, async () => {
     if (process.env.HELM_RENEWAL_FIXTURE === '1') {
       await exerciseBootstrap();
@@ -27,7 +27,7 @@ test('production bootstrap renews an intermediate-issued identity and retries a 
         '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
         '--memory', '2g', '--pids-limit', '512', '--shm-size', '512m',
         '--tmpfs', '/tmp:size=128m', '--tmpfs', '/run:size=32m,uid=10001,gid=10001,mode=0700',
-        '--tmpfs', '/runtime:size=128m,uid=10001,gid=10001,mode=0700',
+        '--tmpfs', '/runtime:size=128m,uid=10001,gid=10001,mode=0700,exec',
         '--mount', `type=bind,source=${fileURLToPath(import.meta.url)},target=/app/renewal-fixture.mjs,readonly`,
         '--env', 'HELM_RENEWAL_FIXTURE=1', '--entrypoint', 'node', image, '/app/renewal-fixture.mjs']);
       assert.match(result.stdout, /Worker identity renewal and response-loss recovery passed/);
@@ -42,6 +42,16 @@ async function exerciseBootstrap() {
   const { WebSocketServer } = await import('ws');
   const directory = '/runtime/renewal-fixture';
   await mkdir(directory, { mode: 0o700 });
+  const bin = `${directory}/bin`;
+  await mkdir(bin, { mode: 0o700 });
+  // Deterministically reproduce a long OpenSSL key-generation progress stream in the worker.
+  // Fixture setup uses the real executable; quiet genpkey and CSR signing remain unchanged.
+  await writeFile(`${bin}/openssl`, `#!/bin/sh
+case " $* " in
+  *" -newkey "*) head -c 8192 /dev/zero | tr '\\000' '+' >&2 ;;
+esac
+exec /usr/bin/openssl "$@"
+`, { mode: 0o700 });
   const openssl = args => execute('openssl', args, { cwd: directory, maxBuffer: 16_384 });
   await openssl(['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
     '-keyout', 'root.key', '-out', 'root.pem', '-subj', '/CN=Fixture root',
@@ -147,7 +157,7 @@ async function exerciseBootstrap() {
   server.listen(8444, '127.0.0.1');
   await once(server, 'listening');
   const worker = spawn(process.execPath, ['/app/dist/src/bootstrap.js'], { detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env,
+    stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, PATH: `${bin}:${process.env.PATH}`,
       BOOTSTRAP_FILE: `${directory}/bootstrap.json`, WORKER_CONTROL_URL: 'wss://localhost:8444/internal/worker/control',
       EGRESS_PROXY_URL: 'http://127.0.0.1:3128', WORKER_IMAGE_DIGEST: 'renewal-fixture' } });
   let diagnostic = '';
@@ -164,6 +174,7 @@ async function exerciseBootstrap() {
     assert.equal(issuanceCount, 2, 'Response-loss retry issued another certificate');
     assert.equal(renewalRequests.length, 2);
     const saved = new X509Certificate(await readFile('/runtime/mtls/cert.pem'));
+    assert.equal(saved.publicKey.asymmetricKeyDetails?.modulusLength, 3072);
     assert.equal(saved.fingerprint256, new X509Certificate(issued.certificatePem).fingerprint256);
     const health = await fetch('http://127.0.0.1:8081/health');
     assert.equal(health.status, 200);

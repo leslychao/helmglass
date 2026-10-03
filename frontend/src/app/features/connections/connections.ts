@@ -164,7 +164,6 @@ export class Connections {
   readonly form = this.fb.nonNullable.group({ displayName: [''], startUrl: [''] });
   readonly columns: Column[] = [
     { key: 'name', title: 'Подключение', sort: 'displayName', width: '28%', kind: 'site' },
-    { key: 'account', title: 'Аккаунт', sort: 'accountLabel' },
     { key: 'state', title: 'Состояние', sort: 'status', kind: 'status' },
     { key: 'lastLogin', title: 'Последний вход', sort: 'lastSuccessfulLoginAt' },
   ];
@@ -176,7 +175,6 @@ export class Connections {
         metadata: { name: connection.host },
         values: {
           name: connection.displayName,
-          account: connection.accountLabel || 'Не подтверждён',
           state: connection.status,
           lastLogin: connection.lastSuccessfulLoginAt
             ? new Date(connection.lastSuccessfulLoginAt).toLocaleString('ru-RU')
@@ -245,7 +243,6 @@ export class Connections {
       <section class="panel connection-summary">
         <div class="connection-symbol"><hg-icon name="globe" /></div>
         <div>
-          <h2>{{ connection.accountLabel || 'Аккаунт ещё не подтверждён' }}</h2>
           <p><hg-status [value]="connection.status" /></p>
         </div>
         <div class="flex">

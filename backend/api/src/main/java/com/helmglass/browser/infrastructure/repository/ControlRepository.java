@@ -32,7 +32,10 @@ public class ControlRepository {
       UUID loginId,
       UUID inputChannelId,
       String returnIntent,
-      String priorTaskState) {}
+      String priorTaskState,
+      UUID continuationClaimId,
+      UUID claimFenceId,
+      Long claimFenceEpoch) {}
 
   public Lease lock(UUID sessionId) {
     return jdbc.sql("SELECT * FROM browser_control_leases WHERE session_id=:id FOR UPDATE")
@@ -64,7 +67,8 @@ public class ControlRepository {
     jdbc.sql(
             """
             UPDATE browser_control_leases SET epoch=epoch+1,state='TRANSFERRING',desired_owner=:owner,
-            controller_instance_id=:controller,input_channel_id=NULL,continuation_claim_id=NULL,privacy_epoch=privacy_epoch+1,operation_id=:operation,
+            controller_instance_id=:controller,input_channel_id=NULL,continuation_claim_id=NULL,
+            claim_fence_id=NULL,claim_fence_epoch=NULL,privacy_epoch=privacy_epoch+1,operation_id=:operation,
             expires_at=CASE WHEN :owner='AGENT' THEN
             (SELECT budget_deadline_at FROM browser_sessions WHERE id=:id)
             ELSE now()+interval '15 seconds' END,version=version+1,changed_at=now() WHERE session_id=:id
@@ -318,6 +322,27 @@ public class ControlRepository {
         .query(Long.class)
         .optional()
         .orElseThrow(() -> DomainException.conflict("CONTROL_CONFLICT", "Agent control changed"));
+  }
+
+  public void fenceClaim(Lease lease, UUID claimId, UUID operationId, Instant expiry) {
+    int changed = jdbc.sql("""
+        UPDATE browser_control_leases SET epoch=epoch+1,continuation_claim_id=NULL,
+          claim_fence_id=:claim,claim_fence_epoch=:epoch,state='TRANSFERRING',desired_owner='AGENT',
+          controller_instance_id=NULL,input_channel_id=NULL,login_id=NULL,
+          operation_id=:operation,expires_at=:expiry,version=version+1
+        WHERE session_id=:id AND epoch=:epoch AND continuation_claim_id=:claim
+          AND owner_kind='AGENT' AND state IN ('ACTIVE','TRANSFERRING')
+        """)
+        .param("id", lease.sessionId()).param("epoch", lease.epoch()).param("claim", claimId)
+        .param("operation", operationId).param("expiry", Timestamp.from(expiry)).update();
+    if (changed != 1) {
+      throw DomainException.conflict("CONTROL_CONFLICT", "Expired claim control changed");
+    }
+  }
+
+  public void clearClaimFence(UUID sessionId) {
+    jdbc.sql("UPDATE browser_control_leases SET claim_fence_id=NULL,claim_fence_epoch=NULL WHERE session_id=:id")
+        .param("id", sessionId).update();
   }
 
   public void closeRequested(UUID id) {

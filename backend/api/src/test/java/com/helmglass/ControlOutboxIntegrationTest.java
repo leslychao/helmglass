@@ -173,7 +173,7 @@ class ControlOutboxIntegrationTest {
         .isInstanceOf(IllegalStateException.class);
     assertThat(outbox.published(delivery.id())).isFalse();
     assertThat(leases.get(fixture.session()).state()).isEqualTo("TRANSFERRING");
-    assertThat(operations.owned(fixture.actor().userId(), operation).state()).isEqualTo("RUNNING");
+    assertThat(operations.owned(fixture.actor().userId(), operation).state()).isEqualTo("PENDING");
     reset(sessionOperations);
     Instant grantedExpiry = leases.get(fixture.session()).expiresAt();
     dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement);

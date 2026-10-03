@@ -70,7 +70,7 @@ class TaskLifecycleIntegrationTest {
   }
 
   @Configuration
-  @EnableTransactionManagement
+  @EnableTransactionManagement(proxyTargetClass = true)
   @EnableJpaRepositories(basePackageClasses = JpaTaskRepository.class)
   @Import({
     TaskLifecycleService.class,

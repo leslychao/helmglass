@@ -44,6 +44,7 @@ public class ContinuationRepository {
       String claimClientId,
       UUID claimGrantId,
       Long claimControlEpoch,
+      Instant claimExpiresAt,
       Instant expiresAt,
       long version,
       Instant dispatchNotBefore,
@@ -275,7 +276,7 @@ public class ContinuationRepository {
     return jdbc.sql(
             """
             UPDATE task_continuations SET state='CLAIMED',claim_id=:claim,claim_client_id=:client,
-              claim_grant_id=:grant,claim_control_epoch=:epoch,claimed_at=now(),expires_at=:expiry,
+              claim_grant_id=:grant,claim_control_epoch=:epoch,claimed_at=now(),claim_expires_at=:expiry,
               version=version+1 WHERE id=:id RETURNING *
             """)
         .param("id", id)
@@ -299,6 +300,14 @@ public class ContinuationRepository {
         .single();
   }
 
+  public Continuation claimRecovered(UUID id, long epoch) {
+    return jdbc.sql("""
+        UPDATE task_continuations SET state='READY',block_reason=NULL,control_epoch=:epoch,
+          claim_id=NULL,claim_client_id=NULL,claim_grant_id=NULL,claim_control_epoch=NULL,
+          claim_expires_at=NULL,dispatch_not_before=now(),version=version+1 WHERE id=:id RETURNING *
+        """).param("id", id).param("epoch", epoch).query(Continuation.class).single();
+  }
+
   public List<Continuation> cancel(UUID taskId) {
     return jdbc.sql(
             "UPDATE task_continuations SET state='CANCELLED',version=version+1 WHERE task_id=:task"
@@ -314,7 +323,7 @@ public class ContinuationRepository {
     return jdbc.sql(
             "SELECT * FROM task_continuations WHERE state IN ("
                 + CURRENT
-                + ") AND block_reason IS DISTINCT FROM 'CLAIM_EXPIRED' AND (expires_at<=now() OR"
+                + ") AND (expires_at<=now() OR (state='CLAIMED' AND claim_expires_at<=now()) OR"
                 + " (state='DISPATCHING' AND dispatch_expires_at<=now())) ORDER BY expires_at,id"
                 + " LIMIT 50")
         .query(Continuation.class)

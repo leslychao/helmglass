@@ -2,6 +2,7 @@ package com.helmglass.realtime.infrastructure.repository;
 
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.realtime.domain.ChatPresentation;
+import com.helmglass.realtime.domain.BrowserMediaBinding;
 import com.helmglass.realtime.domain.ViewerFence;
 import java.sql.Timestamp;
 import com.helmglass.realtime.application.ChannelTicketService.TicketBinding;
@@ -191,7 +192,8 @@ public class ChatPresentationRepository {
     jdbc.sql(
             """
         UPDATE chat_view_slots SET active_viewer_instance_id=NULL,viewer_lease_expires_at=NULL,
-          events_connected=false,
+          events_connected=false,media_connected=false,media_ticket_expires_at=NULL,
+          control_epoch=0,page_epoch=0,privacy_epoch=0,media_generation=0,
               viewer_authorization_expires_at=NULL,browser_session_id=NULL,worker_id=NULL,
               worker_boot_id=NULL,allocation_epoch=0,version=version+1,updated_at=now(),
               transfer_state=CASE WHEN EXISTS(SELECT 1 FROM transactional_outbox o
@@ -268,6 +270,41 @@ public class ChatPresentationRepository {
             """)
         .query(ChatPresentation.class)
         .list();
+  }
+
+  public ChatPresentation reserveMedia(ChatPresentation slot, BrowserMediaBinding media, Instant expiry) {
+    return jdbc.sql("""
+        UPDATE chat_view_slots SET browser_session_id=:session,worker_id=:worker,
+          worker_boot_id=:boot,allocation_epoch=:allocation,control_epoch=:control,page_epoch=:page,
+          privacy_epoch=:privacy,media_generation=:media,media_ticket_expires_at=:expiry,
+          version=version+1,updated_at=now()
+        WHERE id=:id AND active_viewer_instance_id=:viewer AND view_generation=:generation
+          AND transfer_state='ACTIVE' AND retired_at IS NULL RETURNING *
+        """).param("session", media.sessionId()).param("worker", media.workerId())
+        .param("boot", media.workerBootId()).param("allocation", media.allocationEpoch())
+        .param("control", media.controlEpoch()).param("page", media.pageEpoch())
+        .param("privacy", media.privacyEpoch()).param("media", media.mediaGeneration())
+        .param("expiry", Timestamp.from(expiry)).param("id", slot.id())
+        .param("viewer", slot.activeViewerInstanceId()).param("generation", slot.viewGeneration())
+        .query(ChatPresentation.class).single();
+  }
+
+  public boolean connectMedia(TicketBinding binding) {
+    return jdbc.sql("""
+        UPDATE chat_view_slots SET media_connected=true WHERE id=:scope
+          AND presentation_revision=:revision AND active_viewer_instance_id=:viewer
+          AND view_generation=:generation AND NOT media_connected AND retired_at IS NULL
+          AND transfer_state='ACTIVE' AND browser_session_id=:session
+          AND viewer_lease_expires_at>now() AND viewer_authorization_expires_at>now()
+        """).param("scope", binding.viewScopeId()).param("revision", binding.presentationRevision())
+        .param("viewer", binding.viewerInstanceId()).param("generation", binding.viewGeneration())
+        .param("session", binding.sessionId()).update() == 1;
+  }
+
+  @Transactional(propagation = Propagation.MANDATORY)
+  public Optional<ChatPresentation> lock(UUID id) {
+    return jdbc.sql("SELECT * FROM chat_view_slots WHERE id=:id FOR UPDATE")
+        .param("id", id).query(ChatPresentation.class).optional();
   }
 
   @Transactional

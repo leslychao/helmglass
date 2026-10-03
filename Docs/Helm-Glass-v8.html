@@ -517,9 +517,13 @@ function demoDataset6(request){
     return {rows:all.slice(0,50),fields:{id:t=>t.id,state:t=>t.state==='STOPPING'?'Останавливается':statusInfo({status:t.state,outcome:t.outcome,request:t.waitCode==='USER_LOGIN'?{type:'LOGIN'}:null})[0],browser:t=>t.node,reason:t=>ERROR_REASONS_A[t.errorCode]||WAIT_REASONS_A[t.waitCode]||null,created:t=>date(t.created)},id:t=>t.id,meta:{capped:all.length>50,scope:'recent-50'}};
   }
   if(resource==='userDays')return {rows:measuredUsageA(getPersonA(c.userId)).rows,fields:{date:r=>r.date,commands:r=>r.commands,browser:r=>r.browserSec},id:r=>r.date};
-  if(resource==='nodes')return {rows:adminH().nodes.filter(n=>matches([n.id])).map(n=>({...n,busy:n.state==='offline'?null:adminTasksA().filter(t=>t.browser&&t.node===n.id).length,lastBusy:adminTasksA().filter(t=>t.browser&&t.node===n.id).length,admission:n.state==='ready'&&adminH().accepting})),fields:{node:n=>n.id,state:n=>n.state==='ready'?'Принимает задачи':n.state==='draining'?'Выводится из работы':'Недоступен',busy:n=>n.busy,admission:n=>n.admission},id:n=>n.id};
-  if(resource==='sessions')return {rows:adminTasksA().filter(t=>t.browser||t.state==='QUEUED').map(t=>({...t,user:clone(getPersonA(t.userId))})),fields:{user:t=>t.user.name,id:t=>t.id,state:t=>t.state==='STOPPING'?'Останавливается':statusInfo({status:t.state,outcome:t.outcome,request:t.waitCode==='USER_LOGIN'?{type:'LOGIN'}:null})[0],browser:t=>t.node||WAIT_REASONS_A[t.waitCode]},id:t=>t.id};
-  if(resource==='audit')return {rows:peopleA().audit.filter(e=>(!c.userId||e.targetId===c.userId)&&(!f.action||e.action===f.action)&&matches([e.reason,e.actorName,e.actorId,e.targetId,ADMIN_ACTIONS_A[e.action]])).map(e=>({...e,targetName:getPersonA(e.targetId)?.name||(e.targetId==='platform'?'Платформа':e.targetId),targetIsUser:!!getPersonA(e.targetId),operationLabel:operationStatusA(e.operationId)})),fields:{time:e=>date(e.time),actor:e=>e.actorName,target:e=>e.targetName,action:e=>(ADMIN_ACTIONS_A[e.action]||e.action)+' '+e.reason},id:e=>e.id};
+  if(resource==='nodes'){
+    const counts=new Map();
+    for(const task of adminTasksA())if(task.browser)counts.set(task.node,(counts.get(task.node)||0)+1);
+    return {rows:adminH().nodes.filter(n=>matches([n.id,nodeNameA(n.id)])).map(n=>({...n,busy:n.state==='offline'?null:(counts.get(n.id)||0),lastBusy:counts.get(n.id)||0,admission:n.state==='ready'&&adminH().accepting})),fields:{node:n=>n.id,state:n=>n.state==='ready'?'В сети':n.state==='draining'?'Завершает работу':'Нет связи',busy:n=>n.busy,admission:n=>n.admission?Math.max(0,n.slots-n.busy):0},id:n=>n.id};
+  }
+  if(resource==='sessions')return {rows:adminTasksA().filter(t=>c.scope==='queue'?t.state==='QUEUED':t.browser).map(t=>({...t,browserId:t.browser?'session-'+t.id.replace(/^run-/,''):null,user:clone(getPersonA(t.userId))})),fields:{user:t=>t.user.name,id:t=>t.id,browserId:t=>t.browserId,state:t=>t.state==='STOPPING'?'Останавливается':statusInfo({status:t.state,outcome:t.outcome,request:t.waitCode==='USER_LOGIN'?{type:'LOGIN'}:null})[0],browser:t=>t.node||WAIT_REASONS_A[t.waitCode]},id:t=>t.id};
+  if(resource==='audit')return {rows:peopleA().audit.filter(e=>(!c.userId||e.targetId===c.userId)&&(!f.action||e.action===f.action)&&matches([e.reason,e.actorName,e.actorId,e.targetId,auditTargetA(e.targetId),ADMIN_ACTIONS_A[e.action]])).map(e=>({...e,targetName:auditTargetA(e.targetId),targetIsUser:!!getPersonA(e.targetId),operationLabel:operationStatusA(e.operationId)})),fields:{time:e=>date(e.time),actor:e=>e.actorName,target:e=>e.targetName,action:e=>ADMIN_ACTIONS_A[e.action]||e.action,reason:e=>e.reason},id:e=>e.id};
   throw Error('Ресурс таблицы не поддерживается.');
 }
 async function demoPage6(spec,request,signal){
@@ -894,7 +898,7 @@ function cancelManual(){const ctx=manualContext();if(!ctx)return;const m=manualS
 const connectionStatus=c=>({NEEDS_LOGIN:['Нужен вход','warning','lock'],SAVED:['Вход сохранён','success','check'],CHECKING:['Проверяется','blue','clock'],UNAVAILABLE:['Недоступно','error','alert']}[c.status]||['Нужен вход','warning','lock']);
 
 
-function renderConnection(id){const c=S.connections.find(x=>x.id===id);if(!c)return renderSystem('/not-found');return crumbs(['Подключения','/connections'],c.name)+heading(c.name,'Сохранённый доступ к одному внешнему аккаунту.',link('Открыть браузер','/manual?connection='+id,'lock','primary')+connectionMenuButton(c))+`<div class="two-col"><section class="panel"><div class="panel-head"><h2>Подключение</h2>${ib('edit','Изменить подключение','edit-site',`data-id="${esc(id)}"`)}</div><div class="panel-body">${pair('Состояние',badge(...connectionStatus(c)))}${pair('Начальная страница',esc(c.startUrl))}${pair('Аккаунт',esc(c.account||'Не указан'))}${pair('Последний сохранённый вход',c.lastLogin?dateTime(c.lastLogin):'Ещё не выполнен')}<p class="small muted mt">Состояние входа хранится отдельно от истории. Сайт может запросить авторизацию повторно.</p></div><div class="panel-foot"><span class="spacer"></span>${btn('Удалить','delete-site','trash','small quiet',`data-id="${esc(id)}"`)}</div></section><section class="panel"><div class="panel-head"><h2>Последние события</h2></div><div class="panel-body">${(c.history||[]).map(e=>`<p class="small muted" style="padding:9px 0;border-bottom:1px solid var(--line)">${esc(e)}</p>`).join('')||'<p class="small muted">Событий пока нет.</p>'}</div></section></div>`;}
+function renderConnection(id){const c=S.connections.find(x=>x.id===id);if(!c)return renderSystem('/not-found');return crumbs(['Подключения','/connections'],c.name)+heading(c.name,'Сохранённый доступ к одному внешнему аккаунту.',link('Открыть браузер','/manual?connection='+id,'lock','primary')+connectionMenuButton(c))+`<div class="two-col"><section class="panel"><div class="panel-head"><h2>Подключение</h2>${ib('edit','Изменить подключение','edit-site',`data-id="${esc(id)}"`)}</div><div class="panel-body">${pair('Состояние',badge(...connectionStatus(c)))}${pair('Начальная страница',esc(c.startUrl))}${pair('Последний сохранённый вход',c.lastLogin?dateTime(c.lastLogin):'Ещё не выполнен')}<p class="small muted mt">Состояние входа хранится отдельно от истории. Сайт может запросить авторизацию повторно.</p></div><div class="panel-foot"><span class="spacer"></span>${btn('Удалить','delete-site','trash','small quiet',`data-id="${esc(id)}"`)}</div></section><section class="panel"><div class="panel-head"><h2>Последние события</h2></div><div class="panel-body">${(c.history||[]).map(e=>`<p class="small muted" style="padding:9px 0;border-bottom:1px solid var(--line)">${esc(e)}</p>`).join('')||'<p class="small muted">Событий пока нет.</p>'}</div></section></div>`;}
 function openSiteForm(id=null,inline=false){captureDraft();const c=S.connections.find(x=>x.id===id);
  if(c){
   closePopover(false);
@@ -982,7 +986,7 @@ const SCREENS=[
  ['Потеря канала входа','Агент не получает ввод','/manual?run=102&scene=lost','alert']
  ]],
  ['Подключения и аккаунт',[
- ['Подключения сайтов','Аккаунт, полный адрес и состояние входа','/connections','plug'],
+ ['Подключения сайтов','Название, полный адрес и состояние входа','/connections','plug'],
  ['Карточка подключения','Повторный вход, проверка и удаление','/connection/supplier','plug'],
  ['Первое подключение','Пустое состояние','/connections?case=empty','plus'],
  ['Загрузка подключений','Локальное ожидание','/connections?case=loading','clock'],
@@ -1214,7 +1218,7 @@ const renderResultBaseV=renderResult;
 
 
 
-renderConnection=function(id){const c=S.connections.find(x=>x.id===id);if(!c)return renderSystem('/not-found');return heading(c.name,'Сохранённое состояние входа для одного аккаунта.',connectionBrowserActionH(c)+ib('more','Действия подключения','connection-menu',`data-id="${esc(id)}" aria-controls="header-pop" aria-expanded="false"`))+`<div class="two-col"><section class="panel"><div class="panel-head"><h2 class="flex">${markV(siteV(c.startUrl).mark)}Подключение</h2>${connectionBadgeV(c)}</div><div class="panel-body">${pair('Сайт',esc(siteV(c.startUrl).domain))}${pair('Аккаунт',esc(c.account||'Определится при входе'))}${pair('Последний сохранённый вход',c.lastLogin?dateTime(c.lastLogin):'Ещё не выполнен')}${pair('Задач с подключением',String(S.runs.filter(t=>t.connections.includes(c.id)).length))}<p class="help-text-v mt">История задачи не содержит паролей или кодов. Повторный вход выполняется непосредственно в браузере сайта.</p></div></section><section class="panel"><div class="panel-head"><h2>Последние события</h2></div><div class="panel-body"><div class="timeline-v">${(c.history||[]).map((h,i)=>`<div class="timeline-item-v"><span class="timeline-dot-v"></span><div><h3>${esc(h)}</h3><p>${i?'История подключения':'Последнее известное состояние'}</p></div></div>`).join('')}</div></div></section></div>`;};
+renderConnection=function(id){const c=S.connections.find(x=>x.id===id);if(!c)return renderSystem('/not-found');return heading(c.name,'Сохранённое состояние входа для одного аккаунта.',connectionBrowserActionH(c)+ib('more','Действия подключения','connection-menu',`data-id="${esc(id)}" aria-controls="header-pop" aria-expanded="false"`))+`<div class="two-col"><section class="panel"><div class="panel-head"><h2 class="flex">${markV(siteV(c.startUrl).mark)}Подключение</h2>${connectionBadgeV(c)}</div><div class="panel-body">${pair('Сайт',esc(siteV(c.startUrl).domain))}${pair('Последний сохранённый вход',c.lastLogin?dateTime(c.lastLogin):'Ещё не выполнен')}${pair('Задач с подключением',String(S.runs.filter(t=>t.connections.includes(c.id)).length))}<p class="help-text-v mt">История задачи не содержит паролей или кодов. Повторный вход выполняется непосредственно в браузере сайта.</p></div></section><section class="panel"><div class="panel-head"><h2>Последние события</h2></div><div class="panel-body"><div class="timeline-v">${(c.history||[]).map((h,i)=>`<div class="timeline-item-v"><span class="timeline-dot-v"></span><div><h3>${esc(h)}</h3><p>${i?'История подключения':'Последнее известное состояние'}</p></div></div>`).join('')}</div></div></section></div>`;};
 function loginCardV(site,m,key){const phase=V.login[key]||'ready';if(phase==='verified')return `<div class="login-card-v"><span class="check-circle-v">${icon('check')}</span><h3>Вход подтверждён</h3><p class="help-text-v">Демонстрационный аккаунт открыт. Завершите вход; профиль можно сохранить для будущих задач.</p></div>`;if(phase==='otp')return `<div class="login-card-v"><h3>Введите код</h3><p class="help-text-v" style="margin-bottom:20px">Второй фактор показан как отдельный шаг входа. Реальный код не нужен.</p><div class="field"><label>Код подтверждения</label><input value="• • • • • •" aria-label="Иллюстрация кода подтверждения" disabled></div>${btn('Подтвердить демовход','v-login-verify','','primary',`data-key="${esc(key)}"`)}<p class="terms-v">Это демонстрация. Сообщения и коды не отправляются.</p></div>`;return `<div class="login-card-v"><h3>Вход в ${esc(site.name)}</h3><div class="login-tabs-v"><span class="active">Телефон</span><span>Почта</span><span>QR-код</span></div><div class="field"><label>Номер телефона</label><input value="+7 (•••) •••-••-••" disabled aria-label="Иллюстрация номера телефона"></div>${btn('Продолжить демовход','v-login-otp','','primary',`data-key="${esc(key)}"`)}<div class="divider-v">или войдите через</div><div class="social-login-v" aria-hidden="true"><span style="color:#1685ff">VK</span><span style="color:#4285f4">G</span><span>●</span><span style="color:#ed383d">Я</span></div><p class="terms-v">Иллюстрация страницы сайта. Не вводите настоящие пароли и коды в HTML-макете.</p></div>`;}
 renderManual=function(){const ctx=manualContext();if(!ctx)return renderSystem('/not-found');const {t,connection:c,key}=ctx;const m=manualState(ctx),site=siteV(c.startUrl);const entry=manualEntryH(ctx,m);if(entry)return entry;if(t&&isFinal(t))return heading('Вход на сайт')+notice('Задача завершена','Вход для этой задачи больше не требуется.','neutral',link('Открыть задачу','/tasks/'+t.id,'left'));const phase=V.login[key]||'ready',closed=m.phase==='closed',blocked=['busy','expired','lost','denied','wrong-account','unsupported','cancelled'].includes(m.phase);const err={busy:'Браузер занят другой сессией',expired:'Время ручного входа истекло',lost:'Связь с браузером потеряна',denied:'Нет доступа к разделу', 'wrong-account':'Открыт другой аккаунт',unsupported:'Этот способ входа недоступен',cancelled:'Вход отменён'}[m.phase];const header=heading('Вход на сайт',t?'Для продолжения задачи требуется ваш вход в аккаунт.':'Войдите в аккаунт, чтобы сохранить подключение для следующих задач.',`<span class="badge ${closed?'success':'warning'}"><i class="status-point"></i>${closed?(m.saved===false?'Без сохранения':'Вход сохранён'):'Ожидает пользователя'}</span>`);return `${header}${closed?notice('Профиль сохранён',t?'Вход завершён. Эта же задача ожидает продолжения из ChatGPT.':'Сохранённый вход можно использовать в задачах. Сайт вправе запросить авторизацию повторно.','success'):notice(t?'Задача приостановлена':'Вход выполняется вами','Пройдите вход в этом браузере. Пароль и код не нужно передавать агенту. Это локальный макет: используйте только демонстрационные кнопки.')}<div class="login-layout-v"><section class="browser-v"><div class="panel-head" style="padding:16px 18px"><div class="service-cell">${markV(site.mark)}<span><strong style="font-size:12px">${esc(t?runTitle(t):c.name)}</strong><small>${esc(site.domain)}</small></span></div>${ib('info','О защищённом входе','v-login-help')}</div><div class="browser-toolbar-v"><div class="browser-nav-v">${ib('left','Назад на сайте','v-login-site',closed?'disabled':'')}${ib('chevron','Вперёд на сайте','v-login-site','disabled')}</div><label class="browser-url-v">${icon('globe')}<input value="${esc(c.startUrl.replace(/\/$/,'')+'/login')}" readonly aria-label="Адрес страницы входа"></label>${ib('more','Сведения о сессии входа','v-login-help')}</div><div class="login-scene-v"><div class="login-site-logo-v" style="${site.mark==='hh'?'color:#e32643':site.mark==='wb'?'color:#a328cc':''}">${esc(site.mark==='ozon'?'OZON':site.name)}</div>${closed?`<div class="login-card-v"><span class="check-circle-v">${icon('check')}</span><h3>Профиль сохранён</h3><p class="help-text-v">${t?'Следующий шаг выполняется из ChatGPT.':'Подключение готово к использованию.'}</p></div>`:blocked?`<div class="login-card-v">${icon('alert')}<h3 style="font-size:18px">${err}</h3><p class="help-text-v" style="margin-bottom:18px">Состояние задачи сохранено. Повтор входа не повторяет предыдущие действия сайта.</p>${btn('Вернуться ко входу','v-login-restart','','primary',`data-key="${esc(key)}"`)}</div>`:loginCardV(site,m,key)}</div></section><aside class="panel login-context-v"><h2>Как войти на сайт</h2><div class="login-step-v"><span class="step-num-v">1</span><div><h3>Войдите в аккаунт</h3><p>Используйте тот аккаунт, с которым должна работать задача.</p></div></div><div class="login-step-v"><span class="step-num-v">2</span><div><h3>Подтвердите вход</h3><p>При необходимости пройдите второй фактор непосредственно на сайте.</p></div></div><div class="login-step-v"><span class="step-num-v">3</span><div><h3>Завершите вход</h3><p>Продолжите ту же задачу. При необходимости сохраните профиль для будущих запусков.</p></div></div><div class="privacy-box-v">${icon('lock')}<div><strong>Отдельный режим входа</strong>В рабочем продукте агент и обычный просмотр должны быть отключены на время ввода секретов. В макете настоящая авторизация не подключена.</div></div></aside></div><div class="login-action-bar-v">${closed?link('К подключениям','/connections','left'):btn('Отменить','v-login-cancel','','',`data-key="${esc(key)}"`)}<span>${closed?'Демонстрационный профиль сохранён':phase==='verified'?'Демонстрационный вход подтверждён':'Ввод секретов отключён в макете'}</span>${closed?(t?link('Продолжить в задаче','/tasks/'+t.id,'play','primary'):link('Открыть подключение','/connection/'+c.id,'chevron','primary')):btn('Сохранить и продолжить','v-login-save','play','primary',`data-key="${esc(key)}" ${phase!=='verified'||blocked?'disabled':''}`)}</div>`;};
 
@@ -1486,7 +1490,7 @@ function connectionRowsH(ignoreExact=false){
     if(f.state.length&&!f.state.includes(c.status))return false;
     if(f.site.length&&!f.site.includes(domainH(c.startUrl)))return false;
     if(f.exact&&!ignoreExact)return c.id===f.exact;
-    return !q||[c.name,c.account,c.startUrl].join(' ').toLocaleLowerCase('ru').includes(q);
+    return !q||[c.name,c.startUrl].join(' ').toLocaleLowerCase('ru').includes(q);
   });
 }
 
@@ -1543,14 +1547,13 @@ function setGuideOpenH(id,open){
 function renderConnections(){
   const requested=route.query.get('guide');if(CLIENT_GUIDES_H.some(g=>g.id===requested))H.guideOpen[requested]=true;
   return heading('Подключения','',createActionH('Добавить подключение','add-site'))+
-    `<section class="panel h-list"><div class="h-toolbar"><div class="h-filters-left"><label class="search h-search h-search-wide">${icon('search')}<input id="h-site-search" type="search" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="h-completions" aria-label="Поиск подключений" placeholder="Название, аккаунт или сайт" value="${esc(H.filters.connections.query)}" autocomplete="off"></label>${filterControlsH('connections')}</div></div>${filterFeedbackH('connections')}<div id="site-list"></div></section><div class="h-client-guides" id="client-guides">${CLIENT_GUIDES_H.map(renderGuideH).join('')}</div>`;
+    `<section class="panel h-list"><div class="h-toolbar"><div class="h-filters-left"><label class="search h-search h-search-wide">${icon('search')}<input id="h-site-search" type="search" role="combobox" aria-expanded="false" aria-autocomplete="list" aria-haspopup="listbox" aria-controls="h-completions" aria-label="Поиск подключений" placeholder="Название или сайт" value="${esc(H.filters.connections.query)}" autocomplete="off"></label>${filterControlsH('connections')}</div></div>${filterFeedbackH('connections')}<div id="site-list"></div></section><div class="h-client-guides" id="client-guides">${CLIENT_GUIDES_H.map(renderGuideH).join('')}</div>`;
 }
 function refreshConnectionRows(){
   const root=$('#site-list');if(!root)return;refreshFilterUIH('connections');
   syncListFilters8(H.filters.connections);
   root.innerHTML=gridMount6('connections',{resource:'connections',label:'Подключения',filters:H.filters.connections,defaultSort:{field:'name',direction:'asc'},columns:[
     column6('name','Подключение',245,c=>`<a class="service-cell" href="#/connection/${esc(c.id)}" data-route="/connection/${esc(c.id)}">${markV(siteV(c.startUrl).mark)}<span><strong>${esc(c.name)}</strong><small>${esc(domainH(c.startUrl))}</small></span></a>`),
-    column6('account','Аккаунт',205,c=>esc(c.account||'Определится при входе')),
     column6('state','Состояние',160,c=>connectionBadgeV(c)),
     column6('lastLogin','Последний вход',155,c=>`<span class="muted">${c.lastLogin?dateTime(c.lastLogin):'Ещё не выполнен'}</span>`,'date'),
     actionColumn6(c=>`<div class="row-actions">${connectionBrowserActionH(c,'icon')}${ib('more','Действия подключения '+c.name,'connection-menu',`data-id="${esc(c.id)}" aria-controls="header-pop" aria-expanded="false"`)}</div>`,88)
@@ -1562,7 +1565,7 @@ function renderAutocompleteH(){
   const i=$('#h-site-search'),p=$('#h-completions');if(!i||!p||!i.value.trim()){closeAutocompleteH();return;}
   if(['loading','error'].includes(route.query.get('case'))){closeAutocompleteH();return;}
   const rows=connectionRowsH(true);H.autocomplete.items=rows.slice(0,3);H.autocomplete.index=-1;
-  p.innerHTML=H.autocomplete.items.length?H.autocomplete.items.map((c,index)=>`<div class="h-suggestion" role="option" id="h-suggestion-${index}" aria-selected="false" data-action="h-select-suggestion" data-id="${esc(c.id)}">${markV(siteV(c.startUrl).mark)}<span><strong>${esc(c.name)}</strong><small>${esc(domainH(c.startUrl))} · ${esc(c.account||'Без аккаунта')}</small></span>${icon('chevron')}</div>`).join(''):`<div class="h-no-match" role="presentation">Совпадений нет</div>`;
+  p.innerHTML=H.autocomplete.items.length?H.autocomplete.items.map((c,index)=>`<div class="h-suggestion" role="option" id="h-suggestion-${index}" aria-selected="false" data-action="h-select-suggestion" data-id="${esc(c.id)}">${markV(siteV(c.startUrl).mark)}<span><strong>${esc(c.name)}</strong><small>${esc(domainH(c.startUrl))}</small></span>${icon('chevron')}</div>`).join(''):`<div class="h-no-match" role="presentation">Совпадений нет</div>`;
   if(rows.length>3)p.innerHTML+=`<div class="h-autocomplete-foot" role="presentation">Показано 3 из ${rows.length}. Уточните поиск.</div>`;
   p.hidden=false;i.setAttribute('aria-expanded','true');positionAutocompleteH();
 }
@@ -1727,7 +1730,7 @@ function returnLabel8(url) {
   if (path.startsWith('/admin/users/')) return 'К пользователю';
   if (path === '/admin/audit' && query.has('user')) return 'К журналу пользователя';
   return {'/tasks':'К задачам', '/connections':'К подключениям', '/usage':'К использованию',
-    '/profile':'К профилю', '/screens':'К экранам макета', '/admin':'К обзору',
+    '/profile':'К профилю', '/screens':'К экранам макета', '/admin':'К администрированию',
     '/admin/users':'К пользователям', '/admin/browsers':'К браузерам', '/admin/audit':'К журналу действий'}[path] || 'Назад';
 }
 
@@ -1812,7 +1815,7 @@ function breadcrumbItems8() {
       if (u) return [admin, users, item(u.name || 'Пользователь', '/admin/users/' + u.id, true), item('Журнал действий')];
       return [admin, item('Журнал действий')];
     }
-    return [admin, item('Обзор')];
+    return [item('Администрирование')];
   }
   const rootLabels = {'/usage':'Использование', '/profile':'Профиль', '/screens':'Все экраны макета',
     '/unavailable':'Сервис недоступен', '/not-found':'Объект недоступен'};
@@ -2239,7 +2242,7 @@ async function completeLoginH(b,explicitSave){
 }
 
 
-function nodeBadgeH(node){return badge(node.state==='ready'?'Принимает задачи':node.state==='draining'?'Выводится из работы':'Недоступен',node.state==='ready'?'success':node.state==='draining'?'warning':'error');}
+function nodeBadgeH(node){return badge(node.state==='ready'?'В сети':node.state==='draining'?'Завершает работу':'Нет связи',node.state==='ready'?'success':node.state==='draining'?'warning':'error');}
 function bindHelm(){
   bindLiveRoute7();closeAutocompleteH();document.title=(route.path.startsWith('/widget')?'Виджет':topSection())+' · Helm Glass';
   if(route.path.startsWith('/tasks/')){const id=Number(route.path.split('/')[2]);renderEventRowsH(id);if(route.query.get('events')==='1')requestAnimationFrame(()=>$('#execution-events')?.scrollIntoView({block:'start'}));if(route.query.get('resources')==='1')requestAnimationFrame(()=>$('#task-resources')?.scrollIntoView({block:'center'}));}
@@ -2412,7 +2415,7 @@ document.addEventListener('keydown',e=>{
 },true);
 
 SCREENS.push(['Администрирование',[
- ['Обзор платформы','Нагрузка пользователей, браузеры и фоновые операции','/admin','settings'],
+ ['Администрирование','Пользователи, журнал действий и состояние системы','/admin','settings'],
  ['Пользователи','Поиск по имени, email и ID','/admin/users','user'],
  ['Квоты пользователя','Индивидуальный и личный пределы','/admin/users/usr-002','settings'],
  ['Весь пул','Без индивидуального предела и без приоритета','/admin/users/usr-003','browser'],
@@ -2547,7 +2550,7 @@ function stateLabelA(state){return ADMIN_STATES_A.find(x=>x[0]===state)?.[1]||'�
 function personBadgeA(u){return badge(stateLabelA(u.state),{ACTIVE:'success',BLOCKED:'error',DELETING:'warning',PURGING:'warning',DELETED:''}[u.state]);}
 function dateAdminA(value){return value?new Intl.DateTimeFormat('ru-RU',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(value)):'Нет обращений';}
 function deadlineAdminA(u){return new Intl.DateTimeFormat('ru-RU',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit',timeZoneName:'short'}).format(new Date(u.restoreUntil));}
-function personCellA(u,linkTo=true){return `<span class="a-user-cell"><span class="avatar">${esc(u.name.split(' ').map(x=>x[0]).slice(0,2).join(''))}</span><span>${linkTo?`<a class="cell-title" href="#/admin/users/${u.id}" data-route="/admin/users/${u.id}">${esc(u.name)}</a>`:`<strong>${esc(u.name)}</strong>`}${u.id===selfIdA()?'<span class="a-self">Вы</span>':''}<small>${esc(u.email)}</small><span class="a-id">${esc(u.id)}</span></span></span>`;}
+function personCellA(u,linkTo=true){return `<span class="a-user-cell"><span class="avatar">${esc(u.name.split(' ').map(x=>x[0]).slice(0,2).join(''))}</span><span>${linkTo?`<a class="cell-title" href="#/admin/users/${u.id}" data-route="/admin/users/${u.id}">${esc(u.name)}</a>`:`<strong>${esc(u.name)}</strong>`}${u.id===selfIdA()?'<span class="a-self">Вы</span>':''}<small>${esc(u.email)}</small></span></span>`;}
 function ownTaskMetadataA(){
   return S.runs.map(t=>({id:'run-'+t.id,runId:t.id,userId:selfIdA(),outcome:t.outcome,state:t.cancelRequestedAt&&!isFinal(t)?'STOPPING':t.status,browser:!isFinal(t)&&['available','hidden','stale'].includes(t.browser),node:!isFinal(t)&&['available','hidden','stale'].includes(t.browser)?'browser-01':null,created:t.created,updated:t.updated,
     errorCode:t.status==='FAILED'?'BROWSER_OPERATION_FAILED':t.status==='INTERRUPTED'?'RESULT_UNKNOWN':null,
@@ -2558,9 +2561,13 @@ function taskCountsA(userId){const tasks=adminTasksA(userId);return {browsers:ta
 function personalLimitA(u,key){return u.id===selfIdA()?(S.policy?.[key==='browser'?'max_browser_sessions':'max_queued_runs']??null):u[key==='browser'?'personalBrowser':'personalWaiting'];}
 function assignedBrowserCapA(u){return u.browserMode==='POOL'?null:u.browserMode==='CUSTOM'?u.browserLimit:peopleA().standardBrowserLimit;}
 function effectiveCapA(u,key){const assigned=key==='browser'?assignedBrowserCapA(u):u.waitingLimit,personal=personalLimitA(u,key);return assigned==null?personal:personal==null?assigned:Math.min(assigned,personal);}
-function browserLimitLabelA(u){return u.browserMode==='POOL'?'Весь общий пул':u.browserMode==='STANDARD'?'Стандартный · '+peopleA().standardBrowserLimit:String(u.browserLimit);}
+function browserLimitLabelA(u){return u.browserMode==='POOL'?'Без индивидуального лимита':u.browserMode==='STANDARD'?'Стандартный · '+peopleA().standardBrowserLimit:String(u.browserLimit);}
 function quotaSummaryA(u){return 'Браузеры: '+browserLimitLabelA(u)+'; ожидание: '+(u.waitingLimit==null?'без ограничения':u.waitingLimit);}
-function quotaUseA(count,cap,pool=false){const over=cap!=null&&count>cap;return `<div class="a-quota-use ${over?'over':''}"><strong>${count}</strong><small>/ ${cap==null?(pool?'общий пул':'без лимита'):cap}</small>${over?icon('alert'):''}</div><div class="a-current-bar ${over?'over':''}"><i style="width:${cap==null?0:Math.min(100,count/Math.max(1,cap)*100)}%"></i></div>`;}
+function quotaUseA(count,cap,browsers=false){
+  const over=cap!=null&&count>cap;
+  const limit=cap==null?(browsers?'Без индивидуального лимита · в пределах свободных мест':'Лимит не задан'):'Лимит: '+cap;
+  return `<div class="a-quota-use ${over?'over':''}"><strong>${browsers?'Занято':'Ожидают'}: ${count}</strong>${over?icon('alert'):''}</div><small class="cell-secondary">${limit}</small>${cap!=null?`<div class="a-current-bar ${over?'over':''}" aria-hidden="true"><i style="width:${Math.min(100,count/Math.max(1,cap)*100)}%"></i></div>`:''}${over?'<small class="cell-secondary">Лимит снижен; текущая работа сохранена</small>':''}`;
+}
 const WAIT_REASONS_A={USER_LOGIN:'Ожидает входа пользователя',USER_ACTION:'Ожидает действия пользователя',EXTERNAL_AGENT:'Ожидает следующей команды агента',POOL_BUSY:'Ожидает свободного браузера',USER_BROWSER_LIMIT:'Достигнут предел браузеров пользователя',LIMIT_LOWERED:'Новый предел ниже текущего использования',STOP_CONFIRMATION:'Ожидает подтверждения остановки узлом'};
 const ERROR_REASONS_A={BROWSER_TIMEOUT:'Браузер не ответил вовремя',WORKER_UNREACHABLE:'Браузерный узел недоступен',BROWSER_OPERATION_FAILED:'Ошибка браузерной операции',RESULT_UNKNOWN:'Результат операции не подтверждён'};
 function taskBadgeA(t){return t.state==='STOPPING'?badge('Останавливается','warning','clock'):sbV({status:t.state,outcome:t.outcome,request:t.waitCode==='USER_LOGIN'?{type:'LOGIN'}:null});}
@@ -2592,44 +2599,44 @@ function initAdminPeopleA(){
   const self=getPersonA(a.selfId);self.name=S.profile.name;self.email=S.profile.email;reconcileAdminA();persist();
 }
 function adminNavigationA(){
-  const tab=route.path.startsWith('/admin/users')?'users':route.path==='/admin/browsers'?'browsers':route.path==='/admin/audit'?'audit':'overview';
-  return `<div class="a-admin-nav"><nav class="a-admin-tabs" aria-label="Разделы администрирования">${[['overview','Обзор','/admin','grid'],['users','Пользователи','/admin/users','user'],['browsers','Браузеры','/admin/browsers','browser'],['audit','Журнал','/admin/audit','list']].map(([k,l,p,i])=>`<a class="a-admin-tab ${tab===k?'active':''}" href="#${p}" data-route="${p}" ${tab===k?'aria-current="page"':''}>${icon(i)}${l}</a>`).join('')}</nav><span class="h-demo-tag">Демонстрация</span></div>`;
+  const browsers=route.path==='/admin/browsers';
+  return `<nav class="a-admin-nav" aria-label="Разделы администрирования"><div class="a-admin-tabs">${[['Пользователи и журнал','/admin','user',!browsers],['Браузеры','/admin/browsers','browser',browsers]].map(([label,path,glyph,active])=>`<a class="a-admin-tab ${active?'active':''}" href="#${path}" data-route="${path}" ${active?'aria-current="page"':''}>${icon(glyph)}${label}</a>`).join('')}</div></nav>`;
 }
 function adminPrivacyA(){return `<p class="a-privacy">${icon('shield')}<span>Только служебные сведения. Содержимое задач, результаты, документы и секреты пользователей здесь недоступны. Административные действия выполняются только из веб-кабинета, не через MCP.</span></p>`;}
 function renderAdmin(){
   if(!canAdminA())return heading('Администрирование')+`<section class="panel">${empty('shield','Нет доступа к администрированию','Этот раздел доступен только администратору в веб-кабинете. Через MCP административные действия недоступны.',link('К задачам','/tasks','left'))}</section>`;
-  const nav=adminNavigationA(),scene=route.query.get('case');
-  if(scene==='loading')return heading('Администрирование')+nav+`<section class="panel" aria-busy="true" aria-label="Загрузка администрирования">${[1,2,3,4].map(()=>'<div class="skeleton-row"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span></div>').join('')}</section>`;
-  if(scene==='error')return heading('Администрирование')+nav+notice('Не удалось обновить данные','Связь восстанавливается автоматически. Изменение квот и доступа недоступно до получения актуального состояния.','error','');
+  const scene=route.query.get('case');
+  if(scene==='loading')return heading('Администрирование')+`<section class="panel" aria-busy="true" aria-label="Загрузка администрирования">${[1,2,3,4].map(()=>'<div class="skeleton-row"><span class="skeleton"></span><span class="skeleton"></span><span class="skeleton"></span></div>').join('')}</section>`;
+  if(scene==='error')return heading('Администрирование')+notice('Не удалось обновить данные','Связь восстанавливается автоматически. Изменение квот и доступа недоступны до получения актуального состояния.','error','');
   const id=route.path.split('/')[3];let body;
   if(route.path.startsWith('/admin/users/'))body=renderAdminUserA(id);
   else if(route.path==='/admin/users')body=renderAdminUsersA();
   else if(route.path==='/admin/browsers')body=renderAdminBrowsersA();
   else if(route.path==='/admin/audit')body=renderAdminAuditA();
   else body=renderAdminOverviewA();
-  return `<div class="a-admin-page">${nav}${body}${adminPrivacyA()}</div>`;
+  return `<div class="a-admin-page">${adminNavigationA()}${body}${adminPrivacyA()}</div>`;
 }
 function platformCountsA(){
   const tasks=adminTasksA(),nodes=adminH().nodes,knownBusy=tasks.filter(t=>t.browser&&nodes.find(n=>n.id===t.node)?.state!=='offline').length;
   const free=nodes.filter(n=>n.state==='ready').reduce((sum,n)=>sum+Math.max(0,n.slots-tasks.filter(t=>t.browser&&t.node===n.id).length),0);
   return {busy:knownBusy,unknown:tasks.filter(t=>t.browser&&nodes.find(n=>n.id===t.node)?.state==='offline').length,free,waiting:tasks.filter(t=>ADMIN_WAITING_A.includes(t.state)).length,queued:tasks.filter(t=>t.state==='QUEUED').length,blocked:peopleA().users.filter(u=>u.state==='BLOCKED').length,offline:nodes.filter(n=>n.state==='offline').length,pending:peopleA().operations.filter(o=>o.state==='PENDING').length};
 }
-function adminSummary7(){const c=platformCountsA(),accepting=adminH().accepting;return `<div class="metrics a-admin-summary">${metricV('Занято браузеров',c.busy,c.unknown?`Ещё ${c.unknown}: состояние уточняется`:'Подтверждённые сессии','browser')}${metricV('Свободно браузеров',c.free,accepting?'На узлах, принимающих задачи':'Новые назначения приостановлены','server','green')}${metricV('Ожидают задачи',c.waiting,`${c.queued} в очереди на браузер`,'clock')}${metricV('Заблокировано',c.blocked,'Пользователи без доступа','lock')}</div>`+
+function adminSummary7(){const c=platformCountsA(),accepting=adminH().accepting;return `<div class="metrics a-admin-summary">${metricV('Занято браузеров',c.busy,c.unknown?`Ещё ${c.unknown}: состояние уточняется`:'Подтверждённые сессии','browser')}${metricV('Доступно для запуска',accepting?c.free:0,accepting?'На узлах, принимающих задачи':'Новые назначения приостановлены','server','green')}${metricV('Ожидают задачи',c.waiting,`${c.queued} в очереди на браузер`,'clock')}${metricV('Заблокировано',c.blocked,'Пользователи без доступа','lock')}</div>`+
     `<div class="a-top-notices"><a class="a-small-alert" href="#/admin/browsers" data-route="/admin/browsers">${icon('alert')}Недоступно узлов: ${c.offline}</a><span class="a-small-alert neutral">${icon('clock')}Незавершённых операций: ${c.pending}</span></div>`;}
 function renderAdminOverviewA(){
-  const c=platformCountsA(),accepting=adminH().accepting;
-  return heading('Обзор платформы','',btn(accepting?'Приостановить новые запуски':'Разрешить новые запуски','a-admission',accepting?'pause':'play',accepting?'':'primary'))+
+  const accepting=adminH().accepting;
+  return `<h1 class="sr-only" tabindex="-1">Администрирование</h1>`+
     (!accepting?notice('Новые запуски приостановлены','Уже открытые браузеры не прерваны. Принятые задачи остаются в очереди.','warning'):'')+
     adminSummary7()+
-    `<section class="panel a-section"><header class="a-section-header"><h2>Нагрузка по пользователям</h2>${link('Все пользователи','/admin/users','chevron','quiet')}</header>${userTableA('overview-users',{states:['ACTIVE','BLOCKED']},5)}</section>`+
-    operationPanelA()+`<section class="panel a-section"><header class="a-section-header"><h2>Последние действия</h2>${link('Весь журнал','/admin/audit','chevron','quiet')}</header>${auditTableA('overview-audit',{},3)}</section>`;
+    `<section class="panel a-section"><header class="a-section-header"><h2>Пользователи</h2>${link('Поиск и фильтры','/admin/users','search','quiet')}</header>${userTableA('overview-users',{},5)}<p class="a-effective-note">«Занято» — браузеры пользователя, включая запускаемые и завершаемые. «Ожидают» — задачи в очереди, ожидающие ChatGPT или участия пользователя; черновики не учитываются. Лимит задаёт допустимое количество, а не число свободных браузеров.</p></section>`+
+    `<section class="panel a-section"><header class="a-section-header"><h2>Журнал действий</h2>${link('Поиск в журнале','/admin/audit','search','quiet')}</header>${auditTableA('overview-audit',{},3)}</section>`+operationPanelA();
 }
 function userTableA(id,filters={},pageSize=10){
   return gridMount6(id,{resource:'users',filters,label:'Пользователи платформы',pageSize,defaultSort:{field:id==='overview-users'?'browsers':'user',direction:id==='overview-users'?'desc':'asc'},columns:[
     column6('user','Пользователь',255,u=>personCellA(u)),
     column6('state','Состояние',150,u=>personBadgeA(u)),
-    column6('browsers','Браузеры / предел',170,u=>quotaUseA(u.counts.browsers,u.browserCap,true)+`<small class="cell-secondary">${esc(u.browserLabel)}</small>`,'number','По количеству занятых браузеров'),
-    column6('waiting','Ожидают / предел',175,u=>quotaUseA(u.counts.waiting,u.waitingCap),'number','По количеству ожидающих задач'),
+    column6('browsers','Браузеры',195,u=>quotaUseA(u.counts.browsers,u.browserCap,true),'number','По количеству занятых браузеров'),
+    column6('waiting','Ожидающие задачи',195,u=>quotaUseA(u.counts.waiting,u.waitingCap),'number','По количеству ожидающих задач'),
     column6('lastAccess','Последнее обращение',180,u=>`<span class="muted">${dateAdminA(u.lastAccess)}</span>${u.loginRequired?'<small class="cell-secondary">Потребуется новый вход</small>':''}`,'date'),
     actionColumn6(u=>`<a class="icon-btn" href="#/admin/users/${esc(u.id)}" data-route="/admin/users/${esc(u.id)}" aria-label="Открыть пользователя ${esc(u.name)}">${icon('chevron')}</a>`)
   ],emptyTitle:'Пользователи не найдены'});
@@ -2654,7 +2661,7 @@ function operationPanelA(userId=null){
 }
 function quotaPanelA(u){
   const c=taskCountsA(u.id),browser=effectiveCapA(u,'browser'),waiting=effectiveCapA(u,'waiting'),personalB=personalLimitA(u,'browser'),personalW=personalLimitA(u,'waiting');
-  return `<section class="panel live7-quotas"><header class="a-section-header"><h2>Квоты и текущая нагрузка</h2>${btn('Изменить','a-quotas','edit','quiet small',`data-user="${u.id}" ${['PURGING','DELETED'].includes(u.state)?'disabled':''}`)}</header><div class="a-quota-row"><div><strong>Одновременные браузеры</strong><p>Назначено: ${esc(browserLimitLabelA(u))}${personalB!=null?'<br>Личное ограничение: '+personalB:''}</p></div><div><span class="a-big-use">${c.browsers}</span><span class="muted"> / ${browser==null?'пул':browser}</span></div></div><div class="a-quota-row"><div><strong>Подготовленные задачи в ожидании</strong><p>Назначено: ${u.waitingLimit==null?'без ограничения':u.waitingLimit}${personalW!=null?'<br>Личное ограничение: '+personalW:''}</p></div><div><span class="a-big-use">${c.waiting}</span><span class="muted"> / ${waiting==null?'∞':waiting}</span></div></div><div class="a-effective-note">${browser!=null&&c.browsers>browser?'<b>Новый предел ниже текущего числа браузеров.</b> Они не прерываются; новые сессии ждут освобождения.<br>':''}${waiting!=null&&c.waiting>waiting?'<b>Число принятых ожидающих задач выше нового предела.</b> Они сохранены, новые не принимаются до освобождения квоты.<br>':''}Очередь, ожидание агента и действий пользователя учитываются вместе. Черновики не учитываются. Весь пул не даёт приоритета.</div></section>`;
+  return `<section class="panel live7-quotas"><header class="a-section-header"><h2>Квоты и текущая нагрузка</h2>${btn('Изменить','a-quotas','edit','quiet small',`data-user="${u.id}" ${['PURGING','DELETED'].includes(u.state)?'disabled':''}`)}</header><div class="a-quota-row"><div><strong>Одновременные браузеры</strong><p>Назначено: ${esc(browserLimitLabelA(u))}${personalB!=null?'<br>Личное ограничение: '+personalB:''}</p></div><div>${quotaUseA(c.browsers,browser,true)}</div></div><div class="a-quota-row"><div><strong>Подготовленные задачи в ожидании</strong><p>Назначено: ${u.waitingLimit==null?'без ограничения':u.waitingLimit}${personalW!=null?'<br>Личное ограничение: '+personalW:''}</p></div><div>${quotaUseA(c.waiting,waiting)}</div></div><div class="a-effective-note">${browser!=null&&c.browsers>browser?'<b>Новый предел ниже текущего числа браузеров.</b> Они не прерываются; новые сессии ждут освобождения.<br>':''}${waiting!=null&&c.waiting>waiting?'<b>Число принятых ожидающих задач выше нового предела.</b> Они сохранены, новые не принимаются до освобождения квоты.<br>':''}Очередь, ожидание агента и действий пользователя учитываются вместе. Черновики не учитываются. Весь пул не даёт приоритета.</div></section>`;
 }
 function measuredUsageA(u){
   const end=new Date(adminNowA()).toISOString().slice(0,10),start=new Date(adminNowA()-6*ADMIN_DAY_A).toISOString().slice(0,10);
@@ -2689,36 +2696,49 @@ function renderUserTasksA(id){
     actionColumn6(t=>ib('stop','Остановить задачу '+t.id,'a-stop-task',`data-user="${esc(id)}" data-task="${esc(t.id)}" ${ADMIN_FINAL_A.includes(t.state)||['DRAFT','STOPPING'].includes(t.state)?'disabled':''}`))
   ],emptyTitle:'Задач пока нет',emptyHint:'Служебные записи появятся после создания задач.'});
 }
+function nodeNameA(id){return 'Узел '+id.replace(/^browser-/, '');}
+function auditTargetA(id){return getPersonA(id)?.name||(id==='platform'?'Запуск браузеров':adminH().nodes.some(n=>n.id===id)?nodeNameA(id):'Задача '+id.replace(/^run-/,''));}
 function renderAdminBrowsersA(){
-  const a=adminH();
-  const sessions=gridMount6('sessions',{resource:'sessions',label:'Браузеры и очередь',defaultSort:{field:'user',direction:'asc'},columns:[
+  const a=adminH(),counts=platformCountsA();
+  const capacity=a.nodes.reduce((sum,node)=>sum+node.slots,0);
+  const sessions=gridMount6('sessions',{resource:'sessions',context:{scope:'active'},label:'Выделенные браузеры',defaultSort:{field:'browserId',direction:'asc'},columns:[
+    column6('browserId','Браузер · ID',180,t=>'<strong>Браузер '+esc(t.id.replace(/^run-/,''))+'</strong><small class="cell-secondary">'+esc(t.browserId)+'</small>'),
+    column6('state','Статус',200,t=>adminH().nodes.find(n=>n.id===t.node)?.state==='offline'?badge('Состояние неизвестно','warning')+'<small class="cell-secondary">Нет связи с узлом</small>':taskBadgeA(t)),
+    column6('user','Пользователь',240,t=>personCellA(t.user)),
+    column6('browser','Узел',155,t=>esc(nodeNameA(t.node))),
+    column6('id','Задача',120,t=>'<span class="a-meta-task-id">'+esc(t.id)+'</span>'),
+    actionColumn6(t=>ib('stop','Остановить задачу '+t.id,'a-stop-task','data-user="'+esc(t.userId)+'" data-task="'+esc(t.id)+'" '+(t.state==='STOPPING'?'disabled':'')))
+  ],emptyTitle:'Выделенных браузеров нет',emptyHint:'Браузер появится здесь после выделения места для задачи.'});
+  const queue=gridMount6('browser-queue',{resource:'sessions',context:{scope:'queue'},label:'Очередь на браузер',defaultSort:{field:'user',direction:'asc'},columns:[
     column6('user','Пользователь',250,t=>personCellA(t.user)),
-    column6('id','ID задачи',130,t=>`<span class="a-meta-task-id">${esc(t.id)}</span>`),
-    column6('state','Состояние',175,t=>taskBadgeA(t)),
-    column6('browser','Браузер / причина ожидания',245,t=>`<span class="muted">${esc(t.node||WAIT_REASONS_A[t.waitCode]||'Ожидает браузер')}</span>`),
-    actionColumn6(t=>ib('stop','Остановить задачу '+t.id,'a-stop-task',`data-user="${esc(t.userId)}" data-task="${esc(t.id)}" ${t.state==='STOPPING'?'disabled':''}`))
-  ],emptyTitle:'Активных сессий и очереди нет',emptyHint:'Новая работа появится здесь после получения ресурса.'});
-  return heading('Браузеры','',btn(a.accepting?'Приостановить новые запуски':'Разрешить новые запуски','a-admission',a.accepting?'pause':'play'))+
-    (!a.accepting?notice('Новые назначения приостановлены','Работающие браузеры и принятые задачи не отменены.','warning'):'')+
-    `<section class="panel a-section"><header class="a-section-header"><h2>Браузерные узлы</h2><span class="muted small">${a.nodes.length} узла</span></header><div class="h-toolbar"><label class="search h-search">${icon('search')}<input id="a-node-search" aria-label="Найти узел" placeholder="Найти узел" value="${esc(H.adminSearch)}"></label></div><div id="a-node-list"></div></section><section class="panel a-section"><header class="a-section-header"><h2>Браузеры и очередь</h2><small>Без доступа к содержимому</small></header>${sessions}</section>${operationPanelA()}`;
+    column6('id','Задача',150,t=>esc(t.id)),
+    column6('browser','Почему ещё нет браузера',350,t=>esc(WAIT_REASONS_A[t.waitCode]||'Ожидает свободного места'))
+  ],emptyTitle:'Очередь пуста',emptyHint:'Все принятые запросы на браузер обработаны.'});
+  return heading('Браузеры','Доступные места, узлы исполнения и выделенные браузеры.',btn(a.accepting?'Приостановить новые запуски':'Разрешить новые запуски','a-admission',a.accepting?'pause':'play'))+
+    (!a.accepting?notice('Новые запуски приостановлены','Работающие браузеры и принятые задачи не отменены.','warning'):'')+
+    '<div class="metrics a-admin-summary">'+metricV('Доступно для запуска',a.accepting?counts.free:0,'Свободные места на узлах, принимающих задачи','browser','green')+metricV('Занято браузеров',counts.busy,counts.unknown?'Ещё '+counts.unknown+': состояние неизвестно':'Работающие и завершаемые браузеры','browser')+metricV('Вместимость всех узлов',capacity,'Мест, включая отключённые и недоступные узлы','server')+metricV('Узлы исполнения',a.nodes.length,'Нет связи: '+counts.offline,'server')+'</div>'+
+    '<section class="panel a-section"><header class="a-section-header"><h2>Узлы исполнения</h2></header><p class="a-effective-note">Узел — сервис, который запускает браузеры. Вместимость — сколько браузеров он может держать одновременно. Число зарегистрированных узлов не означает число доступных браузеров.</p><div class="h-toolbar"><label class="search h-search">'+icon('search')+'<input id="a-node-search" aria-label="Найти узел" placeholder="Название или ID узла" value="'+esc(H.adminSearch)+'"></label></div><div id="a-node-list"></div></section>'+
+    '<section class="panel a-section"><header class="a-section-header"><h2>Выделенные браузеры</h2><small>Одна строка — один браузер</small></header>'+sessions+'</section>'+
+    '<section class="panel a-section"><header class="a-section-header"><h2>Очередь на браузер</h2><small>Браузер ещё не выделен</small></header>'+queue+'</section>';
 }
 function renderAdminNodesA(){
   const root=$('#a-node-list');if(!root)return;
-  root.innerHTML=gridMount6('nodes',{resource:'nodes',label:'Браузерные узлы',filters:{query:H.adminSearch},defaultSort:{field:'node',direction:'asc'},columns:[
-    column6('node','Узел',190,n=>`<span class="h-node-title">${icon('server')}<strong>${esc(n.id)}</strong></span>`),
-    column6('state','Состояние',180,n=>nodeBadgeH(n)),
-    column6('busy','Браузеры / ёмкость',195,n=>n.busy==null?`<span class="muted">Уточняется / ${n.slots}</span><small class="cell-secondary">Последнее известно: ${n.lastBusy}</small>`:quotaUseA(n.busy,n.slots),'number','По подтверждённому числу занятых браузеров'),
-    column6('admission','Новые назначения',180,n=>n.admission?'Разрешены':'Не назначаются','boolean'),
-    actionColumn6(n=>ib('more','Действия узла '+n.id,'a-node-menu',`data-node="${esc(n.id)}" aria-controls="header-pop" aria-expanded="false"`))
+  root.innerHTML=gridMount6('nodes',{resource:'nodes',label:'Узлы исполнения',filters:{query:H.adminSearch},defaultSort:{field:'node',direction:'asc'},columns:[
+    column6('node','Узел · ID',190,n=>'<span class="h-node-title">'+icon('server')+'<strong>'+esc(nodeNameA(n.id))+'</strong></span><small class="cell-secondary">'+esc(n.id)+'</small>'),
+    column6('state','Статус',240,n=>nodeBadgeH(n)+'<small class="cell-secondary">'+(n.state==='offline'?'Узел не отвечает; браузеры недоступны':n.state==='draining'?'Текущие браузеры продолжают работу':'Связь с узлом установлена')+'</small>'),
+    column6('busy','Загрузка',215,n=>'<strong>'+(n.busy==null?'Занято: неизвестно':'Занято: '+n.busy)+'</strong><small class="cell-secondary">Вместимость: '+n.slots+'</small>'+(n.busy==null?'<small class="cell-secondary">До потери связи: '+n.lastBusy+'</small>':''),'number','По подтверждённому числу занятых браузеров'),
+    column6('admission','Свободно для запуска',210,n=>'<strong>'+(n.admission?Math.max(0,n.slots-n.busy):0)+'</strong><small class="cell-secondary">'+(n.admission?'Новые браузеры разрешены':n.state==='offline'?'Нет связи с узлом':n.state==='draining'?'Новые запуски на узле отключены':'Запуски приостановлены для всех')+'</small>','number'),
+    actionColumn6(n=>ib('more','Действия: '+nodeNameA(n.id),'a-node-menu','data-node="'+esc(n.id)+'" aria-controls="header-pop" aria-expanded="false"'))
   ],emptyTitle:'Узлы не найдены'});
 }
 function operationStatusA(id){const op=peopleA().operations.find(o=>o.id===id);return !op?'Изменение применено':op.state==='DONE'?'Остановка подтверждена':op.kind==='PURGE'?'Очистка выполняется':'Остановка продолжается';}
 function auditTableA(id,context={},pageSize=10,filters={}){
   return gridMount6(id,{resource:'audit',context,filters,pageSize,label:'Журнал административных действий',defaultSort:{field:'time',direction:'desc'},columns:[
-    column6('time','Время',135,e=>`<span class="muted">${dateAdminA(e.time)}</span>`,'date'),
-    column6('actor','Кто изменил',165,e=>`${esc(e.actorName)}<small class="cell-secondary">${esc(e.actorId)}</small>`),
-    column6('target','Пользователь / объект',180,e=>`${e.targetIsUser?`<a href="#/admin/users/${esc(e.targetId)}" data-route="/admin/users/${esc(e.targetId)}">${esc(e.targetName)}</a>`:esc(e.targetName)}<small class="cell-secondary">${esc(e.targetId)}</small>`),
-    column6('action','Действие и причина',430,e=>`<strong style="font-weight:550">${esc(ADMIN_ACTIONS_A[e.action]||e.action)}</strong><p class="a-journal-reason">${esc(e.reason)}</p><p class="a-journal-before">${esc(e.before||'')} → ${esc(e.after||'')}</p>${e.operationId?`<small class="cell-secondary">${esc(e.operationLabel)}</small>`:''}`,'text','Сначала по действию, затем по причине')
+    column6('time','Время',140,e=>'<span class="muted">'+dateAdminA(e.time)+'</span>','date'),
+    column6('actor','Кто изменил',165,e=>esc(e.actorName)),
+    column6('target','Что изменили',200,e=>(e.targetIsUser?'<a href="#/admin/users/'+esc(e.targetId)+'" data-route="/admin/users/'+esc(e.targetId)+'">'+esc(e.targetName)+'</a>':esc(e.targetName))+'<small class="cell-secondary">'+(e.targetIsUser?'Пользователь':e.targetId==='platform'?'Настройка системы':'Узел исполнения')+'</small>'),
+    column6('action','Действие',205,e=>'<strong style="font-weight:550">'+esc(ADMIN_ACTIONS_A[e.action]||'Административное изменение')+'</strong>'+(e.before||e.after?'<p class="a-journal-before">'+esc(e.before||'—')+' → '+esc(e.after||'—')+'</p>':'')+(e.operationId?'<small class="cell-secondary">'+esc(e.operationLabel)+'</small>':''),'text','По действию'),
+    column6('reason','Причина',280,e=>'<p class="a-journal-reason">'+esc(e.reason)+'</p>','text','По причине')
   ],emptyTitle:'Действий не найдено',emptyHint:'Измените условия или дождитесь новых событий.'});
 }
 function renderAdminAuditA(){
@@ -2837,7 +2857,7 @@ async function handleAdminActionA(action,b){
     case'a-node-menu':nodeMenuA(b.dataset.node,b);break;
     case'a-node-toggle':confirmPlatformA(b.dataset.node);break;
     case'a-admission':confirmPlatformA();break;
-    case'a-node-info':{const n=adminH().nodes.find(n=>n.id===b.dataset.node);if(n){closePopover(false);showDialog('Браузерный узел',pair('Узел',esc(n.id))+pair('Состояние',nodeBadgeH(n))+pair('Ёмкость',String(n.slots))+pair('Версия',esc(n.release))+'<p class="small muted mt">Секреты инфраструктуры и содержимое браузеров не выводятся.</p>',btn('Закрыть','dialog-close'));}break;}
+    case'a-node-info':{const n=adminH().nodes.find(n=>n.id===b.dataset.node);if(n){closePopover(false);showDialog('Браузерный узел',pair('Название',esc(nodeNameA(n.id)))+pair('ID узла',esc(n.id))+pair('Статус',nodeBadgeH(n))+pair('Мест для браузеров',String(n.slots))+pair('Версия',esc(n.release))+'<p class="small muted mt">Секреты инфраструктуры и содержимое браузеров не выводятся.</p>',btn('Закрыть','dialog-close'));}break;}
     case'a-nodes-reset':H.adminSearch='';$('#a-node-search').value='';renderAdminNodesA();break;
     default:return false;
   }

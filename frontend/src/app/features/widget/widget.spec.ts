@@ -147,7 +147,10 @@ describe('widget presentation lifecycle', () => {
     widget.inactive.set(true);
     widget.error.set('Old presentation failed');
     const next = { ...presentation, viewScopeId: '2c4eb0ef-a4cc-4a78-8c1f-137986ac00bb' };
-    bridge.attach.mockResolvedValue({ structuredContent: { presentation: next, session: null } });
+    bridge.attach.mockResolvedValue({
+      ...attached(null, true),
+      structuredContent: { presentation: next, session: null },
+    });
 
     bridge.listener?.({ structuredContent: next });
     await Promise.resolve();
@@ -172,6 +175,7 @@ describe('widget presentation lifecycle', () => {
   });
 
   it('recovers the first transient attach failure without another host event', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
     bridge.attach.mockRejectedValueOnce(new Error('Connection lost'));
     const fixture = await mount();
     expect(fixture.componentInstance.snapshot()).toBeNull();

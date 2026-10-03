@@ -92,6 +92,7 @@ public class ControlDispatcher {
     var receipt = outbox.receipt(workerId, bootId, payload);
     if (receipt.isEmpty()) {
       if (registry.acknowledgeRecovery(workerId, bootId, sessionId, payload)) {
+        controls.acknowledgeRecoveredClaim(sessionId);
         return true;
       }
       throw DomainException.conflict(

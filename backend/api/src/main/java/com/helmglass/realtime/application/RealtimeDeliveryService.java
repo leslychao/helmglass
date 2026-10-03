@@ -8,6 +8,7 @@ import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.domain.ChatPresentation;
+import com.helmglass.realtime.domain.BrowserMediaBinding;
 import com.helmglass.realtime.domain.HostConversationContext;
 import com.helmglass.realtime.domain.ViewerFence;
 import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
@@ -116,11 +117,13 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
             || slot.activeViewerInstanceId() == null
                 && presentations.currentInstance(slot.id(), binding.viewerInstanceId(),
                     binding.presentationRevision(), binding.viewGeneration()))
-        && slot.viewGeneration() == binding.viewGeneration()
         && Objects.equals(slot.grantId(), binding.grantId()) && slot.grantVersion() == binding.grantVersion()
         && slot.accessEpoch() == binding.accessEpoch());
     if (current.isEmpty()) {
       return Optional.of("PRESENTATION_SUPERSEDED");
+    }
+    if (current.get().viewGeneration() != binding.viewGeneration()) {
+      return Optional.of("VIEW_GENERATION_CHANGED");
     }
     return current.get().viewerLeaseActive(Instant.now()) ? Optional.empty()
         : Optional.of("VIEW_LEASE_EXPIRED");
@@ -146,6 +149,78 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       MutationReceipt receipt, ChatPresentation slot, boolean superseded, boolean replayed) {}
 
   public record Attachment(ChatPresentation slot, String state, String reason) {}
+
+  public record MediaAdmission(ChatPresentation slot, boolean issueTicket, String unavailableReason) {}
+
+  @Transactional
+  public MediaAdmission prepareWidgetMedia(AuthenticatedActor actor, HostConversationContext host,
+      ChatPresentation attached, BrowserMediaBinding media) {
+    identities.lockActive(actor.userId());
+    ChatPresentation slot = requireCurrentViewer(actor, host, attached.id(),
+        attached.presentationRevision(), attached.activeViewerInstanceId());
+    slot = presentations.lock(slot.id()).orElseThrow();
+    boolean changed = slot.browserSessionId() != null && (media == null || !media.available()
+        || !sameMedia(slot, media) || !slot.mediaConnected()
+            && (slot.mediaTicketExpiresAt() == null || !slot.mediaTicketExpiresAt().isAfter(Instant.now())));
+    if (changed) {
+      presentations.releaseViewer(slot);
+      slot = presentations.admit(slot, actor, slot.activeViewerInstanceId(), slot.grantVersion(),
+          slot.viewerAuthorizationExpiresAt(), slot.viewerLeaseExpiresAt());
+    }
+    if (media == null || !media.available()) {
+      return new MediaAdmission(slot, false, media == null ? "NO_BROWSER" : media.unavailableReason());
+    }
+    if (!slot.transferState().equals("ACTIVE")) {
+      return new MediaAdmission(slot, false, "PRESENTATION_FENCING");
+    }
+    if (slot.mediaConnected()) {
+      return new MediaAdmission(slot, false, null);
+    }
+    Instant ticketExpiry = Instant.now().plusSeconds(30);
+    if (slot.viewerAuthorizationExpiresAt().isBefore(ticketExpiry)) {
+      ticketExpiry = slot.viewerAuthorizationExpiresAt();
+    }
+    return new MediaAdmission(presentations.reserveMedia(slot, media, ticketExpiry), true, null);
+  }
+
+  public boolean widgetMediaAuthorized(ChannelTicketService.TicketBinding binding) {
+    if (!widgetAuthorized(binding)) {
+      return false;
+    }
+    return presentations.find(binding.viewScopeId()).filter(slot -> slot.transferState().equals("ACTIVE")
+        && Objects.equals(slot.browserSessionId(), binding.sessionId())
+        && slot.controlEpoch() == binding.controlEpoch() && slot.pageEpoch() == binding.pageEpoch()
+        && slot.privacyEpoch() == binding.privacyEpoch() && slot.mediaGeneration() == binding.mediaGeneration())
+        .isPresent();
+  }
+
+  @Transactional
+  public boolean connectWidgetMedia(ChannelTicketService.TicketBinding binding) {
+    identities.lockActive(binding.userId());
+    return widgetMediaAuthorized(binding) && presentations.connectMedia(binding);
+  }
+
+  @Transactional
+  public void disconnectWidgetMedia(ChannelTicketService.TicketBinding binding) {
+    identities.lockState(binding.userId());
+    Optional<ChatPresentation> current = presentations.lock(binding.viewScopeId());
+    if (current.isPresent()) {
+      ChatPresentation slot = current.get();
+      if (slot.viewGeneration() == binding.viewGeneration()
+          && Objects.equals(slot.activeViewerInstanceId(), binding.viewerInstanceId())) {
+        presentations.releaseViewer(slot);
+      }
+    }
+  }
+
+  private static boolean sameMedia(ChatPresentation slot, BrowserMediaBinding media) {
+    return Objects.equals(slot.browserSessionId(), media.sessionId())
+        && Objects.equals(slot.workerId(), media.workerId())
+        && Objects.equals(slot.workerBootId(), media.workerBootId())
+        && slot.allocationEpoch() == media.allocationEpoch() && slot.controlEpoch() == media.controlEpoch()
+        && slot.pageEpoch() == media.pageEpoch() && slot.privacyEpoch() == media.privacyEpoch()
+        && slot.mediaGeneration() == media.mediaGeneration();
+  }
 
   /** Reads the current reference without publishing, extending a lease, or changing a revision. */
   public Optional<ChatPresentation> currentPresentation(

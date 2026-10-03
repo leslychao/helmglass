@@ -43,6 +43,8 @@ public class TaskContinuationService {
 
   public record Cancelled(UUID taskId) {}
 
+  public record ClaimFenced(UUID taskId, UUID claimId, long oldClaimEpoch, long newEpoch) {}
+
   private final ContinuationRepository continuations;
   private final CommandRepository tasks;
   private final IdentityRepository identities;
@@ -344,7 +346,7 @@ public class TaskContinuationService {
             value.version() + 1,
             value.sessionId() == null);
     Long epoch = null;
-    Instant expiry = value.expiresAt();
+    Instant expiry = earliest(value.expiresAt(), Instant.now().plusSeconds(120));
     if (value.sessionId() != null) {
       var session = browsers.owned(actor.userId(), value.sessionId());
       var lease = controls.lock(session.id());
@@ -355,7 +357,6 @@ public class TaskContinuationService {
           || !lease.expiresAt().isAfter(Instant.now())) {
         throw DomainException.conflict("CONTINUATION_BLOCKED", "Browser control is not ready");
       }
-      expiry = earliest(expiry, Instant.now().plusSeconds(120));
       epoch = controls.claimAgent(session.id(), claimId, receipt.operationId(), expiry);
       controlOwner.publishControl(actor.userId(), session.id(), "AGENT");
     }
@@ -381,7 +382,8 @@ public class TaskContinuationService {
         || !actor.clientId().equals(value.claimClientId())
         || !Objects.equals(actor.grantId(), value.claimGrantId())
         || instructionRevision != value.instructionRevision()
-        || !value.expiresAt().isAfter(Instant.now())) {
+        || !value.expiresAt().isAfter(Instant.now())
+        || value.claimExpiresAt() == null || !value.claimExpiresAt().isAfter(Instant.now())) {
       throw DomainException.conflict(
           "CONTINUATION_CLAIM_REQUIRED", "Current continuation claim is required");
     }
@@ -401,6 +403,38 @@ public class TaskContinuationService {
     for (Continuation value : continuations.cancel(taskId)) changed(value, Instant.now());
   }
 
+  @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
+  public void claimFenced(ClaimFenced fence) {
+    TaskBinding task = continuations.lockTask(fence.taskId());
+    var current = continuations.current(task.id());
+    if (current.isEmpty()) {
+      return;
+    }
+    Continuation value = current.get();
+    if (!value.state().equals("BLOCKED") || !"CLAIM_EXPIRED".equals(value.blockReason())
+        || !Objects.equals(value.claimId(), fence.claimId())
+        || !Objects.equals(value.claimControlEpoch(), fence.oldClaimEpoch()) || value.sessionId() == null) {
+      return;
+    }
+    if (!value.expiresAt().isAfter(Instant.now())) {
+      changed(continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"), Instant.now());
+      return;
+    }
+    var session = browsers.owned(value.userId(), value.sessionId());
+    var lease = controls.lock(value.sessionId());
+    if (!task.state().equals("WAITING_AGENT") || task.mutationBarrier() || tasks.outstanding(task.id())
+        || task.instructionRevision() != value.instructionRevision()
+        || task.continuationBindingVersion() != value.bindingVersion()
+        || !session.state().equals("ACTIVE") || !session.privacy().equals("NORMAL")
+        || !session.budgetDeadlineAt().isAfter(Instant.now())
+        || !lease.state().equals("ACTIVE") || !lease.ownerKind().equals("AGENT")
+        || lease.epoch() != fence.newEpoch() || !lease.expiresAt().isAfter(Instant.now())) {
+      changed(continuations.transition(value.id(), "BLOCKED", "RECONCILIATION_REQUIRED"), Instant.now());
+      return;
+    }
+    changed(continuations.claimRecovered(value.id(), fence.newEpoch()), Instant.now());
+  }
+
   @Scheduled(fixedDelay = 1000)
   public void expire() {
     for (Continuation due : continuations.due()) {
@@ -410,16 +444,20 @@ public class TaskContinuationService {
             continuations.lockTask(due.taskId());
             Continuation value = continuations.get(due.id());
             if (List.of("CONSUMED", "CANCELLED", "EXPIRED").contains(value.state())) return;
-            if (!value.expiresAt().isAfter(Instant.now())) {
-              // A claimed executor remains fenced by the current intent until control is
-              // reconciled.
-              boolean claimed = value.state().equals("CLAIMED") && value.sessionId() != null;
-              changed(
-                  continuations.transition(
-                      value.id(),
-                      claimed ? "BLOCKED" : "EXPIRED",
-                      claimed ? "CLAIM_EXPIRED" : "CONTINUATION_EXPIRED"),
-                  Instant.now());
+            if (value.state().equals("CLAIMED") && value.claimExpiresAt() != null
+                && !value.claimExpiresAt().isAfter(Instant.now())) {
+              changed(continuations.transition(value.id(), "BLOCKED", "CLAIM_EXPIRED"), Instant.now());
+              if (value.sessionId() == null) {
+                if (value.expiresAt().isAfter(Instant.now())) {
+                  changed(continuations.claimRecovered(value.id(), 0), Instant.now());
+                } else {
+                  changed(continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"), Instant.now());
+                }
+              } else if (value.claimId() != null && value.claimControlEpoch() != null) {
+                controlOwner.fenceExpiredClaim(value.userId(), value.sessionId(), value.claimId(), value.claimControlEpoch());
+              }
+            } else if (!value.expiresAt().isAfter(Instant.now())) {
+              changed(continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"), Instant.now());
             } else if (value.state().equals("DISPATCHING")
                 && value.dispatchExpiresAt() != null
                 && !value.dispatchExpiresAt().isAfter(Instant.now())) {

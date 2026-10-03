@@ -117,23 +117,41 @@ public class TaskPresentationService {
     var attachment =
         realtime.attachPresentation(
             actor, taskId, scope, revision, viewerInstanceId, host, authorizationExpiresAt);
+    var browser = browsers.currentForTask(actor, taskId);
+    ChatPresentation slot = attachment.slot();
+    RealtimeDeliveryService.MediaAdmission media = null;
+    if (attachment.state().equals("ACTIVE") && slot != null && !widgetOrigin.isBlank()) {
+      media = realtime.prepareWidgetMedia(actor, host, slot,
+          browser.map(BrowserSessionService.TaskBrowserView::media).orElse(null));
+      slot = media.slot();
+    }
     Map<String, Object> snapshot = new HashMap<>();
     Map<String, Object> reference = presentation(task, attachment.slot(), attachment.state(), attachment.reason());
     reference.put("viewScopeId", scope);
     reference.put("presentationRevision", revision);
     snapshot.put("presentation", reference);
-    snapshot.put("session", browsers.currentForTask(actor, taskId).orElse(null));
+    snapshot.put("session", browser.map(BrowserSessionService.TaskBrowserView::snapshot).orElse(null));
     snapshot.put("continuation", task.continuation());
     snapshot.put(
         "browserContextChanged",
         observedSessionId != null && !Objects.equals(observedSessionId, sessionId(task)));
-    // Host correlation does not establish actual host WebRTC or physical fence acceptance.
-    snapshot.put("videoState", "UNAVAILABLE");
-    snapshot.put("videoUnavailableReason", "HOST_WEBRTC_NOT_VERIFIED");
-    if (attachment.state().equals("ACTIVE") && attachment.slot() != null
-        && !attachment.slot().eventsConnected() && !widgetOrigin.isBlank()) {
-      snapshot.put("_meta", Map.of("eventTicket", tickets.eventTicket(attachment.slot(), widgetOrigin,
-          origin.replaceFirst("^http", "ws") + "/events/v1/widget/tasks/" + taskId)));
+    String unavailable = media == null ? "PRESENTATION_UNAVAILABLE" : media.unavailableReason();
+    snapshot.put("videoState", unavailable == null || "PRESENTATION_FENCING".equals(unavailable)
+        ? "CONNECTING" : unavailable.equals("PRIVACY_HIDDEN") ? "PRIVACY_HIDDEN" : "UNAVAILABLE");
+    snapshot.put("videoUnavailableReason", unavailable);
+    Map<String, Object> metadata = new HashMap<>();
+    if (attachment.state().equals("ACTIVE") && slot != null && !widgetOrigin.isBlank()) {
+      if (!slot.eventsConnected()) {
+        metadata.put("eventTicket", tickets.eventTicket(slot, widgetOrigin,
+            origin.replaceFirst("^http", "ws") + "/events/v1/widget/tasks/" + taskId));
+      }
+      if (media != null && media.issueTicket()) {
+        metadata.put("viewTicket", tickets.widgetVideoTicket(slot, widgetOrigin,
+            origin.replaceFirst("^http", "ws") + "/stream/v1/widget/signaling/" + slot.browserSessionId()));
+      }
+    }
+    if (!metadata.isEmpty()) {
+      snapshot.put("_meta", metadata);
     }
     return snapshot;
   }

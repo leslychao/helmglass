@@ -17,6 +17,8 @@ import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
@@ -195,7 +197,10 @@ public class BrowserControlService {
           403, "WORKER_BINDING_MISMATCH", "Worker cannot acknowledge control");
     }
     controls.activate(sessionId, epoch, lease.operationId());
-    operations.completeControl(lease.operationId());
+    if (lease.claimFenceId() == null) {
+      operations.completeControl(lease.operationId());
+    }
+    completeClaimFence(session, lease, epoch);
     if ("AGENT".equals(lease.desiredOwner())
         && session.taskId() != null
         && operations
@@ -212,6 +217,55 @@ public class BrowserControlService {
       }
     }
     changes.changed(session.userId(), "tasks", sessionId, session.version());
+  }
+
+  /** Revokes the old claim by draining the same runtime under a fresh control epoch. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public boolean fenceExpiredClaim(UUID userId, UUID sessionId, UUID claimId, long claimEpoch) {
+    if (!identities.lockState(userId).equals("ACTIVE")) {
+      return false;
+    }
+    var session = browsers.owned(userId, sessionId);
+    var lease = controls.lock(sessionId);
+    if (!session.state().equals("ACTIVE") || !session.privacy().equals("NORMAL")
+        || session.taskId() == null || !session.budgetDeadlineAt().isAfter(Instant.now())) {
+      return false;
+    }
+    if (claimId.equals(lease.claimFenceId()) && Objects.equals(claimEpoch, lease.claimFenceEpoch())) {
+      return lease.state().equals("TRANSFERRING") && "AGENT".equals(lease.desiredOwner());
+    }
+    if (!claimId.equals(lease.continuationClaimId()) || lease.epoch() != claimEpoch
+        || !lease.ownerKind().equals("AGENT") || !Set.of("ACTIVE", "TRANSFERRING").contains(lease.state())) {
+      return false;
+    }
+    UUID operation = operations.createSystem(userId, "control.claim-fence", "browserSession", sessionId);
+    operations.expireClaim(lease.operationId());
+    controls.fenceClaim(lease, claimId, operation, session.budgetDeadlineAt());
+    publishControl(userId, sessionId, "AGENT");
+    return true;
+  }
+
+  /** The registry calls this only after its fresh physical recovery control was acknowledged. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void acknowledgeRecoveredClaim(UUID sessionId) {
+    var lease = controls.lock(sessionId);
+    var session = browsers.owned(lease.ownerId(), sessionId);
+    if (session.state().equals("ACTIVE") && session.privacy().equals("NORMAL")
+        && lease.state().equals("ACTIVE") && lease.ownerKind().equals("AGENT")) {
+      completeClaimFence(session, lease, lease.epoch());
+    }
+  }
+
+  private void completeClaimFence(BrowserRepository.Session session, ControlRepository.Lease lease,
+      long epoch) {
+    if (lease.claimFenceId() == null || lease.claimFenceEpoch() == null
+        || epoch <= lease.claimFenceEpoch() || session.taskId() == null) {
+      return;
+    }
+    controls.clearClaimFence(session.id());
+    operations.completeControl(lease.operationId());
+    events.publishEvent(new TaskContinuationService.ClaimFenced(session.taskId(), lease.claimFenceId(),
+        lease.claimFenceEpoch(), epoch));
   }
 
   @Transactional

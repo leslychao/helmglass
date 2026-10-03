@@ -97,6 +97,15 @@ public class ChannelTicketService {
         slot.id(), slot.presentationRevision(), slot.grantVersion(), origin), "url", url);
   }
 
+  public Map<String, Object> widgetVideoTicket(ChatPresentation slot, String origin, String url) {
+    return issue(new TicketBinding(slot.userId(), null, slot.grantId(), slot.accessEpoch(),
+        slot.taskId(), slot.browserSessionId(), slot.activeViewerInstanceId(), null,
+        slot.controlEpoch(), slot.pageEpoch(), slot.privacyEpoch(), slot.mediaGeneration(),
+        slot.viewGeneration(), "NORMAL_VIDEO", slot.mediaTicketExpiresAt(),
+        slot.viewerAuthorizationExpiresAt(), slot.id(), slot.presentationRevision(),
+        slot.grantVersion(), origin), "signalingUrl", url);
+  }
+
   public TicketBinding consumeTaskEvents(String token, UUID taskId, String origin) {
     TicketBinding binding = consume(token, "TASK_EVENTS");
     if (binding.viewScopeId() == null || binding.grantId() == null

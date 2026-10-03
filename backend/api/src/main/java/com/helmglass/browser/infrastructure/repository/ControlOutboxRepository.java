@@ -31,7 +31,7 @@ public class ControlOutboxRepository {
       AND (o.payload->>'operationId')::uuid IS NOT DISTINCT FROM c.operation_id
       AND u.state='ACTIVE'
       AND (o.payload->'message'->>'policyVersion')::bigint=p.version
-      AND (NOT (o.payload->'message' ? 'connectionId') OR EXISTS(
+      AND (NOT jsonb_exists(o.payload->'message','connectionId') OR EXISTS(
         SELECT 1 FROM connections x WHERE x.id=s.connection_id AND x.user_id=s.user_id
         AND x.id::text=o.payload->'message'->>'connectionId'
         AND x.scope_version=(o.payload->'message'->>'scopeVersion')::bigint))
@@ -43,7 +43,8 @@ public class ControlOutboxRepository {
           AND l.admitted_access_epoch=u.access_epoch))))
       AND (c.continuation_claim_id IS NULL OR EXISTS(SELECT 1 FROM task_continuations t
         JOIN client_grants g ON g.id=t.claim_grant_id WHERE t.claim_id=c.continuation_claim_id
-        AND t.state='CLAIMED' AND t.expires_at>now() AND g.status='ACTIVE'))
+        AND t.state='CLAIMED' AND t.expires_at>now() AND t.claim_expires_at>now()
+        AND g.status='ACTIVE'))
       AND (s.budget_deadline_at>now() OR
         (o.payload->'message'->>'mode'='QUIESCED'
         AND (o.payload->'message'->>'cleanupDeadline')::timestamptz>now()

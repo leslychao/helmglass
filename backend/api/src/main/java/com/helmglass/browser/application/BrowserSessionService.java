@@ -8,6 +8,7 @@ import com.helmglass.connection.infrastructure.repository.LoginRepository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.realtime.application.ChannelTicketService;
+import com.helmglass.realtime.domain.BrowserMediaBinding;
 import com.helmglass.task.api.TaskContracts.Capability;
 import java.time.Instant;
 import java.util.HashMap;
@@ -50,17 +51,35 @@ public class BrowserSessionService {
   }
 
   /** Resolves the current task binding through the browser owner, never a historical widget hint. */
-  public Optional<Map<String, Object>> currentForTask(AuthenticatedActor actor, UUID taskId) {
+  public record TaskBrowserView(Map<String, Object> snapshot, BrowserMediaBinding media) {}
+
+  public Optional<TaskBrowserView> currentForTask(AuthenticatedActor actor, UUID taskId) {
     actor.requireScope("browser:view");
     return browsers.binding(taskId)
         .filter(session -> session.userId().equals(actor.userId()))
-        .map(session -> snapshot(actor, session, null));
+        .map(session -> {
+          var control = controls.get(session.id());
+          String reason = null;
+          if (!session.privacy().equals("NORMAL")) {
+            reason = "PRIVACY_HIDDEN";
+          } else if (!session.state().equals("ACTIVE") || !control.state().equals("ACTIVE")) {
+            reason = "BROWSER_NOT_READY";
+          }
+          var media = new BrowserMediaBinding(session.id(), session.workerId(),
+              session.workerBootId(), session.allocationEpoch(), control.epoch(),
+              session.pageEpoch(), session.privacyEpoch(), session.mediaGeneration(), reason);
+          return new TaskBrowserView(snapshot(actor, session, control, null), media);
+        });
   }
 
   private Map<String, Object> snapshot(AuthenticatedActor actor, BrowserRepository.Session session,
       UUID controller) {
+    return snapshot(actor, session, controls.get(session.id()), controller);
+  }
+
+  private Map<String, Object> snapshot(AuthenticatedActor actor, BrowserRepository.Session session,
+      ControlRepository.Lease control, UUID controller) {
     UUID id = session.id();
-    var control = controls.get(id);
     boolean humanLease =
         control.ownerKind().equals("HUMAN") && control.expiresAt().isAfter(Instant.now());
     boolean self =

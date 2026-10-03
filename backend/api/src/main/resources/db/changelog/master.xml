@@ -57,4 +57,10 @@
   <changeSet id="032-control-delivery" author="helmglass">
     <sqlFile path="032-control-delivery.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="033-claim-fencing" author="helmglass">
+    <sqlFile path="033-claim-fencing.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="034-chat-presentation-media" author="helmglass">
+    <sqlFile path="034-chat-presentation-media.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

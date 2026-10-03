@@ -163,7 +163,7 @@ public class WidgetEventGateway extends TextWebSocketHandler {
       String code = rejection.get();
       int status = switch (code) {
         case "AUTHORIZATION_EXPIRED" -> 4401;
-        case "VIEW_LEASE_EXPIRED" -> 4503;
+        case "VIEW_LEASE_EXPIRED", "VIEW_GENERATION_CHANGED" -> 4503;
         case "GRANT_REVOKED" -> 4403;
         default -> 4412;
       };

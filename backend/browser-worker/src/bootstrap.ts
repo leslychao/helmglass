@@ -37,7 +37,10 @@ const keyFile = directory + '/key.pem';
 const csrFile = directory + '/identity.csr';
 const certFile = directory + '/cert.pem';
 const caFile = directory + '/ca.pem';
-await run('openssl', ['req', '-new', '-newkey', 'rsa:3072', '-nodes', '-keyout', keyFile,
+// RSA progress output is unbounded; quiet key generation keeps the process transport bounded.
+await run('openssl', ['genpkey', '-quiet', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:3072',
+  '-out', keyFile], { maxBuffer: 4096 });
+await run('openssl', ['req', '-new', '-key', keyFile,
   '-out', csrFile, '-subj', '/CN=browser-worker-' + workerId], { maxBuffer: 4096 });
 const key = await readFile(keyFile);
 const csrPem = await readFile(csrFile, 'utf8');

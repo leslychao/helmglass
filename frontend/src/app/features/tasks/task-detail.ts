@@ -114,7 +114,9 @@ import { TaskUsage } from '../usage/task-usage';
             >
           </nav>
         }
-        <hg-mutation [action]="action" />
+        @if (!resumeDialog() && !openDialog()) {
+          <hg-mutation [action]="action" />
+        }
         @if (operationId(); as operation) {
           <hg-operation [id]="operation" />
         }
@@ -490,6 +492,7 @@ import { TaskUsage } from '../usage/task-usage';
           Если прежний браузер закрыт, его страницы и несохранённый контекст не восстановятся.
           Подтверждённые результаты задачи сохраняются.
         </p>
+        <hg-mutation [action]="action" />
         @if (openDialog() && task.data()?.connectionIds?.length) {
           <label class="checkbox"
             ><input type="checkbox" [(ngModel)]="saveNewBrowser" />Сохранять изменения входа при
