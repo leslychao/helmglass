@@ -14,10 +14,11 @@ import {
   viewChild,
 } from '@angular/core';
 import { HttpErrorResponse } from '@angular/common/http';
-import { EMPTY, Subscription, exhaustMap, switchMap, timeout, timer } from 'rxjs';
+import { EMPTY, Subscription, TimeoutError, exhaustMap, switchMap, timeout, timer } from 'rxjs';
 import GstWebRTCAPI from 'gstwebrtc-api/src/gstwebrtc-api.js';
 import type ConsumerSession from 'gstwebrtc-api/types/consumer-session';
 import { Api, problemOf } from '../../core/api/api.service';
+import { ResponseContractError } from '../../core/api/response-contract';
 import { BrowserSession, InputTicket, ViewTicket } from '../../core/api/models';
 import { HelmTransport, StreamState } from './helm-transport';
 import { Icon } from '../icon/icon';
@@ -27,6 +28,18 @@ import { Realtime } from '../../core/realtime/realtime.service';
 import { PresentedFrames } from './presented-frames';
 
 export type ViewerState = 'CONNECTING' | 'LIVE' | 'HIDDEN' | 'UNAVAILABLE' | 'ERROR' | 'AUTOPLAY';
+
+const RENEW_FAILURE_CODES = new Set([
+  'CONTROL_CONFLICT',
+  'CONTROL_EXPIRED',
+  'AUTHENTICATION_REQUIRED',
+  'REAUTHENTICATION_REQUIRED',
+  'LOGIN_REVOKED',
+  'ACCOUNT_UNAVAILABLE',
+  'ACCOUNT_DELETED',
+  'ACCESS_DENIED',
+  'CSRF_REJECTED',
+]);
 
 @Component({
   selector: 'hg-remote-browser',
@@ -250,11 +263,12 @@ export class RemoteBrowser {
             ),
           )
           .subscribe({
-            error: () => {
+            error: (error: unknown) => {
               this.fail(
                 'Не удалось продлить управление браузером. Обновляем его состояние.',
                 false,
               );
+              this.technicalDetails.set(renewalFailureDetails(error));
               this.refresh.emit();
             },
           });
@@ -736,4 +750,25 @@ export class RemoteBrowser {
     this.current = undefined;
     this.channelSession = undefined;
   }
+}
+
+function renewalFailureDetails(error: unknown): string {
+  if (error instanceof TimeoutError) return 'CONTROL_RENEW_TIMEOUT';
+  if (error instanceof ResponseContractError)
+    return `CONTROL_RENEW_RESPONSE_CONTRACT · ${error.code}`;
+  if (!(error instanceof HttpErrorResponse)) return 'CONTROL_RENEW_UNEXPECTED';
+  if (error.status === 0) return 'CONTROL_RENEW_NETWORK';
+  const status =
+    Number.isInteger(error.status) && error.status >= 100 && error.status <= 599
+      ? ` ${error.status}`
+      : '';
+  const details = [`CONTROL_RENEW_HTTP${status}`];
+  const problem = problemOf(error);
+  if (RENEW_FAILURE_CODES.has(problem.code)) details.push(problem.code);
+  if (
+    problem.requestId?.length === 36 &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(problem.requestId)
+  )
+    details.push(problem.requestId);
+  return details.join(' · ');
 }

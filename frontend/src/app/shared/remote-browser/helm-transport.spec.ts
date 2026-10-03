@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { HttpErrorResponse } from '@angular/common/http';
 import { of, Subject, throwError } from 'rxjs';
 import { Api } from '../../core/api/api.service';
 import { BrowserSession } from '../../core/api/models';
+import { ResponseContractError } from '../../core/api/response-contract';
 import { HelmTransport, streamStateOf } from './helm-transport';
 import { RemoteBrowser } from './remote-browser';
 
@@ -430,6 +432,80 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     expect(fixture.componentInstance.inputReady()).toBe(false);
     expect(refresh).toHaveBeenCalledOnce();
     expect(TestSocket.instances.at(-1)?.closed).toBe(true);
+    const calls = mutate.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(mutate).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each([
+    {
+      name: 'network failure',
+      error: new HttpErrorResponse({ status: 0, error: { detail: 'private content' } }),
+      details: 'CONTROL_RENEW_NETWORK',
+    },
+    {
+      name: 'known HTTP refusal and valid request identity',
+      error: new HttpErrorResponse({
+        status: 409,
+        error: {
+          code: 'CONTROL_EXPIRED',
+          requestId: '049221e3-6e39-43ef-9c36-4dab85d49760',
+          title: 'private content',
+          detail: 'private content',
+        },
+      }),
+      details: 'CONTROL_RENEW_HTTP 409 · CONTROL_EXPIRED · 049221e3-6e39-43ef-9c36-4dab85d49760',
+    },
+    {
+      name: 'HTTP failure without untrusted server strings',
+      error: new HttpErrorResponse({
+        status: 500,
+        error: { code: 'private content', requestId: 'private content', detail: 'private content' },
+      }),
+      details: 'CONTROL_RENEW_HTTP 500',
+    },
+    {
+      name: 'response contract rejection',
+      error: new ResponseContractError('API_RESPONSE_INVALID'),
+      details: 'CONTROL_RENEW_RESPONSE_CONTRACT · API_RESPONSE_INVALID',
+    },
+    {
+      name: 'unexpected error without its message',
+      error: new Error('private content'),
+      details: 'CONTROL_RENEW_UNEXPECTED',
+    },
+  ])(
+    'shows safe renewal diagnostics for $name without restarting control',
+    async ({ error, details }) => {
+      vi.useFakeTimers();
+      privateControl();
+      mutate.mockImplementationOnce(() => throwError(() => error));
+      await vi.advanceTimersByTimeAsync(0);
+      fixture.detectChanges();
+      expect(fixture.componentInstance.technicalDetails()).toBe(details);
+      const element: unknown = fixture.nativeElement;
+      if (!(element instanceof HTMLElement)) throw new Error('Viewer element is missing');
+      const disclosure = element.querySelector('details');
+      expect(disclosure?.hasAttribute('open')).toBe(false);
+      expect(disclosure?.textContent).toContain(details);
+      expect(element.textContent).not.toContain('private content');
+      expect(fixture.componentInstance.inputReady()).toBe(false);
+      const calls = mutate.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(mutate).toHaveBeenCalledTimes(calls);
+    },
+  );
+
+  it('identifies the real four-second renewal timeout and stops the heartbeat', async () => {
+    vi.useFakeTimers();
+    privateControl();
+    mutate.mockImplementationOnce(() => new Subject<never>());
+    await vi.advanceTimersByTimeAsync(3999);
+    expect(fixture.componentInstance.technicalDetails()).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fixture.componentInstance.technicalDetails()).toBe('CONTROL_RENEW_TIMEOUT');
+    expect(fixture.componentInstance.state()).toBe('ERROR');
+    expect(fixture.componentInstance.inputReady()).toBe(false);
     const calls = mutate.mock.calls.length;
     await vi.advanceTimersByTimeAsync(20000);
     expect(mutate).toHaveBeenCalledTimes(calls);

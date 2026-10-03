@@ -55,6 +55,7 @@ test('only matching nonce pixels count as latency, not following frames or forei
   assert.equal(result.matched, 1);
   assert.equal(result.foreign, 1);
   assert.deepEqual(result.latencyMs, { min: 151, p50: 151, p95: 151, p99: 151, max: 151 });
+  assert.deepEqual(result.observedLatencyMs, { min: 160, p50: 160, p95: 160, p99: 160, max: 160 });
   assert.equal(result.lateCallbacks, 1);
 });
 
@@ -86,6 +87,7 @@ test('timeouts, unfinished inputs and completed duration are explicit bounded ou
   assert.equal(result.abandoned, 1);
   assert.equal(result.inputs, 2);
   assert.equal(result.matched, 0);
+  assert.equal(result.unmatchedInputs, 2);
   assert.equal(result.reason, 'DURATION_COMPLETE');
   assert.equal(result.latencyMs.p95, null);
   assert.equal(collector.histogram.length, 3001);

@@ -1,4 +1,9 @@
-param([string]$ReleaseFile)
+param(
+  [string]$ReleaseFile,
+  [string]$WorkerDist,
+  [ValidateSet('smoke', 'selftest', 'baseline')][string]$Mode = 'smoke',
+  [ValidateSet('720p', '1080p')][string]$Viewport = '720p'
+)
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $context = if ($env:HELM_TEST_DOCKER_CONTEXT) { $env:HELM_TEST_DOCKER_CONTEXT } else { 'desktop-linux' }
@@ -12,8 +17,13 @@ foreach ($component in @('WORKER', 'TURN', 'EGRESS', 'NGINX')) {
   docker --context $context image inspect $release[$component] --format '{{.Id}}' | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Load the selected $component image into the local fixture daemon" }
 }
-npm --prefix "$repo/backend/browser-worker" run build
-if ($LASTEXITCODE -ne 0) { throw 'Worker compilation failed' }
+if (!$WorkerDist) {
+  npm --prefix "$repo/backend/browser-worker" run build
+  if ($LASTEXITCODE -ne 0) { throw 'Worker compilation failed' }
+  $WorkerDist = Join-Path $repo 'backend/browser-worker/dist'
+}
+$WorkerDist = (Resolve-Path -LiteralPath $WorkerDist).Path
+if (!(Test-Path -LiteralPath (Join-Path $WorkerDist 'src/session.js'))) { throw 'Compiled worker missing' }
 $testId = 'helm-media-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
 $fixture = Join-Path ([IO.Path]::GetTempPath()) $testId
 $null = New-Item -ItemType Directory -Path $fixture
@@ -32,6 +42,9 @@ $helperWrapper = @'
 #!/bin/sh
 GST_DEBUG=webrtc*:5,nice*:5 exec /usr/local/bin/helm-media-helper 2>/runtime/helper.log
 '@
+if ($Mode -ne 'smoke') {
+  $helperWrapper = "#!/bin/sh`nexec /usr/local/bin/helm-media-helper 2>/runtime/helper.log"
+}
 [IO.File]::WriteAllText((Join-Path $fixture 'helm-media-helper'), $helperWrapper.Replace([string][char]13, '') + [char]10)
 $gatewayConfiguration = @'
 events {}
@@ -71,13 +84,18 @@ try {
   }
   $workerArgs = @('run', '--rm', '--name', "$testId-worker", '--network', $workerNetwork,
     '--read-only', '--cap-drop=ALL', '--env', 'PATH=/fixture:/usr/local/bin:/usr/bin:/bin',
+    '--env', "HELM_MEDIA_MODE=$Mode", '--env', "HELM_MEDIA_VIEWPORT=$Viewport",
     '--security-opt', "seccomp=$repo/Deploy/security/chromium-seccomp.json",
     '--tmpfs', '/runtime:uid=10001,gid=10001,mode=0700', '--tmpfs', '/tmp:mode=1777',
     '--mount', "type=bind,source=$fixture,target=/fixture,readonly",
     '--mount', "type=bind,source=$repo/backend/browser-worker/tests,target=/app/tests,readonly",
-    '--mount', "type=bind,source=$repo/backend/browser-worker/dist,target=/app/dist,readonly",
+    '--mount', "type=bind,source=$WorkerDist,target=/app/dist,readonly",
     '--mount', "type=bind,source=$repo/frontend/node_modules/gstwebrtc-api/src,target=/sdk,readonly",
     '--entrypoint', 'node')
+  if ($Mode -ne 'smoke') {
+    # Includes the local receiver Chromium: report this shared CPU budget explicitly.
+    $workerArgs += @('--cpus', '2', '--memory', '2g', '--memory-swap', '2g', '--shm-size', '512m')
+  }
   # Reproduce the missing-resolution failure before applying the one-name mapping.
   $baseline = @(docker --context $context @workerArgs $release.WORKER /app/tests/webrtc-smoke.mjs 2>&1)
   if ($LASTEXITCODE -eq 0 -or ($baseline -join [char]10) -notmatch 'EAI_AGAIN|ENOTFOUND') {

@@ -12,6 +12,18 @@ import { UsageChart, UsagePoint } from './usage-chart';
 import { Icon } from '../../shared/icon/icon';
 import { Dialog } from '../../shared/dialog/dialog';
 import { SiteMultiselect } from '../../shared/site-multiselect/site-multiselect';
+
+const STATE_PRESENTATION: Readonly<
+  Record<UsageDto['states'][number]['state'], { label: string; color: string }>
+> = {
+  SUCCESS: { label: 'Готово', color: '#4a8cff' },
+  ACTIVE: { label: 'В работе', color: '#39ba91' },
+  PARTIAL: { label: 'Частично', color: '#a396e9' },
+  NOT_ACHIEVED: { label: 'Без успеха', color: '#d7a665' },
+  ERROR: { label: 'Ошибка', color: '#ed7b88' },
+  CANCELLED: { label: 'Остановлено', color: '#b6c1d2' },
+};
+
 function date(daysAgo: number) {
   const value = new Date();
   value.setDate(value.getDate() - daysAgo);
@@ -170,6 +182,11 @@ function date(daysAgo: number) {
           ChatGPT. Эти интервалы не складываются со временем браузера или медиа.
         </p>
         <p>
+          Диаграмма различает полный успех, частичный результат и недостигнутую цель. «В работе»
+          включает ожидание, паузу и ещё не завершённую остановку. «Ошибка» объединяет ошибочные и
+          прерванные задачи; «Остановлено» означает подтверждённую остановку.
+        </p>
+        <p>
           График времени группирует накопленный расход по дате создания задач. Пропуск означает
           отсутствие полного измерения. Каждая задача относится ровно к одному стартовому сайту.
           Объём медиа — сохранённые объекты, а не трафик просмотра браузера.
@@ -222,7 +239,6 @@ export class Usage {
     'FAILED',
     'CANCELLED',
   ];
-  private readonly label = new LabelPipe();
   private readonly duration = new DurationPipe();
   private readonly bytes = new BytesPipe();
   readonly periods = [
@@ -265,13 +281,15 @@ export class Usage {
       })) ?? [],
   );
   readonly statePoints = computed<UsagePoint[]>(() =>
-    (this.usage.data()?.states ?? []).map((item) => ({
-      key: item.state,
-      label: this.label.transform(item.state),
-      value: item.count,
-      description: `${this.label.transform(item.state)}: ${item.count}`,
-      color: item.state === 'FAILED' ? '#ed7b88' : item.state === 'RUNNING' ? '#39ba91' : '#4a8cff',
-    })),
+    (this.usage.data()?.states ?? []).map((item) => {
+      const presentation = STATE_PRESENTATION[item.state];
+      return {
+        key: item.state,
+        ...presentation,
+        value: item.count,
+        description: `${presentation.label}: ${item.count}`,
+      };
+    }),
   );
   readonly browserPoints = computed<UsagePoint[]>(() =>
     (this.usage.data()?.daily ?? []).map((day) => ({

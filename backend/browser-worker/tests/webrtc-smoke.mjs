@@ -11,6 +11,20 @@ import { WebSocketServer } from 'ws';
 import { BrowserSession } from '../dist/src/session.js';
 import { MediaSession } from '../dist/src/media-session.js';
 
+const mode = process.env.HELM_MEDIA_MODE ?? 'smoke';
+assert.ok(['smoke', 'selftest', 'baseline'].includes(mode));
+const viewportName = process.env.HELM_MEDIA_VIEWPORT ?? '720p';
+assert.ok(['720p', '1080p'].includes(viewportName));
+const viewport = viewportName === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
+const measuring = mode !== 'smoke';
+const warmupMs = mode === 'baseline' ? 60_000 : 1000;
+const durationMs = mode === 'baseline' ? 600_000 : 5000;
+const lifetimeMs = measuring ? warmupMs + durationMs + 60_000 : 150_000;
+const inputDelayMs = measuring ? 0 : 150;
+const watchdog = setTimeout(() => {
+  console.error('Media fixture exceeded its bounded runtime'); process.exit(1);
+}, lifetimeMs + 30_000);
+let controlRenewal;
 const credentials = JSON.parse(await readFile('/fixture/credentials.json', 'utf8'));
 assert.equal((await lookup('coturn')).address, credentials.turnAddress,
   'Isolated worker must resolve only the configured TURN address before libnice CONNECT');
@@ -38,7 +52,7 @@ assert.equal(await proxyConnect('10.0.0.1:3478', credentials.proxy), 403);
 assert.equal(await proxyConnect('169.254.169.254:443', credentials.proxy), 403);
 assert.equal(await proxyConnect(credentials.turnAddress + ':3478', credentials.proxy), 200);
 console.log('Isolated worker DNS, direct relay denial and exact authenticated Squid route verified');
-const children = [spawn('Xvfb', [':99', '-screen', '0', '1280x720x24', '-nolisten', 'tcp', '-noreset'], { stdio: 'ignore' }),
+const children = [spawn('Xvfb', [':99', '-screen', '0', `${viewport.width}x${viewport.height}x24`, '-nolisten', 'tcp', '-noreset'], { stdio: 'ignore' }),
   spawn('gst-webrtc-signalling-server', ['--host', '127.0.0.1', '--port', '8443'], { stdio: 'ignore' })];
 await delay(500); children.push(spawn('openbox', ['--sm-disable'], { stdio: 'ignore' })); await delay(500);
 let runtime; let viewerBrowser;
@@ -67,8 +81,8 @@ const media = new MediaSession(() => runtime, (binding, value) => {
 }, () => undefined);
 const turnUserId = randomUUID();
 for (const viewer of viewers.values()) {
-  // Match IceServerService: distinct viewer identity, shared producer uses its first lease.
-  const username = `${Math.floor(Date.now() / 1000) + 180}:${turnUserId}:${viewer.id}`;
+  // Match IceServerService: each viewer and its producer peer have their own identity.
+  const username = `${Math.floor((Date.now() + lifetimeMs) / 1000)}:${turnUserId}:${viewer.id}`;
   viewer.ice = { urls: ['turn:coturn:3478?transport=tcp'], username,
     credential: createHmac('sha1', credentials.turn).update(username).digest('base64') };
 }
@@ -100,6 +114,8 @@ const server = createServer(async (request, response) => {
       signal.send(JSON.stringify({type:'fixtureInput',nonce}));
     });
     window.measurementSnapshot=()=>measurement?.collector.snapshot(performance.now());
+    window.startMeasurement=()=>{measurement?.stop('WARMUP_COMPLETE');
+      measurement=observeVideo(video,{run:${measurementRun},startedAt:performance.now(),durationMs:${durationMs}});};
     window.stopMeasurement=()=>{const result=measurement?.stop('FIXTURE_COMPLETE');
       document.getElementById('measurement').textContent=JSON.stringify(result,null,2);return result;};
     const decoded=()=>{window.framesDecoded++;window.lastFrameAt=performance.now();window.firstFrameMs??=window.lastFrameAt-openedAt;video.requestVideoFrameCallback(decoded)};
@@ -107,14 +123,14 @@ const server = createServer(async (request, response) => {
     const surface=new URL(location.href).searchParams.get('surface');
     const api=new GstWebRTCAPI({signalingServerUrl:'ws://127.0.0.1:8099/?surface='+surface,reconnectionTimeout:0,webrtcConfig:{iceServers:[${JSON.stringify(viewerIce)}],iceTransportPolicy:'relay'},
       transportFactory:url=>{const ws=new WebSocket(url);signal=ws;const bridge={send:data=>{trace('out',JSON.parse(data));ws.send(data)},close:()=>ws.close(),onmessage:null,onclose:null,onerror:null};
-        ws.onmessage=event=>{const value=JSON.parse(event.data);trace('in',value);if(value.type==='streamState'){window.captureState=value.captureState;return}bridge.onmessage?.(event);
+        ws.onmessage=event=>{const value=JSON.parse(event.data);trace('in',value);if(value.type==='streamState'){window.captureState=value.captureState;window.captureSequence=value.captureSequence;window.captureAgeMs=value.captureAgeMs;return}bridge.onmessage?.(event);
           const peer=window.consumer?.rtcPeerConnection;if(peer&&!observedPeers.has(peer)){observedPeers.add(peer);peer.addEventListener('icecandidateerror',error=>window.iceErrors.push(error.errorCode));}};
         ws.onclose=()=>bridge.onclose?.();ws.onerror=()=>bridge.onerror?.(new ErrorEvent('error',{message:'socket'}));return bridge;}});
     api.registerConnectionListener({connected:()=>console.log('SDK connected'),disconnected:()=>console.log('SDK disconnected'),error:error=>window.failures.push(String(error))});
     api.registerPeerListener({producerAdded:producer=>{if(window.consumer)return;const consumer=api.createConsumerSession(producer.id);if(!consumer)return;window.consumer=consumer;
       consumer.addEventListener('error',event=>{window.failures.push(event.message);console.log('consumer error',event.message)});
       consumer.addEventListener('streamsChanged',()=>{if(consumer.streams[0]){video.srcObject=consumer.streams[0];video.play().then(()=>{
-        measurement?.stop('PEER_REPLACED');measurement=observeVideo(video,{run:${measurementRun},startedAt:performance.now(),durationMs:20000});
+        if(!${measuring}){measurement?.stop('PEER_REPLACED');measurement=observeVideo(video,{run:${measurementRun},startedAt:performance.now(),durationMs:20000});}
       })}});consumer.connect();},producerRemoved:()=>{}});
   </script>`);
 });
@@ -141,7 +157,7 @@ ws.on('connection', (client, request) => {
       const payload = JSON.parse(raw.toString());
       if (payload.type === 'fixtureInput') {
         assert.equal(viewer.surface, 'WEB');
-        assert.ok(Number.isInteger(payload.nonce) && payload.nonce >= 1 && payload.nonce <= 6);
+        assert.ok(Number.isInteger(payload.nonce) && payload.nonce >= 1 && payload.nonce <= (measuring ? 120 : 6));
         await runtime.input({ schemaVersion: 1, type: 'input', requestId: randomUUID(),
           browserSessionId: assignment.browserSessionId, allocationEpoch: assignment.allocationEpoch,
           controlEpoch: binding.controlEpoch, pageEpoch: binding.pageEpoch,
@@ -186,7 +202,7 @@ async function decodedProof(viewer, stage) {
     firstFrameMs: window.firstFrameMs, width: document.querySelector('video').videoWidth,
     height: document.querySelector('video').videoHeight, failures: window.failures,
     captureState: window.captureState }));
-  assert.equal(proof.width, 1280); assert.equal(proof.height, 720);
+  assert.equal(proof.width, viewport.width); assert.equal(proof.height, viewport.height);
   assert.deepEqual(proof.failures, []); assert.deepEqual(viewer.failures, []);
   assert.equal(proof.captureState, 'ACTIVE');
   assert.ok(proof.firstFrameMs < 15000, 'First frame exceeded the existing UI recovery window');
@@ -212,21 +228,102 @@ async function recoverViewers(stage) {
   }
 }
 
+async function performanceBaseline(viewer, capabilities) {
+  console.log(`PERFORMANCE_WARMUP mode=${mode} viewport=${viewportName} seconds=${warmupMs / 1000}`);
+  await delay(warmupMs);
+  await viewer.page.evaluate(() => window.startMeasurement());
+  const samples = [];
+  const start = performance.now();
+  const stats = async () => viewer.page.evaluate(async () => {
+    const pc = window.consumer?.rtcPeerConnection;
+    const report = pc ? await pc.getStats() : new Map();
+    const received = [...report.values()].find(item => item.type === 'inbound-rtp' && item.kind === 'video');
+    const transport = [...report.values()].find(item => item.type === 'transport');
+    const pair = report.get(transport?.selectedCandidatePairId);
+    const local = report.get(pair?.localCandidateId);
+    const remote = report.get(pair?.remoteCandidateId);
+    const video = document.querySelector('video');
+    const result = { clientMs: performance.now(), width: video.videoWidth, height: video.videoHeight,
+      captureSequence: window.captureSequence ?? null, captureAgeMs: window.captureAgeMs ?? null,
+      connectionState: pc?.connectionState ?? null, codec: report.get(received?.codecId)?.mimeType ?? null,
+      localType: local?.candidateType ?? null, remoteType: remote?.candidateType ?? null,
+      protocol: local?.protocol ?? null, relayProtocol: local?.relayProtocol ?? null,
+      rttSeconds: pair?.currentRoundTripTime ?? null };
+    for (const field of ['framesReceived', 'framesDecoded', 'framesDropped', 'bytesReceived',
+      'packetsLost', 'nackCount', 'pliCount', 'jitter', 'jitterBufferDelay',
+      'jitterBufferEmittedCount', 'totalDecodeTime', 'freezeCount', 'totalFreezesDuration'])
+      result[field] = Number.isFinite(received?.[field]) ? received[field] : null;
+    return result;
+  });
+  const initial = await stats();
+  const memoryPeaks = { totalCgroupBytes: 0, anonymousBytes: 0, fileCacheBytes: 0, kernelBytes: 0 };
+  const cpuStart = await readFile('/sys/fs/cgroup/cpu.stat', 'utf8');
+  const cpuUsage = value => Number(/^usage_usec (\d+)$/m.exec(value)?.[1] ?? NaN);
+  for (let second = 1; second <= durationMs / 1000; second++) {
+    await delay(Math.max(0, start + second * 1000 - performance.now()));
+    const sample = await stats();
+    assert.equal(sample.width, viewport.width, 'Unexpected resolution adaptation');
+    assert.equal(sample.height, viewport.height, 'Unexpected resolution adaptation');
+    assert.equal(sample.connectionState, 'connected');
+    samples.push(sample);
+    const memory = await readFile('/sys/fs/cgroup/memory.stat', 'utf8');
+    for (const [field, counter] of [['anonymousBytes', 'anon'], ['fileCacheBytes', 'file'], ['kernelBytes', 'kernel']]) {
+      memoryPeaks[field] = Math.max(memoryPeaks[field], Number(new RegExp(`^${counter} (\\d+)$`, 'm').exec(memory)?.[1] ?? NaN));
+    }
+    memoryPeaks.totalCgroupBytes = Math.max(memoryPeaks.totalCgroupBytes,
+      Number(await readFile('/sys/fs/cgroup/memory.current', 'utf8')));
+    const clock = await viewer.page.evaluate(() => window.measurementSnapshot());
+    if (second % 5 === 1 && second * 1000 < durationMs - 3000) {
+      assert.equal(clock.inputs, clock.matched + clock.timedOut + clock.abandoned,
+        'Only one unreplayed input probe may be outstanding');
+      await viewer.page.getByRole('button', { name: 'Send visual probe' }).click();
+    }
+    if (second % 60 === 0) console.log(`PERFORMANCE_PROGRESS seconds=${second} unique=${clock.unique} matched=${clock.matched} timedOut=${clock.timedOut}`);
+  }
+  const measurement = await viewer.page.evaluate(() => window.stopMeasurement());
+  const cpuEnd = await readFile('/sys/fs/cgroup/cpu.stat', 'utf8');
+  const cpuCores = (cpuUsage(cpuEnd) - cpuUsage(cpuStart)) / (performance.now() - start) / 1000;
+  const result = { scope: 'LOCAL_EQUIVALENT_WORKER_NOT_107', mode, viewport, sessions: 1, viewers: 1,
+    warmupMs, durationMs, deliberatePageDelayMs: inputDelayMs, capabilities,
+    chromium: viewerBrowser.version(), receiver: 'headless Chromium in the same 2CPU/2GiB container',
+    inputPath: 'viewer click -> fixture WebSocket -> production BrowserSession.input -> Chromium',
+    limitations: ['No Java API/OAuth path or physical display', 'Native capture/copy/encode element timings unavailable',
+      'No NVENC device requested; software profile', 'Observed unique FPS is a lower bound for missed callbacks'],
+    cpuCores, memoryPeaks, ...measurement, initial, samples,
+    inputTargetMet: measurement.inputs > 0 && measurement.unmatchedInputs === 0 && measurement.observedLatencyMs.p95 <= 100,
+    fullPerformanceAcceptance: false };
+  console.log('MEDIA_PERFORMANCE_BASELINE=' + JSON.stringify(result));
+  assert.ok(measurement.unique > 0);
+  assert.equal(measurement.foreign, 0);
+  assert.equal(measurement.abandoned, 0);
+  assert.deepEqual(viewer.failures, []);
+}
+
 try {
-  console.log('encoder', await media.capabilities);
+  const capabilities = await media.capabilities;
+  console.log('encoder', capabilities);
   const assignment = { purpose: 'TASK', taskId: randomUUID(), userId: randomUUID(), browserSessionId: randomUUID(), workerBootId: randomUUID(), instructionRevision: 1,
     allocationEpoch: 1, controlEpoch: 1, pageEpoch: 1, privacyEpoch: 1, policyVersion: 1, originPolicy: 'PUBLIC', allowedOrigins: [],
-    deadline: new Date(Date.now() + 150_000).toISOString(), viewport: { width: 1280, height: 720 } };
+    deadline: new Date(Date.now() + lifetimeMs).toISOString(), viewport };
   runtime = await BrowserSession.create(assignment, { headless: false, display: ':99', stagingDirectory: '/runtime/sessions',
     mediaBarrier: () => { mediaBarrier = media.closeAll(); return mediaBarrier; } });
-  await runtime.context.pages()[0].goto(`http://127.0.0.1:8099/performance/source.html?run=${measurementRun}&inputDelayMs=150`);
+  await runtime.context.pages()[0].goto(`http://127.0.0.1:8099/performance/source.html?run=${measurementRun}&inputDelayMs=${inputDelayMs}`);
   await runtime.control({ schemaVersion: 1, type: 'control', requestId: randomUUID(), browserSessionId: assignment.browserSessionId,
     allocationEpoch: 1, controlEpoch: 2, privacyEpoch: 1, pageEpoch: assignment.pageEpoch, policyVersion: 1,
-    mode: 'HUMAN', controllerInstance, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+    mode: 'HUMAN', controllerInstance, leaseExpiresAt: new Date(Date.now() + (measuring ? 30_000 : 60_000)).toISOString() });
+  if (measuring) controlRenewal = setInterval(() => {
+    try { runtime.renewControl({ schemaVersion: 1, type: 'controlRenew', requestId: randomUUID(),
+      browserSessionId: assignment.browserSessionId, controlEpoch: assignment.controlEpoch,
+      controllerInstance, leaseExpiresAt: new Date(Date.now() + 30_000).toISOString() }); }
+    catch (error) { console.error('Control renewal failed', error.code); process.exit(1); }
+  }, 10_000);
   viewerBrowser = await chromium.launch({ headless: true, chromiumSandbox: true });
   const web = viewers.get('WEB');
   await connectViewer(web, 'initial');
   const viewer = web.page;
+  if (measuring) {
+    await performanceBaseline(web, capabilities);
+  } else {
   await viewer.waitForFunction(() => window.measurementSnapshot()?.unique >= 8, undefined, { timeout: 5000 });
   for (let expected = 1; expected <= 6; expected++) {
     await viewer.getByRole('button', { name: 'Send visual probe' }).click();
@@ -308,6 +405,7 @@ try {
     assert.ok(age > 1500, 'Native producer transmitted after lease expiry for ' + item.surface + ': ' + age);
   }
   console.log('Native media lease stopped both decoded streams while the Node owner was stalled');
+  }
 } catch (error) {
   console.error(error); process.exitCode = 1;
   let diagnostic = 'No native diagnostic';
@@ -324,6 +422,7 @@ try {
   console.log(diagnostic.split('\n').filter(line => /ERROR|WARN|turn|proxy|resolv|candidate/i.test(line) && !/webrtcstats/.test(line)).slice(0, 40).join('\n').replace(/((?:https?|turns?):\/\/)[^\s]+@/g, '$1[redacted]@'));
 }
 finally {
+  clearTimeout(watchdog); clearInterval(controlRenewal);
   for (const item of viewers.values()) clearInterval(item.renew);
   await media.closeAll(); await runtime?.close(); await viewerBrowser?.close();
   ws.close(); server.close(); for (const child of children) child.kill();

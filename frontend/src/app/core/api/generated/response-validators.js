@@ -12910,7 +12910,7 @@ function validate136(data, { instancePath = "", parentData, parentDataProperty, 
 }
 validate136.evaluated = { "items": true, "dynamicProps": false, "dynamicItems": false };
 var response20 = validate139;
-var schema64 = { "type": "object", "additionalProperties": false, "properties": { "scope": { "type": "string", "enum": ["TASK_COHORT"] }, "basis": { "type": "string", "enum": ["TASK_CREATED"] }, "from": { "type": "string", "format": "date-time" }, "to": { "type": "string", "format": "date-time" }, "timezone": { "type": "string" }, "asOf": { "type": "string", "format": "date-time" }, "taskCount": { "type": "integer", "format": "int64", "minimum": 0 }, "terminalCount": { "type": "integer", "format": "int64", "minimum": 0 }, "successfulCount": { "type": "integer", "format": "int64", "minimum": 0 }, "successRate": { "anyOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }] }, "metrics": { "$ref": "#/$defs/UsageMetrics" }, "daily": { "type": "array", "items": { "$ref": "#/$defs/UsageDaily" } }, "states": { "type": "array", "items": { "$ref": "#/$defs/UsageState" } } }, "required": ["scope", "basis", "from", "to", "timezone", "asOf", "taskCount", "terminalCount", "successfulCount", "successRate", "metrics", "daily", "states"] };
+var schema64 = { "type": "object", "additionalProperties": false, "properties": { "scope": { "type": "string", "enum": ["TASK_COHORT"] }, "basis": { "type": "string", "enum": ["TASK_CREATED"] }, "from": { "type": "string", "format": "date-time" }, "to": { "type": "string", "format": "date-time" }, "timezone": { "type": "string" }, "asOf": { "type": "string", "format": "date-time" }, "taskCount": { "type": "integer", "format": "int64", "minimum": 0 }, "terminalCount": { "type": "integer", "format": "int64", "minimum": 0 }, "successfulCount": { "type": "integer", "format": "int64", "minimum": 0 }, "successRate": { "anyOf": [{ "type": "number", "minimum": 0, "maximum": 1 }, { "type": "null" }] }, "metrics": { "$ref": "#/$defs/UsageMetrics" }, "daily": { "type": "array", "items": { "$ref": "#/$defs/UsageDaily" } }, "states": { "type": "array", "minItems": 6, "maxItems": 6, "description": "Exactly six outcome groups in order: SUCCESS, ACTIVE, PARTIAL, NOT_ACHIEVED, ERROR, CANCELLED, including zero counts. Completed tasks with no recorded outcome belong to NOT_ACHIEVED.", "items": { "$ref": "#/$defs/UsageState" } } }, "required": ["scope", "basis", "from", "to", "timezone", "asOf", "taskCount", "terminalCount", "successfulCount", "successRate", "metrics", "daily", "states"] };
 var formats224 = require_formats().fullFormats.date;
 function validate141(data, { instancePath = "", parentData, parentDataProperty, rootData = data, dynamicAnchors = {} } = {}) {
   let vErrors = null;
@@ -13007,6 +13007,7 @@ function validate141(data, { instancePath = "", parentData, parentDataProperty, 
   return errors === 0;
 }
 validate141.evaluated = { "props": true, "dynamicProps": false, "dynamicItems": false };
+var schema66 = { "type": "object", "additionalProperties": false, "properties": { "state": { "type": "string", "description": "Outcome group for the task cohort; ACTIVE includes nonterminal states except INTERRUPTED, and ERROR includes FAILED and INTERRUPTED.", "enum": ["SUCCESS", "ACTIVE", "PARTIAL", "NOT_ACHIEVED", "ERROR", "CANCELLED"] }, "count": { "type": "integer", "format": "int64", "minimum": 0 } }, "required": ["state", "count"] };
 function validate144(data, { instancePath = "", parentData, parentDataProperty, rootData = data, dynamicAnchors = {} } = {}) {
   let vErrors = null;
   let errors = 0;
@@ -13034,9 +13035,14 @@ function validate144(data, { instancePath = "", parentData, parentDataProperty, 
         }
         if (_errs1 === errors) {
           if (data.state !== void 0) {
+            let data0 = data.state;
             const _errs2 = errors;
-            if (typeof data.state !== "string") {
+            if (typeof data0 !== "string") {
               validate144.errors = [{ instancePath: instancePath + "/state", schemaPath: "#/properties/state/type", keyword: "type", params: { type: "string" }, message: "must be string" }];
+              return false;
+            }
+            if (!(data0 === "SUCCESS" || data0 === "ACTIVE" || data0 === "PARTIAL" || data0 === "NOT_ACHIEVED" || data0 === "ERROR" || data0 === "CANCELLED")) {
+              validate144.errors = [{ instancePath: instancePath + "/state", schemaPath: "#/properties/state/enum", keyword: "enum", params: { allowedValues: schema66.properties.state.enum }, message: "must be equal to one of the allowed values" }];
               return false;
             }
             var valid0 = _errs2 === errors;
@@ -13407,17 +13413,27 @@ function validate139(data, { instancePath = "", parentData, parentDataProperty, 
                                     const _errs30 = errors;
                                     if (errors === _errs30) {
                                       if (Array.isArray(data13)) {
-                                        var valid3 = true;
-                                        const len1 = data13.length;
-                                        for (let i1 = 0; i1 < len1; i1++) {
-                                          const _errs32 = errors;
-                                          if (!validate144(data13[i1], { instancePath: instancePath + "/states/" + i1, parentData: data13, parentDataProperty: i1, rootData, dynamicAnchors })) {
-                                            vErrors = vErrors === null ? validate144.errors : vErrors.concat(validate144.errors);
-                                            errors = vErrors.length;
-                                          }
-                                          var valid3 = _errs32 === errors;
-                                          if (!valid3) {
-                                            break;
+                                        if (data13.length > 6) {
+                                          validate139.errors = [{ instancePath: instancePath + "/states", schemaPath: "#/properties/states/maxItems", keyword: "maxItems", params: { limit: 6 }, message: "must NOT have more than 6 items" }];
+                                          return false;
+                                        } else {
+                                          if (data13.length < 6) {
+                                            validate139.errors = [{ instancePath: instancePath + "/states", schemaPath: "#/properties/states/minItems", keyword: "minItems", params: { limit: 6 }, message: "must NOT have fewer than 6 items" }];
+                                            return false;
+                                          } else {
+                                            var valid3 = true;
+                                            const len1 = data13.length;
+                                            for (let i1 = 0; i1 < len1; i1++) {
+                                              const _errs32 = errors;
+                                              if (!validate144(data13[i1], { instancePath: instancePath + "/states/" + i1, parentData: data13, parentDataProperty: i1, rootData, dynamicAnchors })) {
+                                                vErrors = vErrors === null ? validate144.errors : vErrors.concat(validate144.errors);
+                                                errors = vErrors.length;
+                                              }
+                                              var valid3 = _errs32 === errors;
+                                              if (!valid3) {
+                                                break;
+                                              }
+                                            }
                                           }
                                         }
                                       } else {

@@ -242,6 +242,7 @@ public class UsageRepository {
       String groupKind,
       LocalDate day,
       String state,
+      String outcome,
       UUID siteId,
       String host,
       long taskCount,
@@ -261,12 +262,13 @@ public class UsageRepository {
                 + """
                 SELECT CASE WHEN grouping(day)=0 THEN 'DAY'
                   WHEN grouping(state)=0 THEN 'STATE' ELSE 'TOTAL' END AS group_kind,
-                  day,state,NULL::uuid AS site_id,NULL::text AS host,
+                  day,state,outcome,NULL::uuid AS site_id,NULL::text AS host,
                 """
                 + TOTALS
                 + """
-                FROM per_task GROUP BY GROUPING SETS ((metric),(day,metric),(state,metric))
-                ORDER BY group_kind,day,state,metric
+                FROM per_task GROUP BY GROUPING SETS ((metric),(day,metric),(state,outcome,metric))
+                HAVING grouping(state)=1 OR metric='command_count'
+                ORDER BY group_kind,day,state,outcome,metric
                 """)
         .params(parameters)
         .query(Aggregate.class)
@@ -315,7 +317,8 @@ public class UsageRepository {
                 + "\n"
                 + """
                   LIMIT :limit OFFSET :offset
-                ) SELECT 'SITE' AS group_kind,NULL::date AS day,NULL::text AS state,g.id AS site_id,
+                ) SELECT 'SITE' AS group_kind,NULL::date AS day,NULL::text AS state,
+                  NULL::text AS outcome,g.id AS site_id,
                   s.host,g.task_count,g.terminal_count,g.successful_count,g.metric,g.known_value,
                   g.measured_count,g.expected_count,g.incomplete_count
                 FROM selected s JOIN grouped g ON g.id IS NOT DISTINCT FROM s.id
@@ -507,7 +510,7 @@ public class UsageRepository {
                 + METRICS
                 + """
                 SELECT 'TOTAL' AS group_kind,NULL::date AS day,NULL::text AS state,
-                  NULL::uuid AS site_id,NULL::text AS host,
+                  NULL::text AS outcome,NULL::uuid AS site_id,NULL::text AS host,
                 """
                 + TOTALS
                 + " FROM per_task GROUP BY metric")

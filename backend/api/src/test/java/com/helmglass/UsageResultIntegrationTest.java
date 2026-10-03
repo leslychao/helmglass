@@ -14,6 +14,7 @@ import com.helmglass.task.api.ResultContracts;
 import com.helmglass.task.application.ResultService;
 import com.helmglass.task.infrastructure.repository.ResultRepository;
 import com.helmglass.usage.api.UsageContracts;
+import com.helmglass.usage.api.UsageContracts.StateGroup;
 import com.helmglass.usage.application.UsageCheckpointService;
 import com.helmglass.usage.application.UsagePeriod;
 import com.helmglass.usage.application.UsageService;
@@ -396,6 +397,64 @@ class UsageResultIntegrationTest {
   }
 
   @Test
+  void stateGroupsSeparateCompletedOutcomesAndCountEveryCohortTaskOnce() {
+    var actor = actor();
+    String createdAt = "2026-01-02T12:00:00Z";
+    task(actor, null, "COMPLETED", "SUCCESS", createdAt);
+    task(actor, null, "COMPLETED", "SUCCESS", createdAt);
+    task(actor, null, "COMPLETED", "PARTIAL", createdAt);
+    task(actor, null, "COMPLETED", "NOT_ACHIEVED", createdAt);
+    task(actor, null, "COMPLETED", null, createdAt);
+    task(actor, null, "FAILED", null, createdAt);
+    task(actor, null, "INTERRUPTED", null, createdAt);
+    task(actor, null, "CANCELLED", null, createdAt);
+    for (String state :
+        List.of(
+            "WAITING_AGENT",
+            "QUEUED",
+            "STARTING",
+            "RUNNING",
+            "PAUSING",
+            "PAUSED",
+            "WAITING_USER",
+            "STOPPING")) {
+      task(actor, null, state, null, createdAt);
+    }
+    task(actor, null, "DRAFT", null, createdAt);
+    task(actor, null, "COMPLETED", "SUCCESS", "2025-12-31T12:00:00Z");
+    task(actor(), null, "COMPLETED", "SUCCESS", createdAt);
+
+    var summary = usage.summary(actor, PERIOD);
+    assertThat(summary.states())
+        .extracting(UsageContracts.StateCount::state)
+        .containsExactly(
+            StateGroup.SUCCESS,
+            StateGroup.ACTIVE,
+            StateGroup.PARTIAL,
+            StateGroup.NOT_ACHIEVED,
+            StateGroup.ERROR,
+            StateGroup.CANCELLED);
+    assertThat(summary.states())
+        .extracting(UsageContracts.StateCount::count)
+        .containsExactly(2L, 8L, 1L, 2L, 2L, 1L);
+    assertThat(summary.taskCount()).isEqualTo(16);
+    assertThat(summary.states().stream().mapToLong(UsageContracts.StateCount::count).sum())
+        .isEqualTo(summary.taskCount());
+    assertThat(summary.terminalCount()).isEqualTo(7);
+    assertThat(summary.successfulCount()).isEqualTo(2);
+    assertThat(summary.successRate()).isEqualTo(2.0 / 7);
+
+    var completed =
+        new UsagePeriod(FROM, TO, PERIOD.timezone(), List.of("COMPLETED"), List.of(), false);
+    var filtered = usage.summary(actor, completed);
+    assertThat(filtered.taskCount()).isEqualTo(5);
+    assertThat(filtered.states())
+        .extracting(UsageContracts.StateCount::count)
+        .containsExactly(2L, 0L, 1L, 2L, 0L, 0L);
+    assertThat(filtered.successRate()).isEqualTo(0.4);
+  }
+
+  @Test
   void cohortCountsAndDatesUseCreationTimeAndDoNotInventMissingMeasurements() {
     var actor = actor();
     UUID site = site();
@@ -418,7 +477,9 @@ class UsageResultIntegrationTest {
         .extracting(UsageContracts.Daily::date)
         .containsExactly(LocalDate.of(2026, 1, 2), LocalDate.of(2026, 1, 3));
     assertThat(summary.daily()).extracting(UsageContracts.Daily::taskCount).containsExactly(1L, 4L);
-    assertThat(summary.states()).contains(new UsageContracts.StateCount("INTERRUPTED", 1));
+    assertThat(summary.states())
+        .extracting(UsageContracts.StateCount::count)
+        .containsExactly(1L, 0L, 1L, 0L, 2L, 1L);
     var media = summary.metrics().get("media_bytes");
     assertThat(media.value()).isNull();
     assertThat(media.knownValue()).isEqualByComparingTo("1200");
@@ -469,6 +530,18 @@ class UsageResultIntegrationTest {
     assertThat(empty.taskCount()).isZero();
     assertThat(empty.successRate()).isNull();
     assertThat(empty.daily()).isEmpty();
+    assertThat(empty.states())
+        .extracting(UsageContracts.StateCount::state)
+        .containsExactly(
+            StateGroup.SUCCESS,
+            StateGroup.ACTIVE,
+            StateGroup.PARTIAL,
+            StateGroup.NOT_ACHIEVED,
+            StateGroup.ERROR,
+            StateGroup.CANCELLED);
+    assertThat(empty.states())
+        .extracting(UsageContracts.StateCount::count)
+        .containsExactly(0L, 0L, 0L, 0L, 0L, 0L);
     assertThat(empty.metrics().get("browser_seconds").completeness()).isEqualTo("UNKNOWN");
     assertThat(usage.sites(actor, PERIOD, PageQuery.from(queryParameters())).total()).isZero();
     assertThatThrownBy(() -> new UsagePeriod(FROM, TO, "not-a-zone", List.of(), List.of(), false))

@@ -2144,7 +2144,11 @@ export interface components {
             metrics: components["schemas"]["UsageMetrics"];
         };
         UsageState: {
-            state: string;
+            /**
+             * @description Outcome group for the task cohort; ACTIVE includes nonterminal states except INTERRUPTED, and ERROR includes FAILED and INTERRUPTED.
+             * @enum {string}
+             */
+            state: "SUCCESS" | "ACTIVE" | "PARTIAL" | "NOT_ACHIEVED" | "ERROR" | "CANCELLED";
             /** Format: int64 */
             count: number;
         };
@@ -2169,6 +2173,7 @@ export interface components {
             successRate: number | null;
             metrics: components["schemas"]["UsageMetrics"];
             daily: components["schemas"]["UsageDaily"][];
+            /** @description Exactly six outcome groups in order: SUCCESS, ACTIVE, PARTIAL, NOT_ACHIEVED, ERROR, CANCELLED, including zero counts. Completed tasks with no recorded outcome belong to NOT_ACHIEVED. */
             states: components["schemas"]["UsageState"][];
         };
         UsageSite: {

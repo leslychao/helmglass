@@ -5,6 +5,7 @@ import com.helmglass.api.PageQuery;
 import com.helmglass.api.PageResult;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
+import com.helmglass.task.domain.TaskState;
 import com.helmglass.usage.api.UsageContracts.Calendar;
 import com.helmglass.usage.api.UsageContracts.CalendarDay;
 import com.helmglass.usage.api.UsageContracts.Daily;
@@ -12,6 +13,7 @@ import com.helmglass.usage.api.UsageContracts.Measurement;
 import com.helmglass.usage.api.UsageContracts.Metric;
 import com.helmglass.usage.api.UsageContracts.Site;
 import com.helmglass.usage.api.UsageContracts.StateCount;
+import com.helmglass.usage.api.UsageContracts.StateGroup;
 import com.helmglass.usage.api.UsageContracts.Summary;
 import com.helmglass.usage.api.UsageContracts.TaskUsage;
 import com.helmglass.usage.infrastructure.repository.UsageRepository;
@@ -20,6 +22,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -154,12 +157,15 @@ public class UsageService {
     List<Aggregate> values = usage.summary(actor.userId(), period);
     List<Aggregate> totals = new ArrayList<>();
     Map<LocalDate, List<Aggregate>> days = new LinkedHashMap<>();
-    Map<String, Long> states = new LinkedHashMap<>();
+    Map<StateGroup, Long> states = new EnumMap<>(StateGroup.class);
+    for (StateGroup group : StateGroup.values()) {
+      states.put(group, 0L);
+    }
     for (Aggregate value : values) {
       switch (value.groupKind()) {
         case "TOTAL" -> totals.add(value);
         case "DAY" -> days.computeIfAbsent(value.day(), ignored -> new ArrayList<>()).add(value);
-        case "STATE" -> states.put(value.state(), value.taskCount());
+        case "STATE" -> states.merge(stateGroup(value), value.taskCount(), Long::sum);
         default -> throw new IllegalStateException("Unknown usage grouping");
       }
     }
@@ -224,6 +230,23 @@ public class UsageService {
 
   private static Double successRate(long successful, long terminal) {
     return terminal == 0 ? null : (double) successful / terminal;
+  }
+
+  private static StateGroup stateGroup(Aggregate value) {
+    return switch (TaskState.valueOf(value.state())) {
+      case COMPLETED ->
+          switch (value.outcome()) {
+            case "SUCCESS" -> StateGroup.SUCCESS;
+            case "PARTIAL" -> StateGroup.PARTIAL;
+            // Legacy completed tasks without an outcome must not imply success.
+            case null, default -> StateGroup.NOT_ACHIEVED;
+          };
+      case FAILED, INTERRUPTED -> StateGroup.ERROR;
+      case CANCELLED -> StateGroup.CANCELLED;
+      case WAITING_AGENT, QUEUED, STARTING, RUNNING, PAUSING, PAUSED, WAITING_USER, STOPPING ->
+          StateGroup.ACTIVE;
+      case DRAFT -> throw new IllegalStateException("Draft tasks are outside the usage cohort");
+    };
   }
 
   static Map<String, Metric> metrics(List<Aggregate> values) {

@@ -8015,7 +8015,16 @@
         "additionalProperties": false,
         "properties": {
           "state": {
-            "type": "string"
+            "type": "string",
+            "description": "Outcome group for the task cohort; ACTIVE includes nonterminal states except INTERRUPTED, and ERROR includes FAILED and INTERRUPTED.",
+            "enum": [
+              "SUCCESS",
+              "ACTIVE",
+              "PARTIAL",
+              "NOT_ACHIEVED",
+              "ERROR",
+              "CANCELLED"
+            ]
           },
           "count": {
             "type": "integer",
@@ -8097,6 +8106,9 @@
           },
           "states": {
             "type": "array",
+            "minItems": 6,
+            "maxItems": 6,
+            "description": "Exactly six outcome groups in order: SUCCESS, ACTIVE, PARTIAL, NOT_ACHIEVED, ERROR, CANCELLED, including zero counts. Completed tasks with no recorded outcome belong to NOT_ACHIEVED.",
             "items": {
               "$ref": "#/components/schemas/UsageState"
             }

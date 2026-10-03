@@ -34,7 +34,16 @@ public final class UsageContracts {
       Map<String, Metric> metrics,
       List<CalendarDay> daily) {}
 
-  public record StateCount(String state, long count) {}
+  public enum StateGroup {
+    SUCCESS,
+    ACTIVE,
+    PARTIAL,
+    NOT_ACHIEVED,
+    ERROR,
+    CANCELLED
+  }
+
+  public record StateCount(StateGroup state, long count) {}
 
   public record Summary(
       String scope,

@@ -3,7 +3,7 @@ import { MARKER, markerFromPixels } from './marker.mjs';
 const MAX_DURATION_MS = 600_000;
 const INPUT_TIMEOUT_MS = 3000;
 
-/** Fixed memory per run: one pending input, 3001 histogram bins, at most 600 fps bins. */
+/** Fixed memory: one pending input, two 3001-bin histograms, at most 600 fps bins. */
 export class MeasurementCollector {
   constructor({ run, startedAt, durationMs = MAX_DURATION_MS }) {
     if (!Number.isInteger(run) || run < 1 || run > 0xffffffff || !Number.isFinite(startedAt)
@@ -14,6 +14,7 @@ export class MeasurementCollector {
     this.startedAt = startedAt;
     this.deadline = startedAt + durationMs;
     this.histogram = new Uint32Array(INPUT_TIMEOUT_MS + 1);
+    this.observedHistogram = new Uint32Array(INPUT_TIMEOUT_MS + 1);
     this.seconds = new Uint32Array(Math.ceil(durationMs / 1000));
     this.counts = { callbacks: 0, presented: 0, missedCallbacks: 0, unique: 0, duplicates: 0,
       corrupt: 0, foreign: 0, lateCallbacks: 0, inputs: 0, matched: 0, timedOut: 0, abandoned: 0 };
@@ -76,6 +77,8 @@ export class MeasurementCollector {
       const latency = Math.ceil(expectedDisplayTime - this.pending.at);
       if (latency <= INPUT_TIMEOUT_MS) {
         this.histogram[latency]++;
+        this.observedHistogram[Math.min(INPUT_TIMEOUT_MS,
+          Math.ceil(Math.max(now, expectedDisplayTime) - this.pending.at))]++;
         this.counts.matched++;
         this.pending = undefined;
       }
@@ -92,21 +95,25 @@ export class MeasurementCollector {
   snapshot(now) {
     this.tick(now);
     const elapsedMs = Math.max(0, (this.endedAt ?? now) - this.startedAt);
-    const percentile = (fraction) => {
+    const percentile = (histogram, fraction) => {
       if (!this.counts.matched) return null;
       const rank = Math.max(1, Math.ceil(this.counts.matched * fraction));
       let cumulative = 0;
-      for (let milliseconds = 0; milliseconds < this.histogram.length; milliseconds++) {
-        cumulative += this.histogram[milliseconds];
+      for (let milliseconds = 0; milliseconds < histogram.length; milliseconds++) {
+        cumulative += histogram[milliseconds];
         if (cumulative >= rank) return milliseconds;
       }
       return null;
     };
+    const percentiles = histogram => ({ min: percentile(histogram, 0),
+      p50: percentile(histogram, 0.5), p95: percentile(histogram, 0.95),
+      p99: percentile(histogram, 0.99), max: percentile(histogram, 1) });
     return { elapsedMs, reason: this.reason ?? 'RUNNING', ...this.counts, maxGapMs: this.maxGapMs,
       observedUniqueFps: elapsedMs ? this.counts.unique * 1000 / elapsedMs : 0,
       compositorFps: elapsedMs ? this.counts.presented * 1000 / elapsedMs : 0,
-      latencyMs: { min: percentile(0), p50: percentile(0.5), p95: percentile(0.95),
-        p99: percentile(0.99), max: percentile(1) },
+      latencyMs: percentiles(this.histogram),
+      observedLatencyMs: percentiles(this.observedHistogram),
+      unmatchedInputs: this.counts.inputs - this.counts.matched,
       latencyPoint: 'input-event-to-estimated-composition', histogramResolutionMs: 1,
       perSecondUnique: Array.from(this.seconds.subarray(0, Math.min(this.seconds.length, Math.ceil(elapsedMs / 1000)))) };
   }
@@ -125,7 +132,9 @@ export function observeVideo(video, options) {
   const next = (now, metadata) => {
     if (!active) return;
     context.drawImage(video, 0, 0, MARKER.width, MARKER.height, 0, 0, MARKER.width, MARKER.height);
-    collector.observe(markerFromPixels(context.getImageData(0, 0, MARKER.width, MARKER.height)), metadata, now);
+    const marker = markerFromPixels(context.getImageData(0, 0, MARKER.width, MARKER.height));
+    // Keep the later observation time separately; late callbacks must not understate latency.
+    collector.observe(marker, metadata, Math.max(now, performance.now()));
     if (collector.endedAt === undefined) callback = video.requestVideoFrameCallback(next);
   };
   callback = video.requestVideoFrameCallback(next);
