@@ -24,12 +24,13 @@ function fail(code) {
 export function validateStorageInput(input, installationId) {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(installationId ?? '') || !input
       || !/^[A-Za-z0-9_-]{3,64}$/.test(input.rootUser ?? '')
-      || !/^[A-Za-z0-9_-]{16,64}$/.test(input.apiAccessKey ?? '')
+      || !/^[A-Za-z0-9_-]{16,20}$/.test(input.apiAccessKey ?? '')
       || input.apiAccessKey === input.rootUser
       || typeof input.caPem !== 'string' || input.caPem.length > 65_536
       || !input.caPem.includes('-----BEGIN CERTIFICATE-----')) throw fail('S3_INPUT_INVALID');
   for (const name of ['rootPassword', 'apiSecretKey']) {
-    if (typeof input[name] !== 'string' || input[name].length < 32 || input[name].length > 256
+    const maximum = name === 'apiSecretKey' ? 40 : 256;
+    if (typeof input[name] !== 'string' || input[name].length < 32 || input[name].length > maximum
         || /[\r\n\0]/.test(input[name])) throw fail('S3_INPUT_INVALID');
   }
 }

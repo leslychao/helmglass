@@ -51,6 +51,8 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     assert.equal(secrets.services.backup, undefined, 'Snapshot role must not receive a service KV record');
     assert.equal(Buffer.from(secrets.services['oauth2-proxy'].cookieSecret, 'base64url').length, 32);
     assert.equal(secrets.services.api.s3AccessKey, secrets.services.provision.minio.apiAccessKey);
+    assert.equal(secrets.services.api.s3AccessKey.length, 20);
+    assert.equal(secrets.services.api.s3SecretKey.length, 40);
     assert.notEqual(secrets.services.api.databasePassword, secrets.services.migration.databasePassword);
     assert.equal((await prepareBootstrap(configuration, environment)).created, false);
     assert.deepEqual(await readFile(join(first.directory, 'vault-services-input')), kvBefore);

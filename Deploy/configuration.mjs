@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
+import { isAbsolute } from 'node:path';
 import { parseEnv } from 'node:util';
 
 const INPUT_NAMES = [
@@ -10,7 +11,7 @@ const INPUT_NAMES = [
   'KEYCLOAK_ANGELINA_EMAIL', 'KEYCLOAK_ANGELINA_LAST_NAME', 'MCP_REDIRECT_URIS',
   'EDGE_TLS_FILE', 'TURN_TLS_FILE', 'LOCAL_RECOVERY_DIR', 'DELETION_LEDGER_DIR',
   'BACKUP_DIR', 'BACKUP_WORK_DIR', 'BACKUP_RECIPIENT_FILE',
-  'MINIO_DATA_DIR',
+  'MINIO_DATA_DIR', 'OPERATOR_INPUT_FILE',
 ];
 export const IMAGE_NAMES = [
   'NGINX_IMAGE', 'API_IMAGE', 'MCP_ADAPTER_IMAGE', 'WORKER_IMAGE', 'EGRESS_IMAGE',
@@ -68,7 +69,14 @@ export function validateDeployment(input) {
   }
   const configuration = {};
   for (const name of INPUT_NAMES) {
-    configuration[name] = name === 'TRUSTED_EDGE_PROXY' ? input[name] ?? '' : requireValue(input, name);
+    if (name === 'OPERATOR_INPUT_FILE' && (input[name] === undefined || input[name] === '')) {
+      configuration[name] = '';
+    } else {
+      configuration[name] = name === 'TRUSTED_EDGE_PROXY' ? input[name] ?? '' : requireValue(input, name);
+    }
+  }
+  if (configuration.OPERATOR_INPUT_FILE && !isAbsolute(configuration.OPERATOR_INPUT_FILE)) {
+    throw new ConfigurationError('OPERATOR_INPUT_FILE', 'must be an absolute operator-workstation file path');
   }
   if (!/^(tcp:\/\/[^\s/?#@]+:\d+|unix:\/\/\/.+|npipe:\/\/.+)$/.test(configuration.DOCKER_HOST)) {
     throw new ConfigurationError('DOCKER_HOST', 'must identify the intended Docker daemon');
@@ -115,7 +123,7 @@ export function validateDeployment(input) {
       || configuration.DELETION_LEDGER_DIR === configuration.SECRETS_DIR
       || configuration.DELETION_LEDGER_DIR.startsWith(`${configuration.SECRETS_DIR}/`)) {
     throw new ConfigurationError('DELETION_LEDGER_DIR',
-      'must be a separate existing encrypted off-host mount for immutable deletion records');
+      'must be a separate existing protected directory for immutable deletion records');
   }
   const mounts = ['BACKUP_DIR', 'BACKUP_WORK_DIR', 'DELETION_LEDGER_DIR',
     'MINIO_DATA_DIR'];

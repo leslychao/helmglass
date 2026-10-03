@@ -69,6 +69,6 @@ async function main() {
 }
 
 main().catch(() => {
-  process.stderr.write('INDEPENDENT_LEDGER_UNAVAILABLE: verify the current off-host mount and installation binding\n');
+  process.stderr.write('INDEPENDENT_LEDGER_UNAVAILABLE: verify the current protected ledger directory and installation binding\n');
   process.exitCode = 1;
 });

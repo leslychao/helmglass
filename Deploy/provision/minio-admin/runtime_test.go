@@ -4,14 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
-	madmin "github.com/minio/madmin-go/v3"
 	minio "github.com/minio/minio-go/v7"
 )
 
@@ -35,18 +32,6 @@ func TestCommunityRuntime(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if _, err := s.admin.InfoServiceAccount(ctx, input.Identity.APIAccessKey); err != nil {
-		var response madmin.ErrorResponse
-		if errors.As(err, &response) {
-			t.Logf("initial service-account response code: %s", response.Code)
-			message := response.Message
-			for _, value := range []string{input.Identity.RootUser, input.Identity.RootPassword,
-				input.Identity.APIAccessKey, input.Identity.APISecretKey} {
-				message = strings.ReplaceAll(message, value, "[fixture identity]")
-			}
-			t.Logf("initial service-account response: %s", message)
-		}
-	}
 	if err := s.apply(ctx); err != nil {
 		t.Fatal(err)
 	}

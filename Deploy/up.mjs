@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { prepareBootstrap } from './bootstrap.mjs';
+import { readOperatorInputs } from './operator-inputs.mjs';
 import { BOOTSTRAP_FILES, ConfigurationError, readEnvironmentFile, validateDeployment, validateRelease } from './configuration.mjs';
 import { decryptRecovery, encryptRecovery, secretInput } from './custody.mjs';
 import { isInside, protectDirectory, readProtectedFile, replaceProtectedFile, writeProtectedFile } from './protected-files.mjs';
@@ -33,6 +34,7 @@ async function main() {
   }
   const configuration = validateDeployment(await readEnvironmentFile(new URL('./.env.dev', import.meta.url)));
   const release = validateRelease(await readEnvironmentFile(new URL('./release.env', import.meta.url)));
+  const operatorInputs = await readOperatorInputs(configuration);
   const environment = { ...process.env, ...configuration, ...release, COMPOSE_PROJECT_NAME: 'helm-glass' };
   const recoveryState = await readRecoveryState(configuration.LOCAL_SECRETS_DIR);
   if (recoveryState && recoveryState.stage !== 'READY') {
@@ -98,7 +100,7 @@ async function main() {
     '--entrypoint', 'node', release.PROVISION_IMAGE, '/opt/helm/provision/src/ledger-files.mjs'], {
     input: JSON.stringify({ schemaVersion: 1, installationId: configuration.INSTALLATION_ID, mode: 'prepare' }),
   });
-  const { directory } = await prepareBootstrap(configuration);
+  const { directory } = await prepareBootstrap(configuration, operatorInputs);
   const delivery = [];
   for (const name of BOOTSTRAP_FILES) {
     const bytes = await readProtectedFile(join(directory, name));
@@ -140,7 +142,7 @@ async function main() {
   let custodyPassword;
   let recovery;
   const openCustody = async () => {
-    custodyPassword ??= await secretInput('VAULT_CUSTODY_PASSWORD', 'Offline Vault recovery password (hidden)');
+    custodyPassword ??= await secretInput('VAULT_CUSTODY_PASSWORD', 'Offline Vault recovery password (hidden)', operatorInputs);
     const sealed = await optionalJson(custodyPath);
     if (!sealed) throw new Error('Offline recovery custody is missing');
     recovery = await decryptRecovery(configuration.INSTALLATION_ID, sealed, custodyPassword);
@@ -150,7 +152,7 @@ async function main() {
   if (!state.initialized) {
     if (receipt || await optionalJson(custodyPath)) throw new Error('Vault data is missing; restore the installation instead of initializing over it');
     progress('initializing Vault with encrypted operator custody outside service bootstrap');
-    custodyPassword = await secretInput('VAULT_CUSTODY_PASSWORD', 'Choose an offline recovery password of at least 16 characters (hidden)');
+    custodyPassword = await secretInput('VAULT_CUSTODY_PASSWORD', 'Choose an offline recovery password of at least 16 characters (hidden)', operatorInputs);
     // Validate custody before creating a seal whose shares cannot be recovered later.
     await encryptRecovery(configuration.INSTALLATION_ID, {}, custodyPassword);
     const recoveryDirectory = await protectDirectory(configuration.LOCAL_RECOVERY_DIR, repository);

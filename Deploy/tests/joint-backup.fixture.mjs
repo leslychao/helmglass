@@ -44,11 +44,10 @@ pg.manifestSha256 = await json(`${env.BACKUP_DIR}/${pg.directory}/manifest.json`
 pg.walManifestSha256 = await json(`${env.BACKUP_DIR}/${pg.walDirectory}/manifest.json`, {
   schemaVersion: 1, systemIdentifier: pg.systemIdentifier, walFile: pg.walFile });
 const minio = { directory: `minio/${installationId}/${backupId}` };
-const disks = [];
-for (let index = 1; index <= 4; index++) disks.push({ diskIndex: index, directory: `disk${index}`,
-  manifestSha256: await bundle(`${env.BACKUP_DIR}/${minio.directory}/disk${index}`) });
+const disks = [{ diskIndex: 1, directory: 'disk1',
+  manifestSha256: await bundle(`${env.BACKUP_DIR}/${minio.directory}/disk1`) }];
 minio.manifestSha256 = await json(`${env.BACKUP_DIR}/${minio.directory}/manifest.json`, {
-  schemaVersion: 1, format: 'helm-minio-cold-v1', installationId, backupId, disks });
+  schemaVersion: 1, format: 'helm-minio-single-v1', installationId, backupId, disks });
 const vault = { directory: `vault/${installationId}/${backupId}` };
 vault.manifestSha256 = await json(`${env.BACKUP_DIR}/${vault.directory}/manifest.json`, {
   schemaVersion: 1, format: 'helm-vault-raft-v1', installationId, backupId,

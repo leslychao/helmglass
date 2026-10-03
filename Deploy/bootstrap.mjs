@@ -79,7 +79,8 @@ export async function prepareBootstrap(configuration, environment = process.env)
   const mediaProxyUsername = 'helm-media';
   const mediaProxyPassword = secret();
   const minio = { rootUser: 'helm-storage-root', rootPassword: secret(),
-    apiAccessKey: secret(), apiSecretKey: secret(), caPem };
+    apiAccessKey: randomBytes(15).toString('base64url'),
+    apiSecretKey: randomBytes(30).toString('base64url'), caPem };
   const services = {
     api: { databaseUrl: 'jdbc:postgresql://postgres:5432/helm', databaseUsername: 'helm_api', databasePassword: postgres.apiPassword,
       redisUsername: 'helm_api', redisPassword: redis.api, s3AccessKey: minio.apiAccessKey, s3SecretKey: minio.apiSecretKey,

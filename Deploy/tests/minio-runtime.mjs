@@ -27,8 +27,8 @@ try {
   const tls = await createIdentity(directory, 'minio', caPem);
   const identity = { schemaVersion: 1, rootUser: 'fixture-root', rootPassword: randomBytes(32).toString('hex'), tls };
   const input = { installationId: 'fixture', mode: 'apply', identity: { rootUser: identity.rootUser,
-    rootPassword: identity.rootPassword, apiAccessKey: randomBytes(16).toString('hex'),
-    apiSecretKey: randomBytes(32).toString('hex'), caPem }, policy: storagePolicy, lifecycle: stagingLifecycle };
+    rootPassword: identity.rootPassword, apiAccessKey: randomBytes(15).toString('base64url'),
+    apiSecretKey: randomBytes(30).toString('base64url'), caPem }, policy: storagePolicy, lifecycle: stagingLifecycle };
   const dockerfile = `FROM golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS build
 WORKDIR /build
 COPY Deploy/provision/minio-admin/go.mod Deploy/provision/minio-admin/go.sum ./

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseEnv } from 'node:util';
+import { resolve } from 'node:path';
 import { IMAGE_NAMES, validateDeployment, validateRelease } from '../../configuration.mjs';
 
 function configuration() {
@@ -29,6 +30,17 @@ test('validates dev configuration without confusing client and daemon secret pat
   assert.equal(value.LOCAL_SECRETS_DIR, 'C:/private/helm-glass');
   assert.equal(value.SECRETS_DIR, '/var/lib/helm-glass/bootstrap');
   assert.ok(Object.isFrozen(value));
+  assert.equal(value.OPERATOR_INPUT_FILE, '');
+});
+
+test('operator password file is optional and accepts only an absolute local path', () => {
+  const path = resolve('operator-inputs.json');
+  assert.equal(validateDeployment({ ...configuration(), OPERATOR_INPUT_FILE: path }).OPERATOR_INPUT_FILE, path);
+  assert.equal(validateDeployment({ ...configuration(), OPERATOR_INPUT_FILE: '' }).OPERATOR_INPUT_FILE, '');
+  for (const value of ['relative.json', ' ', 123, null, path + '\n']) {
+    assert.throws(() => validateDeployment({ ...configuration(), OPERATOR_INPUT_FILE: value }),
+      { parameter: 'OPERATOR_INPUT_FILE' });
+  }
 });
 
 test('rejects secrets, public trust, unsafe origins and malformed remote paths', () => {

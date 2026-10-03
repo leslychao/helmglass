@@ -93,7 +93,7 @@ try {
   run(command[0], [...command.slice(1), 'backup', 'fixture', 'unsafe'], { env, failure: true });
   await unlink('/data/unsafe-link');
   assert.deepEqual(await readdir(root + '/scratch'), []);
-  process.stdout.write('PASS: single-volume encrypted cold roundtrip, corrupt archive leaves target empty, installation binding, hostile tar links/traversal, nonempty-target and source-symlink rejection. This fixture does not run MinIO or prove offhost durability.\n');
+  process.stdout.write('PASS: single-volume encrypted cold roundtrip, corrupt archive leaves target empty, installation binding, hostile tar links/traversal, nonempty-target and source-symlink rejection. This fixture validates encrypted archives, not a running MinIO deployment.\n');
 } finally {
   await rm(root, { recursive: true, force: true });
 }

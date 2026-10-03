@@ -59,9 +59,9 @@ async function verify(root, value, installationId, backupId) {
   const minio = value.minio;
   requireValue(minio?.directory === `minio/${installationId}/${backupId}`);
   const objects = await component(root, minio.directory, minio.manifestSha256);
-  requireValue(objects.schemaVersion === 1 && objects.format === 'helm-minio-cold-v1'
+  requireValue(objects.schemaVersion === 1 && objects.format === 'helm-minio-single-v1'
     && objects.installationId === installationId && objects.backupId === backupId
-    && Array.isArray(objects.disks) && objects.disks.length === 4);
+    && Array.isArray(objects.disks) && objects.disks.length === 1);
   for (const [index, disk] of objects.disks.entries()) {
     requireValue(disk.diskIndex === index + 1 && disk.directory === `disk${index + 1}`);
     await component(root, `${minio.directory}/${disk.directory}`, disk.manifestSha256);
