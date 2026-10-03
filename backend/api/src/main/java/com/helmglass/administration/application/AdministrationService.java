@@ -42,9 +42,10 @@ public class AdministrationService {
     return administration.overview();
   }
 
-  public Map<String, Object> browsers(AuthenticatedActor actor) {
+  @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+  public Map<String, Object> browsers(AuthenticatedActor actor, PageQuery query) {
     actor.requireAdmin();
-    return administration.browsers();
+    return administration.browsers(query);
   }
 
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)

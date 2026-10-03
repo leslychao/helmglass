@@ -60,10 +60,6 @@ public class WidgetEventGateway extends TextWebSocketHandler {
       socket.close(new CloseStatus(4403, "CHANNEL_ORIGIN_REJECTED"));
       return;
     }
-    if (!realtime.fanoutAvailable()) {
-      socket.close(new CloseStatus(4503, "EVENTS_UNAVAILABLE"));
-      return;
-    }
     if (!connectionLimit.tryAcquire()) {
       socket.close(new CloseStatus(4429, "CONNECTION_LIMIT"));
       return;
@@ -150,13 +146,6 @@ public class WidgetEventGateway extends TextWebSocketHandler {
       } else {
         authorized(connection);
       }
-    }
-  }
-
-  @EventListener
-  public void resynchronize(RealtimeDeliveryService.ResynchronizationRequired event) {
-    for (Connection connection : connections.values()) {
-      close(connection, 4503, "EVENTS_RESYNCHRONIZE");
     }
   }
 

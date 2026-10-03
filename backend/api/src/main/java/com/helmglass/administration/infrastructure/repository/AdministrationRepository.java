@@ -290,26 +290,60 @@ public class AdministrationRepository {
         rows, total, query.page(), query.pageSize(), query.sortDescriptor(), snapshot);
   }
 
-  public Map<String, Object> browsers() {
-    return Map.of(
-        "workers",
-        jdbc.sql(
-                """
-                SELECT id,boot_id AS "bootId",capacity,version,desired_mode AS "desiredMode",
-                observed_state AS "observedState",image_version AS "imageVersion",heartbeat_at AS "heartbeatAt"
-                FROM browser_workers ORDER BY id
-                """)
-            .query()
-            .listOfRows(),
-        "allocations",
-        jdbc.sql(
-                """
-                SELECT id,session_id AS "sessionId",user_id AS "userId",worker_id AS "workerId",
-                slot_index AS "slotIndex",state,version FROM browser_allocations WHERE state<>'RELEASED'
-                ORDER BY created_at LIMIT 1000
-                """)
-            .query()
-            .listOfRows());
+  public Map<String, Object> browsers(PageQuery query) {
+    String population = """
+        WITH workers AS (
+          SELECT w.id,w.boot_id AS "bootId",w.capacity,w.version,w.desired_mode AS "desiredMode",
+            w.observed_state AS "observedState",w.image_version AS "imageVersion",w.heartbeat_at AS "heartbeatAt",
+            CASE WHEN w.heartbeat_at<=now()-interval '15 seconds' OR w.observed_state='LOST' THEN 'OFFLINE'
+              WHEN w.desired_mode='DRAINING' THEN 'DRAINING' ELSE w.observed_state END AS state,
+            (SELECT count(*) FROM browser_allocations a WHERE a.worker_id=w.id AND a.state<>'RELEASED') AS "lastKnownOccupied"
+          FROM browser_workers w
+        )
+        """;
+    String where = " WHERE w.id::text ILIKE :q";
+    var parameters = new HashMap<String, Object>();
+    parameters.put("q", query.escapedQuery());
+    List<String> states = query.filters().get("state");
+    if (states != null && !states.isEmpty()) {
+      if (states.size() > 3 || !List.of("READY", "DRAINING", "OFFLINE").containsAll(states)) {
+        throw new DomainException(400, "INVALID_FILTER", "Unsupported worker state filter");
+      }
+      where += " AND w.state IN (:states)";
+      parameters.put("states", states);
+    }
+    var workers = jdbc.sql(population + """
+        SELECT w.*,CASE WHEN w.state='OFFLINE' THEN NULL ELSE w."lastKnownOccupied" END AS occupied,
+          CASE WHEN w.state='OFFLINE' THEN NULL
+            WHEN w.state='READY' AND w."desiredMode"='ENABLED' AND p.accepting_allocations
+            THEN greatest(0,w.capacity-w."lastKnownOccupied") ELSE 0 END AS free
+        FROM workers w CROSS JOIN platform_settings p
+        """ + where + " ORDER BY w.id LIMIT 1000").params(parameters).query().listOfRows();
+    long workerTotal = jdbc.sql(population + "SELECT count(*) FROM workers w" + where)
+        .params(parameters).query(Long.class).single();
+    var allocations = jdbc.sql("""
+        SELECT a.id,a.session_id AS "sessionId",a.user_id AS "userId",u.display_name AS "userName",
+          a.worker_id AS "workerId",a.slot_index AS "slotIndex",a.state,a.version,
+          b.task_id AS "taskId",b.state AS "sessionState"
+        FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
+          JOIN application_users u ON u.id=a.user_id WHERE a.state<>'RELEASED'
+        ORDER BY a.created_at,a.id LIMIT 1000
+        """).query().listOfRows();
+    String queued = """
+        FROM tasks t JOIN application_users u ON u.id=t.user_id
+        WHERE (t.state='QUEUED' OR EXISTS(SELECT 1 FROM browser_sessions b
+          WHERE b.task_id=t.id AND b.state='REQUESTED' AND b.binding_released_at IS NULL))
+          AND NOT EXISTS(SELECT 1 FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
+            WHERE b.task_id=t.id AND a.state<>'RELEASED')
+        """;
+    var queue = jdbc.sql("""
+        SELECT t.id AS "taskId",t.user_id AS "userId",u.display_name AS "userName",
+          t.wait_reason AS "waitReason",t.created_at AS "createdAt"
+        """ + queued + " ORDER BY t.created_at,t.id LIMIT 1000").query().listOfRows();
+    return Map.of("workers", workers, "workerTotal", workerTotal, "allocations", allocations,
+        "allocationTotal", jdbc.sql("SELECT count(*) FROM browser_allocations WHERE state<>'RELEASED'")
+            .query(Long.class).single(), "queue", queue,
+        "queueTotal", jdbc.sql("SELECT count(*) " + queued).query(Long.class).single());
   }
 
   public void limits(UUID userId, AdminContracts.Limits input) {
@@ -449,40 +483,58 @@ public class AdministrationRepository {
   }
 
   public PageResult<Map<String, Object>> audit(UUID actorId, UUID userId, PageQuery query) {
-    String where = " WHERE (reason ILIKE :q OR action ILIKE :q)";
+    String joins = """
+        FROM admin_audit_log a LEFT JOIN application_users u ON a.target_type='user' AND u.id=a.target_id
+          LEFT JOIN operations o ON o.id=a.operation_id
+        """;
+    String where = """
+        WHERE (a.reason ILIKE :q OR a.action ILIKE :q OR a.actor_name ILIKE :q
+          OR a.actor_id::text ILIKE :q OR a.target_id::text ILIKE :q OR u.display_name ILIKE :q)
+        """;
     Map<String, Object> parameters = new HashMap<>();
     parameters.put("q", query.escapedQuery());
     if (userId != null) {
-      where += " AND target_user_id=:user";
+      where += " AND a.target_user_id=:user";
       parameters.put("user", userId);
     }
-    long total =
-        jdbc.sql("SELECT count(*) FROM admin_audit_log" + where)
-            .params(parameters)
-            .query(Long.class)
-            .single();
-    var rows =
-        jdbc.sql(
-                """
-                SELECT id,actor_id AS "actorId",actor_name AS "actorName",target_id AS "targetId",
-                target_type AS "targetType",action,reason,operation_id AS "operationId",occurred_at AS "occurredAt"
-                FROM admin_audit_log
-                """
-                    + where
-                    + " ORDER BY occurred_at DESC,id LIMIT :limit OFFSET :offset")
-            .params(parameters)
-            .param("limit", query.pageSize())
-            .param("offset", query.offset())
-            .query()
-            .listOfRows();
+    String action = query.filters().getFirst("action");
+    if (action != null) {
+      if (!action.matches("[A-Z_]{1,80}") || query.filters().get("action").size() != 1) {
+        throw new DomainException(400, "INVALID_FILTER", "Invalid audit action filter");
+      }
+      where += " AND a.action=:action";
+      parameters.put("action", action);
+    }
+    long total = jdbc.sql("SELECT count(*) " + joins + where).params(parameters).query(Long.class).single();
+    var rows = jdbc.sql("""
+        SELECT a.id,a.actor_id AS "actorId",a.actor_name AS "actorName",a.target_id AS "targetId",
+          coalesce(u.display_name,CASE WHEN a.target_type='platform' THEN 'Платформа' ELSE a.target_id::text END) AS "targetName",
+          a.target_type AS "targetType",a.action,a.reason,a.operation_id AS "operationId",
+          o.state AS "operationState",a.occurred_at AS "occurredAt",
+        """ + auditValueSql("previous_value") + " AS previous," + auditValueSql("new_value") + " AS next "
+        + joins + where + " ORDER BY " + query.sqlOrder(Map.of(
+          "occurredAt", "a.occurred_at", "actorName", "a.actor_name", "targetName", "\"targetName\"",
+          "action", "a.action", "reason", "a.reason"), "a.occurred_at DESC,a.id") + " LIMIT :limit OFFSET :offset")
+        .params(parameters).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
+    for (var row : rows) {
+      row.put("previousValue", json.map((String) row.remove("previous")));
+      row.put("newValue", json.map((String) row.remove("next")));
+    }
     var parametersForSnapshot = new LinkedMultiValueMap<>(query.filters());
     parametersForSnapshot.set("targetUserId", userId == null ? "all" : userId.toString());
-    return new PageResult<>(
-        rows,
-        total,
-        query.page(),
-        query.pageSize(),
-        query.sortDescriptor(),
+    return new PageResult<>(rows, total, query.page(), query.pageSize(), query.sortDescriptor(),
         changes.snapshot(actorId, "audit", PageQuery.from(parametersForSnapshot)));
+  }
+
+  private static String auditValueSql(String column) {
+    return "jsonb_strip_nulls(jsonb_build_object("
+        + "'accountState',a." + column + "->'accountState',"
+        + "'browserMode',a." + column + "->'browserMode',"
+        + "'browserCustom',a." + column + "->'browserCustom',"
+        + "'queuedMode',a." + column + "->'queuedMode',"
+        + "'queuedCustom',a." + column + "->'queuedCustom',"
+        + "'acceptingAllocations',a." + column + "->'acceptingAllocations',"
+        + "'desiredMode',a." + column + "->'desiredMode',"
+        + "'state',a." + column + "->'state'))::text";
   }
 }

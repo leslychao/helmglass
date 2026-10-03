@@ -1640,6 +1640,7 @@ export interface components {
             /** Format: date-time */
             observedAt: string;
             completeness: string;
+            totalUsers: number;
         };
         UserLimits: {
             version: number;
@@ -1698,6 +1699,10 @@ export interface components {
             imageVersion: string;
             /** Format: date-time */
             heartbeatAt: string;
+            state: string;
+            lastKnownOccupied: number;
+            occupied: number | null;
+            free: number | null;
         };
         Allocation: {
             /** Format: uuid */
@@ -1711,10 +1716,18 @@ export interface components {
             slotIndex: number;
             state: string;
             version: number;
+            userName: string;
+            /** Format: uuid */
+            taskId: string | null;
+            sessionState: string;
         };
         BrowserPool: {
             workers: components["schemas"]["Worker"][];
             allocations: components["schemas"]["Allocation"][];
+            workerTotal: number;
+            allocationTotal: number;
+            queueTotal: number;
+            queue: components["schemas"]["AdminBrowserQueueItem"][];
         };
         AuditEntry: {
             /** Format: uuid */
@@ -1731,6 +1744,10 @@ export interface components {
             operationId: string;
             /** Format: date-time */
             occurredAt: string;
+            targetName: string;
+            previousValue: components["schemas"]["AdminAuditValues"];
+            newValue: components["schemas"]["AdminAuditValues"];
+            operationState: string | null;
         };
         AdminUserPage: {
             items: components["schemas"]["AdminUserListItem"][];
@@ -1791,6 +1808,7 @@ export interface components {
             occupiedBrowsers: number;
             queuedTasks: number;
             limits: components["schemas"]["UserLimits"] | null;
+            pendingOperations: number;
         };
         TaskListItem: {
             /** Format: uuid */
@@ -2468,6 +2486,26 @@ export interface components {
                 direction: "asc" | "desc";
             } | null;
             snapshot: string;
+        };
+        AdminBrowserQueueItem: {
+            /** Format: uuid */
+            taskId: string;
+            /** Format: uuid */
+            userId: string;
+            userName: string;
+            waitReason: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        AdminAuditValues: {
+            accountState?: string;
+            browserMode?: string;
+            browserCustom?: number;
+            queuedMode?: string;
+            queuedCustom?: number;
+            acceptingAllocations?: boolean;
+            desiredMode?: string;
+            state?: string;
         };
     };
     responses: never;
@@ -3506,7 +3544,11 @@ export interface operations {
     };
     get__admin_users: {
         parameters: {
-            query?: never;
+            query?: {
+                accountState?: ("ACTIVE" | "BLOCKED" | "DELETING" | "PURGING" | "DELETED")[];
+                pending?: boolean;
+                waiting?: boolean;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3662,7 +3704,10 @@ export interface operations {
     };
     get__admin_browsers: {
         parameters: {
-            query?: never;
+            query?: {
+                q?: string;
+                state?: ("READY" | "DRAINING" | "OFFLINE")[];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3710,7 +3755,11 @@ export interface operations {
     };
     get__admin_audit: {
         parameters: {
-            query?: never;
+            query?: {
+                action?: string;
+                sort?: "occurredAt" | "actorName" | "targetName" | "action" | "reason";
+                direction?: "asc" | "desc";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3758,7 +3807,11 @@ export interface operations {
     };
     get__admin_users_id_audit: {
         parameters: {
-            query?: never;
+            query?: {
+                action?: string;
+                sort?: "occurredAt" | "actorName" | "targetName" | "action" | "reason";
+                direction?: "asc" | "desc";
+            };
             header?: never;
             path: {
                 id: string;

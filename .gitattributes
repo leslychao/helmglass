@@ -5,5 +5,7 @@
 *.conf text eol=lf
 *.hcl text eol=lf
 Dockerfile text eol=lf
+healthcheck text eol=lf
+Deploy/runtime/vault-bootstrap text eol=lf
 mvnw text eol=lf
 *.cmd text eol=crlf

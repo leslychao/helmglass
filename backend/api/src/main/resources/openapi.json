@@ -1278,7 +1278,44 @@
           "409": {
             "description": "Conflict"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "accountState",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "maxItems": 5,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "ACTIVE",
+                  "BLOCKED",
+                  "DELETING",
+                  "PURGING",
+                  "DELETED"
+                ]
+              }
+            }
+          },
+          {
+            "name": "pending",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "waiting",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ]
       }
     },
     "/api/v1/admin/users/{id}": {
@@ -1446,7 +1483,35 @@
           "409": {
             "description": "Conflict"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "READY",
+                  "DRAINING",
+                  "OFFLINE"
+                ]
+              }
+            }
+          }
+        ]
       }
     },
     "/api/v1/admin/audit": {
@@ -1475,7 +1540,45 @@
           "409": {
             "description": "Conflict"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z_]{1,80}$"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "occurredAt",
+                "actorName",
+                "targetName",
+                "action",
+                "reason"
+              ]
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          }
+        ]
       }
     },
     "/api/v1/admin/users/{id}/audit": {
@@ -1513,6 +1616,42 @@
             "schema": {
               "type": "string",
               "format": "uuid"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Z_]{1,80}$"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "occurredAt",
+                "actorName",
+                "targetName",
+                "action",
+                "reason"
+              ]
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
             }
           }
         ]
@@ -5474,6 +5613,10 @@
           },
           "completeness": {
             "type": "string"
+          },
+          "totalUsers": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -5490,7 +5633,8 @@
           "allocatableFree",
           "acceptingAllocations",
           "observedAt",
-          "completeness"
+          "completeness",
+          "totalUsers"
         ]
       },
       "UserLimits": {
@@ -5762,6 +5906,27 @@
           "heartbeatAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "state": {
+            "type": "string"
+          },
+          "lastKnownOccupied": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "occupied": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "free": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
           }
         },
         "required": [
@@ -5772,7 +5937,11 @@
           "desiredMode",
           "observedState",
           "imageVersion",
-          "heartbeatAt"
+          "heartbeatAt",
+          "state",
+          "lastKnownOccupied",
+          "occupied",
+          "free"
         ]
       },
       "Allocation": {
@@ -5803,6 +5972,19 @@
           },
           "version": {
             "type": "integer"
+          },
+          "userName": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "sessionState": {
+            "type": "string"
           }
         },
         "required": [
@@ -5812,7 +5994,10 @@
           "workerId",
           "slotIndex",
           "state",
-          "version"
+          "version",
+          "userName",
+          "taskId",
+          "sessionState"
         ]
       },
       "BrowserPool": {
@@ -5823,18 +6008,43 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Worker"
-            }
+            },
+            "maxItems": 1000
           },
           "allocations": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Allocation"
+            },
+            "maxItems": 1000
+          },
+          "workerTotal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "allocationTotal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queueTotal": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queue": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/AdminBrowserQueueItem"
             }
           }
         },
         "required": [
           "workers",
-          "allocations"
+          "allocations",
+          "workerTotal",
+          "allocationTotal",
+          "queueTotal",
+          "queue"
         ]
       },
       "AuditEntry": {
@@ -5872,6 +6082,21 @@
           "occurredAt": {
             "type": "string",
             "format": "date-time"
+          },
+          "targetName": {
+            "type": "string"
+          },
+          "previousValue": {
+            "$ref": "#/components/schemas/AdminAuditValues"
+          },
+          "newValue": {
+            "$ref": "#/components/schemas/AdminAuditValues"
+          },
+          "operationState": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5883,7 +6108,11 @@
           "action",
           "reason",
           "operationId",
-          "occurredAt"
+          "occurredAt",
+          "targetName",
+          "previousValue",
+          "newValue",
+          "operationState"
         ]
       },
       "AdminUserPage": {
@@ -6143,6 +6372,10 @@
                 "type": "null"
               }
             ]
+          },
+          "pendingOperations": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -6155,7 +6388,8 @@
           "lastActivityAt",
           "occupiedBrowsers",
           "queuedTasks",
-          "limits"
+          "limits",
+          "pendingOperations"
         ]
       },
       "TaskListItem": {
@@ -9099,6 +9333,72 @@
           "sort",
           "snapshot"
         ]
+      },
+      "AdminBrowserQueueItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "userName": {
+            "type": "string"
+          },
+          "waitReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "taskId",
+          "userId",
+          "userName",
+          "waitReason",
+          "createdAt"
+        ]
+      },
+      "AdminAuditValues": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "accountState": {
+            "type": "string"
+          },
+          "browserMode": {
+            "type": "string"
+          },
+          "browserCustom": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "queuedMode": {
+            "type": "string"
+          },
+          "queuedCustom": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "acceptingAllocations": {
+            "type": "boolean"
+          },
+          "desiredMode": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
       }
     }
   }

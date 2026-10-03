@@ -14,9 +14,7 @@ import {
   AdminTask,
   AdminUser as UserDto,
   AuditEntry,
-  BrowserPool,
   Page,
-  Worker,
 } from '../../core/api/models';
 import { ServerResource } from '../../core/api/server-resource';
 import { Mutation } from '../../core/api/mutation';
@@ -428,134 +426,6 @@ export class AdminUser {
   }
 }
 
-@Component({
-  selector: 'hg-admin-browsers',
-  imports: [
-    DatePipe,
-    Feedback,
-    MutationFeedback,
-    Status,
-    Dialog,
-    FormsModule,
-    Icon,
-    DataTable,
-    AsyncOperation,
-  ],
-  changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `<header class="heading"><h1 tabindex="-1">Браузерный пул</h1></header>
-    <hg-feedback [loading]="pool.loading()" [error]="pool.error()" (retry)="pool.refresh()" />
-    @if (pool.data(); as pool) {
-      <section class="panel">
-        <header class="panel-head"><h2>Узлы исполнения</h2></header>
-        @for (worker of pool.workers; track worker.id) {
-          <article class="worker-row">
-            <hg-icon name="browser" />
-            <div>
-              <h3>{{ worker.id }}</h3>
-              <p class="small muted">
-                Heartbeat: {{ worker.heartbeatAt | date: 'dd.MM HH:mm:ss' }}
-              </p>
-            </div>
-            <hg-status [value]="worker.observedState" /><span
-              >{{ occupied().get(worker.id) ?? 0 }} / {{ worker.capacity }}</span
-            ><button class="btn" (click)="selected.set(worker); reason = ''">
-              {{ worker.desiredMode === 'DRAINING' ? 'Вернуть в работу' : 'Вывести из работы' }}
-            </button>
-          </article>
-        } @empty {
-          <p class="panel-body muted">Узлы ещё не зарегистрированы.</p>
-        }
-      </section>
-      <section class="panel">
-        <header class="panel-head"><h2>Сессии браузеров</h2></header>
-        <hg-data-table
-          [columns]="columns"
-          [rows]="rows()"
-          [showEmpty]="true"
-          emptyTitle="Нет активных сессий"
-          emptyText="Сессии появляются после подтверждённого выделения браузера."
-        />
-      </section>
-      <div class="notice neutral">
-        <strong>Вывод узла из работы</strong>
-        <p>
-          Новые браузеры на узле не создаются. Существующие сессии продолжают работу до обычного
-          завершения.
-        </p>
-      </div>
-    }
-    @if (action.receipt()?.operationId; as operation) {
-      <hg-operation [id]="operation" />
-    }
-    @if (selected(); as worker) {
-      <hg-dialog
-        [title]="
-          worker.desiredMode === 'DRAINING' ? 'Вернуть узел в работу' : 'Вывести узел из работы'
-        "
-        [busy]="action.pending()"
-        (closed)="selected.set(null)"
-        ><label class="field"
-          >Причина<textarea [(ngModel)]="reason" maxlength="1000" required></textarea></label
-        ><hg-mutation [action]="action" /><button
-          dialog-actions
-          class="btn primary"
-          [disabled]="!reason.trim() || action.pending() || action.unknown()"
-          (click)="apply()"
-        >
-          Применить
-        </button></hg-dialog
-      >
-    }`,
-})
-export class AdminBrowsers {
-  readonly occupied = computed(() => {
-    const counts = new Map<string, number>();
-    for (const item of this.pool.data()?.allocations ?? []) {
-      counts.set(item.workerId, (counts.get(item.workerId) ?? 0) + 1);
-    }
-    return counts;
-  });
-  readonly pool = new ServerResource<BrowserPool>(['nodes', 'sessions']);
-  readonly selected = signal<Worker | null>(null);
-  readonly action = new Mutation();
-  reason = '';
-  readonly columns: Column[] = [
-    { key: 'id', title: 'Сессия' },
-    { key: 'user', title: 'Пользователь' },
-    { key: 'worker', title: 'Узел' },
-    { key: 'state', title: 'Состояние' },
-  ];
-  readonly rows = computed<TableItem[]>(
-    () =>
-      this.pool.data()?.allocations.map((session) => ({
-        id: session.id,
-        values: {
-          id: session.sessionId,
-          user: session.userId,
-          worker: session.workerId,
-          state: new LabelPipe().transform(session.state),
-        },
-      })) ?? [],
-  );
-  constructor() {
-    this.pool.load('/admin/browsers');
-  }
-  apply() {
-    const worker = this.selected();
-    if (!worker) return;
-    this.action.run(
-      'POST',
-      `/admin/workers/${worker.id}/${worker.desiredMode === 'DRAINING' ? 'enable' : 'drain'}`,
-      { expectedVersion: worker.version, reason: this.reason.trim() },
-      () => {
-        this.selected.set(null);
-        this.pool.refresh();
-      },
-    );
-  }
-}
-
-
 export { AdminUsers } from './admin-users';
 export { AdminAudit } from './admin-audit';
 
@@ -579,3 +449,5 @@ export class AdminOverview {
   readonly overview = new ServerResource<OverviewDto>(['nodes', 'sessions', 'users', 'tasks', 'operations']);
   constructor() { this.overview.load('/admin/overview'); }
 }
+
+export { AdminBrowsers } from './admin-browsers';

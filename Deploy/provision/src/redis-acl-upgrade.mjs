@@ -3,9 +3,8 @@ import { readFile } from 'node:fs/promises';
 const template = (await readFile(new URL('../../redis/users.acl.template', import.meta.url), 'utf8'))
   .replaceAll('\r\n', '\n');
 const sessionLockCommands = ' +msetnx +mset +mget +getrange';
-const realtimeChannel = ' &helm:realtime:invalidations:v1 +publish +subscribe +unsubscribe';
 
-/** Upgrade known shipped policies, preserving credentials and rejecting unrelated policy drift. */
+/** The only supported policy upgrade adds OAuth's refresh lock without changing credentials. */
 export function upgradeRedisAcl(bytes) {
   const source = bytes.toString('utf8');
   const normalized = source.replaceAll('\r\n', '\n');
@@ -16,9 +15,6 @@ export function upgradeRedisAcl(bytes) {
     expected = expected.replace(`${name.toUpperCase()}_PASSWORD_SHA256`, hash);
   }
   if (normalized === expected) return bytes;
-  const beforeRealtime = expected.replace(realtimeChannel, '');
-  if (normalized !== beforeRealtime && normalized !== beforeRealtime.replace(sessionLockCommands, '')) {
-    throw new Error('Unrecognized Redis ACL');
-  }
+  if (normalized !== expected.replace(sessionLockCommands, '')) throw new Error('Unrecognized Redis ACL');
   return Buffer.from(expected.replaceAll('\n', source.includes('\r\n') ? '\r\n' : '\n'));
 }

@@ -65,9 +65,7 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     assert.notEqual(secrets.services.api.databasePassword, secrets.services.migration.databasePassword);
     const aclPath = join(first.directory, 'redis-bootstrap.acl');
     const currentAcl = await readFile(aclPath, 'utf8');
-    const beforeRealtime = currentAcl.replace(
-      ' &helm:realtime:invalidations:v1 +publish +subscribe +unsubscribe', '');
-    await writeFile(aclPath, beforeRealtime.replace(' +msetnx +mset +mget +getrange', ''));
+    await writeFile(aclPath, currentAcl.replace(' +msetnx +mset +mget +getrange', ''));
     await writeFile(turnPath, JSON.stringify(legacyTurn));
     await writeProtectedFile(legacyEdgePath, recipient.certificatePem + recipient.privateKeyPem);
     const unrelatedPath = join(first.directory, 'operator-note');
@@ -79,9 +77,6 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     assert.notEqual(await readFile(aclPath, 'utf8'), currentAcl, 'Reject the full input before applying another migration');
     assert.ok((await readFile(legacyEdgePath)).length > 0);
     await writeFile(turnPath, JSON.stringify(legacyTurn));
-    assert.equal((await prepareBootstrap(configuration, environment)).created, false);
-    assert.equal(await readFile(aclPath, 'utf8'), currentAcl);
-    await writeFile(aclPath, beforeRealtime);
     assert.equal((await prepareBootstrap(configuration, environment)).created, false);
     assert.equal(await readFile(aclPath, 'utf8'), currentAcl);
     assert.deepEqual(await readFile(turnPath), currentTurn);

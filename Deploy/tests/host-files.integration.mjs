@@ -102,18 +102,14 @@ test('daemon-side delivery migrates TURN atomically, retires managed edge TLS an
     assert.equal((await deliver(input, [0, 1])).code, 1);
     await docker([...containerArguments, '--input-type=module', '-e',
       'import {lstat,unlink} from "node:fs/promises";if(!(await lstat("/bootstrap/edge-tls")).isSymbolicLink())throw Error("Fixture link changed");await unlink("/bootstrap/edge-tls");']);
-    const beforeRealtime = acl.replace(
-      ' &helm:realtime:invalidations:v1 +publish +subscribe +unsubscribe', '');
-    for (const previousAcl of [beforeRealtime.replace(' +msetnx +mset +mget +getrange', ''), beforeRealtime]) {
-      await docker([...containerArguments, '--input-type=module', '-e',
-        'import {writeFile} from "node:fs/promises";let input="";for await(const chunk of process.stdin)input+=chunk;await writeFile("/bootstrap/redis-bootstrap.acl",Buffer.from(input,"base64"));'],
-      { input: Buffer.from(previousAcl).toString('base64') });
-      assert.equal((await deliver({ ...input, mode: 'verify' }, [0, 1])).code, 1);
-      const changedPassword = Buffer.from(acl.replace(/#[a-f0-9]{64}/, '#' + '0'.repeat(64)));
-      assert.equal((await deliver({ ...input, files: [entry('redis-bootstrap.acl', changedPassword)] }, [0, 1])).code, 1);
-      assert.equal((await deliver(input)).code, 0);
-      assert.equal((await deliver({ ...input, mode: 'verify' })).code, 0);
-    }
+    await docker([...containerArguments, '--input-type=module', '-e',
+      'import {writeFile} from "node:fs/promises";let input="";for await(const chunk of process.stdin)input+=chunk;await writeFile("/bootstrap/redis-bootstrap.acl",Buffer.from(input,"base64"));'],
+    { input: Buffer.from(acl.replace(' +msetnx +mset +mget +getrange', '')).toString('base64') });
+    assert.equal((await deliver({ ...input, mode: 'verify' }, [0, 1])).code, 1);
+    const changedPassword = Buffer.from(acl.replace(/#[a-f0-9]{64}/, '#' + '0'.repeat(64)));
+    assert.equal((await deliver({ ...input, files: [entry('redis-bootstrap.acl', changedPassword)] }, [0, 1])).code, 1);
+    assert.equal((await deliver(input)).code, 0);
+    assert.equal((await deliver({ ...input, mode: 'verify' })).code, 0);
     // Interrupt after the complete private file is written, but before ownership/atomic rename.
     const resume = entry('worker-bootstrap', randomBytes(64));
     await docker([...containerArguments, '--input-type=module', '-e',

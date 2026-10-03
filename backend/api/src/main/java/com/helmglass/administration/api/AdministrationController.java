@@ -58,8 +58,8 @@ public class AdministrationController {
   }
 
   @GetMapping("/browsers")
-  Map<String, Object> browsers(HttpServletRequest request) {
-    return administration.browsers(Actors.current(request));
+  Map<String, Object> browsers(@RequestParam MultiValueMap<String, String> query, HttpServletRequest request) {
+    return administration.browsers(Actors.current(request), PageQuery.from(query));
   }
 
   @GetMapping("/audit")

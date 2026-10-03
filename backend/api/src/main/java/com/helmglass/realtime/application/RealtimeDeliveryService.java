@@ -15,7 +15,6 @@ import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
 import com.helmglass.realtime.infrastructure.repository.OutboxRepository;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -28,14 +27,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataAccessException;
-import org.springframework.data.redis.connection.Message;
-import org.springframework.data.redis.connection.MessageListener;
-import org.springframework.data.redis.connection.SubscriptionListener;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
@@ -49,9 +43,7 @@ import tools.jackson.databind.JsonNode;
 
 @Slf4j
 @Component
-public class RealtimeDeliveryService extends TextWebSocketHandler
-    implements MessageListener, SubscriptionListener {
-  public static final String FANOUT_CHANNEL = "helm:realtime:invalidations:v1";
+public class RealtimeDeliveryService extends TextWebSocketHandler {
   private static final Set<String> ADMIN_RESOURCES =
       Set.of("users", "userTasks", "userDays", "nodes", "sessions", "audit");
   private static final Set<String> SELF_RESOURCES =
@@ -79,11 +71,7 @@ public class RealtimeDeliveryService extends TextWebSocketHandler
   private final OperationRepository operations;
   private final ApplicationEventPublisher events;
   private final ChangeRepository changes;
-  private final StringRedisTemplate redis;
-  private final AtomicBoolean fanoutReady = new AtomicBoolean();
-  private final UUID fanoutProbeId = UUID.randomUUID();
-  private volatile long lastFanoutReceipt;
-  private long lastFanoutProbe;
+
 
   private record Viewer(
       AuthenticatedActor actor,
@@ -103,8 +91,7 @@ public class RealtimeDeliveryService extends TextWebSocketHandler
       ChatPresentationRepository presentations,
       OperationRepository operations,
       ApplicationEventPublisher events,
-      ChangeRepository changes,
-      StringRedisTemplate redis) {
+      ChangeRepository changes) {
     this.outbox = outbox;
     this.identities = identities;
     this.json = json;
@@ -112,105 +99,9 @@ public class RealtimeDeliveryService extends TextWebSocketHandler
     this.operations = operations;
     this.events = events;
     this.changes = changes;
-    this.redis = redis;
   }
 
   public record TaskInvalidation(UUID userId, UUID resourceId, List<String> resources) {}
-
-  public record FanoutInvalidation(
-      UUID messageId, UUID userId, UUID resourceId, List<String> resources) {}
-
-  public record ResynchronizationRequired() {}
-
-  public boolean fanoutAvailable() {
-    return fanoutReady.get();
-  }
-
-  @Override
-  public void onChannelSubscribed(byte[] channel, long count) {
-    if (FANOUT_CHANNEL.equals(new String(channel, StandardCharsets.UTF_8))) {
-      resynchronizeClients();
-      lastFanoutReceipt = System.nanoTime();
-      fanoutReady.set(true);
-    }
-  }
-
-  @Override
-  public void onChannelUnsubscribed(byte[] channel, long count) {
-    fanoutUnavailable();
-  }
-
-  public void fanoutUnavailable() {
-    fanoutReady.set(false);
-    resynchronizeClients();
-  }
-
-  public void resynchronizeClients() {
-    for (Viewer viewer : viewers.values()) {
-      close(viewer, 4503, "EVENTS_RESYNCHRONIZE");
-    }
-    events.publishEvent(new ResynchronizationRequired());
-  }
-
-  @Override
-  public void onMessage(Message message, byte[] pattern) {
-    if (!FANOUT_CHANNEL.equals(new String(message.getChannel(), StandardCharsets.UTF_8))
-        || message.getBody().length > 4096) {
-      return;
-    }
-    try {
-      JsonNode payload = json.read(new String(message.getBody(), StandardCharsets.UTF_8));
-      if (payload.path("type").asString().equals("probe")) {
-        if (payload.path("nodeId").asString().equals(fanoutProbeId.toString())) {
-          lastFanoutReceipt = System.nanoTime();
-          fanoutReady.set(true);
-        }
-        return;
-      }
-      FanoutInvalidation event = json.convert(payload, FanoutInvalidation.class);
-      if (event.messageId() == null
-          || event.userId() == null
-          || event.resourceId() == null
-          || event.resources() == null
-          || event.resources().size() > SELF_RESOURCES.size() + ADMIN_RESOURCES.size()
-          || event.resources().stream()
-              .anyMatch(
-                  resource ->
-                      resource == null
-                          || !SELF_RESOURCES.contains(resource)
-                              && !ADMIN_RESOURCES.contains(resource))) {
-        throw new IllegalArgumentException("Invalid invalidation envelope");
-      }
-      deliver(event);
-    } catch (JacksonException | IllegalArgumentException error) {
-      resynchronizeClients();
-    }
-  }
-
-  private void deliver(FanoutInvalidation event) {
-    events.publishEvent(
-        new TaskInvalidation(event.userId(), event.resourceId(), event.resources()));
-    for (Viewer viewer : viewers.values()) {
-      boolean own =
-          viewer.channels().contains("self") && viewer.actor().userId().equals(event.userId());
-      boolean administration = viewer.channels().contains("administration");
-      List<String> visible =
-          event.resources().stream()
-              .filter(resource -> ADMIN_RESOURCES.contains(resource) ? administration : own)
-              .toList();
-      if (visible.isEmpty() || !authorized(viewer)) {
-        continue;
-      }
-      try {
-        viewer
-            .socket()
-            .sendMessage(
-                new TextMessage(json.write(Map.of("type", "invalidate", "resources", visible))));
-      } catch (IOException error) {
-        close(viewer, 4503, "DELIVERY_FAILED");
-      }
-    }
-  }
 
   public boolean widgetAuthorized(ChannelTicketService.TicketBinding binding) {
     return widgetRejection(binding).isEmpty();
@@ -619,10 +510,6 @@ public class RealtimeDeliveryService extends TextWebSocketHandler
       socket.close(new CloseStatus(4401, "AUTHENTICATION_REQUIRED"));
       return;
     }
-    if (!fanoutAvailable()) {
-      socket.close(new CloseStatus(4503, "EVENTS_UNAVAILABLE"));
-      return;
-    }
     if (!connections.tryAcquire()) {
       socket.close(new CloseStatus(4429, "CONNECTION_LIMIT"));
       return;
@@ -716,64 +603,38 @@ public class RealtimeDeliveryService extends TextWebSocketHandler
     for (Viewer viewer : viewers.values()) {
       authorized(viewer);
     }
-    verifyFanoutTransport();
-    if (!fanoutAvailable()) {
-      return;
-    }
     for (var intent : outbox.due()) {
-      try {
-        if (intent.payload().length() > 8192) {
-          outbox.failed(intent.id(), "INVALID_EVENT_PAYLOAD");
+      JsonNode payload = json.read(intent.payload());
+      List<String> resources = resources(intent, payload);
+      String resourceId = payload.path("resourceId").asString();
+      if (resourceId.matches("[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}")) {
+        events.publishEvent(new TaskInvalidation(intent.userId(), UUID.fromString(resourceId), resources));
+      }
+      for (Viewer viewer : viewers.values()) {
+        boolean own = viewer.channels().contains("self") && viewer.actor().userId().equals(intent.userId());
+        boolean administration = viewer.channels().contains("administration");
+        List<String> visible = resources.stream()
+            .filter(resource -> ADMIN_RESOURCES.contains(resource) ? administration : own).toList();
+        if (visible.isEmpty() || !authorized(viewer)) {
           continue;
         }
-        List<String> resources = resources(intent);
-        String resource = json.read(intent.payload()).path("resourceId").asString();
-        UUID resourceId = resource.isEmpty() ? intent.aggregateId() : UUID.fromString(resource);
-        long receivers =
-            redis.convertAndSend(
-                FANOUT_CHANNEL,
-                json.write(
-                    new FanoutInvalidation(intent.id(), intent.userId(), resourceId, resources)));
-        if (receivers < 1) {
-          outbox.failed(intent.id(), "EVENT_SUBSCRIBER_UNAVAILABLE");
-          fanoutUnavailable();
-          return;
+        try {
+          viewer.socket().sendMessage(new TextMessage(json.write(Map.of("type", "invalidate", "resources", visible))));
+        } catch (IOException error) {
+          close(viewer, 4503, "DELIVERY_FAILED");
         }
-        outbox.published(intent.id());
-      } catch (DataAccessException error) {
-        outbox.failed(intent.id(), "EVENT_TRANSPORT_UNAVAILABLE");
-        fanoutUnavailable();
-        return;
-      } catch (JacksonException | IllegalArgumentException error) {
-        outbox.failed(intent.id(), "INVALID_EVENT_PAYLOAD");
       }
+      outbox.published(intent.id());
     }
   }
 
-  /** A transport heartbeat detects a silent subscription gap, without polling business data. */
-  private void verifyFanoutTransport() {
-    long now = System.nanoTime();
-    if (now - lastFanoutProbe >= 2_000_000_000L) {
-      lastFanoutProbe = now;
-      try {
-        redis.convertAndSend(
-            FANOUT_CHANNEL, json.write(Map.of("type", "probe", "nodeId", fanoutProbeId)));
-      } catch (DataAccessException error) {
-        fanoutUnavailable();
-      }
-    }
-    if (now - lastFanoutReceipt > 5_000_000_000L && fanoutReady.get()) {
-      fanoutUnavailable();
-    }
-  }
-
-  private List<String> resources(OutboxRepository.Intent intent) {
+  private List<String> resources(OutboxRepository.Intent intent, JsonNode payload) {
     Set<String> resources = new LinkedHashSet<>();
     if (SELF_RESOURCES.contains(intent.eventType())
         || ADMIN_RESOURCES.contains(intent.eventType())) {
       resources.add(intent.eventType());
     }
-    JsonNode declared = json.read(intent.payload()).path("resources");
+    JsonNode declared = payload.path("resources");
     if (declared.isArray()) {
       for (JsonNode value : declared) {
         if (value.isString()

@@ -17,6 +17,7 @@ export interface TableItem {
   metadata?: Readonly<Record<string, string>>;
   link?: string;
   state?: string;
+  actionDisabled?: boolean;
 }
 @Component({
   selector: 'hg-data-table',
@@ -123,6 +124,7 @@ export interface TableItem {
                 <td>
                   <button
                     class="icon-btn"
+                    [disabled]="row.actionDisabled === true"
                     [attr.aria-label]="'Действия: ' + (row.values[columns()[0].key] ?? row.id)"
                     (click)="action.emit(row.id)"
                   >
