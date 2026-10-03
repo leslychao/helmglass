@@ -156,10 +156,13 @@ public class TaskController {
   }
 
   @GetMapping("/{id}/events")
-  PageResult<Map<String, Object>> events(
+  TaskContracts.EventPage events(
       @PathVariable UUID id,
       @RequestParam MultiValueMap<String, String> query,
       HttpServletRequest request) {
+    if (!query.containsKey("pageSize")) {
+      query.set("pageSize", "10");
+    }
     return tasks.events(Actors.current(request), id, PageQuery.from(query));
   }
 }

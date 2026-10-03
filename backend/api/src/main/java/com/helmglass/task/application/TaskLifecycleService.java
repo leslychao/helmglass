@@ -293,8 +293,8 @@ public class TaskLifecycleService {
   }
 
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
-  public PageResult<Map<String, Object>> events(
-      AuthenticatedActor actor, UUID id, PageQuery query) {
+  public TaskContracts.EventPage events(AuthenticatedActor actor, UUID id, PageQuery query) {
+    actor.requireScope("tasks:read");
     owned(actor, id);
     return queries.events(actor.userId(), id, query);
   }

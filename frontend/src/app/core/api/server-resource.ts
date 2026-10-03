@@ -10,11 +10,14 @@ export class ServerResource<T> {
   readonly data = signal<T | null>(null);
   readonly loading = signal(false);
   readonly error = signal<Problem | null>(null);
+  readonly invalidated = signal(false);
   private readonly api = inject(Api);
   private readonly destroy = inject(DestroyRef);
   private request?: Subscription;
   private generation = 0;
   private dirty = false;
+  private suspended = false;
+  private resyncOnLoad = false;
   private path = '';
   private query: Query = {};
   private readonly pages: readonly [string, (value: T) => unknown][];
@@ -23,12 +26,29 @@ export class ServerResource<T> {
     names: ResourceName[],
     pageOf: ((value: T) => unknown) | Readonly<Record<string, (value: T) => unknown>> = (value) =>
       value,
+    private readonly updates: {
+      invalidation?: 'refresh' | 'notify';
+      resourceId?: () => string | undefined;
+    } = {},
   ) {
     this.pages = typeof pageOf === 'function' ? [['', pageOf]] : Object.entries(pageOf);
     inject(Realtime)
       .refresh.pipe(takeUntilDestroyed(this.destroy))
       .subscribe((changed) => {
-        if (changed === null || names.some((name) => changed.has(name))) this.refresh();
+        if (changed !== null && !names.some((name) => changed.has(name))) return;
+        if (
+          changed?.resourceId &&
+          updates.resourceId &&
+          changed.resourceId !== updates.resourceId()
+        )
+          return;
+        if (updates.invalidation === 'notify') {
+          if (this.path) this.invalidated.set(true);
+          if (changed === null) {
+            this.resyncOnLoad = true;
+            if (this.path && !this.suspended) this.load(this.path, this.query);
+          }
+        } else this.refresh();
       });
     this.destroy.onDestroy(() => this.request?.unsubscribe());
   }
@@ -37,6 +57,7 @@ export class ServerResource<T> {
     this.request?.unsubscribe();
     this.generation++;
     this.dirty = false;
+    this.suspended = false;
     if (path !== this.path) this.data.set(null);
     const data = untracked(this.data);
     const nextQuery = { ...query };
@@ -44,15 +65,22 @@ export class ServerResource<T> {
       const previous = data === null ? null : pageMetadata(untracked(() => select(data)));
       const sameScope =
         queryScope(path, query, prefix) === queryScope(this.path, this.query, prefix);
-      nextQuery[pageKey(prefix, 'snapshot')] = sameScope ? previous?.snapshot : undefined;
+      if (!sameScope || this.resyncOnLoad) this.invalidated.set(false);
+      nextQuery[pageKey(prefix, 'snapshot')] =
+        sameScope && !this.resyncOnLoad ? previous?.snapshot : undefined;
+      if (this.resyncOnLoad) nextQuery[pageKey(prefix, 'page')] = 1;
     }
+    this.resyncOnLoad = false;
     this.path = path;
     this.query = nextQuery;
     this.read();
   }
 
-  refresh() {
+  refresh(query: Query = {}) {
     if (!this.path) return;
+    this.query = { ...this.query, ...query };
+    this.invalidated.set(false);
+    this.resyncOnLoad = false;
     this.clearSnapshots();
     if (untracked(this.loading)) {
       this.dirty = true;
@@ -62,13 +90,22 @@ export class ServerResource<T> {
   }
 
   clear() {
-    this.request?.unsubscribe();
-    this.generation++;
-    this.dirty = false;
+    this.cancelRead();
     this.path = '';
     this.query = {};
     this.data.set(null);
     this.error.set(null);
+    this.loading.set(false);
+    this.invalidated.set(false);
+    this.resyncOnLoad = false;
+  }
+
+  /** Stop a hidden resource's read while retaining its page and stable snapshot. */
+  cancelRead() {
+    this.suspended = true;
+    this.request?.unsubscribe();
+    this.generation++;
+    this.dirty = false;
     this.loading.set(false);
   }
 
@@ -104,6 +141,10 @@ export class ServerResource<T> {
         const problem = problemOf(error);
         if (!recovered && problem.code === 'LIST_SNAPSHOT_EXPIRED') {
           this.clearSnapshots();
+          if (this.updates.invalidation === 'notify') {
+            for (const [prefix] of this.pages)
+              this.query = { ...this.query, [pageKey(prefix, 'page')]: 1 };
+          }
           this.read(true, corrected);
           return;
         }

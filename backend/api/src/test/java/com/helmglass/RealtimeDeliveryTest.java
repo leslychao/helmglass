@@ -166,6 +166,43 @@ class RealtimeDeliveryTest {
   }
 
   @Test
+  void eventInvalidationIdentifiesTheTaskOnlyForItsOwner() throws Exception {
+    var owner = actor(false);
+    var own = socket(owner);
+    var foreign = socket(actor(false));
+    var admin = socket(actor(true));
+    for (var socket : List.of(own, foreign, admin)) {
+      realtime.afterConnectionEstablished(socket);
+      realtime.handleMessage(
+          socket, new TextMessage("{\"type\":\"subscribe\",\"channels\":[\"self\"]}"));
+    }
+    realtime.handleMessage(
+        admin, new TextMessage("{\"type\":\"subscribe\",\"channels\":[\"administration\"]}"));
+    UUID taskId = UUID.randomUUID();
+    var intent =
+        new OutboxRepository.Intent(
+            UUID.randomUUID(),
+            owner.userId(),
+            taskId,
+            "events",
+            json.write(Map.of("resources", List.of("events"), "resourceId", taskId)));
+    when(outbox.due()).thenReturn(List.of(intent));
+
+    realtime.relay();
+
+    var messages = ArgumentCaptor.forClass(TextMessage.class);
+    verify(own, times(2)).sendMessage(messages.capture());
+    assertEquals(
+        json.read(
+            json.write(
+                Map.of("type", "invalidate", "resources", List.of("events"), "resourceId", taskId))),
+        json.read(messages.getAllValues().getLast().getPayload()));
+    verify(foreign).sendMessage(any(TextMessage.class));
+    verify(admin, times(2)).sendMessage(any(TextMessage.class));
+    verify(outbox).published(intent.id());
+  }
+
+  @Test
   void slowClientCannotPreventDeliveryToAnotherClientOrAcknowledgingTheInvalidation()
       throws Exception {
     var owner = actor(false);

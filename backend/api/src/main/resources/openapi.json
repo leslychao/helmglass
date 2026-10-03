@@ -550,7 +550,9 @@
             "description": "Exclude connections being deleted from selectable connections.",
             "schema": {
               "type": "string",
-              "enum": ["DELETING"]
+              "enum": [
+                "DELETING"
+              ]
             }
           }
         ],
@@ -2986,8 +2988,92 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10001,
+              "default": 1
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "enum": [
+                10
+              ],
+              "default": 10
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "AGENT",
+                  "BROWSER",
+                  "SYSTEM"
+                ]
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "sequence"
+              ]
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "name": "snapshot",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 512
+            }
           }
-        ]
+        ],
+        "description": "Append-stable owned task history. Subsequent pages require the same snapshot. Appends do not expire a snapshot; refresh starts page 1 without it. Snapshot TTL is 300 seconds; maximum offset 100000; query timeout is an explicit error."
       }
     },
     "/api/v1/notifications": {
@@ -5226,11 +5312,17 @@
             "format": "date-time"
           },
           "idleDeadlineAt": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "lastActivityAt": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "allocationEpoch": {
@@ -6843,7 +6935,10 @@
             "minimum": 0
           },
           "idleDeadlineAt": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "format": "date-time"
           },
           "budgetDeadlineAt": {
@@ -7727,7 +7822,12 @@
             "type": "integer"
           },
           "type": {
-            "type": "string"
+            "type": "string",
+            "enum": [
+              "AGENT",
+              "BROWSER",
+              "SYSTEM"
+            ]
           },
           "code": {
             "type": "string"
@@ -7757,7 +7857,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TaskEvent"
-            }
+            },
+            "maxItems": 10
           },
           "total": {
             "type": "integer"
@@ -7766,36 +7867,49 @@
             "type": "integer"
           },
           "pageSize": {
-            "type": "integer"
+            "type": "integer",
+            "enum": [
+              10
+            ]
           },
           "sort": {
-            "anyOf": [
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "field": {
-                    "type": "string"
-                  },
-                  "direction": {
-                    "enum": [
-                      "asc",
-                      "desc"
-                    ]
-                  }
-                },
-                "required": [
-                  "field",
-                  "direction"
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "field": {
+                "type": "string",
+                "enum": [
+                  "sequence"
                 ]
               },
-              {
-                "type": "null"
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "asc",
+                  "desc"
+                ]
               }
+            },
+            "required": [
+              "field",
+              "direction"
             ]
           },
           "snapshot": {
             "type": "string"
+          },
+          "meta": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "snapshotSequence": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "snapshotSequence"
+            ]
           }
         },
         "required": [
@@ -7804,7 +7918,8 @@
           "page",
           "pageSize",
           "sort",
-          "snapshot"
+          "snapshot",
+          "meta"
         ]
       },
       "Notification": {

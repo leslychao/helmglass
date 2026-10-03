@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { run } from '../process.mjs';
 import { deployWorkerRelease } from '../worker-release.mjs';
 
-test('redeployment stops the pool before retirement, recreates workers and preserves data',
+test('hard redeployment kills the pool before retirement, recreates workers and preserves data',
   { timeout: 180_000 }, async () => {
     const fixture = randomUUID();
     const project = `helm-worker-release-${fixture}`;
@@ -44,8 +44,10 @@ test('redeployment stops the pool before retirement, recreates workers and prese
         }
         if (!fs.existsSync('/data/marker')) fs.writeFileSync('/data/marker', 'preserved');
         process.on('SIGTERM', () => {
-          fs.writeFileSync('/data/' + require('node:os').hostname() + '.stopped', 'SIGTERM');
-          process.exit(0);
+          setTimeout(() => {
+            fs.writeFileSync('/data/' + require('node:os').hostname() + '.stopped', 'SIGTERM');
+            process.exit(0);
+          }, 200);
         });
         setInterval(() => {}, 1000);
       `], command: [],
@@ -64,7 +66,9 @@ test('redeployment stops the pool before retirement, recreates workers and prese
       const release = { docker, compose: async args => {
         if (args.includes('retire-workers')) {
           for (const id of await identifiers()) {
-            assert.equal((await inspect(id)).State.Running, false, 'Retirement requires a stopped pool');
+            const state = (await inspect(id)).State;
+            assert.equal(state.Running, false, 'Retirement requires a stopped pool');
+            assert.equal(state.ExitCode, 137, 'The deployment must kill workers without waiting for graceful shutdown');
           }
         }
         return compose(newImage, args);
@@ -73,10 +77,10 @@ test('redeployment stops the pool before retirement, recreates workers and prese
       const original = await healthy(2);
       const apiId = (await compose(oldImage, ['ps', '-q', 'api'])).stdout.trim();
       const originalApi = await inspect(apiId);
-      await docker(['stop', original[0].Id]);
+      await docker(['stop', '--time', '0', original[0].Id]);
       assert.equal((await inspect(original[1].Id)).State.Running, true);
 
-      await compose(newImage, ['up', '-d', '--no-deps', 'api']);
+      await compose(newImage, ['up', '-d', '--no-deps', '--force-recreate', '--timeout', '0', 'api']);
       const updatedApiId = (await compose(newImage, ['ps', '-q', 'api'])).stdout.trim();
       assert.notEqual(updatedApiId, apiId);
       assert.equal((await inspect(updatedApiId)).Image, expectedId);
@@ -89,7 +93,7 @@ test('redeployment stops the pool before retirement, recreates workers and prese
       assert.equal((await readData('marker')).stdout, 'preserved');
       assert.equal((await readData('retirements')).stdout, 'retired\n');
       for (const old of [...original, originalApi]) {
-        assert.equal((await readData(`${old.Config.Hostname}.stopped`)).stdout, 'SIGTERM');
+        await assert.rejects(readData(`${old.Config.Hostname}.stopped`), /failed with exit code/);
       }
 
       await deployWorkerRelease(release);

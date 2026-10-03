@@ -43,9 +43,13 @@ const resources = new Set<string>([
   'audit',
 ]);
 
+export interface ResourceInvalidation extends ReadonlySet<string> {
+  readonly resourceId?: string;
+}
+
 @Injectable({ providedIn: 'root' })
 export class Realtime {
-  readonly refresh = new Subject<ReadonlySet<string> | null>();
+  readonly refresh = new Subject<ResourceInvalidation | null>();
   readonly browserClocks = new Subject<BrowserClock>();
   readonly state = signal<'connecting' | 'ready' | 'offline' | 'exhausted' | 'denied'>(
     'connecting',
@@ -164,7 +168,20 @@ export class Realtime {
           const names = message.resources.filter(
             (value: unknown): value is string => typeof value === 'string' && resources.has(value),
           );
-          this.zone.run(() => this.refresh.next(new Set(names)));
+          const changed = new Set(names);
+          if ('resourceId' in message) {
+            if (
+              typeof message.resourceId !== 'string' ||
+              !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+                message.resourceId,
+              )
+            ) {
+              socket.close();
+              return;
+            }
+            Object.assign(changed, { resourceId: message.resourceId });
+          }
+          this.zone.run(() => this.refresh.next(changed));
         }
       };
       socket.onclose = (event) => {

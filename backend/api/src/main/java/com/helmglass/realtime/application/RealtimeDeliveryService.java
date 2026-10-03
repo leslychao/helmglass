@@ -617,8 +617,10 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       JsonNode payload = json.read(intent.payload());
       List<String> resources = resources(intent, payload);
       String resourceId = payload.path("resourceId").asString();
-      if (resourceId.matches(
-          "[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}")) {
+      boolean hasResourceId =
+          resourceId.matches(
+              "[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}");
+      if (hasResourceId) {
         events.publishEvent(
             new TaskInvalidation(intent.userId(), UUID.fromString(resourceId), resources));
       }
@@ -633,11 +635,13 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
         if (visible.isEmpty() || !authorized(viewer)) {
           continue;
         }
+        Map<String, Object> message =
+            new HashMap<>(Map.of("type", "invalidate", "resources", visible));
+        if (own && visible.contains("events") && hasResourceId) {
+          message.put("resourceId", resourceId);
+        }
         try {
-          viewer
-              .socket()
-              .sendMessage(
-                  new TextMessage(json.write(Map.of("type", "invalidate", "resources", visible))));
+          viewer.socket().sendMessage(new TextMessage(json.write(message)));
         } catch (IOException | SessionLimitExceededException error) {
           close(viewer, 4503, "DELIVERY_FAILED");
         }

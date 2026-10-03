@@ -56,6 +56,7 @@ export interface Measurements {
 export type Task = components['schemas']['Task'];
 export type TaskSummary = components['schemas']['TaskSummary'];
 export type TaskEvent = components['schemas']['TaskEvent'];
+export type TaskEventPage = components['schemas']['TaskEventPage'];
 export type ActionRequest = components['schemas']['TaskActionRequest'];
 export type Continuation = components['schemas']['Continuation'];
 export type Connection = components['schemas']['Connection'];

@@ -55,6 +55,17 @@ public final class TaskContracts {
 
   public record Capability(boolean allowed, boolean visible, String reason) {}
 
+  public record EventPage(
+      List<Map<String, Object>> items,
+      long total,
+      int page,
+      int pageSize,
+      Map<String, String> sort,
+      String snapshot,
+      EventPageMeta meta) {}
+
+  public record EventPageMeta(long snapshotSequence) {}
+
   public record TaskView(
       UUID id,
       long displayNumber,

@@ -108,11 +108,19 @@ describe('task result and actions', () => {
   afterEach(() => {
     TestBed.resetTestingModule();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
     else Reflect.deleteProperty(navigator, 'clipboard');
   });
 
-  async function render(value: Result | null = result) {
+  async function render(value: Result | null = result, resultPage = true) {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
     const mutate = vi.fn(() => NEVER);
     const get = vi.fn(() => NEVER);
     TestBed.configureTestingModule({
@@ -121,10 +129,13 @@ describe('task result and actions', () => {
         {
           provide: ActivatedRoute,
           useValue: {
-            snapshot: { paramMap: convertToParamMap({ id: 'task-1' }), data: { result: true } },
+            snapshot: {
+              paramMap: convertToParamMap({ id: 'task-1' }),
+              data: { result: resultPage },
+            },
           },
         },
-        { provide: Realtime, useValue: { refresh: new Subject() } },
+        { provide: Realtime, useValue: { refresh: new Subject(), browserClocks: new Subject() } },
         { provide: Api, useValue: { get, mutate } },
       ],
     });
@@ -175,6 +186,23 @@ describe('task result and actions', () => {
     if (!button) throw new Error('Copy conclusion button is missing');
     return button;
   }
+
+  it('keeps task history available after the browser runtime is closed', async () => {
+    const { fixture, root, get, mutate } = await render(result, false);
+    expect(root.querySelector('hg-browser-panel')).not.toBeNull();
+    expect(root.textContent).toContain('Браузер не открыт');
+    const history = root.querySelector<HTMLButtonElement>('button[aria-label="Ход выполнения"]');
+    expect(history).not.toBeNull();
+    history?.click();
+    fixture.detectChanges();
+    expect(root.querySelector('aside[aria-label="Ход выполнения"]')).not.toBeNull();
+    expect(get).toHaveBeenCalledExactlyOnceWith(
+      '/tasks/task-1/events',
+      expect.objectContaining({ page: 1, pageSize: 10 }),
+    );
+    expect(root.querySelector('hg-remote-browser')).toBeNull();
+    expect(mutate).not.toHaveBeenCalled();
+  });
 
   it('resumes the same task without implicitly consenting to a new browser', async () => {
     const { fixture, mutate, navigate } = await render();

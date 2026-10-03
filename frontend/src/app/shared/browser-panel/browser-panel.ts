@@ -2,12 +2,15 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  ElementRef,
   computed,
   effect,
   inject,
   input,
   output,
   signal,
+  untracked,
+  viewChild,
 } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
@@ -20,8 +23,8 @@ import {
   BrowserSession,
   BrowserSnapshot,
   Operation,
-  Page,
   TaskEvent,
+  TaskEventPage,
   ViewTicket,
 } from '../../core/api/models';
 import { ServerResource } from '../../core/api/server-resource';
@@ -159,24 +162,20 @@ import { BrowserClock, newerClock, sessionClock } from '../../core/realtime/brow
             [readOnly]="!can('navigate') || !live() || busy()"
             (keydown.enter)="navigate('GOTO')"
           />
-          @if (surface() === 'WEB') {
-            <button
-              class="icon-btn"
-              aria-label="Ход выполнения"
-              [attr.aria-expanded]="historyOpen()"
-              (click)="historyOpen.set(!historyOpen())"
-            >
-              <hg-icon name="history" />
-            </button>
-          }
         </div>
         @if (browser.privacyMode === 'LOGIN_PRIVATE') {
           <div class="secure-banner">
             <hg-icon name="lock" />Приватный вход. ChatGPT не видит экран и вводимые секреты.
           </div>
         }
-        <div class="browser-content" [class.with-history]="historyOpen()">
-          <div class="browser-video">
+      }
+      <div
+        class="browser-content"
+        [class.with-history]="historyOpen()"
+        [class.history-overlay]="historyOpen() && compactHistory()"
+      >
+        <div class="browser-video" [inert]="historyOpen() && compactHistory()">
+          @if (session.data(); as browser) {
             <hg-remote-browser
               [session]="browser"
               [instanceId]="viewerInstanceId() || instance.id"
@@ -188,78 +187,121 @@ import { BrowserClock, newerClock, sessionClock } from '../../core/realtime/brow
               (live)="live.set($event)"
               (stateChanged)="viewState.set($event)"
             />
-          </div>
-          @if (historyOpen()) {
-            <aside class="browser-history">
-              <header>
-                <h2>Ход выполнения</h2>
-                <button
-                  class="icon-btn"
-                  aria-label="Закрыть ход выполнения"
-                  (click)="historyOpen.set(false)"
-                >
-                  <hg-icon name="close" />
-                </button>
-              </header>
-              @if (taskId()) {
+          } @else {
+            <ng-content />
+          }
+        </div>
+        @if (historyOpen()) {
+          <aside
+            class="browser-history"
+            aria-label="Ход выполнения"
+            (keydown.escape)="closeHistory($event)"
+          >
+            <header>
+              <h2>Ход выполнения</h2>
+              <button class="icon-btn" aria-label="Закрыть ход выполнения" (click)="closeHistory()">
+                <hg-icon name="close" />
+              </button>
+            </header>
+            @if (taskId()) {
+              <div class="history-controls">
                 <label class="search"
                   ><hg-icon name="search" /><input
                     type="search"
                     aria-label="Поиск по событиям"
                     [(ngModel)]="eventQuery"
-                    (keydown.enter)="readEvents(1)"
-                    placeholder="Поиск событий" /></label
-                ><hg-feedback
-                  [loading]="events.loading()"
-                  [error]="events.error()"
-                  (retry)="events.refresh()"
-                /><hg-data-table
-                  [columns]="eventColumns"
-                  [rows]="eventRows()"
-                  [page]="events.data()"
-                  [sizes]="[10]"
-                  (changed)="eventPage($event)"
-                  emptyTitle="Событий пока нет"
-                  emptyText="Подтверждённые действия появятся здесь."
-                />
-              } @else {
-                <p class="panel-body muted">История приватного ввода не сохраняется.</p>
+                    maxlength="200"
+                    (keydown.enter)="searchEvents()"
+                    (search)="searchEvents()"
+                    placeholder="Найти событие"
+                /></label>
+                <details class="history-types">
+                  <summary>Тип{{ eventTypes().length ? ' · ' + eventTypes().length : '' }}</summary>
+                  <fieldset>
+                    <legend class="sr-only">Тип событий</legend>
+                    @for (type of historyTypes; track type.value) {
+                      <label
+                        ><input
+                          type="checkbox"
+                          [checked]="eventTypes().includes(type.value)"
+                          (change)="toggleEventType(type.value)"
+                        />{{ type.label }}</label
+                      >
+                    }
+                  </fieldset>
+                </details>
+                <span class="muted">Новые сверху</span>
+              </div>
+              @if (events.invalidated()) {
+                <button class="btn history-update" (click)="refreshEvents()">
+                  Есть новые события · Обновить
+                </button>
               }
-            </aside>
-          }
-        </div>
-        <footer class="browser-foot">
+              <hg-feedback
+                [loading]="events.loading()"
+                [error]="events.error()"
+                (retry)="refreshEvents()"
+              /><hg-data-table
+                [columns]="eventColumns"
+                [rows]="eventRows()"
+                [page]="events.data()"
+                [sizes]="[10]"
+                (changed)="eventPage($event)"
+                emptyTitle="Событий пока нет"
+                emptyText="Подтверждённые действия появятся здесь."
+              />
+            } @else {
+              <p class="panel-body muted">История приватного ввода не сохраняется.</p>
+            }
+          </aside>
+        }
+      </div>
+      <footer class="browser-foot">
+        @if (session.data(); as browser) {
           <span>{{ controlStatus() | label }}</span
-          ><span>·</span><span>{{ browser.siteAccess | label }}</span
-          ><span class="spacer"></span>
-          @if (countdown(); as countdown) {
-            <span aria-label="Оставшееся время браузера"
-              >{{ countdown.label }} {{ countdown.text }}</span
-            >
-            <span>·</span>
-          }
-          <span role="status">{{ live() ? 'Живой просмотр' : (viewStatus() | label) }}</span>
-        </footer>
+          ><span>·</span><span>{{ browser.siteAccess | label }}</span>
+        }
+        <span class="spacer"></span>
         @if (countdown(); as countdown) {
-          @if (countdown.warning) {
-            <div class="notice warning">
-              <strong>{{
+          <span aria-label="Оставшееся время браузера"
+            >{{ countdown.label }} {{ countdown.text }}</span
+          >
+          <span>·</span>
+        }
+        @if (session.data()) {
+          <span role="status">{{ live() ? 'Живой просмотр' : (viewStatus() | label) }}</span>
+        }
+        @if (surface() === 'WEB' && taskId()) {
+          <button
+            class="btn"
+            aria-label="Ход выполнения"
+            [attr.aria-expanded]="historyOpen()"
+            #historyTrigger
+            (click)="toggleHistory(historyTrigger)"
+          >
+            <hg-icon name="history" />Шаги
+          </button>
+        }
+      </footer>
+      @if (countdown(); as countdown) {
+        @if (countdown.warning) {
+          <div class="notice warning">
+            <strong>{{
+              countdown.budget
+                ? 'Заканчивается время работы браузера'
+                : 'Браузер закроется при простое'
+            }}</strong>
+            <p>
+              {{
                 countdown.budget
-                  ? 'Заканчивается время работы браузера'
-                  : 'Браузер закроется при простое'
-              }}</strong>
-              <p>
-                {{
-                  countdown.budget
-                    ? 'Время работы ограничено бюджетом задачи. Переподключение не увеличивает лимит.'
-                    : 'Продолжите работу на странице. Просмотр и переподключение не продлевают ожидание; выполняемая команда завершится до закрытия по простою.'
-                }}
-              </p>
-              @if (countdown.expired) {
-                <p role="status">Срок истёк. Ожидаем подтверждения состояния от сервера.</p>
-              }
-            </div>
-          }
+                  ? 'Время работы ограничено бюджетом задачи. Переподключение не увеличивает лимит.'
+                  : 'Продолжите работу на странице. Просмотр и переподключение не продлевают ожидание; выполняемая команда завершится до закрытия по простою.'
+              }}
+            </p>
+            @if (countdown.expired) {
+              <p role="status">Срок истёк. Ожидаем подтверждения состояния от сервера.</p>
+            }
+          </div>
         }
       }
       <hg-feedback
@@ -300,7 +342,7 @@ export class BrowserPanel {
   providedClock = input<BrowserClock | null>(null);
   providedTicket = input<ViewTicket | null>(null);
   viewerInstanceId = input<string>();
-  sessionId = input.required<string>();
+  sessionId = input<string | undefined>();
   taskId = input<string | undefined>();
   activeLoginOperationId = input<string>();
   changed = output<void>();
@@ -335,7 +377,10 @@ export class BrowserPanel {
     };
   });
   readonly session = new ServerResource<BrowserSession>(['tasks', 'sessions', 'connections']);
-  readonly events = new ServerResource<Page<TaskEvent>>(['events']);
+  readonly events = new ServerResource<TaskEventPage>(['events'], (value) => value, {
+    invalidation: 'notify',
+    resourceId: () => this.taskId(),
+  });
   readonly action = new Mutation();
   readonly menu = signal(false);
   readonly paused = signal(false);
@@ -358,6 +403,8 @@ export class BrowserPanel {
         : 'NONE';
   });
   readonly historyOpen = signal(false);
+  readonly compactHistory = signal(false);
+  private readonly panelElement = viewChild<ElementRef<HTMLElement>>('panel');
   readonly closeDialog = signal(false);
   readonly notice = signal('');
   readonly operation = signal<Pick<Operation, 'id' | 'state'> | null>(null);
@@ -374,6 +421,15 @@ export class BrowserPanel {
   url = '';
   private addressBinding = '';
   eventQuery = '';
+  private eventSearch = '';
+  private historyTask = '';
+  private historyTrigger?: HTMLButtonElement;
+  readonly eventTypes = signal<readonly TaskEvent['type'][]>([]);
+  readonly historyTypes: readonly { value: TaskEvent['type']; label: string }[] = [
+    { value: 'BROWSER', label: 'Браузер' },
+    { value: 'SYSTEM', label: 'Система' },
+    { value: 'AGENT', label: 'Агент' },
+  ];
   saveChanges = true;
   readonly browserSavePolicy = computed(() => this.session.data()?.savePolicy);
   readonly savePolicies: readonly { value: BrowserSavePolicy['policy']; label: string }[] = [
@@ -438,6 +494,15 @@ export class BrowserPanel {
     );
   });
   constructor() {
+    effect((cleanup) => {
+      const panel = this.panelElement()?.nativeElement;
+      if (!panel) return;
+      const observer = new ResizeObserver(([entry]) => {
+        if (entry) this.compactHistory.set(entry.contentRect.width < 680);
+      });
+      observer.observe(panel);
+      cleanup(() => observer.disconnect());
+    });
     effect(() => {
       const provided = this.providedClock();
       const session = this.session.data();
@@ -481,11 +546,12 @@ export class BrowserPanel {
       cleanup(() => clearInterval(timer));
     });
     effect(() => {
-      if (this.surface() === 'WEB')
+      if (this.surface() === 'WEB' && this.sessionId())
         this.session.load(`/browser-sessions/${this.sessionId()}`, {
           controllerInstanceId: this.instance.id,
         });
-      else this.session.data.set(this.providedSession());
+      else if (this.surface() === 'WIDGET') this.session.data.set(this.providedSession());
+      else this.session.clear();
     });
     effect(() => {
       const session = this.session.data();
@@ -499,7 +565,19 @@ export class BrowserPanel {
       }
     });
     effect(() => {
-      if (this.surface() === 'WEB' && this.historyOpen() && this.taskId()) this.readEvents(1);
+      const task = this.taskId() ?? '';
+      const visible = this.surface() === 'WEB' && this.historyOpen();
+      untracked(() => {
+        if (task !== this.historyTask) {
+          this.historyTask = task;
+          this.events.clear();
+          this.eventQuery = '';
+          this.eventSearch = '';
+          this.eventTypes.set([]);
+        }
+        if (visible && task) this.readEvents(this.events.data()?.page ?? 1);
+        else this.events.cancelRead();
+      });
     });
   }
   refreshSnapshot() {
@@ -639,13 +717,45 @@ export class BrowserPanel {
       this.events.load(`/tasks/${this.taskId()}/events`, {
         page,
         pageSize: 10,
-        q: this.eventQuery,
+        q: this.eventSearch,
+        type: this.eventTypes(),
         sort: 'sequence',
         direction: 'desc',
       });
   }
   eventPage(query: Readonly<Record<string, unknown>>) {
     this.readEvents(typeof query['page'] === 'number' ? query['page'] : 1);
+  }
+  searchEvents() {
+    this.eventSearch = this.eventQuery.trim();
+    this.readEvents(1);
+  }
+  toggleEventType(type: TaskEvent['type']) {
+    this.eventTypes.update((types) =>
+      types.includes(type) ? types.filter((value) => value !== type) : [...types, type].sort(),
+    );
+    this.readEvents(1);
+  }
+  refreshEvents() {
+    this.events.refresh({ page: 1 });
+  }
+  toggleHistory(trigger: HTMLButtonElement) {
+    this.historyTrigger = trigger;
+    if (this.historyOpen()) this.closeHistory();
+    else this.historyOpen.set(true);
+  }
+  closeHistory(event?: Event) {
+    event?.stopPropagation();
+    if (event?.target instanceof HTMLElement) {
+      const filter = event.target.closest('details');
+      if (filter instanceof HTMLDetailsElement && filter.open) {
+        filter.open = false;
+        filter.querySelector('summary')?.focus();
+        return;
+      }
+    }
+    this.historyOpen.set(false);
+    this.historyTrigger?.focus();
   }
   fullscreen(element: HTMLElement) {
     if (document.fullscreenElement) void document.exitFullscreen();

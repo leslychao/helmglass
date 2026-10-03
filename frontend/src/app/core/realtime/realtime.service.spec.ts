@@ -117,6 +117,29 @@ describe('cabinet session recovery', () => {
     expect(reads).toHaveLength(readCount);
   });
 
+  it('preserves a scoped task identity on the same invalidation stream', () => {
+    const resourceId = '11111111-1111-4111-8111-111111111111';
+    socket().onmessage?.({
+      data: JSON.stringify({ type: 'invalidate', resources: ['events'], resourceId }),
+    });
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(
+      Object.assign(new Set(['events']), { resourceId }),
+    );
+    expect(reads).toHaveLength(1);
+  });
+
+  it('rejects malformed resource identity without turning it into an unscoped invalidation', () => {
+    socket().onmessage?.({
+      data: JSON.stringify({
+        type: 'invalidate',
+        resources: ['events'],
+        resourceId: 'untrusted/'.repeat(100),
+      }),
+    });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(socket().close).toHaveBeenCalledOnce();
+  });
+
   function respond(profile: Me) {
     const response = reads[reads.length - 1];
     response.next(profile);

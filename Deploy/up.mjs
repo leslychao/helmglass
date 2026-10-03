@@ -100,11 +100,11 @@ async function main() {
       : undefined;
     if (installedAcl !== expectedAcl) {
       progress('reloading Redis with its verified bootstrap policy and existing data volume');
-      await compose(['up', '-d', '--no-deps', '--force-recreate', 'redis']);
+      await compose(['up', '-d', '--no-deps', '--force-recreate', '--timeout', '0', 'redis']);
     }
   }
   progress('starting PostgreSQL, Redis, MinIO and sealed Vault');
-  await compose(['up', '-d', '--no-deps', 'postgres', 'redis', 'minio', 'vault']);
+  await compose(['up', '-d', '--no-deps', '--timeout', '0', 'postgres', 'redis', 'minio', 'vault']);
   const vaultId = await single('vault');
   const vaultArguments = ['exec', '-i', '-e', 'VAULT_TOKEN', '-e', 'VAULT_ADDR=https://vault:8200',
     '-e', 'VAULT_CACERT=/run/helm/ca.crt', '-e', 'VAULT_MAX_RETRIES=0', vaultId, 'vault'];
@@ -209,24 +209,24 @@ async function main() {
   custodyPassword = undefined;
   progress('checking persistent services and starting Keycloak');
   await Promise.all(['postgres', 'redis', 'minio', 'vault'].map(service => healthy(service)));
-  await compose(['up', '-d', '--no-deps', 'keycloak']);
+  await compose(['up', '-d', '--no-deps', '--timeout', '0', 'keycloak']);
   await healthy('keycloak', 180_000);
   for (const service of ['provision', 'migrate']) {
     progress(`running ${service} for this configuration and release`);
-    await compose(['up', '--no-deps', '--force-recreate', '--abort-on-container-exit', '--exit-code-from', service, service], { timeout: 300_000 });
+    await compose(['up', '--no-deps', '--force-recreate', '--timeout', '0', '--abort-on-container-exit', '--exit-code-from', service, service], { timeout: 300_000 });
     const completed = await inspect(await single(service));
     if (completed.State.Running || completed.State.ExitCode !== 0) throw new Error(`${service} did not complete successfully`);
   }
   progress('starting the API, OAuth proxy, MCP adapter and browser workers');
-  await compose(['up', '-d', '--no-deps', 'api', 'oauth2-proxy', 'coturn']);
+  await compose(['up', '-d', '--no-deps', '--force-recreate', '--timeout', '0', 'api', 'oauth2-proxy', 'coturn']);
   await Promise.all(['api', 'oauth2-proxy', 'coturn'].map(service => healthy(service)));
-  await compose(['up', '-d', '--no-deps', 'mcp-adapter', 'egress-proxy']);
+  await compose(['up', '-d', '--no-deps', '--force-recreate', '--timeout', '0', 'mcp-adapter', 'egress-proxy']);
   await Promise.all(['mcp-adapter', 'egress-proxy'].map(service => healthy(service)));
-  progress('stopping browser workers, retiring their enrollments and starting the selected pool');
+  progress('killing browser workers, retiring their enrollments and starting the selected pool');
   await deployWorkerRelease({ docker, compose, identifiers: () => identifiers('browser-worker'),
     imageId: imageIds.get(release.WORKER_IMAGE), count: Number(configuration.WORKER_COUNT) });
   await healthy('browser-worker');
-  await compose(['up', '-d', '--no-deps', 'nginx']);
+  await compose(['up', '-d', '--no-deps', '--force-recreate', '--timeout', '0', 'nginx']);
   await healthy('nginx');
   process.stdout.write(`Helm Glass services are ready at ${configuration.PUBLIC_ORIGIN}. Browser and external-host acceptance must be verified separately.\n`);
 }

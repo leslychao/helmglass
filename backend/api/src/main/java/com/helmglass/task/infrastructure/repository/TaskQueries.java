@@ -8,22 +8,41 @@ import com.helmglass.continuation.infrastructure.repository.ContinuationReposito
 import com.helmglass.identity.domain.QuotaCeiling;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.task.api.TaskContracts.Capability;
+import com.helmglass.task.api.TaskContracts.EventPage;
+import com.helmglass.task.api.TaskContracts.EventPageMeta;
 import com.helmglass.task.api.TaskContracts.TaskView;
 import com.helmglass.task.domain.TaskAggregate;
 import com.helmglass.task.domain.TaskState;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 @Repository
 public class TaskQueries {
+  private static final Set<String> EVENT_TYPES = Set.of("AGENT", "BROWSER", "SYSTEM");
+  private static final Set<String> EVENT_PARAMETERS =
+      Set.of("page", "pageSize", "q", "sort", "direction", "snapshot", "type");
+  private static final int EVENT_PAGE_SIZE = 10;
+  private static final int MAX_EVENT_OFFSET = 100_000;
+  private static final int EVENT_SNAPSHOT_SECONDS = 300;
   private final JdbcClient jdbc;
   private final ChangeRepository changes;
   private final ContinuationRepository continuations;
@@ -423,7 +442,11 @@ public class TaskQueries {
         .single();
   }
 
+  @Transactional(propagation = Propagation.MANDATORY)
   public void event(TaskAggregate task, String type, String code, String summary) {
+    if (!EVENT_TYPES.contains(type)) {
+      throw new IllegalArgumentException("Unsupported task event type");
+    }
     jdbc.sql("INSERT INTO task_event_counters(task_id) VALUES(:task) ON CONFLICT DO NOTHING")
         .param("task", task.getId())
         .update();
@@ -448,6 +471,7 @@ public class TaskQueries {
         .param("code", code)
         .param("summary", summary)
         .update();
+    changes.changed(task.getUserId(), "events", task.getId(), sequence);
   }
 
   public void enqueueStops(UUID userId, UUID operationId) {
@@ -599,12 +623,59 @@ public class TaskQueries {
         .listOfRows();
   }
 
-  public PageResult<Map<String, Object>> events(UUID userId, UUID taskId, PageQuery query) {
-    String snapshot = changes.snapshot(userId, "tasks", query);
-    String where = " WHERE task_id=:task AND summary ILIKE :q";
+  public EventPage events(UUID userId, UUID taskId, PageQuery query) {
+    var types = eventTypes(query);
+    String direction = query.direction() == null ? "desc" : query.direction();
+    try {
+      // Both queries share the owner's repeatable-read transaction and bounded SQL budget.
+      jdbc.sql("SELECT set_config('statement_timeout','2s',true)").query(String.class).single();
+      var counter =
+          jdbc.sql(
+                  """
+                  SELECT c.next_sequence-1 AS sequence,c.snapshot_key FROM task_event_counters c
+                  JOIN tasks t ON t.id=c.task_id WHERE c.task_id=:task AND t.user_id=:user
+                  """)
+              .param("task", taskId)
+              .param("user", userId)
+              .query(
+                  (row, number) ->
+                      new EventCounter(row.getLong("sequence"), row.getString("snapshot_key")))
+              .optional()
+              .orElseThrow(TaskQueries::expiredEventSnapshot);
+      String fingerprint =
+          json.digest(
+              Map.of(
+                  "user",
+                  userId,
+                  "task",
+                  taskId,
+                  "q",
+                  query.query(),
+                  "types",
+                  types,
+                  "sort",
+                  "sequence",
+                  "direction",
+                  direction,
+                  "pageSize",
+                  EVENT_PAGE_SIZE));
+      var snapshot = eventSnapshot(query.snapshot(), counter, fingerprint);
+      return eventPage(taskId, query, types, direction, snapshot);
+    } catch (QueryTimeoutException error) {
+      throw new DomainException(
+          503, "EVENT_HISTORY_QUERY_TIMEOUT", "History query exceeded its time limit");
+    }
+  }
+
+  private EventPage eventPage(
+      UUID taskId, PageQuery query, Set<String> types, String direction, EventSnapshot snapshot) {
+    String where =
+        " WHERE task_id=:task AND sequence<=:sequence AND type IN (:types) AND summary ILIKE :q";
     long total =
         jdbc.sql("SELECT count(*) FROM task_execution_events" + where)
             .param("task", taskId)
+            .param("sequence", snapshot.sequence())
+            .param("types", types)
             .param("q", query.escapedQuery())
             .query(Long.class)
             .single();
@@ -615,16 +686,123 @@ public class TaskQueries {
                 FROM task_execution_events
                 """
                     + where
-                    + " ORDER BY sequence DESC LIMIT :limit OFFSET :offset")
+                    + " ORDER BY sequence "
+                    + direction
+                    + " LIMIT :limit OFFSET :offset")
             .param("task", taskId)
+            .param("sequence", snapshot.sequence())
+            .param("types", types)
             .param("q", query.escapedQuery())
             .param("limit", query.pageSize())
             .param("offset", query.offset())
             .query()
             .listOfRows();
-    return new PageResult<>(
-        rows, total, query.page(), query.pageSize(), query.sortDescriptor(), snapshot);
+    return new EventPage(
+        rows,
+        total,
+        query.page(),
+        EVENT_PAGE_SIZE,
+        Map.of("field", "sequence", "direction", direction),
+        snapshot.token(),
+        new EventPageMeta(snapshot.sequence()));
   }
+
+  private static Set<String> eventTypes(PageQuery query) {
+    if (query.pageSize() != EVENT_PAGE_SIZE
+        || query.offset() > MAX_EVENT_OFFSET
+        || query.sort() != null && !query.sort().equals("sequence")) {
+      throw new DomainException(
+          422,
+          "INVALID_EVENT_PAGINATION",
+          "History requires ten rows, sequence ordering and an offset at most 100000");
+    }
+    for (var entry : query.filters().entrySet()) {
+      if (!EVENT_PARAMETERS.contains(entry.getKey())
+          || !entry.getKey().equals("type") && entry.getValue().size() != 1) {
+        throw new DomainException(
+            422, "INVALID_EVENT_FILTER", "Unsupported history query parameter");
+      }
+    }
+    List<String> requested = query.filters().get("type");
+    Set<String> types = new TreeSet<>(requested == null ? EVENT_TYPES : requested);
+    if (types.isEmpty()
+        || requested != null && requested.size() > EVENT_TYPES.size()
+        || !EVENT_TYPES.containsAll(types)) {
+      throw new DomainException(422, "INVALID_EVENT_FILTER", "Unsupported history event type");
+    }
+    if (query.page() != 1 && query.snapshot() == null) {
+      throw new DomainException(
+          422, "EVENT_SNAPSHOT_REQUIRED", "Open the first history page before paging");
+    }
+    return types;
+  }
+
+  private static EventSnapshot eventSnapshot(
+      String token, EventCounter counter, String fingerprint) {
+    if (token == null) {
+      String payload =
+          "1:"
+              + counter.sequence()
+              + ":"
+              + Instant.now().plusSeconds(EVENT_SNAPSHOT_SECONDS).getEpochSecond()
+              + ":"
+              + fingerprint;
+      String encoded =
+          Base64.getUrlEncoder()
+              .withoutPadding()
+              .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
+      return new EventSnapshot(
+          counter.sequence(), encoded + "." + eventSignature(encoded, counter.key()));
+    }
+    try {
+      if (token.length() > 512) {
+        throw expiredEventSnapshot();
+      }
+      String[] parts = token.split("\\.", -1);
+      if (parts.length != 2
+          || !MessageDigest.isEqual(
+              parts[1].getBytes(StandardCharsets.US_ASCII),
+              eventSignature(parts[0], counter.key()).getBytes(StandardCharsets.US_ASCII))) {
+        throw expiredEventSnapshot();
+      }
+      String[] payload =
+          new String(Base64.getUrlDecoder().decode(parts[0]), StandardCharsets.UTF_8)
+              .split(":", -1);
+      if (payload.length != 4
+          || !payload[0].equals("1")
+          || !payload[3].equals(fingerprint)
+          || Instant.now().getEpochSecond() >= Long.parseLong(payload[2])) {
+        throw expiredEventSnapshot();
+      }
+      long sequence = Long.parseLong(payload[1]);
+      if (sequence < 0 || sequence > counter.sequence()) {
+        throw expiredEventSnapshot();
+      }
+      return new EventSnapshot(sequence, token);
+    } catch (IllegalArgumentException error) {
+      throw expiredEventSnapshot();
+    }
+  }
+
+  private static String eventSignature(String payload, String key) {
+    try {
+      Mac hmac = Mac.getInstance("HmacSHA256");
+      hmac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+      return Base64.getUrlEncoder()
+          .withoutPadding()
+          .encodeToString(hmac.doFinal(payload.getBytes(StandardCharsets.US_ASCII)));
+    } catch (GeneralSecurityException error) {
+      throw new IllegalStateException("History snapshot signing is unavailable", error);
+    }
+  }
+
+  private static DomainException expiredEventSnapshot() {
+    return DomainException.conflict("LIST_SNAPSHOT_EXPIRED", "Refresh the current history");
+  }
+
+  private record EventCounter(long sequence, String key) {}
+
+  private record EventSnapshot(long sequence, String token) {}
 
   public void verifyFinalResult(UUID taskId, UUID resultId, long revision) {
     int updated =

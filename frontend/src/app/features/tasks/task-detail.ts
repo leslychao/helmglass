@@ -336,34 +336,23 @@ import { TaskUsage } from '../usage/task-usage';
           }
           <div class="task-layout-v h-task-layout">
             <div>
-              @if (sessionId(); as sessionId) {
-                <hg-browser-panel
-                  [sessionId]="sessionId"
-                  [taskId]="task.id"
-                  (changed)="refresh()"
-                />
-              } @else {
-                <section class="browser-panel">
-                  <header class="browser-head"><strong>Браузер</strong></header>
-                  <div class="viewer-empty">
-                    <div>
-                      <hg-icon name="browser" />
-                      <h3>
-                        {{
-                          task.state === 'WAITING_AGENT' ? 'Ожидаем ChatGPT' : 'Браузер не открыт'
-                        }}
-                      </h3>
-                      <p>Просмотр страницы не запускает браузер и не возобновляет задачу.</p>
-                      @if (can('openBrowser')) {
-                        <button class="btn primary" (click)="openDialog.set(true)">
-                          Открыть новый браузер
-                        </button>
-                      }
-                      <a class="btn" routerLink="/connections/guide">Как подключить ChatGPT</a>
-                    </div>
+              <hg-browser-panel [sessionId]="sessionId()" [taskId]="task.id" (changed)="refresh()">
+                <div class="viewer-empty">
+                  <div>
+                    <hg-icon name="browser" />
+                    <h3>
+                      {{ task.state === 'WAITING_AGENT' ? 'Ожидаем ChatGPT' : 'Браузер не открыт' }}
+                    </h3>
+                    <p>Просмотр страницы не запускает браузер и не возобновляет задачу.</p>
+                    @if (can('openBrowser')) {
+                      <button class="btn primary" (click)="openDialog.set(true)">
+                        Открыть новый браузер
+                      </button>
+                    }
+                    <a class="btn" routerLink="/connections/guide">Как подключить ChatGPT</a>
                   </div>
-                </section>
-              }
+                </div>
+              </hg-browser-panel>
               <section class="panel clarification">
                 <header class="panel-head">
                   <h2>Уточнить поручение</h2>

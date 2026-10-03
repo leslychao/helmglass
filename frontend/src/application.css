@@ -670,9 +670,80 @@ legend {
 .browser-history {
   border-left: 1px solid var(--line);
   height: 420px;
-  overflow: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   background: white;
   min-width: 0;
+}
+.browser-history > hg-data-table {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.browser-history .table-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.browser-history > header,
+.browser-history .table-footer {
+  flex-shrink: 0;
+}
+.browser-content.history-overlay {
+  grid-template-columns: minmax(0, 1fr);
+}
+.history-overlay .browser-video,
+.history-overlay .browser-history {
+  grid-area: 1 / 1;
+}
+.history-overlay .browser-video {
+  visibility: hidden;
+}
+.history-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+}
+.history-controls .search {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.history-controls > span {
+  margin-left: auto;
+  font-size: 11px;
+}
+.history-types {
+  position: relative;
+  font-size: 12px;
+}
+.history-types summary {
+  cursor: pointer;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.history-types fieldset {
+  position: absolute;
+  z-index: 2;
+  min-width: 145px;
+  margin: 4px 0 0;
+  padding: 10px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.history-types label {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+}
+.history-update {
+  margin: 0 10px 10px;
+  font-size: 12px;
 }
 .browser-history > header {
   display: flex;

@@ -69,4 +69,7 @@
   <changeSet id="036-browser-activity" author="helmglass">
     <sqlFile path="036-browser-activity.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="037-task-event-snapshots" author="helmglass">
+    <sqlFile path="037-task-event-snapshots.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

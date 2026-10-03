@@ -971,6 +971,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        /** @description Append-stable owned task history. Subsequent pages require the same snapshot. Appends do not expire a snapshot; refresh starts page 1 without it. Snapshot TTL is 300 seconds; maximum offset 100000; query timeout is an explicit error. */
         get: operations["get_TaskEventPage"];
         put?: never;
         post?: never;
@@ -2081,7 +2082,8 @@ export interface components {
             /** Format: uuid */
             id: string;
             sequence: number;
-            type: string;
+            /** @enum {string} */
+            type: "AGENT" | "BROWSER" | "SYSTEM";
             code: string;
             summary: string;
             /** Format: date-time */
@@ -2091,13 +2093,18 @@ export interface components {
             items: components["schemas"]["TaskEvent"][];
             total: number;
             page: number;
-            pageSize: number;
+            /** @enum {integer} */
+            pageSize: 10;
             sort: {
-                field: string;
-                /** @enum {unknown} */
+                /** @enum {string} */
+                field: "sequence";
+                /** @enum {string} */
                 direction: "asc" | "desc";
-            } | null;
+            };
             snapshot: string;
+            meta: {
+                snapshotSequence: number;
+            };
         };
         Notification: {
             /** Format: uuid */
@@ -4871,7 +4878,15 @@ export interface operations {
     };
     get_TaskEventPage: {
         parameters: {
-            query?: never;
+            query?: {
+                page?: number;
+                pageSize?: 10;
+                q?: string;
+                type?: ("AGENT" | "BROWSER" | "SYSTEM")[];
+                sort?: "sequence";
+                direction?: "asc" | "desc";
+                snapshot?: string;
+            };
             header?: never;
             path: {
                 id: string;
