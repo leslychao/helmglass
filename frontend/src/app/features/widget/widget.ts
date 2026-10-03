@@ -460,6 +460,14 @@ export class Widget {
     // DISPATCHING may be recovered only by the mount that still knows it has not invoked the host.
     if (continuation.state !== 'READY' && !(sameAttempt && continuation.state === 'DISPATCHING'))
       return;
+    // Recovering an expired claim does not authorize another host message.
+    if (continuation.state === 'READY' && continuation.dispatchId !== undefined) {
+      this.manualText.set(
+        continuation.manualMessage ||
+          `Продолжи задачу ${presentation.taskId} после моего участия. Не создавай новую задачу.`,
+      );
+      return;
+    }
     if (!this.app.getHostCapabilities()?.message?.text) {
       this.manualText.set(
         `Продолжи задачу ${presentation.taskId} после моего участия. Не создавай новую задачу.`,

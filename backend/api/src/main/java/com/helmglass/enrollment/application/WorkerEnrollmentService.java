@@ -97,6 +97,21 @@ public class WorkerEnrollmentService {
         chain, expiresAt);
   }
 
+  /**
+   * Revokes this installation's enrollments after the operator has stopped every worker.
+   * Repeating the command before restarting the pool is safe; enrollment history is retained.
+   */
+  public int retireStoppedPool() {
+    Integer retired = transaction.execute(status -> {
+      repository.lockInstallation(secrets.installationId());
+      return repository.revokeInstallation(secrets.installationId());
+    });
+    if (retired == null) {
+      throw new IllegalStateException("Worker retirement was not completed");
+    }
+    return retired;
+  }
+
   private Reservation reserve(Request request, String digest, X509Certificate peer) {
     repository.lockInstallation(secrets.installationId());
     Enrollment existing = repository.find(secrets.installationId(), request.workerId(),

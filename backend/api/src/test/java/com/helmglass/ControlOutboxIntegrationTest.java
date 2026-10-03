@@ -18,6 +18,7 @@ import com.helmglass.browser.application.ControlDispatcher;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlOutboxRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
+import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
@@ -81,6 +82,7 @@ class ControlOutboxIntegrationTest {
   private final OutboxRepository realtime;
   private final JsonSupport json;
   private final TransactionTemplate transaction;
+  private final WorkerRegistryRepository registry;
   private final List<UUID> fixtureSessions = new ArrayList<>();
 
   @Autowired
@@ -97,6 +99,7 @@ class ControlOutboxIntegrationTest {
       OperationRepository operations,
       OutboxRepository realtime,
       JsonSupport json,
+      WorkerRegistryRepository registry,
       PlatformTransactionManager transactions) {
     this.jdbc = jdbc;
     this.identities = identities;
@@ -110,6 +113,7 @@ class ControlOutboxIntegrationTest {
     this.operations = operations;
     this.realtime = realtime;
     this.json = json;
+    this.registry = registry;
     transaction = new TransactionTemplate(transactions);
   }
 
@@ -282,6 +286,106 @@ class ControlOutboxIntegrationTest {
     }
   }
 
+  @Test
+  void expiredClaimCreatesOneDurableFenceAndOnlyItsFreshAckReleasesControl() {
+    Fixture fixture = fixture();
+    UUID claim = UUID.randomUUID();
+    UUID operation = claimFixture(fixture, claim);
+    long oldEpoch = leases.get(fixture.session()).epoch();
+    var previous = intent(fixture);
+    assertThat(fence(fixture, claim, oldEpoch)).isTrue();
+    var delivery = intent(fixture);
+    assertThat(delivery.id()).isNotEqualTo(previous.id());
+    assertThat(leases.get(fixture.session()).epoch()).isEqualTo(oldEpoch + 1);
+    assertThat(leases.get(fixture.session()).claimFenceId()).isEqualTo(claim);
+    assertThat(leases.get(fixture.session()).continuationClaimId()).isNull();
+    assertThat(operations.owned(fixture.actor().userId(), operation).state()).isEqualTo("FAILED");
+    assertThat(fence(fixture, claim, oldEpoch)).isTrue();
+    assertThat(count(fixture)).isEqualTo(2);
+    assertThat(intent(fixture).id()).isEqualTo(delivery.id());
+    assertThat(outbox.deliverable(delivery.id())).isTrue();
+    assertThat(outbox.deliverable(previous.id())).isFalse();
+    assertThatThrownBy(
+            () ->
+                dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(previous)))
+        .isInstanceOf(DomainException.class);
+    UUID fenceOperation = leases.get(fixture.session()).operationId();
+    assertThat(outbox.published(delivery.id())).isFalse();
+    dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(delivery));
+    assertThat(leases.get(fixture.session()).state()).isEqualTo("ACTIVE");
+    assertThat(leases.get(fixture.session()).claimFenceId()).isNull();
+    assertThat(operations.owned(fixture.actor().userId(), fenceOperation).state())
+        .isEqualTo("SUCCEEDED");
+    assertThat(outbox.published(delivery.id())).isTrue();
+    assertThat(fence(fixture, claim, oldEpoch)).isFalse();
+  }
+
+  @Test
+  void reconnectRecoveryAckCanFinishClaimFenceButAnOldReceiptCannot() {
+    Fixture fixture = fixture();
+    UUID claim = UUID.randomUUID();
+    claimFixture(fixture, claim);
+    long oldEpoch = leases.get(fixture.session()).epoch();
+    assertThat(fence(fixture, claim, oldEpoch)).isTrue();
+    var delivery = intent(fixture);
+    transaction.executeWithoutResult(
+        status -> {
+          registry.recovering(fixture.session());
+          registry.beginRecovery(
+              fixture.session(),
+              "AGENT",
+              browsers.owned(fixture.actor().userId(), fixture.session()).pageEpoch());
+        });
+    assertThatThrownBy(
+            () ->
+                dispatcher.acknowledge(fixture.worker(), fixture.boot(), acknowledgement(delivery)))
+        .isInstanceOf(DomainException.class);
+    ObjectNode recovery = acknowledgement(delivery);
+    recovery.put("requestId", UUID.randomUUID().toString());
+    recovery.put("controlEpoch", leases.get(fixture.session()).epoch());
+    assertThat(dispatcher.acknowledge(fixture.worker(), fixture.boot(), recovery)).isTrue();
+    assertThat(leases.get(fixture.session()).state()).isEqualTo("ACTIVE");
+    assertThat(leases.get(fixture.session()).claimFenceId()).isNull();
+    assertThat(outbox.published(delivery.id())).isFalse();
+  }
+
+  private UUID claimFixture(Fixture fixture, UUID claim) {
+    return Objects.requireNonNull(
+        transaction.execute(
+            status -> {
+              UUID task = UUID.randomUUID();
+              jdbc.sql(
+                      """
+                      INSERT INTO tasks(id,user_id,goal,title,output_format,origin,state)
+                      VALUES(:id,:user,'Control fixture','Control fixture','TEXT','MCP','WAITING_AGENT')
+                      """)
+                  .param("id", task)
+                  .param("user", fixture.actor().userId())
+                  .update();
+              jdbc.sql("UPDATE browser_sessions SET task_id=:task,purpose='TASK' WHERE id=:id")
+                  .param("task", task)
+                  .param("id", fixture.session())
+                  .update();
+              UUID operation =
+                  operations.createSystem(
+                      fixture.actor().userId(),
+                      "tasks.continue:" + task,
+                      "continuationClaim",
+                      claim);
+              leases.claimAgent(fixture.session(), claim, operation, Instant.now().minusSeconds(1));
+              controls.publishControl(fixture.actor().userId(), fixture.session(), "AGENT");
+              return operation;
+            }));
+  }
+
+  private boolean fence(Fixture fixture, UUID claim, long epoch) {
+    return Boolean.TRUE.equals(
+        transaction.execute(
+            status ->
+                controls.fenceExpiredClaim(
+                    fixture.actor().userId(), fixture.session(), claim, epoch)));
+  }
+
   private Fixture fixture() {
     var fixture =
         Objects.requireNonNull(
@@ -372,7 +476,7 @@ class ControlOutboxIntegrationTest {
             """
             SELECT id,(payload->>'workerId')::uuid worker_id,(payload->>'workerBootId')::uuid worker_boot_id,
               (payload->'message')::text message FROM transactional_outbox
-            WHERE aggregate_id=:id AND event_type='worker.control'
+            WHERE aggregate_id=:id AND event_type='worker.control' ORDER BY aggregate_version DESC LIMIT 1
             """)
         .param("id", fixture.session())
         .query(ControlOutboxRepository.Delivery.class)

@@ -222,6 +222,7 @@ async function main() {
   await Promise.all(['api', 'oauth2-proxy', 'coturn'].map(service => healthy(service)));
   await compose(['up', '-d', '--no-deps', 'mcp-adapter', 'egress-proxy']);
   await Promise.all(['mcp-adapter', 'egress-proxy'].map(service => healthy(service)));
+  progress('stopping browser workers, retiring their enrollments and starting the selected pool');
   await deployWorkerRelease({ docker, compose, identifiers: () => identifiers('browser-worker'),
     imageId: imageIds.get(release.WORKER_IMAGE), count: Number(configuration.WORKER_COUNT) });
   await healthy('browser-worker');

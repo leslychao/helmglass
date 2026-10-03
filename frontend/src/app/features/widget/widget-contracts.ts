@@ -16,6 +16,7 @@ export interface WidgetSnapshot {
     id: string;
     state: string;
     mode: string;
+    dispatchId?: string;
     reason?: string;
     deliveredAt?: string;
     manualMessage?: string;
@@ -148,6 +149,7 @@ export function snapshotOf(
           id: string(source['id']),
           state: string(source['state']),
           mode: string(source['mode']),
+          dispatchId: source['dispatchId'] == null ? undefined : string(source['dispatchId']),
           reason: optional(source['reason']),
           deliveredAt: optional(source['deliveredAt']),
           manualMessage: optional(source['manualMessage']),

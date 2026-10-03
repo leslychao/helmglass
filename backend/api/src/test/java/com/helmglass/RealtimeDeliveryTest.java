@@ -14,6 +14,7 @@ import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
 import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
+import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.realtime.infrastructure.repository.OutboxRepository;
 import java.time.Instant;
 import java.util.List;
@@ -38,7 +39,7 @@ class RealtimeDeliveryTest {
           identities,
           json,
           mock(ChatPresentationRepository.class),
-          mock(OperationRepository.class), mock(ApplicationEventPublisher.class));
+          mock(OperationRepository.class), mock(ApplicationEventPublisher.class), mock(ChangeRepository.class));
 
   @Test
   void subscribesBeforeReadyAndOnlyReceivesOwnSafeResources() throws Exception {

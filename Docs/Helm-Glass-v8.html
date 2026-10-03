@@ -490,7 +490,7 @@ function compareValue6(a,b,direction){
   const value=typeof a==='number'&&typeof b==='number'?a-b:typeof a==='boolean'&&typeof b==='boolean'?Number(a)-Number(b):collator6.compare(String(a),String(b));
   return value*(direction==='desc'?-1:1);
 }
-function userDto6(u){return {...clone(u),counts:taskCountsA(u.id),browserCap:effectiveCapA(u,'browser'),waitingCap:effectiveCapA(u,'waiting'),browserLabel:browserLimitLabelA(u)};}
+function userDto6(u,pendingOperations=0){return {...clone(u),counts:taskCountsA(u.id),pendingOperations,browserCap:effectiveCapA(u,'browser'),waitingCap:effectiveCapA(u,'waiting'),browserLabel:browserLimitLabelA(u)};}
 function taskListDto6(t){return {id:t.id,title:runTitle(t),startUrl:t.startUrl,origin:t.origin,status:t.status,outcome:t.outcome,request:t.request?{type:t.request.type}:null,cancelRequestedAt:t.cancelRequestedAt||null,created:t.created,updated:t.updated,activeSec:t.activeSec,humanSec:t.humanSec,mediaSec:t.mediaSec,mediaBytes:t.mediaBytes,summary:runSummary(t)};}
 function demoDataset6(request){
   const {resource,filters:f,context:c}=request,q=(f.query||'').trim().toLocaleLowerCase('ru');
@@ -511,7 +511,12 @@ function demoDataset6(request){
     return {rows:siteUsageRowsH(tasks).map(g=>({id:g.domain,domain:g.domain,site:g.site,browser:g.browser,media:g.media,bytes:g.bytes,taskCount:g.tasks.length,percentage:totalBrowser>0&&g.browser!=null?g.browser/totalBrowser*100:null})),fields:{site:g=>g.domain,browser:g=>g.browser,tasks:g=>g.taskCount,media:g=>g.media,bytes:g=>g.bytes},id:g=>g.id};
   }
   if(!canAdminA()){const error=Error('Нет доступа к администрированию.');error.status=403;throw error;}
-  if(resource==='users')return {rows:peopleA().users.filter(u=>inValues('states',u.state)&&matches([u.name,u.email,u.id])).map(userDto6),fields:{user:u=>u.name,state:u=>stateLabelA(u.state),browsers:u=>u.counts.browsers,waiting:u=>u.counts.waiting,lastAccess:u=>date(u.lastAccess)},id:u=>u.id};
+  if(resource==='users'){
+    const pendingCounts=new Map();
+    for(const operation of peopleA().operations)if(operation.state==='PENDING')pendingCounts.set(operation.userId,(pendingCounts.get(operation.userId)||0)+1);
+    const rows=peopleA().users.filter(u=>inValues('states',u.state)&&matches([u.name,u.email,u.id])).map(u=>userDto6(u,pendingCounts.get(u.id)||0)).filter(u=>(!f.pending||u.pendingOperations>0)&&(!f.waiting||u.counts.waiting>0));
+    return {rows,fields:{user:u=>u.name,state:u=>stateLabelA(u.state),browsers:u=>u.counts.browsers,waiting:u=>u.counts.waiting,lastAccess:u=>date(u.lastAccess)},id:u=>u.id};
+  }
   if(resource==='userTasks'){
     const all=adminTasksA(c.userId).slice().sort((a,b)=>date(b.created)-date(a.created)||collator6.compare(a.id,b.id));
     return {rows:all.slice(0,50),fields:{id:t=>t.id,state:t=>t.state==='STOPPING'?'Останавливается':statusInfo({status:t.state,outcome:t.outcome,request:t.waitCode==='USER_LOGIN'?{type:'LOGIN'}:null})[0],browser:t=>t.node,reason:t=>ERROR_REASONS_A[t.errorCode]||WAIT_REASONS_A[t.waitCode]||null,created:t=>date(t.created)},id:t=>t.id,meta:{capped:all.length>50,scope:'recent-50'}};
@@ -520,7 +525,7 @@ function demoDataset6(request){
   if(resource==='nodes'){
     const counts=new Map();
     for(const task of adminTasksA())if(task.browser)counts.set(task.node,(counts.get(task.node)||0)+1);
-    return {rows:adminH().nodes.filter(n=>matches([n.id,nodeNameA(n.id)])).map(n=>({...n,busy:n.state==='offline'?null:(counts.get(n.id)||0),lastBusy:counts.get(n.id)||0,admission:n.state==='ready'&&adminH().accepting})),fields:{node:n=>n.id,state:n=>n.state==='ready'?'В сети':n.state==='draining'?'Завершает работу':'Нет связи',busy:n=>n.busy,admission:n=>n.admission?Math.max(0,n.slots-n.busy):0},id:n=>n.id};
+    return {rows:adminH().nodes.filter(n=>matches([n.id,nodeNameA(n.id)])&&inValues('states',n.state)).map(n=>({...n,busy:n.state==='offline'?null:(counts.get(n.id)||0),lastBusy:counts.get(n.id)||0,admission:n.state==='ready'&&adminH().accepting})),fields:{node:n=>n.id,state:n=>n.state==='ready'?'В сети':n.state==='draining'?'Завершает работу':'Нет связи',busy:n=>n.busy,admission:n=>n.admission?Math.max(0,n.slots-n.busy):0},id:n=>n.id};
   }
   if(resource==='sessions')return {rows:adminTasksA().filter(t=>c.scope==='queue'?t.state==='QUEUED':t.browser).map(t=>({...t,browserId:t.browser?'session-'+t.id.replace(/^run-/,''):null,user:clone(getPersonA(t.userId))})),fields:{user:t=>t.user.name,id:t=>t.id,browserId:t=>t.browserId,state:t=>t.state==='STOPPING'?'Останавливается':statusInfo({status:t.state,outcome:t.outcome,request:t.waitCode==='USER_LOGIN'?{type:'LOGIN'}:null})[0],browser:t=>t.node||WAIT_REASONS_A[t.waitCode]},id:t=>t.id};
   if(resource==='audit')return {rows:peopleA().audit.filter(e=>(!c.userId||e.targetId===c.userId)&&(!f.action||e.action===f.action)&&matches([e.reason,e.actorName,e.actorId,e.targetId,auditTargetA(e.targetId),ADMIN_ACTIONS_A[e.action]])).map(e=>({...e,targetName:auditTargetA(e.targetId),targetIsUser:!!getPersonA(e.targetId),operationLabel:operationStatusA(e.operationId)})),fields:{time:e=>date(e.time),actor:e=>e.actorName,target:e=>e.targetName,action:e=>ADMIN_ACTIONS_A[e.action]||e.action,reason:e=>e.reason},id:e=>e.id};
@@ -2499,7 +2504,7 @@ document.addEventListener('keydown',e=>{
 },true);
 
 // Administration contains service metadata only. This static prototype has no administrative API.
-const ADMIN_VIEW_A={query:'',states:[],page:0,size:10,taskPage:{},auditQuery:'',auditPage:0,auditAction:'',userAudits:{}};
+const ADMIN_VIEW_A={query:'',states:[],pending:false,waiting:false,nodeStates:[],page:0,size:10,taskPage:{},auditQuery:'',auditPage:0,auditAction:'',userAudits:{}};
 const ADMIN_STATES_A=[['ACTIVE','Активен'],['BLOCKED','Заблокирован'],['DELETING','Ожидает удаления'],['PURGING','Очистка данных'],['DELETED','Удалён']];
 const ADMIN_ACTIONS_A={QUOTAS:'Изменение квот',STOP_TASK:'Остановка задачи',STOP_ALL:'Остановка всех задач',BLOCK:'Блокировка',UNBLOCK:'Разблокировка',DELETE:'Удаление аккаунта',RESTORE:'Отмена удаления',ADMISSION:'Новые запуски',NODE:'Назначения узла',PURGE:'Начало очистки'};
 const ADMIN_WAITING_A=['QUEUED','WAITING_AGENT','WAITING_USER'];

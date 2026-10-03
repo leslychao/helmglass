@@ -86,7 +86,7 @@ class ChatPresentationIntegrationTest {
             identities,
             json,
             presentations,
-            new OperationRepository(jdbc, json, changes), event -> {});
+            new OperationRepository(jdbc, json, changes), event -> {}, changes);
   }
 
   @AfterAll

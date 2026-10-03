@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.MutationContext;
+import com.helmglass.browser.application.BrowserControlService;
+import com.helmglass.browser.infrastructure.repository.BrowserRepository;
+import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.command.api.CommandContracts;
 import com.helmglass.command.application.CommandExecutionService;
 import com.helmglass.continuation.api.ContinuationContracts;
@@ -50,6 +53,9 @@ class ContinuationDeliveryIntegrationTest {
   private final JdbcClient jdbc;
   private final ApplicationEventPublisher events;
   private final TransactionTemplate transaction;
+  private final BrowserRepository browsers;
+  private final BrowserControlService controls;
+  private final ControlRepository leases;
 
   @Autowired
   ContinuationDeliveryIntegrationTest(
@@ -62,7 +68,8 @@ class ContinuationDeliveryIntegrationTest {
       OperationRepository operations,
       JdbcClient jdbc,
       ApplicationEventPublisher events,
-      PlatformTransactionManager transactions) {
+      PlatformTransactionManager transactions, BrowserRepository browsers,
+      BrowserControlService controls, ControlRepository leases) {
     this.owner = owner;
     this.repository = repository;
     this.tasks = tasks;
@@ -73,6 +80,9 @@ class ContinuationDeliveryIntegrationTest {
     this.jdbc = jdbc;
     this.events = events;
     transaction = new TransactionTemplate(transactions);
+    this.browsers = browsers;
+    this.controls = controls;
+    this.leases = leases;
   }
 
   private record Fixture(
@@ -173,7 +183,9 @@ class ContinuationDeliveryIntegrationTest {
             publication.slot().id(),
             publication.slot().presentationRevision(),
             viewer);
-    if (ready) finish(result, "SUCCEEDED");
+    if (ready) {
+      finish(result, "SUCCEEDED");
+    }
     return result;
   }
 
@@ -262,8 +274,9 @@ class ContinuationDeliveryIntegrationTest {
   }
 
   private String prepareAfter(CountDownLatch start, Fixture fixture) throws InterruptedException {
-    if (!start.await(5, TimeUnit.SECONDS))
+    if (!start.await(5, TimeUnit.SECONDS)) {
       throw new IllegalStateException("Concurrent test did not start");
+    }
     try {
       owner.prepareMessage(
           fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context());
@@ -513,7 +526,9 @@ class ContinuationDeliveryIntegrationTest {
 
   private CommandContracts.Submit command(Fixture fixture, UUID id, UUID claim, String type) {
     var action = JsonMapper.builder().build().createObjectNode().put("type", type);
-    if (type.equals("NAVIGATE")) action.put("url", "https://example.com");
+    if (type.equals("NAVIGATE")) {
+      action.put("url", "https://example.com");
+    }
     return new CommandContracts.Submit(
         id,
         tasks.get(fixture.actor(), fixture.task()).version(),
@@ -526,6 +541,86 @@ class ContinuationDeliveryIntegrationTest {
         null,
         null,
         action);
+  }
+
+  @Test
+  void expiredClaimNeedsPhysicalFenceAckBeforeAnotherClaimAndKeepsDispatchReceipt() {
+    Fixture fixture = fixture(false);
+    var session = runtime(fixture);
+    finish(fixture, "SUCCEEDED");
+    var dispatch = owner.prepareMessage(fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context());
+    var first = owner.claim(fixture.actor(), fixture.host(), fixture.task(),
+        new ContinuationContracts.Claim(fixture.continuation(), 1L), context());
+    controls.acknowledge(session.workerId(), session.workerBootId(), session.id(), leases.get(session.id()).epoch());
+    Instant deadline = repository.get(fixture.continuation()).expiresAt();
+    expireClaim(fixture);
+    assertThat(repository.get(fixture.continuation()).state()).isEqualTo("BLOCKED");
+    assertThat(leases.get(session.id()).state()).isEqualTo("TRANSFERRING");
+    assertThatThrownBy(() -> owner.claim(fixture.actor(), fixture.host(), fixture.task(),
+        new ContinuationContracts.Claim(fixture.continuation(), 1L), context())).isInstanceOf(DomainException.class);
+    controls.acknowledge(session.workerId(), session.workerBootId(), session.id(), leases.get(session.id()).epoch());
+    var recovered = repository.get(fixture.continuation());
+    assertThat(recovered.state()).isEqualTo("READY");
+    assertThat(recovered.expiresAt()).isEqualTo(deadline);
+    assertThat(recovered.dispatchId()).isEqualTo(dispatch.dispatchId());
+    assertThatThrownBy(() -> owner.prepareMessage(fixture.actor(), fixture.host(), fixture.task(), fixture.prepare(), context()))
+        .isInstanceOf(DomainException.class).extracting("code").isEqualTo("CONTINUATION_NOT_READY");
+    var second = owner.claim(fixture.actor(), fixture.host(), fixture.task(),
+        new ContinuationContracts.Claim(fixture.continuation(), 1L), context());
+    assertThat(second.resource().id()).isNotEqualTo(first.resource().id());
+    assertThatThrownBy(() -> transaction.executeWithoutResult(status -> owner.consume(fixture.actor(), fixture.task(), 1, first.resource().id())))
+        .isInstanceOf(DomainException.class);
+    assertThat(count("SELECT count(*) FROM browser_sessions WHERE task_id=:id", fixture.task())).isEqualTo(1);
+  }
+
+  @Test
+  void pauseDuringClaimFenceCannotBeUndoneByLatePhysicalAck() {
+    Fixture fixture = fixture(false);
+    var session = runtime(fixture);
+    finish(fixture, "SUCCEEDED");
+    owner.claim(fixture.actor(), fixture.host(), fixture.task(),
+        new ContinuationContracts.Claim(fixture.continuation(), 1L), context());
+    controls.acknowledge(session.workerId(), session.workerBootId(), session.id(), leases.get(session.id()).epoch());
+    expireClaim(fixture);
+    long epoch = leases.get(session.id()).epoch();
+    tasks.pause(fixture.actor(), fixture.task(), context());
+    transaction.executeWithoutResult(status -> events.publishEvent(new TaskContinuationService.ClaimFenced(
+        fixture.task(), repository.get(fixture.continuation()).claimId(), epoch - 1, epoch)));
+    assertThat(repository.get(fixture.continuation()).state()).isEqualTo("CANCELLED");
+  }
+
+  @Test
+  void manualModeCannotGrantAgentControlToWebOrRevokedMcpIdentity() {
+    Fixture fixture = fixture(true);
+    jdbc.sql("UPDATE task_continuations SET mode='MANUAL' WHERE id=:id").param("id", fixture.continuation()).update();
+    var actor = fixture.actor();
+    var web = new AuthenticatedActor(actor.userId(), UUID.randomUUID(), null, "helm-web",
+        actor.displayName(), actor.email(), actor.accessEpoch(), Set.of(), false);
+    assertThatThrownBy(() -> owner.claim(web, null, fixture.task(),
+        new ContinuationContracts.Claim(fixture.continuation(), 1L), context()))
+        .isInstanceOf(DomainException.class).extracting("code").isEqualTo("MCP_GRANT_REQUIRED");
+    jdbc.sql("UPDATE client_grants SET status='REVOKED' WHERE id=:id").param("id", actor.grantId()).update();
+    assertThatThrownBy(() -> owner.claim(actor, null, fixture.task(),
+        new ContinuationContracts.Claim(fixture.continuation(), 1L), context()))
+        .isInstanceOf(DomainException.class).extracting("code").isEqualTo("MCP_GRANT_REQUIRED");
+  }
+
+  private BrowserRepository.Session runtime(Fixture fixture) {
+    return Objects.requireNonNull(transaction.execute(status -> {
+      UUID worker = UUID.randomUUID();
+      UUID boot = UUID.randomUUID();
+      jdbc.sql("INSERT INTO browser_workers(id,boot_id,capacity,image_version) VALUES(:id,:boot,1,'fixture')")
+          .param("id", worker).param("boot", boot).update();
+      var session = browsers.reserve(fixture.actor().userId(), fixture.task(), new BrowserRepository.Worker(worker, boot, 1), 1800);
+      jdbc.sql("UPDATE browser_sessions SET state='ACTIVE' WHERE id=:id").param("id", session.id()).update();
+      return browsers.owned(fixture.actor().userId(), session.id());
+    }));
+  }
+
+  private void expireClaim(Fixture fixture) {
+    jdbc.sql("UPDATE task_continuations SET claim_expires_at=now()-interval '1 second' WHERE id=:id")
+        .param("id", fixture.continuation()).update();
+    owner.expire();
   }
 
   private long count(String sql, UUID id) {

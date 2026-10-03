@@ -227,18 +227,24 @@ public class BrowserControlService {
     }
     var session = browsers.owned(userId, sessionId);
     var lease = controls.lock(sessionId);
-    if (!session.state().equals("ACTIVE") || !session.privacy().equals("NORMAL")
-        || session.taskId() == null || !session.budgetDeadlineAt().isAfter(Instant.now())) {
+    if (!session.state().equals("ACTIVE")
+        || !session.privacy().equals("NORMAL")
+        || session.taskId() == null
+        || !session.budgetDeadlineAt().isAfter(Instant.now())) {
       return false;
     }
-    if (claimId.equals(lease.claimFenceId()) && Objects.equals(claimEpoch, lease.claimFenceEpoch())) {
+    if (claimId.equals(lease.claimFenceId())
+        && Objects.equals(claimEpoch, lease.claimFenceEpoch())) {
       return lease.state().equals("TRANSFERRING") && "AGENT".equals(lease.desiredOwner());
     }
-    if (!claimId.equals(lease.continuationClaimId()) || lease.epoch() != claimEpoch
-        || !lease.ownerKind().equals("AGENT") || !Set.of("ACTIVE", "TRANSFERRING").contains(lease.state())) {
+    if (!claimId.equals(lease.continuationClaimId())
+        || lease.epoch() != claimEpoch
+        || !lease.ownerKind().equals("AGENT")
+        || !Set.of("ACTIVE", "TRANSFERRING").contains(lease.state())) {
       return false;
     }
-    UUID operation = operations.createSystem(userId, "control.claim-fence", "browserSession", sessionId);
+    UUID operation =
+        operations.createSystem(userId, "control.claim-fence", "browserSession", sessionId);
     operations.expireClaim(lease.operationId());
     controls.fenceClaim(lease, claimId, operation, session.budgetDeadlineAt());
     publishControl(userId, sessionId, "AGENT");
@@ -250,22 +256,27 @@ public class BrowserControlService {
   public void acknowledgeRecoveredClaim(UUID sessionId) {
     var lease = controls.lock(sessionId);
     var session = browsers.owned(lease.ownerId(), sessionId);
-    if (session.state().equals("ACTIVE") && session.privacy().equals("NORMAL")
-        && lease.state().equals("ACTIVE") && lease.ownerKind().equals("AGENT")) {
+    if (session.state().equals("ACTIVE")
+        && session.privacy().equals("NORMAL")
+        && lease.state().equals("ACTIVE")
+        && lease.ownerKind().equals("AGENT")) {
       completeClaimFence(session, lease, lease.epoch());
     }
   }
 
-  private void completeClaimFence(BrowserRepository.Session session, ControlRepository.Lease lease,
-      long epoch) {
-    if (lease.claimFenceId() == null || lease.claimFenceEpoch() == null
-        || epoch <= lease.claimFenceEpoch() || session.taskId() == null) {
+  private void completeClaimFence(
+      BrowserRepository.Session session, ControlRepository.Lease lease, long epoch) {
+    if (lease.claimFenceId() == null
+        || lease.claimFenceEpoch() == null
+        || epoch <= lease.claimFenceEpoch()
+        || session.taskId() == null) {
       return;
     }
     controls.clearClaimFence(session.id());
     operations.completeControl(lease.operationId());
-    events.publishEvent(new TaskContinuationService.ClaimFenced(session.taskId(), lease.claimFenceId(),
-        lease.claimFenceEpoch(), epoch));
+    events.publishEvent(
+        new TaskContinuationService.ClaimFenced(
+            session.taskId(), lease.claimFenceId(), lease.claimFenceEpoch(), epoch));
   }
 
   @Transactional

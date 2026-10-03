@@ -632,6 +632,28 @@ describe('widget presentation lifecycle', () => {
     expect(protocol.prepare).toHaveBeenCalledOnce();
   });
 
+  it('does not send another message after an expired claim becomes READY on remount', async () => {
+    const continuation = {
+      id: 'continuation-1',
+      state: 'READY',
+      mode: 'WIDGET_RETURN',
+      dispatchId: '3f1978bb-80d8-4990-b345-edebeb351513',
+      manualMessage: 'Продолжи ту же задачу после восстановления управления.',
+    };
+    bridge.attach.mockResolvedValue(attached(continuation, true));
+    const fixture = await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    socket().receive('invalidate');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    expect(bridge.attach.mock.calls.every(([request]) => request.name === 'browser.attach_view')).toBe(
+      true,
+    );
+    expect(fixture.componentInstance.manualText()).toBe(continuation.manualMessage);
+  });
+
   it('rejects a prepared message if the widget becomes hidden before host invocation', async () => {
     const protocol = deliveryScenario();
     let resolve: ((value: ReturnType<typeof protocol.prepared>) => void) | undefined;

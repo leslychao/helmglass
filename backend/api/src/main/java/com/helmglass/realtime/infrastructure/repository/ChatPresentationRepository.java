@@ -330,7 +330,7 @@ public class ChatPresentationRepository {
   }
 
   @Transactional(propagation = Propagation.MANDATORY)
-  public boolean confirmFence(ViewerFence fence) {
+  public Optional<UUID> confirmFence(ViewerFence fence) {
     // Match even a previously published exact receipt: the worker's confirmation may have been
     // lost.
     Optional<UUID> scope =
@@ -353,7 +353,7 @@ public class ChatPresentationRepository {
             .query(UUID.class)
             .optional();
     if (scope.isEmpty()) {
-      return false;
+      return Optional.empty();
     }
     jdbc.sql(
             """
@@ -364,7 +364,21 @@ public class ChatPresentationRepository {
             """)
         .param("id", scope.get())
         .update();
-    return true;
+    return scope;
+  }
+
+  public void requestWebFence(UUID userId, ViewerFence fence) {
+    jdbc.sql("""
+        INSERT INTO transactional_outbox(id,user_id,aggregate_id,aggregate_version,event_type,payload)
+        VALUES(:id,:user,:viewer,:generation,'viewer.fence',jsonb_build_object(
+          'workerId',CAST(:worker AS text),'workerBootId',CAST(:boot AS text),
+          'browserSessionId',CAST(:session AS text),'allocationEpoch',CAST(:allocation AS bigint),
+          'viewerId',CAST(:viewer AS text),'viewGeneration',CAST(:generation AS bigint)))
+        ON CONFLICT(aggregate_id,aggregate_version,event_type,ordinal) DO NOTHING
+        """).param("id", fence.requestId()).param("user", userId)
+        .param("worker", fence.workerId()).param("boot", fence.workerBootId())
+        .param("session", fence.browserSessionId()).param("allocation", fence.allocationEpoch())
+        .param("viewer", fence.viewerId()).param("generation", fence.viewGeneration()).update();
   }
 
   public void fenceTransportFailed(UUID id) {

@@ -70,6 +70,20 @@ describe('widget presentation and frame authorization', () => {
     expect(() => presentationOf({ ...presentation, viewScopeId: null }, origin)).toThrow();
   });
 
+  it('rejects a malformed dispatch marker instead of treating a sent continuation as new', () => {
+    expect(() =>
+      snapshotOf(
+        {
+          presentation,
+          continuation: { id: 'continuation-1', state: 'READY', mode: 'WIDGET_RETURN', dispatchId: 42 },
+        },
+        {},
+        presentation,
+        origin,
+      ),
+    ).toThrow();
+  });
+
   it('retains the live single-use ticket when control changes but frame binding is unchanged', () => {
     const previous = snapshotOf({ presentation, session }, meta, presentation, origin);
     const next = snapshotOf(

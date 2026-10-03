@@ -227,11 +227,16 @@ public class OperationRepository {
   }
 
   public void expireClaim(UUID operationId) {
-    var expired = jdbc.sql("""
-        UPDATE operations SET state='FAILED',failure_code='CLAIM_EXPIRED',finished_at=now(),
-          updated_at=now(),version=version+1 WHERE id=:id AND state IN ('PENDING','RUNNING')
-          AND kind LIKE 'tasks.continue:%' RETURNING id,user_id,version
-        """).param("id", operationId).query(Transition.class).optional();
+    var expired =
+        jdbc.sql(
+                """
+                UPDATE operations SET state='FAILED',failure_code='CLAIM_EXPIRED',finished_at=now(),
+                  updated_at=now(),version=version+1 WHERE id=:id AND state IN ('PENDING','RUNNING')
+                  AND kind LIKE 'tasks.continue:%' RETURNING id,user_id,version
+                """)
+            .param("id", operationId)
+            .query(Transition.class)
+            .optional();
     expired.ifPresent(this::changed);
   }
 

@@ -13,6 +13,7 @@ public record ChatPresentation(
     long presentationRevision,
     UUID activeViewerInstanceId,
     long viewGeneration,
+    long version,
     String transferState,
     UUID grantId,
     long grantVersion,

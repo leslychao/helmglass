@@ -13,6 +13,7 @@ import com.helmglass.realtime.domain.HostConversationContext;
 import com.helmglass.realtime.domain.ViewerFence;
 import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
 import com.helmglass.realtime.infrastructure.repository.OutboxRepository;
+import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.HashMap;
@@ -69,6 +70,7 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
   private final ChatPresentationRepository presentations;
   private final OperationRepository operations;
   private final ApplicationEventPublisher events;
+  private final ChangeRepository changes;
 
   private record Viewer(
       AuthenticatedActor actor,
@@ -87,13 +89,14 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       JsonSupport json,
       ChatPresentationRepository presentations,
       OperationRepository operations,
-      ApplicationEventPublisher events) {
+      ApplicationEventPublisher events, ChangeRepository changes) {
     this.outbox = outbox;
     this.identities = identities;
     this.json = json;
     this.presentations = presentations;
     this.operations = operations;
     this.events = events;
+    this.changes = changes;
   }
 
   public record TaskInvalidation(UUID userId, UUID resourceId, List<String> resources) {}
@@ -409,7 +412,15 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
 
   @Transactional
   public boolean confirmViewerFence(ViewerFence fence) {
-    return presentations.confirmFence(fence);
+    var confirmed = presentations.confirmFence(fence);
+    confirmed.flatMap(presentations::find).ifPresent(slot -> changes.changed(slot.userId(), "tasks", slot.taskId(), slot.id(),
+        slot.version(), Instant.now()));
+    return confirmed.isPresent();
+  }
+
+  @Transactional
+  public void requestViewerFence(UUID userId, ViewerFence fence) {
+    presentations.requestWebFence(userId, fence);
   }
 
   private static boolean supportedHost(AuthenticatedActor actor, HostConversationContext host) {

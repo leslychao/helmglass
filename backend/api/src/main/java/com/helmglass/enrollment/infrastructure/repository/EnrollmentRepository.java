@@ -1,7 +1,7 @@
 package com.helmglass.enrollment.infrastructure.repository;
 
-import java.time.Instant;
 import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -39,6 +39,13 @@ public class EnrollmentRepository {
         SELECT count(*) FROM worker_enrollments
         WHERE installation_id=:installation AND expires_at>now() AND state<>'REVOKED'
         """).param("installation", installation).query(Long.class).single();
+  }
+
+  public int revokeInstallation(String installation) {
+    return jdbc.sql("""
+        UPDATE worker_enrollments SET state='REVOKED'
+        WHERE installation_id=:installation AND state<>'REVOKED'
+        """).param("installation", installation).update();
   }
 
   public boolean hasOtherLiveBoot(String installation, UUID workerId, UUID bootId) {

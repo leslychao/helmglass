@@ -325,24 +325,33 @@ public class ControlRepository {
   }
 
   public void fenceClaim(Lease lease, UUID claimId, UUID operationId, Instant expiry) {
-    int changed = jdbc.sql("""
-        UPDATE browser_control_leases SET epoch=epoch+1,continuation_claim_id=NULL,
-          claim_fence_id=:claim,claim_fence_epoch=:epoch,state='TRANSFERRING',desired_owner='AGENT',
-          controller_instance_id=NULL,input_channel_id=NULL,login_id=NULL,
-          operation_id=:operation,expires_at=:expiry,version=version+1
-        WHERE session_id=:id AND epoch=:epoch AND continuation_claim_id=:claim
-          AND owner_kind='AGENT' AND state IN ('ACTIVE','TRANSFERRING')
-        """)
-        .param("id", lease.sessionId()).param("epoch", lease.epoch()).param("claim", claimId)
-        .param("operation", operationId).param("expiry", Timestamp.from(expiry)).update();
+    int changed =
+        jdbc.sql(
+                """
+                UPDATE browser_control_leases SET epoch=epoch+1,continuation_claim_id=NULL,
+                  claim_fence_id=:claim,claim_fence_epoch=:epoch,state='TRANSFERRING',desired_owner='AGENT',
+                  controller_instance_id=NULL,input_channel_id=NULL,login_id=NULL,
+                  operation_id=:operation,expires_at=:expiry,version=version+1
+                WHERE session_id=:id AND epoch=:epoch AND continuation_claim_id=:claim
+                  AND owner_kind='AGENT' AND state IN ('ACTIVE','TRANSFERRING')
+                """)
+            .param("id", lease.sessionId())
+            .param("epoch", lease.epoch())
+            .param("claim", claimId)
+            .param("operation", operationId)
+            .param("expiry", Timestamp.from(expiry))
+            .update();
     if (changed != 1) {
       throw DomainException.conflict("CONTROL_CONFLICT", "Expired claim control changed");
     }
   }
 
   public void clearClaimFence(UUID sessionId) {
-    jdbc.sql("UPDATE browser_control_leases SET claim_fence_id=NULL,claim_fence_epoch=NULL WHERE session_id=:id")
-        .param("id", sessionId).update();
+    jdbc.sql(
+            "UPDATE browser_control_leases SET claim_fence_id=NULL,claim_fence_epoch=NULL WHERE"
+                + " session_id=:id")
+        .param("id", sessionId)
+        .update();
   }
 
   public void closeRequested(UUID id) {

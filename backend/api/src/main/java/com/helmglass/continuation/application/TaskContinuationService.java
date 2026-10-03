@@ -91,13 +91,17 @@ public class TaskContinuationService {
     TaskBinding task = ownedTask(actor, taskId);
     ChatPresentation slot =
         presentations.lockCurrentPresentation(actor, host).orElseThrow(DomainException::notFound);
-    if (!slot.taskId().equals(taskId)) throw DomainException.notFound();
+    if (!slot.taskId().equals(taskId)) {
+      throw DomainException.notFound();
+    }
     continuations.bind(task, slot, hostMessageVerified);
   }
 
   @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
   public void consent(Consent value) {
-    if (value.taskId() == null) return;
+    if (value.taskId() == null) {
+      return;
+    }
     continuations.lockTask(value.taskId());
     continuations.consent(value.taskId(), value.granted());
     if (!value.granted()) {
@@ -111,26 +115,36 @@ public class TaskContinuationService {
 
   @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
   public void cancelled(Cancelled value) {
-    if (value.taskId() != null) cancel(value.taskId());
+    if (value.taskId() != null) {
+      cancel(value.taskId());
+    }
   }
 
   @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
   public void waiting(Waiting value) {
-    if (value.taskId() != null)
+    if (value.taskId() != null) {
       waitForResult(
           value.taskId(), value.sourceOperationId(), value.sourceCommandId(), value.reason());
+    }
   }
 
   /** The accepting owner calls this in the same transaction, before its external dispatch. */
   @Transactional(propagation = Propagation.MANDATORY)
   public void waitForResult(UUID taskId, UUID operation, UUID command, String reason) {
-    if ((operation == null) == (command == null))
+    if ((operation == null) == (command == null)) {
       throw new IllegalArgumentException("One continuation source is required");
+    }
     TaskBinding task = continuations.lockTask(taskId);
-    if (command != null && !continuations.commandNeedsContinuation(command)) return;
-    if (continuations.source(taskId, operation, command).isPresent()) return;
+    if (command != null && !continuations.commandNeedsContinuation(command)) {
+      return;
+    }
+    if (continuations.source(taskId, operation, command).isPresent()) {
+      return;
+    }
     if (List.of("COMPLETED", "FAILED", "CANCELLED", "STOPPING", "PAUSED", "PAUSING")
-        .contains(task.state())) return;
+        .contains(task.state())) {
+      return;
+    }
     if (continuations.current(taskId).isPresent()) {
       throw DomainException.conflict(
           "CONTINUATION_PENDING", "The current continuation must be consumed first");
@@ -144,19 +158,27 @@ public class TaskContinuationService {
   public void ready(Ready ready) {
     TaskBinding task = continuations.lockTask(ready.taskId());
     if (ready.sourceCommandId() != null
-        && !continuations.commandNeedsContinuation(ready.sourceCommandId())) return;
+        && !continuations.commandNeedsContinuation(ready.sourceCommandId())) {
+      return;
+    }
     var existing =
         continuations.source(task.id(), ready.sourceOperationId(), ready.sourceCommandId());
     if (existing.isEmpty()) {
       // An immediate operation (answer/resume) still registers and completes its intent atomically.
-      if (!task.state().equals("WAITING_AGENT") || task.mutationBarrier()) return;
+      if (!task.state().equals("WAITING_AGENT") || task.mutationBarrier()) {
+        return;
+      }
       waitForResult(task.id(), ready.sourceOperationId(), ready.sourceCommandId(), ready.reason());
       existing =
           continuations.source(task.id(), ready.sourceOperationId(), ready.sourceCommandId());
     }
-    if (existing.isEmpty()) return;
+    if (existing.isEmpty()) {
+      return;
+    }
     Continuation value = existing.get();
-    if (!value.state().equals("WAITING_RESULT")) return;
+    if (!value.state().equals("WAITING_RESULT")) {
+      return;
+    }
     String sourceState = continuations.sourceState(value);
     if (List.of("UNKNOWN", "NEEDS_ATTENTION").contains(sourceState) || task.mutationBarrier()) {
       changed(
@@ -164,7 +186,9 @@ public class TaskContinuationService {
           Instant.now());
       return;
     }
-    if (!List.of("SUCCEEDED", "FAILED").contains(sourceState)) return;
+    if (!List.of("SUCCEEDED", "FAILED").contains(sourceState)) {
+      return;
+    }
     if (task.instructionRevision() != value.instructionRevision()
         || !task.state().equals("WAITING_AGENT")) {
       changed(continuations.transition(value.id(), "CANCELLED", "TASK_NOT_READY"), Instant.now());
@@ -207,6 +231,9 @@ public class TaskContinuationService {
           "Host message delivery has not been accepted for this task");
     }
     requireReadyTask(task, value);
+    if (value.sessionId() != null) {
+      requireReadyControl(value);
+    }
     var replay =
         operations.replay(actor, "continuations.prepare_message:" + taskId, context, input);
     if (replay.isPresent()) {
@@ -271,7 +298,9 @@ public class TaskContinuationService {
     var replay =
         operations.replay(
             actor, "continuations.record_delivery:" + input.dispatchId(), context, input);
-    if (replay.isPresent()) return replay.get();
+    if (replay.isPresent()) {
+      return replay.get();
+    }
     String outcome = input.outcome().name();
     if (value.deliveryOutcome() != null
         && !value.deliveryOutcome().equals(outcome)
@@ -323,13 +352,18 @@ public class TaskContinuationService {
     }
     TaskBinding task = ownedTask(actor, taskId);
     Continuation value = ownedContinuation(actor, taskId, input.continuationId());
-    if (value.mode().equals("WIDGET_RETURN")) requireDestination(actor, host, value);
+    if (value.mode().equals("WIDGET_RETURN")) {
+      requireDestination(actor, host, value);
+    }
     var replay = operations.replay(actor, "tasks.continue:" + taskId, context, input);
-    if (replay.isPresent()) return replay.get();
+    if (replay.isPresent()) {
+      return replay.get();
+    }
     DomainException.requireVersion(task.instructionRevision(), input.expectedInstructionRevision());
     requireReadyTask(task, value);
-    if (value.state().equals("CLAIMED"))
+    if (value.state().equals("CLAIMED")) {
       throw DomainException.conflict("CONTINUATION_BUSY", "Continuation already has a recipient");
+    }
     if (!List.of("READY", "DISPATCHING", "DELIVERED", "DELIVERY_UNKNOWN").contains(value.state())
         && !(value.state().equals("BLOCKED") && "HOST_REJECTED".equals(value.blockReason()))) {
       throw DomainException.conflict("CONTINUATION_BLOCKED", "Continuation is not claimable");
@@ -348,17 +382,9 @@ public class TaskContinuationService {
     Long epoch = null;
     Instant expiry = earliest(value.expiresAt(), Instant.now().plusSeconds(120));
     if (value.sessionId() != null) {
-      var session = browsers.owned(actor.userId(), value.sessionId());
-      var lease = controls.lock(session.id());
-      if (!session.state().equals("ACTIVE")
-          || !session.privacy().equals("NORMAL")
-          || !lease.ownerKind().equals("AGENT")
-          || !lease.state().equals("ACTIVE")
-          || !lease.expiresAt().isAfter(Instant.now())) {
-        throw DomainException.conflict("CONTINUATION_BLOCKED", "Browser control is not ready");
-      }
-      epoch = controls.claimAgent(session.id(), claimId, receipt.operationId(), expiry);
-      controlOwner.publishControl(actor.userId(), session.id(), "AGENT");
+      requireReadyControl(value);
+      epoch = controls.claimAgent(value.sessionId(), claimId, receipt.operationId(), expiry);
+      controlOwner.publishControl(actor.userId(), value.sessionId(), "AGENT");
     }
     changed(
         continuations.claim(value.id(), claimId, actor.clientId(), actor.grantId(), epoch, expiry),
@@ -371,9 +397,10 @@ public class TaskContinuationService {
       AuthenticatedActor actor, UUID taskId, long instructionRevision, UUID claimId) {
     var current = continuations.current(taskId);
     if (current.isEmpty()) {
-      if (claimId != null)
+      if (claimId != null) {
         throw DomainException.conflict(
             "ALREADY_CONSUMED", "Continuation claim is no longer current");
+      }
       return;
     }
     Continuation value = current.get();
@@ -400,7 +427,9 @@ public class TaskContinuationService {
   }
 
   public void cancel(UUID taskId) {
-    for (Continuation value : continuations.cancel(taskId)) changed(value, Instant.now());
+    for (Continuation value : continuations.cancel(taskId)) {
+      changed(value, Instant.now());
+    }
   }
 
   @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
@@ -443,7 +472,9 @@ public class TaskContinuationService {
             identities.lockState(due.userId());
             continuations.lockTask(due.taskId());
             Continuation value = continuations.get(due.id());
-            if (List.of("CONSUMED", "CANCELLED", "EXPIRED").contains(value.state())) return;
+            if (List.of("CONSUMED", "CANCELLED", "EXPIRED").contains(value.state())) {
+              return;
+            }
             if (value.state().equals("CLAIMED") && value.claimExpiresAt() != null
                 && !value.claimExpiresAt().isAfter(Instant.now())) {
               changed(continuations.transition(value.id(), "BLOCKED", "CLAIM_EXPIRED"), Instant.now());
@@ -470,14 +501,17 @@ public class TaskContinuationService {
   }
 
   private TaskBinding ownedTask(AuthenticatedActor actor, UUID taskId) {
-    if (!continuations.owner(taskId).equals(actor.userId())) throw DomainException.notFound();
+    if (!continuations.owner(taskId).equals(actor.userId())) {
+      throw DomainException.notFound();
+    }
     return continuations.lockTask(taskId);
   }
 
   private Continuation ownedContinuation(AuthenticatedActor actor, UUID taskId, UUID id) {
     Continuation value = continuations.get(id);
-    if (!value.userId().equals(actor.userId()) || !value.taskId().equals(taskId))
+    if (!value.userId().equals(actor.userId()) || !value.taskId().equals(taskId)) {
       throw DomainException.notFound();
+    }
     return value;
   }
 
@@ -508,6 +542,18 @@ public class TaskContinuationService {
     }
   }
 
+  private void requireReadyControl(Continuation value) {
+    var session = browsers.owned(value.userId(), value.sessionId());
+    var lease = controls.lock(session.id());
+    if (!session.state().equals("ACTIVE") || !session.privacy().equals("NORMAL")
+        || !session.budgetDeadlineAt().isAfter(Instant.now())
+        || !lease.ownerKind().equals("AGENT") || !lease.state().equals("ACTIVE")
+        || !lease.expiresAt().isAfter(Instant.now())
+        || !Objects.equals(value.controlEpoch(), lease.epoch())) {
+      throw DomainException.conflict("CONTINUATION_BLOCKED", "Browser control is not ready");
+    }
+  }
+
   private void changed(Continuation value, Instant notBefore) {
     changes.changed(
         value.userId(), "tasks", value.taskId(), value.id(), value.version(), notBefore);
@@ -520,7 +566,11 @@ public class TaskContinuationService {
 
   private static Instant earliest(Instant first, Instant... remaining) {
     Instant result = first;
-    for (Instant value : remaining) if (value.isBefore(result)) result = value;
+    for (Instant value : remaining) {
+      if (value.isBefore(result)) {
+        result = value;
+      }
+    }
     return result;
   }
 }
