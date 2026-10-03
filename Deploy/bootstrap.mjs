@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOOTSTRAP_FILES } from './configuration.mjs';
 import { isInside, protectDirectory, readProtectedFile, replaceProtectedFile, writeProtectedFile } from './protected-files.mjs';
-import { createAuthority, createIdentity, validateBackupRecipient, validateInternalIdentity } from './tls.mjs';
+import { createAuthority, createIdentity, validateInternalIdentity } from './tls.mjs';
 import { VAULT_ROLES } from './provision/src/vault-services.mjs';
 import { validatePredefinedInput } from './provision/src/predefined-users.mjs';
 import { upgradeRedisAcl } from './provision/src/redis-acl-upgrade.mjs';
@@ -46,7 +46,7 @@ export async function prepareBootstrap(configuration, environment = process.env)
       throw new Error('Existing bootstrap belongs to a different installation or origin; use an explicit certificate rotation');
     }
     let serviceSecrets;
-    for (const file of [...BOOTSTRAP_FILES, 'backup-bootstrap', 'vault-services-input',
+    for (const file of [...BOOTSTRAP_FILES, 'vault-services-input',
       'installation-ca.crt', 'installation-ca.key']) {
       const bytes = await readProtectedFile(join(directory, file));
       if (file === 'vault-services-input') serviceSecrets = JSON.parse(bytes.toString('utf8')).services;
@@ -56,7 +56,6 @@ export async function prepareBootstrap(configuration, environment = process.env)
       const legacyEdge = await lstat(legacyEdgePath);
       if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()) throw new Error('Unsafe legacy edge TLS file');
     }
-    validateBackupRecipient((await readProtectedFile(join(directory, 'backup-recipient'))).toString('utf8'));
     for (const [name, file] of Object.entries({ api: 'api-bootstrap', vault: 'vault-tls',
       minio: 'minio-bootstrap', 'mcp-adapter': 'mcp-adapter-bootstrap' })) {
       const installed = JSON.parse((await readProtectedFile(join(directory, file))).toString());
@@ -85,9 +84,6 @@ export async function prepareBootstrap(configuration, environment = process.env)
     }
     return { directory, created: false };
   }
-  // Validate every operator-supplied value before creating installation credentials.
-  const backupRecipient = validateBackupRecipient(
-    (await readProtectedFile(configuration.BACKUP_RECIPIENT_FILE, 65_536)).toString('utf8'));
   await protectDirectory(directory, repository);
   const caPem = await createAuthority(directory);
   const identities = {};
@@ -127,7 +123,6 @@ export async function prepareBootstrap(configuration, environment = process.env)
     'postgres-bootstrap': postgres,
     'redis-health-bootstrap': { schemaVersion: 1, username: 'helm_health', password: redis.health },
     'minio-bootstrap': { schemaVersion: 1, rootUser: minio.rootUser, rootPassword: minio.rootPassword, tls: identities.minio },
-    'backup-recipient': backupRecipient,
     'worker-bootstrap': { schemaVersion: 1, installationId: configuration.INSTALLATION_ID, enrollmentToken, caPem },
     'turn-bootstrap': { schemaVersion: 2, turnSharedSecret },
     'egress-bootstrap': { schemaVersion: 1, mediaProxyUsername, mediaProxyPassword },
@@ -135,8 +130,7 @@ export async function prepareBootstrap(configuration, environment = process.env)
     'vault-services-input': { schemaVersion: 1, installationId: configuration.INSTALLATION_ID, caPem, services, credentials },
   };
   for (const [service, file] of Object.entries({ api: 'api-bootstrap', migration: 'migration-bootstrap',
-    keycloak: 'keycloak-bootstrap', 'oauth2-proxy': 'oauth-bootstrap', provision: 'provision-bootstrap',
-    backup: 'backup-bootstrap' })) {
+    keycloak: 'keycloak-bootstrap', 'oauth2-proxy': 'oauth-bootstrap', provision: 'provision-bootstrap' })) {
     files[file] = { schemaVersion: 1, vault: { address: 'https://vault:8200', caPem, ...credentials[service] },
       ...(service === 'api' ? { tls: identities.api } : {}) };
   }

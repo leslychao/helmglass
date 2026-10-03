@@ -16,11 +16,8 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     await protectDirectory(temporary, resolve('.'));
     const caPem = await createAuthority(temporary);
     const recipient = await createIdentity(temporary, 'helm-test', caPem);
-    const recipientPath = join(temporary, 'backup-recipient.pem');
-    await writeProtectedFile(recipientPath, recipient.certificatePem);
     const configuration = { INSTALLATION_ID: 'bootstrap-test', PUBLIC_ORIGIN: 'https://helm-test', TURN_REALM: 'helm-test',
       LOCAL_SECRETS_DIR: join(temporary, 'service-secrets'), LOCAL_RECOVERY_DIR: join(temporary, 'offline-custody'),
-      BACKUP_RECIPIENT_FILE: recipientPath,
       KEYCLOAK_ADMIN_EMAIL: 'admin@example.test', KEYCLOAK_ADMIN_LAST_NAME: 'Fixture',
       KEYCLOAK_ANGELINA_EMAIL: 'angelina@example.test', KEYCLOAK_ANGELINA_LAST_NAME: 'Fixture',
       MCP_REDIRECT_URIS: 'https://chatgpt.com/connector_platform_oauth_redirect', WORKER_COUNT: '2' };
@@ -61,9 +58,6 @@ test('protected bootstrap generates distinct TLS identities once and does not re
       { ...turn, tls: recipient },
       { ...turn, turnSharedSecret: 'too-short' },
     ]) assert.throws(() => upgradeTurnBootstrap(Buffer.from(JSON.stringify(invalid))));
-    const backup = JSON.parse(await readFile(join(first.directory, 'backup-bootstrap'), 'utf8'));
-    assert.equal(backup.vault.roleId, secrets.credentials.backup.roleId);
-    assert.equal(secrets.services.backup, undefined, 'Snapshot role must not receive a service KV record');
     assert.equal(Buffer.from(secrets.services['oauth2-proxy'].cookieSecret, 'base64url').length, 32);
     assert.equal(secrets.services.api.s3AccessKey, secrets.services.provision.minio.apiAccessKey);
     assert.equal(secrets.services.api.s3AccessKey.length, 20);

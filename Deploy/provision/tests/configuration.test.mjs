@@ -11,8 +11,6 @@ function configuration() {
     TRUSTED_EDGE_PROXY: '172.30.242.2', WORKER_COUNT: '2', GPU_DEVICE_ID: '0',
     LOCAL_SECRETS_DIR: 'C:/private/helm-glass', SECRETS_DIR: '/var/lib/helm-glass/bootstrap',
     LOCAL_RECOVERY_DIR: 'C:/offline/recovery',
-    BACKUP_DIR: '/srv/backup/data', BACKUP_WORK_DIR: '/srv/scratch/data',
-    DELETION_LEDGER_DIR: '/srv/ledger/data', BACKUP_RECIPIENT_FILE: 'C:/offline/recipient.pem',
     MINIO_DATA_DIR: '/srv/minio/data',
     TURN_INTERNAL_URL: 'turn:coturn:3478?transport=tcp',
     TURN_PUBLIC_URLS: 'turn:192.168.0.107:3478?transport=udp,turns:helm.example.test:5349?transport=tcp',

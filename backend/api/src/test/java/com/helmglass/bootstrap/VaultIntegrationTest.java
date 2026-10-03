@@ -4,14 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.helmglass.api.DomainException;
-import com.helmglass.api.JsonSupport;
 import com.helmglass.enrollment.api.EnrollmentContracts;
 import com.helmglass.enrollment.application.WorkerEnrollmentService;
 import com.helmglass.enrollment.infrastructure.repository.EnrollmentRepository;
 import com.helmglass.profile.infrastructure.ProfileKeyService;
-import com.helmglass.recovery.application.RecoveryService;
-import com.helmglass.recovery.domain.RecoveryProof;
-import com.helmglass.recovery.infrastructure.repository.RecoveryRepository;
 import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -30,21 +26,15 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.WebApplicationType;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.vault.VaultException;
 import org.springframework.vault.authentication.TokenAuthentication;
 import org.springframework.vault.client.VaultClient;
 import org.springframework.vault.client.VaultEndpoint;
 import org.springframework.vault.core.VaultTemplate;
-import org.springframework.web.bind.annotation.RestController;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -59,7 +49,7 @@ class VaultIntegrationTest {
   @TempDir Path directory;
 
   @Test
-  void tlsAppRoleScopesKeysAndBootstrapsIsolatedMigrationAndRecoveryProcesses() throws Exception {
+  void tlsAppRoleScopesKeysAndBootstrapsIsolatedMigration() throws Exception {
     String rootToken = UUID.randomUUID().toString();
     try (var container =
         new GenericContainer<>(IMAGE)
@@ -167,22 +157,13 @@ class VaultIntegrationTest {
                 .isInstanceOf(DomainException.class);
           }
         }
-        var tls =
-            new BootstrapIdentity.TlsIdentity(
-                container.copyFileFromContainer(
-                    "/tmp/vault-cert.pem",
-                    input -> new String(input.readAllBytes(), StandardCharsets.US_ASCII)),
-                container.copyFileFromContainer(
-                    "/tmp/vault-key.pem",
-                    input -> new String(input.readAllBytes(), StandardCharsets.US_ASCII)),
-                ca);
-        verifyMigrationBootstrap(administrator, endpoint, ca, tls);
+        verifyMigrationBootstrap(administrator, endpoint, ca);
       }
     }
   }
 
   private void verifyMigrationBootstrap(
-      VaultTemplate administrator, URI endpoint, String ca, BootstrapIdentity.TlsIdentity tls)
+      VaultTemplate administrator, URI endpoint, String ca)
       throws Exception {
     var databaseImage =
         DockerImageName.parse(
@@ -260,109 +241,6 @@ class VaultIntegrationTest {
         assertThat(rows.getInt(1)).isGreaterThanOrEqualTo(3);
       }
       verifyWorkerEnrollment(administrator, endpoint, ca, database);
-      verifyRecoveryBootstrap(administrator, endpoint, ca, database, tls);
-    }
-  }
-
-  private void verifyRecoveryBootstrap(
-      VaultTemplate administrator,
-      URI endpoint,
-      String ca,
-      PostgreSQLContainer database,
-      BootstrapIdentity.TlsIdentity tls)
-      throws Exception {
-    String credential = UUID.randomUUID().toString();
-    administrator
-        .opsForVersionedKeyValue("helm-kv")
-        .put(
-            "services/api",
-            Map.ofEntries(
-                Map.entry("databaseUrl", database.getJdbcUrl()),
-                Map.entry("databaseUsername", database.getUsername()),
-                Map.entry("databasePassword", database.getPassword()),
-                Map.entry("redisUsername", "fixture"),
-                Map.entry("redisPassword", credential),
-                Map.entry("s3AccessKey", "fixture"),
-                Map.entry("s3SecretKey", credential),
-                Map.entry("keycloakClientId", "fixture"),
-                Map.entry("keycloakClientSecret", credential),
-                Map.entry("turnSharedSecret", credential),
-                Map.entry("mediaProxyUsername", "fixture"),
-                Map.entry("mediaProxyPassword", credential),
-                Map.entry("installationId", "fixture"),
-                Map.entry("workerEnrollmentToken", credential)));
-    var role = administrator.read("auth/approle/role/helm-api/role-id");
-    var secret = administrator.write("auth/approle/role/helm-api/secret-id", Map.of());
-    assertThat(role).isNotNull();
-    assertThat(secret).isNotNull();
-    Path identity = directory.resolve("recovery-api.json");
-    var mapper = JsonMapper.builder().build();
-    Files.writeString(
-        identity,
-        mapper.writeValueAsString(
-            new BootstrapIdentity(
-                1,
-                new BootstrapIdentity.VaultIdentity(
-                    endpoint.toString(),
-                    ca,
-                    String.valueOf(role.getRequiredData().get("role_id")),
-                    String.valueOf(secret.getRequiredData().get("secret_id"))),
-                tls)));
-    var staged =
-        Map.of(
-            Path.of("/run/helm/api.crt"),
-            tls.certificatePem(),
-            Path.of("/run/helm/api.key"),
-            tls.privateKeyPem(),
-            Path.of("/run/helm/ca.crt"),
-            ca);
-    assertThat(staged.keySet()).allMatch(path -> !Files.exists(path));
-    SpringApplication application =
-        new SpringApplication(RecoveryApplication.RecoveryProcess.class);
-    application.setWebApplicationType(WebApplicationType.NONE);
-    application.setLogStartupInfo(false);
-    try (var context =
-        application.run(
-            "--helm.process-role=api",
-            "--helm.bootstrap-identity=" + identity,
-            "--spring.liquibase.enabled=false",
-            "--spring.data.redis.host=127.0.0.1",
-            "--spring.data.redis.port=1",
-            "--helm.s3.endpoint=https://127.0.0.1:1")) {
-      assertThat(context.getBeansOfType(ScheduledAnnotationBeanPostProcessor.class)).isEmpty();
-      assertThat(context.getBeansWithAnnotation(RestController.class)).isEmpty();
-      var proof =
-          new RecoveryProof(
-              1,
-              UUID.randomUUID(),
-              "bootstrap-fixture",
-              "fixture point",
-              "fixture only",
-              false,
-              null,
-              null,
-              false,
-              null,
-              JsonSupport.sha256("fixture ledger"));
-      String encoded = mapper.writeValueAsString(proof);
-      Files.writeString(directory.resolve("proof.json"), encoded);
-      var repository = context.getBean(RecoveryRepository.class);
-      var transaction = new TransactionTemplate(context.getBean(PlatformTransactionManager.class));
-      transaction.executeWithoutResult(
-          status -> repository.begin(proof, JsonSupport.sha256(encoded)));
-      var receipt = context.getBean(RecoveryService.class).status(directory);
-      assertThat(receipt.recoveryId()).isEqualTo(proof.recoveryId());
-      assertThat(receipt.proofHash()).isEqualTo(JsonSupport.sha256(encoded));
-      assertThat(receipt.state()).isEqualTo("FENCING");
-      assertThat(receipt.admissionState()).isEqualTo("RECOVERING");
-      assertThat(repository.state(proof.recoveryId())).isEqualTo("FENCING");
-    } finally {
-      for (var entry : staged.entrySet()) {
-        if (Files.exists(entry.getKey())) {
-          assertThat(Files.readString(entry.getKey())).isEqualTo(entry.getValue());
-          Files.delete(entry.getKey());
-        }
-      }
     }
   }
 

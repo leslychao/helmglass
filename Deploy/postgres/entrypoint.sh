@@ -25,13 +25,6 @@ export POSTGRES_PASSWORD_FILE=/run/helm/postgres-root-password
 export POSTGRES_INITDB_ARGS='--auth-host=scram-sha-256 --auth-local=trust'
 export POSTGRES_HOST_AUTH_METHOD=scram-sha-256
 unset POSTGRES_PASSWORD
-if [ -n "${BACKUP_DIR:-}" ] && [ "$1" = postgres ]; then
-  : "${BACKUP_RECIPIENT_CERT:?Backup recipient certificate file is required}"
-  [ -d "$BACKUP_DIR" ] && [ ! -L "$BACKUP_DIR" ] && [ -f "$BACKUP_RECIPIENT_CERT" ] \
-    || { printf '%s\n' 'PostgreSQL WAL backup inputs are unavailable.' >&2; exit 1; }
-  set -- "$@" -c wal_level=replica -c archive_mode=on -c archive_timeout=60s \
-    -c 'archive_command=/opt/helm/bin/archive-wal "%p" "%f"'
-fi
 # The official entrypoint creates a version parent directory before dropping root;
 # its default mask keeps that parent traversable by postgres. Secrets are already 0600.
 umask 022

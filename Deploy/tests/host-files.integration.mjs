@@ -23,7 +23,6 @@ test('daemon-side delivery migrates TURN atomically, retires managed edge TLS an
   const currentTurn = Buffer.from(JSON.stringify({ schemaVersion: 2, turnSharedSecret: turnSecret }));
   const input = { schemaVersion: 1, installationId: 'delivery-fixture', mode: 'stage',
     files: [entry('turn-bootstrap', currentTurn), entry('api-bootstrap', randomBytes(64)),
-      entry('backup-recipient', Buffer.from('Public certificate transport fixture')),
       entry('redis-bootstrap.acl', Buffer.from(acl))] };
   const containerArguments = ['run', '--rm', '-i', '--network', 'none', '--read-only', '--user', '0:0',
     '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--cap-add', 'DAC_OVERRIDE', '--cap-add', 'FOWNER',
@@ -44,7 +43,7 @@ test('daemon-side delivery migrates TURN atomically, retires managed edge TLS an
     await docker(['volume', 'create', '--label', `helmglass.acceptance=${fixture}`, volume]);
     volumeCreated = true;
     const first = await deliver(input);
-    assert.deepEqual(JSON.parse(first.stdout), { status: 'READY', count: 4 });
+    assert.deepEqual(JSON.parse(first.stdout), { status: 'READY', count: 3 });
     assert.ok(!first.stdout.includes(content.toString('base64')));
     assert.equal((await deliver({ ...input, mode: 'verify' })).code, 0);
     assert.equal((await deliver(input)).code, 0);

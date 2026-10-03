@@ -10,8 +10,6 @@ import test from 'node:test';
 import { VaultCli } from '../provision/src/vault-cli.mjs';
 import { provisionVaultServices, VAULT_SERVICES, VAULT_ROLES } from '../provision/src/vault-services.mjs';
 import { protectDirectory } from '../protected-files.mjs';
-import { saveVaultSnapshot } from '../vault-snapshot.mjs';
-import { verifyEncryptedVaultArchive } from '../tests/vault-archive.mjs';
 
 function docker(args, { input, token, allowFailure = false } = {}) {
   const result = spawnSync('docker', args, {
@@ -48,7 +46,7 @@ function request(port, ca, method, path, body) {
   });
 }
 
-test('real Raft Vault preserves scoped TLS, snapshot restore, Transit keys and Shamir restart',
+test('real Raft Vault preserves scoped TLS, Transit keys and Shamir restart',
   { timeout: 240_000 }, async () => {
     const fixtureId = randomUUID();
     const directory = await mkdtemp(join(tmpdir(), 'helm-vault-it-'));
@@ -58,12 +56,9 @@ test('real Raft Vault preserves scoped TLS, snapshot restore, Transit keys and S
     const csrPath = join(directory, 'worker.csr');
     const workerCertificatePath = join(directory, 'worker.crt');
     const extensionsPath = join(directory, 'worker-ext.cnf');
-    const snapshotPath = join(directory, 'vault.snap');
     const volume = `helm-vault-it-${fixtureId}`;
     let container;
     let volumeCreated = false;
-    let recoveryVolume;
-    let recoveryContainer;
     const network = `helm-vault-it-${fixtureId}`;
     let networkCreated = false;
     try {
@@ -177,61 +172,6 @@ test('real Raft Vault preserves scoped TLS, snapshot restore, Transit keys and S
       assert.ok(audit.includes('hmac-sha256:'), 'Audit redacts secret material');
       assert.ok(!audit.includes(secret), 'Audit must not expose the fixture KV secret');
 
-      const backupSession = cli.execute(['write', '-format=json', 'auth/approle/login', '-'], {
-        role_id: installation.credentials.backup.roleId,
-        secret_id: installation.credentials.backup.secretId,
-      });
-      const backupClient = new VaultCli({ ...process.env, VAULT_TOKEN: backupSession.auth.client_token }, 'docker', cli.prefix);
-      assert.throws(() => backupClient.read('helm-kv/data/services/api'), { code: 'VAULT_403' });
-      assert.throws(() => backupClient.write('sys/storage/raft/snapshot', {}), { code: 'VAULT_403' });
-      assert.throws(() => backupClient.write('sys/storage/raft/snapshot-force', {}), { code: 'VAULT_403' });
-      backupClient.write('auth/token/revoke-self', {});
-      await verifyEncryptedVaultArchive({ container, installation, cli, rootToken, ca,
-        createNewCluster: async () => {
-          recoveryVolume = volume + '-recovery';
-          docker(['volume', 'create', '--label', `helmglass.acceptance=${fixtureId}`, recoveryVolume]);
-          recoveryContainer = startVault(recoveryVolume);
-          // The production restore owner must wait for this detached server's TLS listener.
-          return { container: recoveryContainer, originalShares: shares,
-            client: token => new VaultCli({ ...process.env, VAULT_TOKEN: token }, 'docker', [
-              'exec', '-i', '-e', 'VAULT_TOKEN', '-e', 'VAULT_ADDR=https://vault:8200',
-              '-e', 'VAULT_CACERT=/run/helm/ca.crt', '-e', 'VAULT_MAX_RETRIES=0', recoveryContainer, 'vault']) };
-        } });
-
-      const profileKey = `profiles-${randomUUID()}`;
-      cli.write(`helm-transit/keys/${profileKey}`, { type: 'aes256-gcm96' });
-      cli.write(`helm-transit/keys/${profileKey}/config`, { deletion_allowed: true });
-      const plaintext = randomBytes(32).toString('base64');
-      const wrapped = cli.write(`helm-transit/encrypt/${profileKey}`, { plaintext }).ciphertext;
-      const snapshot = await saveVaultSnapshot({ containerId: container, destination: snapshotPath,
-        identity: { schemaVersion: 1, vault: { address: 'https://vault:8200', ...installation.credentials.backup } } });
-      assert.ok(snapshot.bytes > 0 && /^[a-f0-9]{64}$/.test(snapshot.sha256));
-      await assert.rejects(saveVaultSnapshot({ containerId: container, destination: snapshotPath,
-        identity: { schemaVersion: 1, vault: { address: 'https://vault:8200', ...installation.credentials.backup } } }),
-      /already exists/);
-      cli.write('helm-kv/data/services/provision', { data: { fixture: 'post-snapshot-value' } });
-      cli.execute(['delete', '-format=json', `helm-transit/keys/${profileKey}`]);
-      assert.throws(() => cli.write(`helm-transit/decrypt/${profileKey}`, { ciphertext: wrapped }));
-      docker(['exec', '-i', container, 'sh', '-c', 'umask 077; cat > /run/helm/restore.snap'], {
-        input: await readFile(snapshotPath),
-      });
-      vault(['operator', 'raft', 'snapshot', 'restore', '/run/helm/restore.snap']);
-      const restoreDeadline = Date.now() + 30_000;
-      let restored = false;
-      while (Date.now() < restoreDeadline) {
-        try {
-          const observed = cli.read('helm-kv/data/services/provision');
-          if (observed.data.fixture === secret) {
-            assert.equal(cli.write(`helm-transit/decrypt/${profileKey}`, { ciphertext: wrapped }).plaintext, plaintext);
-            restored = true;
-            break;
-          }
-        } catch { /* Restore acceptance precedes database replacement and unseal completion. */ }
-        await delay(250);
-      }
-      assert.ok(restored, 'A restored snapshot must recover both the previous KV value and the deleted Transit key');
-      docker(['exec', container, 'rm', '/run/helm/restore.snap']);
-
       docker(['restart', container]);
       assert.equal((await statusAfterStart()).status, 503);
       assert.equal((await request(port, ca, 'PUT', 'sys/unseal', { key: shares[0] })).data.sealed, true);
@@ -246,14 +186,6 @@ test('real Raft Vault preserves scoped TLS, snapshot restore, Transit keys and S
       cli.execute(['delete', '-format=json', 'sys/mounts/helm-transit']);
       assert.throws(() => provisionVaultServices(cli, installation), { code: 'VAULT_MOUNT_REMOVED' });
     } finally {
-      if (recoveryContainer) {
-        assert.equal(docker(['inspect', '--format', '{{index .Config.Labels "helmglass.acceptance"}}', recoveryContainer]), fixtureId);
-        docker(['rm', '--force', '--volumes', recoveryContainer]);
-      }
-      if (recoveryVolume) {
-        assert.equal(docker(['volume', 'inspect', '--format', '{{index .Labels "helmglass.acceptance"}}', recoveryVolume]), fixtureId);
-        docker(['volume', 'rm', recoveryVolume]);
-      }
       if (container) {
         assert.equal(docker(['inspect', '--format', '{{index .Config.Labels "helmglass.acceptance"}}', container]), fixtureId);
         docker(['rm', '--force', '--volumes', container]);
@@ -266,7 +198,7 @@ test('real Raft Vault preserves scoped TLS, snapshot restore, Transit keys and S
         assert.equal(docker(['network', 'inspect', '--format', '{{index .Labels "helmglass.acceptance"}}', network]), fixtureId);
         docker(['network', 'rm', network]);
       }
-      for (const path of [keyPath, certificatePath, identityPath, csrPath, workerCertificatePath, extensionsPath, snapshotPath]) {
+      for (const path of [keyPath, certificatePath, identityPath, csrPath, workerCertificatePath, extensionsPath]) {
         await unlink(path).catch((error) => { if (error.code !== 'ENOENT') throw error; });
       }
       await rmdir(directory);

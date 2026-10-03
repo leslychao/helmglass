@@ -9,8 +9,7 @@ const INPUT_NAMES = [
   'TURN_INTERNAL_URL', 'TURN_PUBLIC_URLS', 'TURN_REALM',
   'TURN_RELAY_MIN', 'TURN_RELAY_MAX', 'KEYCLOAK_ADMIN_EMAIL', 'KEYCLOAK_ADMIN_LAST_NAME',
   'KEYCLOAK_ANGELINA_EMAIL', 'KEYCLOAK_ANGELINA_LAST_NAME', 'MCP_REDIRECT_URIS',
-  'LOCAL_RECOVERY_DIR', 'DELETION_LEDGER_DIR',
-  'BACKUP_DIR', 'BACKUP_WORK_DIR', 'BACKUP_RECIPIENT_FILE',
+  'LOCAL_RECOVERY_DIR',
   'MINIO_DATA_DIR', 'OPERATOR_INPUT_FILE',
 ];
 export const IMAGE_NAMES = [
@@ -23,7 +22,6 @@ export const BOOTSTRAP_FILES = [
   'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap',
   'mcp-adapter-bootstrap', 'vault-tls', 'provision-bootstrap', 'migration-bootstrap',
   'keycloak-bootstrap', 'oauth-bootstrap', 'predefined-users-input',
-  'backup-recipient',
 ];
 
 export class ConfigurationError extends Error {
@@ -111,28 +109,14 @@ export function validateDeployment(input) {
       || configuration.SECRETS_DIR.split('/').filter(Boolean).length < 3) {
     throw new ConfigurationError('SECRETS_DIR', 'must be a dedicated absolute daemon-side directory');
   }
-  if (!/^\/[a-zA-Z0-9/_-]+$/.test(configuration.DELETION_LEDGER_DIR)
-      || configuration.DELETION_LEDGER_DIR.includes('//')
-      || configuration.DELETION_LEDGER_DIR.split('/').filter(Boolean).length < 3
-      || configuration.DELETION_LEDGER_DIR === configuration.SECRETS_DIR
-      || configuration.DELETION_LEDGER_DIR.startsWith(`${configuration.SECRETS_DIR}/`)) {
-    throw new ConfigurationError('DELETION_LEDGER_DIR',
-      'must be a separate existing protected directory for immutable deletion records');
+  const storage = configuration.MINIO_DATA_DIR;
+  if (!/^\/[A-Za-z0-9/_-]+$/.test(storage) || storage.includes('//') || storage.endsWith('/')
+      || storage.split('/').filter(Boolean).length < 3) {
+    throw new ConfigurationError('MINIO_DATA_DIR', 'must be a dedicated existing absolute daemon-side mount');
   }
-  const mounts = ['BACKUP_DIR', 'BACKUP_WORK_DIR', 'DELETION_LEDGER_DIR',
-    'MINIO_DATA_DIR'];
-  for (const name of mounts) {
-    const path = configuration[name];
-    if (!/^\/[A-Za-z0-9/_-]+$/.test(path) || path.includes('//') || path.endsWith('/')
-        || path.split('/').filter(Boolean).length < 3) {
-      throw new ConfigurationError(name, 'must be a dedicated existing absolute daemon-side mount');
-    }
-    for (const other of [...mounts.filter(value => value !== name), 'SECRETS_DIR']) {
-      if (path === configuration[other] || path.startsWith(`${configuration[other]}/`)
-          || configuration[other].startsWith(`${path}/`)) {
-        throw new ConfigurationError(name, 'storage, backup, scratch, ledger and secret paths must not overlap');
-      }
-    }
+  if (storage === configuration.SECRETS_DIR || storage.startsWith(`${configuration.SECRETS_DIR}/`)
+      || configuration.SECRETS_DIR.startsWith(`${storage}/`)) {
+    throw new ConfigurationError('MINIO_DATA_DIR', 'storage and secret paths must not overlap');
   }
   if (configuration.TURN_INTERNAL_URL !== 'turn:coturn:3478?transport=tcp') {
     throw new ConfigurationError('TURN_INTERNAL_URL', 'must identify the private coturn TCP listener');

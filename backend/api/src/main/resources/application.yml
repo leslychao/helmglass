@@ -43,7 +43,6 @@ logging:
     format:
       console: ecs
 helm:
-  deletion-ledger-directory: ${HELM_DELETION_LEDGER_DIRECTORY:}
   process-role: ${HELM_PROCESS_ROLE:api}
   issuer-uri: ${HELM_ISSUER_URI}
   jwk-set-uri: ${HELM_JWK_SET_URI}

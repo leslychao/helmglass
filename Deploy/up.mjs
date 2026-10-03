@@ -3,7 +3,6 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { isDeepStrictEqual } from 'node:util';
 import { prepareBootstrap } from './bootstrap.mjs';
 import { readOperatorInputs } from './operator-inputs.mjs';
 import { BOOTSTRAP_FILES, ConfigurationError, readEnvironmentFile, validateDeployment, validateRelease } from './configuration.mjs';
@@ -11,7 +10,6 @@ import { decryptRecovery, encryptRecovery, secretInput } from './custody.mjs';
 import { isInside, protectDirectory, readProtectedFile, replaceProtectedFile, writeProtectedFile } from './protected-files.mjs';
 import { run } from './process.mjs';
 import { signWorkerAuthority } from './tls.mjs';
-import { applyRecoveryTargets, readRecoveryState } from './recovery-files.mjs';
 import { acquireMaintenance, deploymentContainers } from './maintenance.mjs';
 import { ProvisioningError } from './provision/src/keycloak-client.mjs';
 import { VaultCli } from './provision/src/vault-cli.mjs';
@@ -37,11 +35,6 @@ async function main() {
   const release = validateRelease(await readEnvironmentFile(new URL('./release.env', import.meta.url)));
   const operatorInputs = await readOperatorInputs(configuration);
   const environment = { ...process.env, ...configuration, ...release, COMPOSE_PROJECT_NAME: 'helm-glass' };
-  const recoveryState = await readRecoveryState(configuration.LOCAL_SECRETS_DIR);
-  if (recoveryState && recoveryState.stage !== 'READY') {
-    throw new ConfigurationError('RECOVERY', 'complete the recorded restore barriers before opening the installation');
-  }
-  applyRecoveryTargets(environment, recoveryState);
   for (const name of ['DOCKER_CONTEXT', 'COMPOSE_PROFILES', 'COMPOSE_FILE']) delete environment[name];
   delete environment.VAULT_TOKEN;
   const docker = (arguments_, options = {}) => run('docker', arguments_, { environment, cwd: repository, ...options });
@@ -71,18 +64,12 @@ async function main() {
   progress('checking the selected Docker daemon and release');
   const daemon = JSON.parse((await docker(['info', '--format', '{{json .}}'])).stdout);
   if (daemon.OSType !== 'linux') throw new ConfigurationError('DOCKER_HOST', 'requires a Linux Docker engine');
-  if (recoveryState && recoveryState.daemonId !== daemon.ID) {
-    throw new ConfigurationError('RECOVERY', 'the recorded restore belongs to a different Docker daemon');
-  }
   const imageIds = new Map();
   for (const reference of Object.values(release)) {
     imageIds.set(reference, JSON.parse((await docker(['image', 'inspect', reference])).stdout)[0].Id);
   }
   maintenance = await acquireMaintenance({ docker, image: release.PROVISION_IMAGE,
-    installationId: configuration.INSTALLATION_ID, operation: 'startup' });
-  if (!isDeepStrictEqual(recoveryState, await readRecoveryState(configuration.LOCAL_SECRETS_DIR))) {
-    throw new ConfigurationError('RECOVERY', 'state changed before startup acquired maintenance; retry with the current state');
-  }
+    installationId: configuration.INSTALLATION_ID });
   const workerRelease = new WorkerRelease({ docker, identifiers: () => identifiers('browser-worker'),
     imageId: imageIds.get(release.WORKER_IMAGE), count: Number(configuration.WORKER_COUNT) });
   await workerRelease.prepare();
@@ -93,12 +80,6 @@ async function main() {
     }
   }
   progress('validating operator inputs and preparing protected installation files');
-  await docker(['run', '--rm', '-i', '--network', 'none', '--read-only', '--user', '10001:10001',
-    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true', '--pids-limit', '32', '--memory', '128m',
-    '--log-driver', 'none', '--mount', `type=bind,source=${configuration.DELETION_LEDGER_DIR},target=/ledger`,
-    '--entrypoint', 'node', release.PROVISION_IMAGE, '/opt/helm/provision/src/ledger-files.mjs'], {
-    input: JSON.stringify({ schemaVersion: 1, installationId: configuration.INSTALLATION_ID, mode: 'prepare' }),
-  });
   const { directory } = await prepareBootstrap(configuration, operatorInputs);
   const delivery = [];
   for (const name of BOOTSTRAP_FILES) {
@@ -162,7 +143,7 @@ async function main() {
     return recovery;
   };
   if (!state.initialized) {
-    if (receipt || await optionalJson(custodyPath)) throw new Error('Vault data is missing; restore the installation instead of initializing over it');
+    if (receipt || await optionalJson(custodyPath)) throw new Error('Vault data is missing; startup cannot initialize over an existing installation');
     progress('initializing Vault with encrypted operator custody outside service bootstrap');
     custodyPassword = await secretInput('VAULT_CUSTODY_PASSWORD', 'Choose an offline recovery password of at least 16 characters (hidden)', operatorInputs);
     // Validate custody before creating a seal whose shares cannot be recovered later.

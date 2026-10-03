@@ -9,11 +9,10 @@ import { upgradeTurnBootstrap } from './turn-bootstrap-upgrade.mjs';
 const allowed = new Set(['api-bootstrap', 'worker-bootstrap', 'turn-bootstrap', 'egress-bootstrap',
   'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap',
   'mcp-adapter-bootstrap', 'vault-tls', 'provision-bootstrap', 'migration-bootstrap', 'keycloak-bootstrap',
-  'oauth-bootstrap', 'predefined-users-input', 'backup-recipient']);
+  'oauth-bootstrap', 'predefined-users-input']);
 const directory = '/bootstrap';
 const checksum = bytes => createHash('sha256').update(bytes).digest('hex');
-const ownerUid = name => name === 'postgres-bootstrap' ? 999 : name === 'backup-recipient' ? 0 : 10001;
-const fileMode = name => name === 'backup-recipient' ? 0o444 : 0o400;
+const ownerUid = name => name === 'postgres-bootstrap' ? 999 : 10001;
 
 async function main() {
   const chunks = [];
@@ -51,6 +50,12 @@ async function main() {
     if (entries.length || input.mode !== 'stage') throw new Error('Unowned mount');
     owner = { schemaVersion: 1, installationId: input.installationId };
   }
+  const retiredRecipient = join(directory, 'backup-recipient');
+  if (entries.includes('backup-recipient')) {
+    const legacy = await lstat(retiredRecipient);
+    if (input.mode === 'verify' || !legacy.isFile() || legacy.isSymbolicLink()
+        || legacy.uid !== 0 || legacy.gid !== 0) throw new Error('Unsafe retired backup certificate');
+  }
   const legacyEdgePath = join(directory, 'edge-tls');
   if (entries.includes('edge-tls')) {
     const legacyEdge = await lstat(legacyEdgePath);
@@ -59,7 +64,7 @@ async function main() {
       throw new Error('Legacy edge TLS must be retired safely');
     }
   }
-  if (entries.some(name => !allowed.has(name) && name !== '.helm-owner.json' && name !== 'edge-tls'
+  if (entries.some(name => !allowed.has(name) && name !== '.helm-owner.json' && name !== 'edge-tls' && name !== 'backup-recipient'
       && !(name.endsWith('.pending') && input.files.some(file => `${file.name}.pending` === name)))) throw new Error('Unexpected file');
   // Inspect all destinations before the first write. Normal restart cannot replace a credential.
   for (const file of input.files) {
@@ -94,12 +99,12 @@ async function main() {
         // The validated credential is unchanged; repair its canonical ownership on upgrades.
         const uid = ownerUid(file.name);
         await chown(path, uid, uid);
-        await chmod(path, fileMode(file.name));
+        await chmod(path, 0o400);
         if (entries.includes(`${file.name}.pending`)) await unlink(pending);
         continue;
       }
       if (!entries.includes(`${file.name}.pending`)) await writeFile(pending, file.bytes, { flag: 'wx', mode: 0o400 });
-      await chmod(pending, fileMode(file.name));
+      await chmod(pending, 0o400);
       const uid = ownerUid(file.name);
       await chown(pending, uid, uid);
       await rename(pending, path);
@@ -108,7 +113,7 @@ async function main() {
   for (const file of input.files) {
     const metadata = await lstat(join(directory, file.name));
     const uid = ownerUid(file.name);
-    if (metadata.uid !== uid || (metadata.mode & 0o777) !== fileMode(file.name)
+    if (metadata.uid !== uid || (metadata.mode & 0o777) !== 0o400
         || checksum(await readFile(join(directory, file.name))) !== file.sha256) throw new Error('Protected delivery verification failed');
   }
   if (input.mode === 'stage' && entries.includes('edge-tls')) {
@@ -116,6 +121,13 @@ async function main() {
     if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()
         || legacyEdge.uid !== 101 || legacyEdge.gid !== 101) throw new Error('Unsafe legacy edge TLS file');
     await unlink(legacyEdgePath);
+  }
+  if (input.mode === 'stage' && entries.includes('backup-recipient')) {
+    const legacy = await lstat(retiredRecipient);
+    if (!legacy.isFile() || legacy.isSymbolicLink() || legacy.uid !== 0 || legacy.gid !== 0) {
+      throw new Error('Unsafe retired backup certificate');
+    }
+    await unlink(retiredRecipient);
   }
   process.stdout.write(JSON.stringify({ status: 'READY', count: input.files.length }) + '\n');
 }

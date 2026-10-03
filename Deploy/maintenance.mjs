@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
-/** One Docker-side exclusion for startup, backup and restore, including remote launchers. */
-export async function acquireMaintenance({ docker, image, installationId, operation,
+/** One Docker-side exclusion for concurrent startup, including remote launchers. */
+export async function acquireMaintenance({ docker, image, installationId,
   project = 'helm-glass' }) {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(installationId ?? '')
-      || !/^(startup|backup|restore)$/.test(operation ?? '')
       || !/^helm-glass(?:-[a-z0-9-]+)?$/.test(project)) {
     throw new Error('Invalid maintenance owner');
   }
@@ -14,7 +13,7 @@ export async function acquireMaintenance({ docker, image, installationId, operat
   // A killed launcher leaves it in place; another launcher must not steal it on a TTL.
   const id = (await docker(['create', '--name', name, '--network', 'none', '--read-only',
     '--label', `helmglass.maintenance.installation=${installationId}`,
-    '--label', `helmglass.maintenance.operation=${operation}`,
+    '--label', 'helmglass.maintenance.operation=startup',
     '--label', `helmglass.maintenance.token=${token}`,
     '--entrypoint', 'node', image, '--version'])).stdout.trim();
   if (!/^[a-f0-9]{64}$/.test(id)) throw new Error('Maintenance ownership was not confirmed');
@@ -46,18 +45,3 @@ export async function deploymentContainers(docker, service, project = 'helm-glas
   return ids;
 }
 
-export async function deploymentContainer(docker, service, project = 'helm-glass') {
-  const ids = await deploymentContainers(docker, service, project);
-  if (ids.length !== 1) {
-    throw new Error(`Exactly one ${service} container is required for maintenance`);
-  }
-  return ids[0];
-}
-
-export async function requireStopped(docker, id) {
-  const state = JSON.parse((await docker(['inspect', '--format', '{{json .State}}', id])).stdout);
-  if (state.Running || state.Restarting || state.Pid !== 0
-      || !['created', 'exited', 'dead'].includes(state.Status)) {
-    throw new Error('Storage container has not been confirmed stopped');
-  }
-}

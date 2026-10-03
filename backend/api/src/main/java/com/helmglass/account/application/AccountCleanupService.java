@@ -1,6 +1,5 @@
 package com.helmglass.account.application;
 
-import com.helmglass.account.infrastructure.DeletionLedger;
 import com.helmglass.account.infrastructure.repository.AccountCleanupRepository;
 import com.helmglass.account.infrastructure.repository.AccountCleanupRepository.Purge;
 import com.helmglass.account.infrastructure.repository.AccountCleanupRepository.Stage;
@@ -32,7 +31,6 @@ public class AccountCleanupService {
   private final AccountDataRepository data;
   private final KeycloakSessionClient keycloak;
   private final UserEphemeralState ephemeral;
-  private final DeletionLedger ledger;
   private final ObjectStorage storage;
   private final ProfileKeyService keys;
   private final TransactionTemplate transaction;
@@ -42,7 +40,6 @@ public class AccountCleanupService {
       AccountDataRepository data,
       KeycloakSessionClient keycloak,
       UserEphemeralState ephemeral,
-      DeletionLedger ledger,
       ObjectStorage storage,
       ProfileKeyService keys,
       PlatformTransactionManager transactions) {
@@ -50,7 +47,6 @@ public class AccountCleanupService {
     this.data = data;
     this.keycloak = keycloak;
     this.ephemeral = ephemeral;
-    this.ledger = ledger;
     this.storage = storage;
     this.keys = keys;
     transaction = new TransactionTemplate(transactions);
@@ -149,11 +145,6 @@ public class AccountCleanupService {
     Purge purge = work.purge();
     UUID userId = purge.userId();
     return switch (work.stage().phase()) {
-      case "01_LEDGER" -> {
-        String checksum = ledger.record(purge);
-        transaction.executeWithoutResult(status -> cleanup.ledger(purge, checksum));
-        yield true;
-      }
       case "02_RUNTIME" -> cleanup.runtimesClosed(userId);
       case "03_ARTIFACTS" -> storage.purgeUserBatch("hg-artifacts", userId);
       case "04_PROFILES" -> storage.purgeUserBatch("hg-browser-profiles", userId);

@@ -4,17 +4,13 @@ import { ProvisioningError } from './keycloak-client.mjs';
 
 export const VAULT_SERVICES = ['api', 'migration', 'keycloak', 'oauth2-proxy', 'provision', 'coturn', 'egress-proxy'];
 export const VAULT_ROLES = [
-  ...VAULT_SERVICES.filter((name) => !['coturn', 'egress-proxy'].includes(name)), 'backup',
+  ...VAULT_SERVICES.filter((name) => !['coturn', 'egress-proxy'].includes(name)),
 ];
 
 function fail(code, message) { throw new ProvisioningError(code, message); }
 
 export function servicePolicy(service) {
   if (!VAULT_ROLES.includes(service)) fail('VAULT_SCOPE_INVALID', 'Unknown Vault service role.');
-  if (service === 'backup') {
-    return `path "sys/storage/raft/snapshot" { capabilities = ["read"] }
-path "helm-kv/data/recovery-markers/*" { capabilities = ["create", "update", "read"] }`;
-  }
   const kv = `path "helm-kv/data/services/${service}" { capabilities = ["read"] }`;
   if (service === 'provision') {
     return `${kv}\npath "helm-kv/data/bootstrap/minio" { capabilities = ["create", "read", "update"] }`;

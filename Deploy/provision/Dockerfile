@@ -19,11 +19,6 @@ COPY Deploy/redis/users.acl.template /opt/helm/redis/users.acl.template
 COPY --from=vault-cli /bin/vault /usr/local/bin/vault
 COPY --from=minio-admin /minio-admin /opt/helm/bin/minio-admin
 COPY Deploy/runtime/vault-bootstrap /opt/helm/bin/vault-bootstrap
-COPY --chmod=755 Deploy/backup-crypto/backup-crypto /opt/helm/bin/backup-crypto
-COPY --chmod=755 Deploy/backup-crypto/backup-file /opt/helm/bin/backup-file
-COPY Deploy/minio/cold-archive.mjs /opt/helm/minio/cold-archive.mjs
-COPY Deploy/vault/archive.mjs /opt/helm/vault/archive.mjs
-COPY Deploy/vault-snapshot.mjs Deploy/vault-backup-session.mjs Deploy/process.mjs /opt/helm/
 COPY --chmod=755 Deploy/provision/entrypoint.sh /opt/helm/bin/entrypoint
 USER 10001:10001
 ENTRYPOINT ["/opt/helm/bin/entrypoint"]

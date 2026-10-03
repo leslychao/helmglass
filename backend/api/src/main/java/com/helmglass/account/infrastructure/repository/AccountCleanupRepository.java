@@ -24,8 +24,7 @@ public class AccountCleanupRepository {
       UUID operationId, long desiredVersion, long completedVersion, int attempts) {}
 
   public record Purge(UUID id, UUID userId, String status, Instant restoreUntil,
-      UUID purgeOperationId, Instant purgeStartedAt, String ledgerChecksum,
-      String identityHash, String subject) {}
+      UUID purgeOperationId, String subject) {}
 
   public record Stage(String itemKey, String phase, String state) {}
 
@@ -166,8 +165,7 @@ public class AccountCleanupRepository {
 
   public Purge lockPurge(UUID id) {
     return jdbc.sql("""
-        SELECT d.id,d.user_id,d.status,d.restore_until,d.purge_operation_id,d.purge_started_at,
-        d.ledger_checksum,u.identity_hash,u.subject
+        SELECT d.id,d.user_id,d.status,d.restore_until,d.purge_operation_id,u.subject
         FROM account_deletion_requests d JOIN application_users u ON u.id=d.user_id
         WHERE d.id=:id FOR UPDATE OF d,u
         """).param("id", id).query(Purge.class).single();
@@ -193,7 +191,7 @@ public class AccountCleanupRepository {
     if (changed != 1) {
       throw DomainException.conflict("PURGE_STATE_CONFLICT", "Account is not awaiting deletion");
     }
-    for (String phase : List.of("01_LEDGER", "02_RUNTIME", "03_ARTIFACTS", "04_PROFILES",
+    for (String phase : List.of("02_RUNTIME", "03_ARTIFACTS", "04_PROFILES",
         "05_STAGING", "06_KEYS", "07_REDIS", "08_IDENTITY", "09_METADATA", "10_VERIFY")) {
       jdbc.sql("INSERT INTO operation_items(operation_id,item_key,target_id,phase) VALUES(:operation,:phase,:user,:phase)")
           .param("operation", operationId).param("phase", phase).param("user", request.userId()).update();
@@ -251,11 +249,6 @@ public class AccountCleanupRepository {
         """).param("id", operationId).update();
   }
 
-  public void ledger(Purge purge, String checksum) {
-    jdbc.sql("UPDATE account_deletion_requests SET ledger_checksum=:hash WHERE id=:id")
-        .param("id", purge.id()).param("hash", checksum).update();
-  }
-
   public void defer(UUID requestId, String code, boolean failure) {
     jdbc.sql("UPDATE account_deletion_requests SET next_attempt_at=now()+interval '10 seconds' WHERE id=:id")
         .param("id", requestId).update();
@@ -269,7 +262,7 @@ public class AccountCleanupRepository {
   }
 
   public void complete(Purge purge) {
-    if (!runtimesClosed(purge.userId()) || purge.ledgerChecksum() == null) {
+    if (!runtimesClosed(purge.userId())) {
       throw DomainException.conflict("PURGE_UNCONFIRMED", "External cleanup is not confirmed");
     }
     jdbc.sql("""

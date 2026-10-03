@@ -60,13 +60,7 @@ services:
       HELM_JWK_SET_URI: http://keycloak:8080/auth/realms/helm/protocol/openid-connect/certs
       HELM_TURN_INTERNAL_URL: ${TURN_INTERNAL_URL:?required}
       HELM_TURN_PUBLIC_URLS: ${TURN_PUBLIC_URLS:?required}
-      HELM_DELETION_LEDGER_DIRECTORY: /recovery-ledger
     secrets: [api_identity]
-    volumes:
-      - type: bind
-        source: ${DELETION_LEDGER_DIR:?required independent protected local ledger directory}
-        target: /recovery-ledger
-        bind: {create_host_path: false}
     networks: [application, data, secrets, mcp-control, worker-control]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -161,22 +155,10 @@ services:
   postgres:
     <<: *runtime
     image: ${POSTGRES_IMAGE:?required release digest}
-    secrets: [postgres_identity, backup_recipient]
-    environment:
-      BACKUP_DIR: /backup
-      BACKUP_WORK_DIR: /backup-work
-      BACKUP_RECIPIENT_CERT: /run/secrets/backup_recipient
+    secrets: [postgres_identity]
     tmpfs: ["/run:size=32m", "/var/run/postgresql:size=16m"]
     volumes:
       - pg-data:/var/lib/postgresql
-      - type: bind
-        source: ${BACKUP_DIR:?required protected local backup directory}
-        target: /backup
-        bind: {create_host_path: false}
-      - type: bind
-        source: ${BACKUP_WORK_DIR:?required encrypted scratch mount}
-        target: /backup-work
-        bind: {create_host_path: false}
     networks: [data, secrets]
     cpus: 2
     mem_limit: 2g
@@ -314,7 +296,6 @@ volumes:
     name: ${VAULT_DATA_VOLUME:-helm-glass_vault-data}
 
 secrets:
-  backup_recipient: {file: "${SECRETS_DIR:?required}/backup-recipient"}
   api_identity: {file: "${SECRETS_DIR:?required}/api-bootstrap"}
   worker_identity: {file: "${SECRETS_DIR:?required}/worker-bootstrap"}
   turn_identity: {file: "${SECRETS_DIR:?required}/turn-bootstrap"}

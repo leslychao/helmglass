@@ -8,21 +8,6 @@ import { readProtectedFile, writeProtectedFile } from './protected-files.mjs';
 const openssl = process.env.OPENSSL_BIN ?? (process.platform === 'win32'
   ? 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe' : 'openssl');
 
-export function validateBackupRecipient(pem, now = Date.now()) {
-  if (typeof pem !== 'string' || /PRIVATE KEY/.test(pem)
-      || (pem.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length !== 1) {
-    throw new Error('Backup recipient must contain one public certificate and no private key');
-  }
-  const certificate = new X509Certificate(pem);
-  if (certificate.publicKey.asymmetricKeyType !== 'rsa'
-      || certificate.publicKey.asymmetricKeyDetails.modulusLength < 3072
-      || Date.parse(certificate.validFrom) > now
-      || Date.parse(certificate.validTo) < now + 86_400_000) {
-    throw new Error('Backup recipient must use RSA 3072 or stronger and remain valid for one day');
-  }
-  return pem;
-}
-
 /** Rechecks an installed service identity without silently issuing replacement credentials. */
 export function validateInternalIdentity(identity, hostname, client = false, now = Date.now()) {
   const certificate = new X509Certificate(identity.certificatePem);

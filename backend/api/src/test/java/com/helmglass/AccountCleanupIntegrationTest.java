@@ -13,7 +13,6 @@ import static org.mockito.Mockito.when;
 
 import com.helmglass.account.application.AccountCleanupService;
 import com.helmglass.account.application.AccountLifecycleService;
-import com.helmglass.account.infrastructure.DeletionLedger;
 import com.helmglass.account.infrastructure.repository.AccountCleanupRepository;
 import com.helmglass.account.infrastructure.repository.AccountDataRepository;
 import com.helmglass.administration.api.AdminContracts;
@@ -55,7 +54,6 @@ class AccountCleanupIntegrationTest {
   static class Owners {
     @Bean KeycloakSessionClient keycloak() { return mock(KeycloakSessionClient.class); }
     @Bean UserEphemeralState ephemeral() { return mock(UserEphemeralState.class); }
-    @Bean DeletionLedger ledger() { return mock(DeletionLedger.class); }
     @Bean ObjectStorage storage() { return mock(ObjectStorage.class); }
     @Bean ProfileKeyService keys() { return mock(ProfileKeyService.class); }
   }
@@ -68,7 +66,6 @@ class AccountCleanupIntegrationTest {
   private final JdbcClient jdbc;
   private final KeycloakSessionClient keycloak;
   private final UserEphemeralState ephemeral;
-  private final DeletionLedger ledger;
   private final ObjectStorage storage;
   private final ProfileKeyService keys;
   private final TransactionTemplate transaction;
@@ -77,7 +74,7 @@ class AccountCleanupIntegrationTest {
   AccountCleanupIntegrationTest(AccountLifecycleService accounts, AccountCleanupService cleanup,
       IdentityRepository identities, TaskLifecycleService tasks, BrowserRepository browsers,
       JdbcClient jdbc, KeycloakSessionClient keycloak, UserEphemeralState ephemeral,
-      DeletionLedger ledger, ObjectStorage storage, ProfileKeyService keys,
+      ObjectStorage storage, ProfileKeyService keys,
       PlatformTransactionManager transactions) {
     this.accounts = accounts;
     this.cleanup = cleanup;
@@ -87,7 +84,6 @@ class AccountCleanupIntegrationTest {
     this.jdbc = jdbc;
     this.keycloak = keycloak;
     this.ephemeral = ephemeral;
-    this.ledger = ledger;
     this.storage = storage;
     this.keys = keys;
     transaction = new TransactionTemplate(transactions);
@@ -95,34 +91,36 @@ class AccountCleanupIntegrationTest {
 
   @BeforeEach
   void providers() {
-    reset(keycloak, ephemeral, ledger, storage, keys);
+    reset(keycloak, ephemeral, storage, keys);
     when(ephemeral.purgeBatch(any())).thenReturn(true);
-    when(ledger.record(any())).thenReturn("a".repeat(64));
     when(storage.purgeUserBatch(anyString(), any())).thenReturn(true);
   }
 
   @Test
-  void retentionAllowsRestoreButPurgeWaitsForConfirmedExternalLedger() {
+  void retentionAllowsCancellationAndPurgeWaitsForConfirmedStorageDeletion() {
     var admin = actor(true);
     var user = actor(false);
     var deletion = delete(admin, user);
     cleanup.processPurge(deletion.resource().id());
-    verify(ledger, never()).record(any());
+    verify(storage, never()).purgeUserBatch(anyString(), any());
     accounts.restore(admin, deletion.resource().id(), new AdminContracts.Reason(1L, "Recover"), context());
     assertThat(identities.isActive(user.userId())).isTrue();
 
     var second = accounts.change(admin, user.userId(), new AdminContracts.Reason(3L, "Delete again"), context(), "delete");
     UUID requestId = second.resource().id();
     expire(requestId);
-    when(ledger.record(any())).thenThrow(new DomainException(503, "LEDGER_UNAVAILABLE", "Unavailable"));
+    cleanup.processPurge(requestId);
+    next(requestId);
+    when(storage.purgeUserBatch(anyString(), any()))
+        .thenThrow(new DomainException(503, "STORAGE_UNAVAILABLE", "Unavailable"));
     cleanup.processPurge(requestId);
     assertThat(state(user.userId())).isEqualTo("PURGING");
-    verify(storage, never()).purgeUserBatch(anyString(), any());
+    verify(storage).purgeUserBatch("hg-artifacts", user.userId());
     verify(keys, never()).destroy(any());
     assertThatThrownBy(() -> accounts.restore(admin, requestId, new AdminContracts.Reason(2L, "Too late"), context()))
         .isInstanceOf(DomainException.class);
     assertThat(jdbc.sql("SELECT count(*) FROM operation_items WHERE operation_id=(SELECT purge_operation_id FROM account_deletion_requests WHERE id=:id) AND state='SUCCEEDED'")
-        .param("id", requestId).query(Long.class).single()).isZero();
+        .param("id", requestId).query(Long.class).single()).isOne();
   }
 
   @Test
