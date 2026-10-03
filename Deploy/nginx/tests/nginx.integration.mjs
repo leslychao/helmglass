@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, unlink, rmdir } from 'node:fs/promises';
 import https from 'node:https';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -29,6 +30,20 @@ function request(port, certificate, path) {
       response.on('end', () => accept({ status: response.statusCode, headers: response.headers }));
     });
     operation.on('timeout', () => operation.destroy(new Error('TLS request timed out')));
+    operation.on('error', reject);
+  });
+}
+
+function untrustedHttpRequest(address) {
+  return new Promise((accept, reject) => {
+    const operation = http.get(`http://${address}/mcp`, {
+      headers: { host: 'helm.integration.test', 'x-forwarded-for': '127.0.0.1' },
+      timeout: 3000,
+    }, (response) => {
+      response.resume();
+      response.on('end', () => accept(response.statusCode));
+    });
+    operation.on('timeout', () => operation.destroy(new Error('HTTP request timed out')));
     operation.on('error', reject);
   });
 }
@@ -96,12 +111,8 @@ test('renders and starts real Nginx with TLS, preserving variables and private r
     assert.equal(missingUpstream.headers.location, undefined);
     assert.equal(missingUpstream.headers['x-content-type-options'], 'nosniff');
     const httpAddress = docker(['port', containerId, '8080/tcp']);
-    const rejected = await fetch(`http://${httpAddress}/mcp`, {
-      headers: { host: 'helm.integration.test', 'x-forwarded-for': '127.0.0.1' },
-      signal: AbortSignal.timeout(3000),
-    });
-    assert.equal(rejected.status, 403, 'Spoofed forwarding headers cannot authorize the HTTP peer');
-    await rejected.arrayBuffer();
+    assert.equal(await untrustedHttpRequest(httpAddress), 403,
+      'Spoofed forwarding headers cannot authorize the HTTP peer');
     const trusted = spawnSync('docker', ['exec', containerId, 'wget', '-S', '-O', '-',
       '--header=Host: helm.integration.test', '--header=X-Forwarded-For: 203.0.113.8',
       'http://127.0.0.1:8080/mcp'], { encoding: 'utf8', timeout: 5000 });

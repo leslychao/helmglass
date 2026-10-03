@@ -14,7 +14,7 @@ import (
 	"sort"
 	"time"
 
-	madmin "github.com/minio/madmin-go/v4"
+	madmin "github.com/minio/madmin-go/v3"
 	minio "github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
@@ -81,7 +81,10 @@ func newStorage(input request) (*storage, error) {
 
 func accountMissing(err error) bool {
 	var response madmin.ErrorResponse
-	return errors.As(err, &response) && (response.Code == "XMinioInvalidAccessKey" || response.Code == "NoSuchServiceAccount")
+	// Community MinIO shares this code with other IAM failures; only this exact
+	// pinned server response identifies a missing service account.
+	return errors.As(err, &response) && response.Code == "XMinioInvalidIAMCredentials" &&
+		response.Message == "The specified service account is not found (Specified service account does not exist)"
 }
 
 func (s *storage) inspect(ctx context.Context) (snapshot, error) {

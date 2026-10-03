@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 
-const disks = ['/data1', '/data2', '/data3', '/data4'];
+const disks = ['/data'];
 const reserveBytes = 134_217_728;
 const maximumDiskBytes = 4 * 1024 ** 4;
 const maximumEntries = 1_000_000;
@@ -101,7 +101,7 @@ async function validateTar(file, work, diskIndex) {
     requireCondition(/^[-d]/.test(line), 'TAR_LINK_OR_SPECIAL_FILE');
   }
   const descriptor = JSON.parse(run('tar', ['--extract', '--to-stdout', '--file', file, 'metadata.json']));
-  requireCondition(descriptor.schemaVersion === 1 && descriptor.format === 'helm-minio-cold-v1'
+  requireCondition(descriptor.schemaVersion === 1 && descriptor.format === 'helm-minio-single-v1'
     && descriptor.installationId === installationId && descriptor.backupId === backupId
     && descriptor.diskIndex === diskIndex, 'ARCHIVE_IDENTITY_MISMATCH');
   await unlink(listing);
@@ -123,7 +123,7 @@ async function backup(work, root) {
   await requireSpace(root, estimates.reduce((total, bytes) => total + bytes, 0));
   const pending = await mkdtemp(path.join(destinationParent, '.pending-'));
   try {
-    const manifest = { schemaVersion: 1, format: 'helm-minio-cold-v1', installationId, backupId,
+    const manifest = { schemaVersion: 1, format: 'helm-minio-single-v1', installationId, backupId,
       capturedAt: new Date().toISOString(), disks: [] };
     for (const [index, disk] of disks.entries()) {
       await requireSpace(work, estimates[index]);
@@ -152,9 +152,9 @@ async function backup(work, root) {
 
 async function restore(work) {
   const manifest = await jsonFile(path.join(source, 'manifest.json'), 16_384, expectedManifestSha256);
-  requireCondition(manifest.schemaVersion === 1 && manifest.format === 'helm-minio-cold-v1'
+  requireCondition(manifest.schemaVersion === 1 && manifest.format === 'helm-minio-single-v1'
     && manifest.installationId === installationId && manifest.backupId === backupId
-    && Array.isArray(manifest.disks) && manifest.disks.length === 4, 'INVALID_ARCHIVE_MANIFEST');
+    && Array.isArray(manifest.disks) && manifest.disks.length === 1, 'INVALID_ARCHIVE_MANIFEST');
   let requiredBytes = 0;
   for (const [index, disk] of manifest.disks.entries()) {
     requireCondition(disk.diskIndex === index + 1 && disk.directory === 'disk' + (index + 1)
@@ -174,7 +174,7 @@ async function restore(work) {
     run('/opt/helm/bin/backup-file', ['decrypt', path.join(source, disk.directory), tar, disk.manifestSha256]);
     await validateTar(tar, work, disk.diskIndex);
   }
-  // All four disks are authenticated before any target is touched. Failed extraction
+  // The data archive is authenticated before any target is touched. Failed extraction
   // leaves this marker on every target; the MinIO runtime refuses partial restores.
   for (const disk of disks) await writeJson(path.join(disk, '.helm-restore-pending'), { installationId, backupId });
   for (const [index, disk] of disks.entries()) {
@@ -184,7 +184,7 @@ async function restore(work) {
     run('sync', ['-f', disk]);
   }
   for (const disk of disks) { await unlink(path.join(disk, '.helm-restore-pending')); run('sync', ['-f', disk]); }
-  process.stdout.write(JSON.stringify({ installationId, backupId, restoredDisks: 4, state: 'RESTORED', manifestSha256: expectedManifestSha256 }) + '\n');
+  process.stdout.write(JSON.stringify({ installationId, backupId, restoredDisks: 1, state: 'RESTORED', manifestSha256: expectedManifestSha256 }) + '\n');
 }
 
 let work;

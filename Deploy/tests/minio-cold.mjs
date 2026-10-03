@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { chown, cp, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 
 const root = await mkdtemp('/tmp/minio-cold-fixture-');
-const data = ['/data1', '/data2', '/data3', '/data4'];
+const data = ['/data'];
 const expected = [];
 function run(command, args, { failure = false, env = {} } = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000,
@@ -47,11 +47,11 @@ try {
   run(command[0], [...command.slice(1), 'restore', 'fixture', 'verified', receipt.directory, '0'.repeat(64)], { env, failure: true });
   for (const disk of data) assert.deepEqual(await readdir(disk), [], 'Wrong parent manifest never changes targets');
 
-  const cipher = receipt.directory + '/disk4/00000000.cms';
+  const cipher = receipt.directory + '/disk1/00000000.cms';
   const original = await readFile(cipher);
   await writeFile(cipher, original.subarray(0, original.length - 1));
   run(command[0], [...command.slice(1), 'restore', 'fixture', 'verified', receipt.directory, receipt.manifestSha256], { env, failure: true });
-  for (const disk of data) assert.deepEqual(await readdir(disk), [], 'No target changes before all four archives verify');
+  for (const disk of data) assert.deepEqual(await readdir(disk), [], 'No target changes before the data archive verifies');
   await writeFile(cipher, original);
   run(command[0], [...command.slice(1), 'restore', 'other-installation', 'verified', receipt.directory, receipt.manifestSha256], { env, failure: true });
   for (const disk of data) assert.deepEqual(await readdir(disk), []);
@@ -63,19 +63,19 @@ try {
     await mkdir(hostile, { mode: 0o700 });
     await mkdir(hostile + '/data', { mode: 0o700 });
     await writeFile(hostile + '/metadata.json', JSON.stringify({ schemaVersion: 1,
-      format: 'helm-minio-cold-v1', installationId: 'fixture', backupId: 'verified', diskIndex: 4 }));
+      format: 'helm-minio-single-v1', installationId: 'fixture', backupId: 'verified', diskIndex: 1 }));
     if (kind === 'link') await symlink('/tmp/escape', hostile + '/data/escape');
     else await writeFile(hostile + '/data/escape', 'fixture');
     const tar = root + '/hostile-' + kind + '.tar';
     run('tar', ['--create', '--file', tar, '--directory', hostile, 'metadata.json', 'data',
       ...(kind === 'traversal' ? ['--transform', 's,^data/,../escape/,'] : [])]);
     await cp(receipt.directory, archive, { recursive: true });
-    await rm(archive + '/disk4', { recursive: true });
-    run('/opt/helm/bin/backup-file', ['encrypt', tar, archive + '/disk4'], { env });
+    await rm(archive + '/disk1', { recursive: true });
+    run('/opt/helm/bin/backup-file', ['encrypt', tar, archive + '/disk1'], { env });
     const manifest = JSON.parse(await readFile(archive + '/manifest.json', 'utf8'));
-    manifest.disks[3].plaintextByteLength = (await stat(tar)).size;
-    manifest.disks[3].manifestSha256 = createHash('sha256')
-      .update(await readFile(archive + '/disk4/manifest.json')).digest('hex');
+    manifest.disks[0].plaintextByteLength = (await stat(tar)).size;
+    manifest.disks[0].manifestSha256 = createHash('sha256')
+      .update(await readFile(archive + '/disk1/manifest.json')).digest('hex');
     await writeFile(archive + '/manifest.json', JSON.stringify(manifest));
     const hostileHash = createHash('sha256').update(await readFile(archive + '/manifest.json')).digest('hex');
     run(command[0], [...command.slice(1), 'restore', 'fixture', 'verified', archive, hostileHash], { env, failure: true });
@@ -83,17 +83,17 @@ try {
   }
 
   const restored = JSON.parse(run(command[0], [...command.slice(1), 'restore', 'fixture', 'verified', receipt.directory, receipt.manifestSha256], { env }));
-  assert.equal(restored.restoredDisks, 4);
+  assert.equal(restored.restoredDisks, 1);
   for (const [index, disk] of data.entries()) {
     assert.deepEqual(await readFile(disk + '/u/object'), expected[index]);
     assert.equal((await stat(disk + '/u/object')).uid, 10001);
   }
   run(command[0], [...command.slice(1), 'restore', 'fixture', 'verified', receipt.directory, receipt.manifestSha256], { env, failure: true });
-  await symlink('/data1/u/object', '/data1/unsafe-link');
+  await symlink('/data/u/object', '/data/unsafe-link');
   run(command[0], [...command.slice(1), 'backup', 'fixture', 'unsafe'], { env, failure: true });
-  await unlink('/data1/unsafe-link');
+  await unlink('/data/unsafe-link');
   assert.deepEqual(await readdir(root + '/scratch'), []);
-  process.stdout.write('PASS: four-volume encrypted cold roundtrip, corrupt fourth disk leaves every target empty, installation binding, hostile tar links/traversal, nonempty-target and source-symlink rejection. This fixture does not run AIStor or prove offhost durability.\n');
+  process.stdout.write('PASS: single-volume encrypted cold roundtrip, corrupt archive leaves target empty, installation binding, hostile tar links/traversal, nonempty-target and source-symlink rejection. This fixture does not run MinIO or prove offhost durability.\n');
 } finally {
   await rm(root, { recursive: true, force: true });
 }

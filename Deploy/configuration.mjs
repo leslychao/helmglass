@@ -8,9 +8,9 @@ const INPUT_NAMES = [
   'TURN_INTERNAL_URL', 'TURN_PUBLIC_URLS', 'TURN_REALM', 'TURN_ADVERTISED_IP', 'TURN_BIND_ADDRESS',
   'TURN_RELAY_MIN', 'TURN_RELAY_MAX', 'KEYCLOAK_ADMIN_EMAIL', 'KEYCLOAK_ADMIN_LAST_NAME',
   'KEYCLOAK_ANGELINA_EMAIL', 'KEYCLOAK_ANGELINA_LAST_NAME', 'MCP_REDIRECT_URIS',
-  'EDGE_TLS_FILE', 'TURN_TLS_FILE', 'MINIO_LICENSE_FILE', 'LOCAL_RECOVERY_DIR', 'DELETION_LEDGER_DIR',
+  'EDGE_TLS_FILE', 'TURN_TLS_FILE', 'LOCAL_RECOVERY_DIR', 'DELETION_LEDGER_DIR',
   'BACKUP_DIR', 'BACKUP_WORK_DIR', 'BACKUP_RECIPIENT_FILE',
-  'MINIO_DISK_1_DIR', 'MINIO_DISK_2_DIR', 'MINIO_DISK_3_DIR', 'MINIO_DISK_4_DIR',
+  'MINIO_DATA_DIR',
 ];
 export const IMAGE_NAMES = [
   'NGINX_IMAGE', 'API_IMAGE', 'MCP_ADAPTER_IMAGE', 'WORKER_IMAGE', 'EGRESS_IMAGE',
@@ -19,7 +19,7 @@ export const IMAGE_NAMES = [
 ];
 export const BOOTSTRAP_FILES = [
   'edge-tls', 'api-bootstrap', 'worker-bootstrap', 'turn-bootstrap', 'egress-bootstrap',
-  'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap', 'minio-license',
+  'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap',
   'mcp-adapter-bootstrap', 'vault-tls', 'provision-bootstrap', 'migration-bootstrap',
   'keycloak-bootstrap', 'oauth-bootstrap', 'predefined-users-input',
   'backup-recipient',
@@ -118,7 +118,7 @@ export function validateDeployment(input) {
       'must be a separate existing encrypted off-host mount for immutable deletion records');
   }
   const mounts = ['BACKUP_DIR', 'BACKUP_WORK_DIR', 'DELETION_LEDGER_DIR',
-    'MINIO_DISK_1_DIR', 'MINIO_DISK_2_DIR', 'MINIO_DISK_3_DIR', 'MINIO_DISK_4_DIR'];
+    'MINIO_DATA_DIR'];
   for (const name of mounts) {
     const path = configuration[name];
     if (!/^\/[A-Za-z0-9/_-]+$/.test(path) || path.includes('//') || path.endsWith('/')

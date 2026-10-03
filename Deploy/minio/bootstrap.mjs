@@ -4,7 +4,6 @@ import { spawn } from 'node:child_process';
 import { validateDisks } from './disks.mjs';
 
 const identityPath = '/run/secrets/minio_identity';
-const licensePath = '/run/secrets/minio_license';
 const runtime = '/run/helm';
 
 async function boundedFile(path, maximum) {
@@ -22,7 +21,6 @@ try {
     throw new Error('MINIO_DISKS_INVALID');
   }
   const identity = JSON.parse(await boundedFile(identityPath, 131_072));
-  await boundedFile(licensePath, 1_048_576);
   if (identity.schemaVersion !== 1 || typeof identity.rootUser !== 'string'
       || !/^[A-Za-z0-9_-]{3,64}$/.test(identity.rootUser)
       || typeof identity.rootPassword !== 'string' || identity.rootPassword.length < 32
@@ -46,7 +44,7 @@ try {
     writeFile(`${runtime}/certs/CAs/installation.crt`, identity.tls.caPem, { mode: 0o600 }),
   ]);
   const child = spawn('/usr/bin/minio', ['server', ...disks, '--address', ':9000', '--console-address', '127.0.0.1:9001',
-    '--certs-dir', `${runtime}/certs`, '--license', licensePath, '--json'], {
+    '--certs-dir', `${runtime}/certs`, '--json'], {
     stdio: 'inherit', env: { ...process.env, MINIO_ROOT_USER_FILE: `${runtime}/root-user`,
       MINIO_ROOT_PASSWORD_FILE: `${runtime}/root-password`, MINIO_BROWSER: 'off' },
   });
@@ -54,9 +52,9 @@ try {
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => child.kill(signal));
   child.once('exit', code => { process.exitCode = code ?? 1; });
 } catch (error) {
-  // Bootstrap contains credentials and the license; raw parser/provider errors must not escape.
+  // Bootstrap contains credentials; raw parser/provider errors must not escape.
   process.stderr.write(error instanceof Error && error.message === 'MINIO_DISKS_INVALID'
-    ? 'MINIO_DISKS_INVALID: four private writable mounts on distinct backing block disks are required\n'
-    : 'MINIO_BOOTSTRAP_INVALID: protected identity, TLS and a valid license are required\n');
+    ? 'MINIO_DISKS_INVALID: a private writable persistent data mount is required\n'
+    : 'MINIO_BOOTSTRAP_INVALID: protected identity and TLS are required\n');
   process.exitCode = 1;
 }

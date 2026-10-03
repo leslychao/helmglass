@@ -62,8 +62,7 @@ async function main() {
   const postgres = await deploymentContainer(docker, 'postgres');
   const minio = await deploymentContainer(docker, 'minio');
   const vault = await deploymentContainer(docker, 'vault');
-  for (const [id, bindings] of [[minio, [1, 2, 3, 4].map(index =>
-    [`/data${index}`, environment[`MINIO_DISK_${index}_DIR`]])],
+  for (const [id, bindings] of [[minio, [['/data', environment.MINIO_DATA_DIR]]],
   [postgres, [['/backup', configuration.BACKUP_DIR], ['/backup-work', configuration.BACKUP_WORK_DIR]]]]) {
     const mounts = JSON.parse((await docker(['inspect', '--format', '{{json .Mounts}}', id])).stdout);
     for (const [target, source] of bindings) {
@@ -121,10 +120,9 @@ async function main() {
   }
   if (!walManifest || walManifest.value.walFile !== walFile) throw new Error('Restore-point WAL has not reached backup storage');
   const baseManifest = await readPg(`${baseDirectory}/manifest.json`);
-  progress('encrypting the four stopped MinIO disks');
+  progress('encrypting the stopped MinIO data directory');
   const minioBackup = JSON.parse((await helper('/opt/helm/minio/cold-archive.mjs',
-    ['backup', configuration.INSTALLATION_ID, backupId], { mounts: [1, 2, 3, 4].flatMap(index =>
-      bind(environment[`MINIO_DISK_${index}_DIR`], `/data${index}`, true)) })).stdout);
+    ['backup', configuration.INSTALLATION_ID, backupId], { mounts: bind(environment.MINIO_DATA_DIR, '/data', true) })).stdout);
   await requireStopped(docker, minio);
   progress('saving scoped Vault Raft keys and configuration');
   const vaultBackup = JSON.parse((await helper('/opt/helm/vault/archive.mjs',

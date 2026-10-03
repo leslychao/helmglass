@@ -5,7 +5,7 @@ import { join } from 'node:path';
 // Runs once with no network and one explicit daemon-side bootstrap-directory mount.
 // Secrets arrive through stdin, never Docker environment, image layers, command arguments or logs.
 const allowed = new Set(['edge-tls', 'api-bootstrap', 'worker-bootstrap', 'turn-bootstrap', 'egress-bootstrap',
-  'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap', 'minio-license',
+  'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap',
   'mcp-adapter-bootstrap', 'vault-tls', 'provision-bootstrap', 'migration-bootstrap', 'keycloak-bootstrap',
   'oauth-bootstrap', 'predefined-users-input', 'backup-recipient']);
 const directory = '/bootstrap';

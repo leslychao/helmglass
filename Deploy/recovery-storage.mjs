@@ -77,9 +77,9 @@ export async function verifyMinioTargets({ docker, release, directories, require
     + (requireEmpty ? 'for(const disk of disks)if((await readdir(disk)).length)throw Error("Target is not empty");' : '')
     + 'process.stdout.write(JSON.stringify({state:"VERIFIED",disks:disks.length})+"\\n");';
   const value = JSON.parse((await docker(['run', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
-    ...restrictions, '--memory', '128m', ...directories.flatMap((path, index) => bind(path, `/data${index + 1}`)),
+    ...restrictions, '--memory', '128m', ...directories.flatMap(path => bind(path, '/data')),
     '--entrypoint', 'node', release.MINIO_IMAGE, '--input-type=module', '-e', code])).stdout);
-  if (value.state !== 'VERIFIED' || value.disks !== 4) throw new Error('Four independent storage disks were not verified');
+  if (value.state !== 'VERIFIED' || value.disks !== 1) throw new Error('Persistent storage directory was not verified');
 }
 
 export async function restoreMinio({ docker, configuration, release, state, manifest, saveState }) {
@@ -89,10 +89,10 @@ export async function restoreMinio({ docker, configuration, release, state, mani
       state.backupId, `/backup/${manifest.minio.directory}`, manifest.minio.manifestSha256], options: ['--user', '0:0', ...restrictions,
       '--cap-add', 'DAC_OVERRIDE', '--cap-add', 'CHOWN', '--cap-add', 'FOWNER', '--memory', '512m',
       '--tmpfs', '/tmp:size=32m,mode=0700', ...decryptionMounts(configuration, state.recoveryId),
-      ...state.storage.minioDirectories.flatMap((path, index) => bind(path, `/data${index + 1}`))] });
+      ...state.storage.minioDirectories.flatMap(path => bind(path, '/data'))] });
   const receipt = JSON.parse(restored.output);
   if (receipt.installationId !== configuration.INSTALLATION_ID || receipt.backupId !== state.backupId
-      || receipt.state !== 'RESTORED' || receipt.restoredDisks !== 4
+      || receipt.state !== 'RESTORED' || receipt.restoredDisks !== 1
       || receipt.manifestSha256 !== manifest.minio.manifestSha256) throw new Error('MinIO disk restore was not confirmed');
   await verifyMinioTargets({ docker, release, directories: state.storage.minioDirectories, requireEmpty: false });
   const next = { ...state, physical: { ...state.physical,

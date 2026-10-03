@@ -5,8 +5,27 @@ import (
 	"encoding/xml"
 	"testing"
 
+	madmin "github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7/pkg/lifecycle"
 )
+
+func TestAccountMissingRejectsAuthenticationAndVersionFailures(t *testing.T) {
+	if !accountMissing(madmin.ErrorResponse{Code: "XMinioInvalidIAMCredentials",
+		Message: "The specified service account is not found (Specified service account does not exist)"}) {
+		t.Fatal("pinned community missing-account response must be recognized")
+	}
+	for _, response := range []madmin.ErrorResponse{
+		{Code: "XMinioInvalidIAMCredentials", Message: "The administrator key is not eligible for this operation"},
+		{Code: "XMinioInvalidIAMCredentials", Message: "The account key is not eligible for this operation"},
+		{Code: "AccessDenied"},
+		{Code: "XMinioAdminVersionMismatch"},
+		{Code: "XMinioInvalidAccessKey"},
+	} {
+		if accountMissing(response) {
+			t.Fatal("an unrelated IAM failure must not permit identity creation")
+		}
+	}
+}
 
 func TestLifecycleVerificationAcceptsSDKXMLRoundTripButRejectsChangedRetention(t *testing.T) {
 	var desired lifecycle.Configuration

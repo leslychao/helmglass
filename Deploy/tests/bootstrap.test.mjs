@@ -19,11 +19,9 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     await writeProtectedFile(edgePath, edge.certificatePem + caPem + edge.privateKeyPem);
     const recipientPath = join(temporary, 'backup-recipient.pem');
     await writeProtectedFile(recipientPath, edge.certificatePem);
-    const licensePath = join(temporary, 'fixture-license');
-    await writeProtectedFile(licensePath, 'Explicit bootstrap serialization fixture; not an AIStor license.');
     const configuration = { INSTALLATION_ID: 'bootstrap-test', PUBLIC_ORIGIN: 'https://helm-test', TURN_REALM: 'helm-test',
       LOCAL_SECRETS_DIR: join(temporary, 'service-secrets'), LOCAL_RECOVERY_DIR: join(temporary, 'offline-custody'),
-      EDGE_TLS_FILE: edgePath, TURN_TLS_FILE: edgePath, MINIO_LICENSE_FILE: licensePath,
+      EDGE_TLS_FILE: edgePath, TURN_TLS_FILE: edgePath,
       BACKUP_RECIPIENT_FILE: recipientPath,
       KEYCLOAK_ADMIN_EMAIL: 'admin@example.test', KEYCLOAK_ADMIN_LAST_NAME: 'Fixture',
       KEYCLOAK_ANGELINA_EMAIL: 'angelina@example.test', KEYCLOAK_ANGELINA_LAST_NAME: 'Fixture',
@@ -33,6 +31,7 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     await assert.rejects(prepareBootstrap(configuration, {}), /Required parameter/);
     const first = await prepareBootstrap(configuration, environment);
     assert.equal(first.created, true);
+    await assert.rejects(readFile(join(first.directory, 'minio-license')), { code: 'ENOENT' });
     const kvBefore = await readFile(join(first.directory, 'vault-services-input'));
     const api = JSON.parse(await readFile(join(first.directory, 'api-bootstrap'), 'utf8'));
     const adapter = JSON.parse(await readFile(join(first.directory, 'mcp-adapter-bootstrap'), 'utf8'));

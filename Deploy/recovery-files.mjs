@@ -25,15 +25,15 @@ export function applyRecoveryTargets(environment, state) {
   const suffix = state.recoveryId;
   if (state.storage.postgresVolume !== `helm-glass-pg-recovery-${suffix}`
       || state.storage.vaultVolume !== `helm-glass-vault-recovery-${suffix}`
-      || !Array.isArray(state.storage.minioDirectories) || state.storage.minioDirectories.length !== 4
-      || new Set(state.storage.minioDirectories).size !== 4
+      || !Array.isArray(state.storage.minioDirectories) || state.storage.minioDirectories.length !== 1
+      || new Set(state.storage.minioDirectories).size !== 1
       || state.storage.minioDirectories.some(value => !/^\/[A-Za-z0-9/_-]+$/.test(value)
         || value.includes('//') || value.endsWith('/'))) {
     throw new Error('Recovery storage selection is invalid; admission remains closed');
   }
   environment.PG_DATA_VOLUME = state.storage.postgresVolume;
   environment.VAULT_DATA_VOLUME = state.storage.vaultVolume;
-  state.storage.minioDirectories.forEach((path, index) => { environment[`MINIO_DISK_${index + 1}_DIR`] = path; });
+  environment.MINIO_DATA_DIR = state.storage.minioDirectories[0];
 }
 
 export async function saveRecoveryState(directory, value) {

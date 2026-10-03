@@ -6,20 +6,21 @@ import { IMAGE_NAMES } from '../configuration.mjs';
 
 const configuration = { INSTALLATION_ID: 'fixture', BACKUP_DIR: '/srv/backup/data',
   BACKUP_WORK_DIR: '/srv/scratch/data', DELETION_LEDGER_DIR: '/srv/ledger/data', SECRETS_DIR: '/srv/secrets/data',
-  ...Object.fromEntries([1, 2, 3, 4].map(index => [`MINIO_DISK_${index}_DIR`, `/srv/disk${index}/current`])) };
+  MINIO_DATA_DIR: '/srv/minio/current' };
 const plan = { schemaVersion: 1, installationId: 'fixture', recoveryId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
   backupId: 'backup-one', jointManifestSha256: 'a'.repeat(64),
   privateKeyFile: resolve('fixture/private.pem'), keyPasswordFile: resolve('fixture/password'),
-  minioDirectories: [1, 2, 3, 4].map(index => `/srv/new${index}/data`), walLossWindow: 'Since the named backup point' };
+  minioDirectories: ['/srv/new1/data'], walLossWindow: 'Since the named backup point' };
 
 test('Restore plan rejects current, nested, shared and previously restored storage', () => {
   assert.equal(validateRestorePlan(plan, configuration), plan);
-  for (const path of ['/srv/disk1/current', '/srv/disk1/current/child', '/srv/disk1',
-    '/srv/backup/data/child', '/srv/new2/data', '/srv/new2/data/child', '/srv/new1/../data']) {
+  for (const path of ['/srv/minio/current', '/srv/minio/current/child', '/srv/minio',
+    '/srv/backup/data/child', '/srv/new1/../data']) {
     assert.throws(() => validateRestorePlan({ ...plan, minioDirectories: [path, ...plan.minioDirectories.slice(1)] }, configuration));
   }
   assert.throws(() => validateRestorePlan(plan, configuration,
     { stage: 'READY', storage: { minioDirectories: [plan.minioDirectories[0]] } }));
+  assert.throws(() => validateRestorePlan({ ...plan, minioDirectories: ['/srv/new1/data', '/srv/new2/data'] }, configuration));
   assert.throws(() => validateRestorePlan({ ...plan, installationId: 'other' }, configuration));
   assert.throws(() => validateRestorePlan({ ...plan, privateKeyFile: 'relative.key' }, configuration));
   assert.throws(() => validateRestorePlan({ ...plan, jointManifestSha256: '' }, configuration));

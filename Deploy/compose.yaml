@@ -202,24 +202,12 @@ services:
     <<: *stateless
     user: "10001:10001"
     tmpfs: ["/tmp:size=16m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
-    image: ${MINIO_IMAGE:?required supported release digest}
-    secrets: [minio_identity, minio_license]
+    image: ${MINIO_IMAGE:?required community release digest}
+    secrets: [minio_identity]
     volumes:
       - type: bind
-        source: ${MINIO_DISK_1_DIR:?required first encrypted disk mount}
-        target: /data1
-        bind: {create_host_path: false}
-      - type: bind
-        source: ${MINIO_DISK_2_DIR:?required second encrypted disk mount}
-        target: /data2
-        bind: {create_host_path: false}
-      - type: bind
-        source: ${MINIO_DISK_3_DIR:?required third encrypted disk mount}
-        target: /data3
-        bind: {create_host_path: false}
-      - type: bind
-        source: ${MINIO_DISK_4_DIR:?required fourth encrypted disk mount}
-        target: /data4
+        source: ${MINIO_DATA_DIR:?required persistent data directory}
+        target: /data
         bind: {create_host_path: false}
     networks: [data]
     cpus: 1
@@ -340,7 +328,6 @@ secrets:
   redis_acl: {file: "${SECRETS_DIR:?required}/redis-bootstrap.acl"}
   redis_health_identity: {file: "${SECRETS_DIR:?required}/redis-health-bootstrap"}
   minio_identity: {file: "${SECRETS_DIR:?required}/minio-bootstrap"}
-  minio_license: {file: "${SECRETS_DIR:?required}/minio-license"}
   mcp_adapter_identity: {file: "${SECRETS_DIR:?required}/mcp-adapter-bootstrap"}
   vault_tls_identity: {file: "${SECRETS_DIR:?required}/vault-tls"}
   provision_identity: {file: "${SECRETS_DIR:?required}/provision-bootstrap"}

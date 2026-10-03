@@ -60,7 +60,6 @@ export async function prepareBootstrap(configuration, environment = process.env)
   const edge = await readTlsBundle(configuration.EDGE_TLS_FILE, new URL(configuration.PUBLIC_ORIGIN).hostname);
   const turn = await readTlsBundle(configuration.TURN_TLS_FILE, configuration.TURN_REALM);
   if (!turn.caPem.includes('BEGIN CERTIFICATE')) throw new Error('TURN TLS bundle must include its CA chain');
-  const license = await readProtectedFile(configuration.MINIO_LICENSE_FILE);
   const backupRecipient = validateBackupRecipient(
     (await readProtectedFile(configuration.BACKUP_RECIPIENT_FILE, 65_536)).toString('utf8'));
   await protectDirectory(directory, repository);
@@ -102,7 +101,6 @@ export async function prepareBootstrap(configuration, environment = process.env)
     'postgres-bootstrap': postgres,
     'redis-health-bootstrap': { schemaVersion: 1, username: 'helm_health', password: redis.health },
     'minio-bootstrap': { schemaVersion: 1, rootUser: minio.rootUser, rootPassword: minio.rootPassword, tls: identities.minio },
-    'minio-license': license,
     'backup-recipient': backupRecipient,
     'worker-bootstrap': { schemaVersion: 1, installationId: configuration.INSTALLATION_ID, enrollmentToken, caPem },
     'turn-bootstrap': { schemaVersion: 1, turnSharedSecret,

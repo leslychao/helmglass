@@ -153,7 +153,7 @@ async function main() {
   if (state.stage === 'RESTORING') {
     progress('restoring PostgreSQL to its exact named WAL point in a new volume');
     if (!state.physical?.postgres) state = await restorePostgres({ docker, configuration, release, state, manifest, saveState });
-    progress('restoring and checking all four MinIO disks');
+    progress('restoring and checking the MinIO data directory');
     if (!state.physical?.minio) state = await restoreMinio({ docker, configuration, release, state, manifest, saveState });
   }
   // Original bootstrap credentials are verified, never regenerated or silently replaced for an old backup.
