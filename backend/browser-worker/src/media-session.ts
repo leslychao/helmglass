@@ -166,7 +166,18 @@ export class MediaSession {
       this.generations.set(binding.viewerId, { binding: viewerFence(binding), state: 'CLOSED' });
       return;
     }
-    if (!sameFence(generation.binding, binding)) throw new WorkerError('VIEW_BINDING_FENCED');
+    if (!sameFence(generation.binding, binding)) {
+      const previous = generation.binding;
+      if (generation.state !== 'CLOSED' || binding.viewGeneration <= previous.viewGeneration
+        || binding.workerBootId !== previous.workerBootId || binding.browserSessionId !== previous.browserSessionId
+        || binding.allocationEpoch !== previous.allocationEpoch) throw new WorkerError('VIEW_BINDING_FENCED');
+      this.requireCurrentAllocation(binding);
+      // CLOSED proves the older consumer was physically removed or never existed. No newer
+      // open was admitted: admission would have replaced this generation. Fence the unused
+      // ticket too, so its delayed open cannot create a consumer after this receipt.
+      this.generations.set(binding.viewerId, { binding: viewerFence(binding), state: 'CLOSED' });
+      return;
+    }
     if (generation.state === 'CLOSED') return;
     if (this.viewers.has(binding.viewerId) || this.closing.has(binding.viewerId)) {
       await this.closeViewer(binding.viewerId, 'VIEW_CLOSED');

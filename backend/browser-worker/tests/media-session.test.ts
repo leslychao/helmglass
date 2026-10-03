@@ -252,6 +252,64 @@ test('close before delivery of open fences that generation without creating a na
   await value.media.closeAll();
 });
 
+test('an unused newer generation advances a closed tombstone and cannot open afterward', async (context) => {
+  const value = await fixture(context);
+  const first = value.binding();
+  await value.media.accept(first);
+  const firstClose = close(first);
+  await value.media.accept(firstClose);
+  await value.media.accept({ ...firstClose, type: 'viewerClosedAck' });
+  const unused = { ...first, requestId: randomUUID(), viewGeneration: 2 };
+  const unusedClose = close(unused);
+  await value.media.accept(unusedClose);
+  assert.deepEqual(value.receipts[1], { ...unusedClose, type: 'viewerClosed', code: 'VIEW_CLOSED' });
+  assert.equal(value.starts(), 1);
+  assert.equal(value.revocations(), 1);
+  assert.equal(value.stops(), 1);
+  await value.media.accept({ ...unusedClose, type: 'viewerClosedAck' });
+  await assert.rejects(value.media.accept(unused), /VIEW_BINDING_FENCED/);
+  const nextUnused = { ...unused, requestId: randomUUID(), viewGeneration: 3 };
+  await value.media.accept(close(nextUnused));
+  assert.equal(value.starts(), 1);
+  await value.media.accept({ ...first, requestId: randomUUID(), viewGeneration: 4 });
+  assert.equal(value.starts(), 2);
+  await value.media.closeAll();
+});
+
+test('a newer absent close cannot confirm an opening or live older generation', async (context) => {
+  const value = await fixture(context);
+  const first = value.binding();
+  const opening = value.media.accept(first);
+  await assert.rejects(value.media.accept({ ...close(first), viewGeneration: 2 }), /VIEW_BINDING_FENCED/);
+  await opening;
+  await assert.rejects(value.media.accept({ ...close(first), viewGeneration: 2 }), /VIEW_BINDING_FENCED/);
+  assert.equal(value.receipts.length, 0);
+  assert.equal(value.revocations(), 0);
+  assert.equal(value.stops(), 0);
+  await value.media.accept(close(first));
+  assert.equal(value.receipts.length, 1);
+});
+
+test('advancing a closed tombstone rejects stale or foreign allocation proofs', async (context) => {
+  const value = await fixture(context);
+  const first = { ...value.binding(), viewGeneration: 2 };
+  await value.media.accept(close(first));
+  const newer = { ...close(first), viewGeneration: 3 };
+  for (const command of [
+    { ...newer, viewGeneration: 1 },
+    { ...newer, workerBootId: randomUUID() },
+    { ...newer, browserSessionId: randomUUID() },
+    { ...newer, allocationEpoch: 2 },
+  ]) {
+    await assert.rejects(value.media.accept({ ...command, requestId: randomUUID() }), /VIEW_BINDING_FENCED/);
+  }
+  value.assignment.allocationEpoch = 2;
+  await assert.rejects(value.media.accept(newer), /VIEW_BINDING_FENCED/);
+  await assert.rejects(value.media.accept({ ...newer, requestId: randomUUID(), allocationEpoch: 2 }), /VIEW_BINDING_FENCED/);
+  assert.equal(value.receipts.length, 1);
+  assert.equal(value.starts(), 0);
+});
+
 test('close cancels an admitted asynchronous opening and rejects an early receipt ACK', async (context) => {
   const value = await fixture(context);
   const binding = value.binding();
