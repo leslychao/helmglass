@@ -136,7 +136,8 @@ public class WorkerEnrollmentService {
     transaction.executeWithoutResult(
         status -> {
           repository.lockInstallation(secrets.installationId());
-          repository.find(secrets.installationId(), workerId, bootId)
+          repository
+              .find(secrets.installationId(), workerId, bootId)
               .orElseThrow(DomainException::notFound);
           repository.revokeBoot(secrets.installationId(), workerId, bootId);
         });

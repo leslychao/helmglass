@@ -7,10 +7,12 @@ import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository;
 import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository.Claim;
 import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository.CommandDisposition;
 import com.helmglass.command.application.CommandExecutionService;
+import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,6 +20,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -30,6 +33,7 @@ public class WorkerRegistryService {
   private final ControlRepository controls;
   private final CommandExecutionService commands;
   private final BrowserOpenService opens;
+  private final ChangeRepository changes;
 
   public WorkerRegistryService(
       WorkerRegistryRepository workers,
@@ -37,13 +41,131 @@ public class WorkerRegistryService {
       JsonSupport json,
       ControlRepository controls,
       CommandExecutionService commands,
-      BrowserOpenService opens) {
+      BrowserOpenService opens,
+      ChangeRepository changes) {
     this.workers = workers;
     this.protocol = protocol;
     this.json = json;
     this.controls = controls;
     this.commands = commands;
     this.opens = opens;
+    this.changes = changes;
+  }
+
+  public record StoppedAllocation(UUID sessionId, long allocationEpoch, UUID runtimeGeneration) {
+    public StoppedAllocation {
+      if (sessionId == null || allocationEpoch <= 0) {
+        throw invalidStoppedProof();
+      }
+    }
+  }
+
+  /** Operator evidence of a later incarnation of the exact Docker container. */
+  public record StoppedWorkerProof(
+      String installationId,
+      UUID engineId,
+      String containerId,
+      Instant previousStartedAt,
+      int previousRestartCount,
+      Instant observedStartedAt,
+      int observedRestartCount,
+      UUID workerId,
+      UUID bootId,
+      List<StoppedAllocation> allocations) {
+    public StoppedWorkerProof {
+      if (installationId == null
+          || !installationId.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+          || engineId == null
+          || containerId == null
+          || !containerId.matches("[a-f0-9]{64}")
+          || previousStartedAt == null
+          || observedStartedAt == null
+          || !observedStartedAt.isAfter(previousStartedAt)
+          || previousRestartCount < 0
+          || observedRestartCount <= previousRestartCount
+          || workerId == null
+          || bootId == null
+          || allocations == null
+          || allocations.isEmpty()
+          || allocations.size() > 256) {
+        throw invalidStoppedProof();
+      }
+      Set<UUID> unique = new HashSet<>();
+      for (StoppedAllocation allocation : allocations) {
+        if (allocation == null || !unique.add(allocation.sessionId())) {
+          throw invalidStoppedProof();
+        }
+      }
+      allocations = List.copyOf(allocations);
+    }
+  }
+
+  /**
+   * Releases only exact bindings whose stopped process incarnation was verified by the operator.
+   * The caller validates installation/engine/container evidence and revokes enrollment in this same
+   * transaction. This is physical closure evidence, not evidence of any external command result.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public int confirmStopped(StoppedWorkerProof proof) {
+    if (proof == null || proof.observedStartedAt().isAfter(Instant.now())) {
+      throw invalidStoppedProof();
+    }
+    List<UUID> sessionIds = proof.allocations().stream().map(StoppedAllocation::sessionId).toList();
+    List<Claim> supplied = workers.claimsBySessionIds(sessionIds);
+    List<Claim> unresolved = workers.claims(proof.workerId());
+    List<Claim> subjects = new ArrayList<>(supplied);
+    subjects.addAll(unresolved);
+    workers.lockSubjects(subjects);
+    var worker = workers.lockWorker(proof.workerId()).orElseThrow(DomainException::notFound);
+    if (!worker.bootId().equals(proof.bootId())
+        || !worker.observedState().equals("OFFLINE")
+        || worker.registeredAt().isBefore(proof.previousStartedAt())
+        || !worker.registeredAt().isBefore(proof.observedStartedAt())
+        || !worker.heartbeatAt().isBefore(proof.observedStartedAt())) {
+      throw DomainException.conflict(
+          "STOPPED_WORKER_MISMATCH", "Worker is not the stopped incarnation");
+    }
+    supplied = workers.claimsBySessionIds(sessionIds);
+    List<Claim> current = workers.claims(proof.workerId());
+    if (!unresolved.stream()
+        .map(Claim::sessionId)
+        .toList()
+        .equals(current.stream().map(Claim::sessionId).toList())) {
+      throw DomainException.conflict(
+          "WORKER_INVENTORY_RETRY", "Worker claims changed during confirmation");
+    }
+    Map<UUID, StoppedAllocation> allocations = new HashMap<>();
+    for (StoppedAllocation allocation : proof.allocations()) {
+      allocations.put(allocation.sessionId(), allocation);
+    }
+    if (supplied.size() != sessionIds.size()
+        || current.stream().anyMatch(claim -> !allocations.containsKey(claim.sessionId()))) {
+      throw DomainException.conflict(
+          "STOPPED_ALLOCATION_MISMATCH", "Proof must cover every unresolved binding");
+    }
+    for (Claim claim : supplied) {
+      StoppedAllocation allocation = allocations.get(claim.sessionId());
+      if (!claim.workerId().equals(proof.workerId())
+          || !claim.workerBootId().equals(proof.bootId())
+          || claim.allocationEpoch() != allocation.allocationEpoch()
+          || !Objects.equals(claim.runtimeGeneration(), allocation.runtimeGeneration())) {
+        throw DomainException.conflict(
+            "STOPPED_ALLOCATION_MISMATCH", "Proof does not match the physical binding");
+      }
+    }
+    int closed = 0;
+    for (Claim claim : supplied) {
+      if (!physicallyReleased(claim)) {
+        closeClaim(claim);
+        closed++;
+      }
+    }
+    return closed;
+  }
+
+  private static DomainException invalidStoppedProof() {
+    return new DomainException(
+        422, "INVALID_STOPPED_WORKER_PROOF", "Stopped worker proof is invalid");
   }
 
   @Transactional
@@ -133,7 +255,7 @@ public class WorkerRegistryService {
       if (item == null) {
         if (authoritative) {
           // The worker waits for pending launches and fencing before this snapshot.
-          dispositionsChanged(workers.closed(claim.sessionId()));
+          closeClaim(claim);
         } else if (claim.runtimeGeneration() != null) {
           workers.recovering(claim.sessionId());
           mismatch = true;
@@ -164,7 +286,7 @@ public class WorkerRegistryService {
         continue;
       }
       if (item.path("closed").asBoolean()) {
-        dispositionsChanged(workers.closed(claim.sessionId()));
+        closeClaim(claim);
         continue;
       }
       if (claim.runtimeGeneration() == null) {
@@ -324,7 +446,7 @@ public class WorkerRegistryService {
   public void closed(UUID workerId, UUID bootId, UUID sessionId, JsonNode receipt) {
     Claim claim = lockClaim(sessionId);
     requireBinding(claim, workerId, bootId, receipt);
-    dispositionsChanged(workers.closed(sessionId));
+    closeClaim(claim);
   }
 
   @Transactional(readOnly = true)
@@ -429,6 +551,41 @@ public class WorkerRegistryService {
         && claim.recoveryStartedAt() != null
         && claim.recoveryStartedAt().plusSeconds(30).isBefore(Instant.now())) {
       dispositionsChanged(workers.lost(sessionId));
+      lifecycleChanged(claim);
+    }
+  }
+
+  private static boolean physicallyReleased(Claim claim) {
+    return claim.sessionState().equals("CLOSED")
+        && claim.state().equals("RELEASED")
+        && claim.bindingReleasedAt() != null;
+  }
+
+  private void closeClaim(Claim claim) {
+    if (physicallyReleased(claim)) {
+      return;
+    }
+    dispositionsChanged(workers.closed(claim.sessionId()));
+    lifecycleChanged(claim);
+  }
+
+  private void lifecycleChanged(Claim before) {
+    Claim after = workers.claim(before.sessionId());
+    if (after.sessionVersion() != before.sessionVersion()) {
+      changes.changed(after.userId(), "sessions", after.sessionId(), after.sessionVersion());
+    }
+    if (after.taskId() != null
+        && after.taskVersion() != null
+        && !after.taskVersion().equals(before.taskVersion())) {
+      changes.changed(after.userId(), "tasks", after.taskId(), after.taskVersion());
+    } else if (after.taskId() != null && after.sessionVersion() != before.sessionVersion()) {
+      changes.changed(
+          after.userId(),
+          "tasks",
+          after.taskId(),
+          after.sessionId(),
+          after.sessionVersion(),
+          Instant.now());
     }
   }
 

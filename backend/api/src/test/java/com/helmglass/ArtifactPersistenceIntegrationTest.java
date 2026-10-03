@@ -192,8 +192,13 @@ class ArtifactPersistenceIntegrationTest {
     assertMediaDenied(() -> service.metadata(fixture.actor(), artifactId));
     assertMediaDenied(() -> service.content(fixture.actor(), artifactId, "bytes=0-7"));
     assertMediaDenied(
-        () -> service.download(fixture.actor(), artifactId, content,
-            OutputStream.nullOutputStream(), Instant.now().plusSeconds(5)));
+        () ->
+            service.download(
+                fixture.actor(),
+                artifactId,
+                content,
+                OutputStream.nullOutputStream(),
+                Instant.now().plusSeconds(5)));
     verifyNoInteractions(storage, multipart);
     assertThat(repository.artifact(artifactId).state()).isEqualTo("READY");
 

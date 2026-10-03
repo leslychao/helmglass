@@ -4,10 +4,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.helmglass.api.DomainException;
+import com.helmglass.browser.application.WorkerRegistryService;
+import com.helmglass.browser.application.WorkerRegistryService.StoppedAllocation;
+import com.helmglass.browser.application.WorkerRegistryService.StoppedWorkerProof;
 import com.helmglass.enrollment.api.EnrollmentContracts;
 import com.helmglass.enrollment.application.WorkerEnrollmentService;
 import com.helmglass.enrollment.infrastructure.repository.EnrollmentRepository;
+import com.helmglass.identity.api.SecurityConfiguration;
 import com.helmglass.profile.infrastructure.ProfileKeyService;
+import com.helmglass.realtime.api.RealtimeConfiguration;
 import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -18,6 +23,7 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.sql.DriverManager;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -31,12 +37,16 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.vault.VaultException;
 import org.springframework.vault.authentication.TokenAuthentication;
 import org.springframework.vault.client.VaultClient;
 import org.springframework.vault.client.VaultEndpoint;
 import org.springframework.vault.core.VaultOperations;
 import org.springframework.vault.core.VaultTemplate;
+import org.springframework.web.context.WebApplicationContext;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -390,6 +400,7 @@ class VaultIntegrationTest {
           "0".repeat(64),
           UUID.randomUUID(),
           false);
+      verifyStoppedWorkerContext(database, runtime, session.operations(), ca, request, repository);
       new ApplicationContextRunner()
           .withUserConfiguration(WorkerRetirementApplication.EnrollmentProcess.class)
           .withBean(RuntimeSecrets.class, () -> runtime)
@@ -436,6 +447,115 @@ class VaultIntegrationTest {
               Files.readString(csr));
       assertThat(service.enroll(replacement, null).workerId()).isEqualTo(replacement.workerId());
     }
+  }
+
+  private void verifyStoppedWorkerContext(
+      PostgreSQLContainer database,
+      RuntimeSecrets runtime,
+      VaultOperations vault,
+      String ca,
+      EnrollmentContracts.Request request,
+      EnrollmentRepository repository)
+      throws Exception {
+    Path trust = directory.resolve("stopped-worker-ca.pem");
+    Files.writeString(trust, ca);
+    new ApplicationContextRunner()
+        .withUserConfiguration(WorkerRetirementApplication.StoppedWorkerProcess.class)
+        .withBean(RuntimeSecrets.class, () -> runtime)
+        .withBean(VaultOperations.class, () -> vault)
+        .withPropertyValues(
+            "spring.datasource.url=" + database.getJdbcUrl(),
+            "spring.datasource.username=" + database.getUsername(),
+            "spring.datasource.password=" + database.getPassword(),
+            "spring.jpa.hibernate.ddl-auto=validate",
+            "spring.data.redis.host=127.0.0.1",
+            "helm.public-origin=https://helm.example",
+            "helm.worker-registration-limit=1",
+            "helm.s3.endpoint=https://127.0.0.1:1",
+            "helm.s3.access-key=fixture",
+            "helm.s3.secret-key=fixture-secret",
+            "helm.internal-tls.trust-certificate=" + trust)
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(context).hasSingleBean(WorkerRegistryService.class);
+              assertThat(context).doesNotHaveBean(ScheduledAnnotationBeanPostProcessor.class);
+              assertThat(context).doesNotHaveBean(RealtimeConfiguration.class);
+              assertThat(context).doesNotHaveBean(SecurityConfiguration.class);
+              assertThat(context.getSourceApplicationContext())
+                  .isNotInstanceOf(WebApplicationContext.class);
+              assertThat(context).doesNotHaveBean("dispatcherServlet");
+              assertThat(context).doesNotHaveBean("usageProjectionStartup");
+              var enrollment = context.getBean(WorkerEnrollmentService.class);
+              var transaction =
+                  new TransactionTemplate(context.getBean(PlatformTransactionManager.class));
+              transaction.executeWithoutResult(
+                  status -> {
+                    enrollment.retireStoppedBoot(request.workerId(), request.bootId());
+                    assertThat(repository.find("fixture", request.workerId(), request.bootId()))
+                        .hasValueSatisfying(
+                            value -> assertThat(value.state()).isEqualTo("REVOKED"));
+                    status.setRollbackOnly();
+                  });
+              assertThat(repository.find("fixture", request.workerId(), request.bootId()))
+                  .hasValueSatisfying(value -> assertThat(value.state()).isEqualTo("READY"));
+
+              var proof =
+                  new StoppedWorkerProof(
+                      "fixture",
+                      UUID.randomUUID(),
+                      "a".repeat(64),
+                      Instant.now().minusSeconds(120),
+                      0,
+                      Instant.now().minusSeconds(60),
+                      1,
+                      request.workerId(),
+                      request.bootId(),
+                      List.of(new StoppedAllocation(UUID.randomUUID(), 1, null)));
+              var foreignProof =
+                  new StoppedWorkerProof(
+                      "other-installation",
+                      proof.engineId(),
+                      proof.containerId(),
+                      proof.previousStartedAt(),
+                      proof.previousRestartCount(),
+                      proof.observedStartedAt(),
+                      proof.observedRestartCount(),
+                      proof.workerId(),
+                      proof.bootId(),
+                      proof.allocations());
+              assertThatThrownBy(
+                      () ->
+                          WorkerRetirementApplication.confirmStopped(
+                              context.getSourceApplicationContext(), foreignProof))
+                  .isInstanceOf(IllegalArgumentException.class)
+                  .hasMessageContaining("another installation");
+              assertThatThrownBy(
+                      () ->
+                          WorkerRetirementApplication.confirmStopped(
+                              context.getSourceApplicationContext(), proof))
+                  .isInstanceOf(DomainException.class);
+              assertThat(repository.find("fixture", request.workerId(), request.bootId()))
+                  .hasValueSatisfying(value -> assertThat(value.state()).isEqualTo("READY"));
+
+              UUID retiredWorker = UUID.randomUUID();
+              UUID retiredBoot = UUID.randomUUID();
+              repository.reserve(
+                  "fixture",
+                  retiredWorker,
+                  retiredBoot,
+                  1,
+                  "1".repeat(64),
+                  UUID.randomUUID(),
+                  false);
+              enrollment.retireStoppedBoot(retiredWorker, retiredBoot);
+              enrollment.retireStoppedBoot(retiredWorker, retiredBoot);
+              assertThat(repository.find("fixture", retiredWorker, retiredBoot))
+                  .hasValueSatisfying(value -> assertThat(value.state()).isEqualTo("REVOKED"));
+              assertThat(repository.find("fixture", request.workerId(), request.bootId()))
+                  .hasValueSatisfying(value -> assertThat(value.state()).isEqualTo("READY"));
+              assertThat(repository.activeCount("other-installation")).isEqualTo(1);
+            });
   }
 
   private static void keytool(String... arguments) throws Exception {

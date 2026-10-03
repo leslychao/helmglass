@@ -9,6 +9,9 @@ import com.helmglass.api.MutationContext;
 import com.helmglass.browser.application.BrowserAllocationService;
 import com.helmglass.browser.application.BrowserStartupService;
 import com.helmglass.browser.application.WorkerRegistryService;
+import com.helmglass.browser.application.WorkerRegistryService.StoppedAllocation;
+import com.helmglass.browser.application.WorkerRegistryService.StoppedWorkerProof;
+import com.helmglass.browser.infrastructure.repository.BrowserCloseOutboxRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository;
 import com.helmglass.command.api.CommandContracts;
@@ -18,6 +21,9 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.task.api.TaskContracts;
 import com.helmglass.task.application.TaskLifecycleService;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +52,7 @@ class WorkerRegistryIntegrationTest {
   private final JsonSupport json;
   private final JdbcClient jdbc;
   private final TransactionTemplate transaction;
+  private final BrowserCloseOutboxRepository closeOutbox;
 
   @Autowired
   WorkerRegistryIntegrationTest(
@@ -59,6 +66,7 @@ class WorkerRegistryIntegrationTest {
       IdentityRepository identities,
       JsonSupport json,
       JdbcClient jdbc,
+      BrowserCloseOutboxRepository closeOutbox,
       PlatformTransactionManager transactions) {
     this.registry = registry;
     this.workers = workers;
@@ -70,6 +78,7 @@ class WorkerRegistryIntegrationTest {
     this.identities = identities;
     this.json = json;
     this.jdbc = jdbc;
+    this.closeOutbox = closeOutbox;
     transaction = new TransactionTemplate(transactions);
   }
 
@@ -78,6 +87,412 @@ class WorkerRegistryIntegrationTest {
       JsonNode assignment,
       Map<String, Object> permit,
       UUID generation) {}
+
+  @Test
+  void operatorProofClosesLostRuntimePreservesResultAndReplaysWithoutMutation() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    complete(runtime);
+    lose(runtime);
+    var proof = stoppedProof(runtime);
+    var dispatch = runtime.dispatch();
+    jdbc.sql("UPDATE tasks SET state='STOPPING',version=version+1 WHERE id=:id")
+        .param("id", dispatch.taskId())
+        .update();
+    transaction.executeWithoutResult(status -> closeOutbox.request(dispatch.sessionId()));
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM transactional_outbox WHERE aggregate_id=:id AND"
+                        + " event_type='worker.close' AND published_at IS NULL")
+                .param("id", dispatch.sessionId())
+                .query(Long.class)
+                .single())
+        .isEqualTo(1);
+    assertThat(confirm(proof)).isEqualTo(1);
+    var closed = workers.claim(dispatch.sessionId());
+    assertThat(closed.sessionState()).isEqualTo("CLOSED");
+    assertThat(closed.state()).isEqualTo("RELEASED");
+    assertThat(closed.bindingReleasedAt()).isNotNull();
+    assertThat(closed.taskState()).isEqualTo("CANCELLED");
+    assertThat(commandState(dispatch.commandId())).isEqualTo("SUCCEEDED");
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM transactional_outbox WHERE aggregate_id=:id AND"
+                        + " event_type='worker.close' AND published_at IS NULL")
+                .param("id", dispatch.sessionId())
+                .query(Long.class)
+                .single())
+        .isZero();
+    assertCurrentLifecycleEvents(runtime);
+    long events = lifecycleEvents(runtime);
+    assertThat(confirm(proof)).isZero();
+    assertThat(workers.claim(dispatch.sessionId())).isEqualTo(closed);
+    assertThat(lifecycleEvents(runtime)).isEqualTo(events);
+  }
+
+  @Test
+  void stoppedProofPreservesUnknownEffectAndReconciliationBarrier() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    var dispatch = runtime.dispatch();
+    start(runtime);
+    lose(runtime);
+    var proof = stoppedProof(runtime);
+    assertThat(commandState(dispatch.commandId())).isEqualTo("UNKNOWN");
+    assertThat(confirm(proof)).isEqualTo(1);
+    assertThat(commandState(dispatch.commandId())).isEqualTo("UNKNOWN");
+    assertThat(commandOperationState(dispatch.commandId())).isEqualTo("NEEDS_ATTENTION");
+    assertThat(workers.claim(dispatch.sessionId()).taskState()).isEqualTo("INTERRUPTED");
+    assertThat(
+            jdbc.sql("SELECT mutation_barrier FROM tasks WHERE id=:id")
+                .param("id", dispatch.taskId())
+                .query(Boolean.class)
+                .single())
+        .isTrue();
+    assertThat(
+            jdbc.sql("SELECT effect_state FROM command_attempts WHERE id=:id")
+                .param("id", dispatch.attemptId())
+                .query(String.class)
+                .single())
+        .isEqualTo("UNKNOWN");
+    assertThat(registry.claimCommandDelivery(dispatch.commandId())).isFalse();
+  }
+
+  @Test
+  void closingLostRuntimeInvalidatesTaskProjectionEvenWhenTaskVersionIsUnchanged() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    complete(runtime);
+    lose(runtime);
+    var proof = stoppedProof(runtime);
+    var before = workers.claim(runtime.dispatch().sessionId());
+    assertThat(confirm(proof)).isEqualTo(1);
+    var after = workers.claim(runtime.dispatch().sessionId());
+    assertThat(after.taskVersion()).isEqualTo(before.taskVersion());
+    assertThat(
+            jdbc.sql(
+                    """
+                    SELECT count(*) FROM transactional_outbox
+                    WHERE aggregate_id=:session AND aggregate_version=:version AND event_type='tasks'
+                      AND payload->>'resourceId'=:task
+                    """)
+                .param("session", after.sessionId())
+                .param("version", after.sessionVersion())
+                .param("task", after.taskId().toString())
+                .query(Long.class)
+                .single())
+        .isEqualTo(1);
+  }
+
+  @Test
+  void stoppedProofRequiresOfflineExactBootAndEarlierRegistryTimestamps() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    var liveProof = stoppedProof(runtime);
+    assertThatThrownBy(() -> confirm(liveProof)).isInstanceOf(DomainException.class);
+    lose(runtime);
+    var proof = stoppedProof(runtime);
+    var valid = proof;
+    var wrongBoot =
+        new StoppedWorkerProof(
+            proof.installationId(),
+            proof.engineId(),
+            proof.containerId(),
+            proof.previousStartedAt(),
+            0,
+            proof.observedStartedAt(),
+            1,
+            proof.workerId(),
+            UUID.randomUUID(),
+            proof.allocations());
+    assertThatThrownBy(() -> confirm(wrongBoot)).isInstanceOf(DomainException.class);
+    jdbc.sql("UPDATE browser_workers SET heartbeat_at=:at WHERE id=:id")
+        .param("id", proof.workerId())
+        .param("at", Timestamp.from(proof.observedStartedAt()))
+        .update();
+    assertThatThrownBy(() -> confirm(valid)).isInstanceOf(DomainException.class);
+    jdbc.sql("UPDATE browser_workers SET heartbeat_at=:at,registered_at=:at WHERE id=:id")
+        .param("id", proof.workerId())
+        .param("at", Timestamp.from(proof.observedStartedAt()))
+        .update();
+    assertThatThrownBy(() -> confirm(valid)).isInstanceOf(DomainException.class);
+    jdbc.sql("UPDATE browser_workers SET boot_id=:boot WHERE id=:id")
+        .param("id", proof.workerId())
+        .param("boot", UUID.randomUUID())
+        .update();
+    assertThatThrownBy(() -> confirm(valid)).isInstanceOf(DomainException.class);
+    assertThat(workers.claim(runtime.dispatch().sessionId()).bindingReleasedAt()).isNull();
+  }
+
+  @Test
+  void stoppedProofRejectsWrongEpochGenerationForeignAndOmittedClaims() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    lose(runtime);
+    var proof = stoppedProof(runtime);
+    var allocation = proof.allocations().getFirst();
+    List<List<StoppedAllocation>> invalid =
+        List.of(
+            List.of(
+                new StoppedAllocation(
+                    allocation.sessionId(),
+                    allocation.allocationEpoch() + 1,
+                    allocation.runtimeGeneration())),
+            List.of(
+                new StoppedAllocation(
+                    allocation.sessionId(), allocation.allocationEpoch(), UUID.randomUUID())),
+            List.of(new StoppedAllocation(UUID.randomUUID(), allocation.allocationEpoch(), null)));
+    for (List<StoppedAllocation> claims : invalid) {
+      assertThatThrownBy(() -> confirm(withAllocations(proof, claims)))
+          .isInstanceOf(DomainException.class);
+    }
+    Runtime foreign = allocate();
+    ready(foreign);
+    var foreignClaim =
+        new StoppedAllocation(
+            foreign.dispatch().sessionId(),
+            foreign.dispatch().allocationEpoch(),
+            foreign.generation());
+    assertThatThrownBy(() -> confirm(withAllocations(proof, List.of(allocation, foreignClaim))))
+        .isInstanceOf(DomainException.class);
+    jdbc.sql("UPDATE browser_sessions SET worker_id=:worker,worker_boot_id=:boot WHERE id=:id")
+        .param("id", foreign.dispatch().sessionId())
+        .param("worker", proof.workerId())
+        .param("boot", proof.bootId())
+        .update();
+    assertThatThrownBy(() -> confirm(proof)).isInstanceOf(DomainException.class);
+    assertThat(workers.claim(runtime.dispatch().sessionId()).bindingReleasedAt()).isNull();
+    assertThat(workers.claim(foreign.dispatch().sessionId()).bindingReleasedAt()).isNull();
+  }
+
+  @Test
+  void stoppedProofRollbackRestoresBindingTaskAndOutbox() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    complete(runtime);
+    lose(runtime);
+    var proof = stoppedProof(runtime);
+    var before = workers.claim(runtime.dispatch().sessionId());
+    long events = lifecycleEvents(runtime);
+    transaction.executeWithoutResult(
+        status -> {
+          assertThat(registry.confirmStopped(proof)).isEqualTo(1);
+          status.setRollbackOnly();
+        });
+    assertThat(workers.claim(runtime.dispatch().sessionId())).isEqualTo(before);
+    assertThat(lifecycleEvents(runtime)).isEqualTo(events);
+    assertThatThrownBy(() -> registry.confirmStopped(proof))
+        .isInstanceOf(org.springframework.transaction.IllegalTransactionStateException.class);
+  }
+
+  @Test
+  void stoppedProofIsBoundedImmutableAndAllowsNeverAssignedRuntime() {
+    Runtime runtime = allocate();
+    lose(runtime);
+    var proof = stoppedProof(runtime);
+    var claims = new ArrayList<>(proof.allocations());
+    var copied = withAllocations(proof, claims);
+    claims.clear();
+    assertThat(copied.allocations()).hasSize(1);
+    assertThat(copied.allocations().getFirst().runtimeGeneration()).isNull();
+    assertThat(confirm(copied)).isEqualTo(1);
+    assertThatThrownBy(() -> withAllocations(proof, List.of())).isInstanceOf(DomainException.class);
+    assertThatThrownBy(
+            () ->
+                withAllocations(
+                    proof, List.of(proof.allocations().getFirst(), proof.allocations().getFirst())))
+        .isInstanceOf(DomainException.class);
+    assertThatThrownBy(
+            () ->
+                new StoppedWorkerProof(
+                    proof.installationId(),
+                    proof.engineId(),
+                    "bad",
+                    proof.previousStartedAt(),
+                    0,
+                    proof.observedStartedAt(),
+                    1,
+                    proof.workerId(),
+                    proof.bootId(),
+                    proof.allocations()))
+        .isInstanceOf(DomainException.class);
+    var future =
+        new StoppedWorkerProof(
+            proof.installationId(),
+            proof.engineId(),
+            proof.containerId(),
+            proof.previousStartedAt(),
+            0,
+            Instant.now().plusSeconds(60),
+            1,
+            proof.workerId(),
+            proof.bootId(),
+            proof.allocations());
+    assertThatThrownBy(() -> confirm(future)).isInstanceOf(DomainException.class);
+  }
+
+  private int confirm(StoppedWorkerProof proof) {
+    return Objects.requireNonNull(transaction.execute(status -> registry.confirmStopped(proof)));
+  }
+
+  private StoppedWorkerProof stoppedProof(Runtime runtime) {
+    var dispatch = runtime.dispatch();
+    Instant observed = Instant.now().minusSeconds(1);
+    jdbc.sql(
+            "UPDATE browser_workers SET registered_at=:registered,heartbeat_at=:heartbeat WHERE"
+                + " id=:id")
+        .param("id", dispatch.workerId())
+        .param("registered", Timestamp.from(observed.minusSeconds(60)))
+        .param("heartbeat", Timestamp.from(observed.minusSeconds(30)))
+        .update();
+    var claim = workers.claim(dispatch.sessionId());
+    return new StoppedWorkerProof(
+        "test-installation",
+        UUID.randomUUID(),
+        "a".repeat(64),
+        observed.minusSeconds(120),
+        0,
+        observed,
+        1,
+        dispatch.workerId(),
+        dispatch.workerBootId(),
+        List.of(
+            new StoppedAllocation(
+                dispatch.sessionId(), dispatch.allocationEpoch(), claim.runtimeGeneration())));
+  }
+
+  private StoppedWorkerProof withAllocations(
+      StoppedWorkerProof proof, List<StoppedAllocation> allocations) {
+    return new StoppedWorkerProof(
+        proof.installationId(),
+        proof.engineId(),
+        proof.containerId(),
+        proof.previousStartedAt(),
+        proof.previousRestartCount(),
+        proof.observedStartedAt(),
+        proof.observedRestartCount(),
+        proof.workerId(),
+        proof.bootId(),
+        allocations);
+  }
+
+  @Test
+  void losingIdleRuntimePublishesTaskAndSessionWithoutAChangedCommand() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    complete(runtime);
+    var dispatch = runtime.dispatch();
+    lose(runtime);
+    assertThat(workers.claim(dispatch.sessionId()).taskState()).isEqualTo("INTERRUPTED");
+    assertThat(commandState(dispatch.commandId())).isEqualTo("SUCCEEDED");
+    assertCurrentLifecycleEvents(runtime);
+    long events = lifecycleEvents(runtime);
+    registry.expireRecovery(dispatch.sessionId());
+    assertThat(lifecycleEvents(runtime)).isEqualTo(events);
+  }
+
+  @Test
+  void physicalClosurePublishesCancellationWithoutAChangedCommand() {
+    Runtime runtime = allocate();
+    ready(runtime);
+    complete(runtime);
+    var dispatch = runtime.dispatch();
+    jdbc.sql("UPDATE tasks SET state='STOPPING',version=version+1 WHERE id=:id")
+        .param("id", dispatch.taskId())
+        .update();
+    registry.closed(
+        dispatch.workerId(), dispatch.workerBootId(), dispatch.sessionId(), inventory(runtime));
+    assertThat(workers.claim(dispatch.sessionId()).taskState()).isEqualTo("CANCELLED");
+    assertThat(commandState(dispatch.commandId())).isEqualTo("SUCCEEDED");
+    assertCurrentLifecycleEvents(runtime);
+    long events = lifecycleEvents(runtime);
+    registry.closed(
+        dispatch.workerId(), dispatch.workerBootId(), dispatch.sessionId(), inventory(runtime));
+    assertThat(lifecycleEvents(runtime)).isEqualTo(events);
+  }
+
+  private void complete(Runtime runtime) {
+    var dispatch = runtime.dispatch();
+    start(runtime);
+    Map<String, Object> result = new HashMap<>();
+    result.put("schemaVersion", 1);
+    result.put("commandId", dispatch.commandId());
+    result.put("attemptId", dispatch.attemptId());
+    result.put("taskId", dispatch.taskId());
+    result.put("browserSessionId", dispatch.sessionId());
+    result.put("allocationEpoch", dispatch.allocationEpoch());
+    result.put("controlEpoch", dispatch.controlEpoch());
+    result.put("pageEpoch", dispatch.pageEpoch());
+    result.put("privacyEpoch", dispatch.privacyEpoch());
+    result.put("status", "SUCCEEDED");
+    result.put("effectState", "CONFIRMED");
+    result.put("code", "HANDLER_COMPLETED");
+    result.put("digest", json.workerDigest(json.read(json.write(result))));
+    commands.acceptResult(
+        dispatch.workerId(), dispatch.workerBootId(), json.read(json.write(result)));
+  }
+
+  private void start(Runtime runtime) {
+    var dispatch = runtime.dispatch();
+    Map<String, Object> request = new HashMap<>(CommandExecutionService.scope(dispatch));
+    request.put("commandId", dispatch.commandId());
+    request.put("attemptId", dispatch.attemptId());
+    request.put("actionDigest", dispatch.payloadHash());
+    commands.start(dispatch.workerId(), dispatch.workerBootId(), json.read(json.write(request)));
+  }
+
+  private void lose(Runtime runtime) {
+    var dispatch = runtime.dispatch();
+    jdbc.sql("UPDATE browser_workers SET heartbeat_at=now()-interval '21 seconds' WHERE id=:id")
+        .param("id", dispatch.workerId())
+        .update();
+    registry.expireWorker(dispatch.workerId());
+    jdbc.sql(
+            "UPDATE browser_sessions SET recovery_started_at=now()-interval '31 seconds' WHERE"
+                + " id=:id")
+        .param("id", dispatch.sessionId())
+        .update();
+    registry.expireRecovery(dispatch.sessionId());
+  }
+
+  private String commandState(UUID commandId) {
+    return jdbc.sql("SELECT state FROM task_commands WHERE id=:id")
+        .param("id", commandId)
+        .query(String.class)
+        .single();
+  }
+
+  private void assertCurrentLifecycleEvents(Runtime runtime) {
+    var dispatch = runtime.dispatch();
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM transactional_outbox o JOIN tasks t ON"
+                        + " t.id=o.aggregate_id WHERE t.id=:id AND o.event_type='tasks' AND"
+                        + " o.aggregate_version=t.version")
+                .param("id", dispatch.taskId())
+                .query(Long.class)
+                .single())
+        .isEqualTo(1);
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM transactional_outbox o JOIN browser_sessions s ON"
+                        + " s.id=o.aggregate_id WHERE s.id=:id AND o.event_type='sessions' AND"
+                        + " o.aggregate_version=s.version")
+                .param("id", dispatch.sessionId())
+                .query(Long.class)
+                .single())
+        .isEqualTo(1);
+  }
+
+  private long lifecycleEvents(Runtime runtime) {
+    return jdbc.sql(
+            "SELECT count(*) FROM transactional_outbox WHERE aggregate_id IN (:task,:session)"
+                + " AND event_type IN ('tasks','sessions')")
+        .param("task", runtime.dispatch().taskId())
+        .param("session", runtime.dispatch().sessionId())
+        .query(Long.class)
+        .single();
+  }
 
   @Test
   void physicalLaunchHasOneDurablePermitAndRejectsChangedInstruction() {

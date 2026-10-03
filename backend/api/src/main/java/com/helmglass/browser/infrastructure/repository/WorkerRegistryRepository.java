@@ -52,9 +52,18 @@ public class WorkerRegistryRepository {
       String taskState,
       String ownerKind,
       String privacy,
-      Instant readyAt) {}
+      Instant readyAt,
+      Instant bindingReleasedAt,
+      long sessionVersion,
+      Long taskVersion) {}
 
-  public record Worker(UUID id, UUID bootId, String desiredMode, String observedState) {}
+  public record Worker(
+      UUID id,
+      UUID bootId,
+      String desiredMode,
+      String observedState,
+      Instant registeredAt,
+      Instant heartbeatAt) {}
 
   public record CommandDisposition(UUID userId, UUID taskId, UUID commandId) {}
 
@@ -66,7 +75,8 @@ public class WorkerRegistryRepository {
       s.budget_deadline_at,s.recovery_started_at,s.recovery_control_pending,s.recovery_mode,
       l.epoch control_epoch,s.page_epoch,s.privacy_epoch,p.version policy_version,
       coalesce(t.instruction_revision,0) instruction_revision,u.state account_state,t.state task_state,
-      l.owner_kind,s.privacy,s.ready_at FROM browser_sessions s
+      l.owner_kind,s.privacy,s.ready_at,s.binding_released_at,s.version session_version,
+      t.version task_version FROM browser_sessions s
       JOIN browser_allocations a ON a.session_id=s.id
       JOIN browser_control_leases l ON l.session_id=s.id
       JOIN application_users u ON u.id=s.user_id JOIN user_policies p ON p.user_id=s.user_id
@@ -85,7 +95,8 @@ public class WorkerRegistryRepository {
     List<Claim> claims =
         jdbc.sql(
                 CLAIM_SELECT
-                    + " WHERE s.worker_id=:worker AND a.state<>'RELEASED' ORDER BY s.id LIMIT 257")
+                    + " WHERE s.worker_id=:worker AND (a.state<>'RELEASED' OR s.binding_released_at"
+                    + " IS NULL) ORDER BY s.id LIMIT 257")
             .param("worker", workerId)
             .query(Claim.class)
             .list();
@@ -94,6 +105,13 @@ public class WorkerRegistryRepository {
           "WORKER_RECONCILIATION_LIMIT", "Unresolved claims require operator review");
     }
     return claims;
+  }
+
+  public List<Claim> claimsBySessionIds(List<UUID> sessionIds) {
+    return jdbc.sql(CLAIM_SELECT + " WHERE s.id IN (:ids) ORDER BY s.id")
+        .param("ids", sessionIds)
+        .query(Claim.class)
+        .list();
   }
 
   public void lockSubjects(List<Claim> claims) {
@@ -124,8 +142,8 @@ public class WorkerRegistryRepository {
 
   public Optional<Worker> lockWorker(UUID workerId) {
     return jdbc.sql(
-            "SELECT id,boot_id,desired_mode,observed_state FROM browser_workers WHERE id=:id FOR"
-                + " UPDATE")
+            "SELECT id,boot_id,desired_mode,observed_state,registered_at,heartbeat_at FROM"
+                + " browser_workers WHERE id=:id FOR UPDATE")
         .param("id", workerId)
         .query(Worker.class)
         .optional();
@@ -525,7 +543,7 @@ public class WorkerRegistryRepository {
   public List<Worker> recoveryWorkers() {
     return jdbc.sql(
             """
-            SELECT id,boot_id,desired_mode,observed_state FROM browser_workers w
+            SELECT id,boot_id,desired_mode,observed_state,registered_at,heartbeat_at FROM browser_workers w
             WHERE w.heartbeat_at>now()-interval '20 seconds'
             AND EXISTS(SELECT 1 FROM browser_sessions s WHERE s.worker_id=w.id AND s.worker_boot_id=w.boot_id
             AND s.recovery_control_pending AND s.state='RECOVERING') ORDER BY w.id LIMIT 50
