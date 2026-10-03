@@ -249,37 +249,6 @@ public class BrowserRepository {
         .orElse(null);
   }
 
-  public List<Map<String, Object>> pendingClosures() {
-    return jdbc.sql(
-            """
-            WITH due AS (
-              SELECT s.id FROM browser_sessions s LEFT JOIN tasks t ON t.id=s.task_id
-              JOIN browser_allocations a ON a.session_id=s.id
-              WHERE s.binding_released_at IS NULL AND s.close_attempts<8 AND s.next_close_at<=now()
-              AND (NOT EXISTS(SELECT 1 FROM browser_session_operations o WHERE o.session_id=s.id
-                AND o.state IN ('QUIESCING','SAVING','RESUMING') AND o.deadline>now())
-                OR EXISTS(SELECT 1 FROM application_users u WHERE u.id=s.user_id AND u.state<>'ACTIVE'))
-              AND (s.state NOT IN ('ACTIVE','STOPPING')
-                OR EXISTS(SELECT 1 FROM browser_session_operations o WHERE o.session_id=s.id
-                  AND (o.state IN ('CLOSING','FAILED','UNKNOWN','SUCCEEDED') OR o.deadline<=now()))
-                OR EXISTS(SELECT 1 FROM application_users u WHERE u.id=s.user_id AND u.state<>'ACTIVE')
-                OR s.runtime_generation IS NULL)
-              AND (t.state IN ('STOPPING','COMPLETED','FAILED','CANCELLED') OR s.state IN ('STOPPING','LOST')
-              OR s.budget_deadline_at<=now() OR s.idle_deadline_at<=now()
-              OR s.runtime_generation IS NULL AND a.dispatch_attempts>=6
-              OR EXISTS(SELECT 1 FROM task_commands c WHERE c.expected_session_id=s.id
-              AND c.state='DISPATCHED' AND (c.delivery_attempts>=6 OR c.deadline<=now())))
-              ORDER BY s.next_close_at LIMIT 100 FOR UPDATE OF s SKIP LOCKED
-            ) UPDATE browser_sessions s SET state=CASE WHEN s.state='LOST' THEN 'LOST' ELSE 'STOPPING' END,
-            close_attempts=close_attempts+1,version=version+1,
-            next_close_at=now()+make_interval(secs=>least(30,power(2,close_attempts+1)::int))
-            FROM due WHERE s.id=due.id
-            RETURNING s.id,s.worker_id AS "workerId",s.allocation_epoch AS "allocationEpoch"
-            """)
-        .query()
-        .listOfRows();
-  }
-
   public void waitForResource(UUID commandId, String reason) {
     jdbc.sql(
             """

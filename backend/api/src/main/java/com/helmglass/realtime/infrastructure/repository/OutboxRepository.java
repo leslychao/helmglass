@@ -21,13 +21,15 @@ public class OutboxRepository {
     return jdbc.sql("""
         UPDATE transactional_outbox SET retry_at=now()+interval '10 seconds'
         WHERE id IN (SELECT id FROM transactional_outbox WHERE published_at IS NULL AND retry_at<=now()
+        AND event_type<>'worker.close'
         ORDER BY retry_at,id LIMIT 100 FOR UPDATE SKIP LOCKED)
         RETURNING id,user_id,aggregate_id,event_type,payload::text
         """).query(Intent.class).list();
   }
 
   public void published(UUID id) {
-    jdbc.sql("UPDATE transactional_outbox SET published_at=now() WHERE id=:id AND published_at IS NULL")
+    jdbc.sql("UPDATE transactional_outbox SET published_at=now() WHERE id=:id AND published_at IS NULL"
+        + " AND event_type<>'worker.close'")
         .param("id", id).update();
   }
 }

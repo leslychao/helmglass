@@ -16,9 +16,11 @@ import org.springframework.stereotype.Repository;
 public class WorkerRegistryRepository {
   private static final int MAX_COMMAND_ALLOCATION_ATTEMPTS = 3;
   private final JdbcClient jdbc;
+  private final BrowserCloseOutboxRepository closeOutbox;
 
-  public WorkerRegistryRepository(JdbcClient jdbc) {
+  public WorkerRegistryRepository(JdbcClient jdbc, BrowserCloseOutboxRepository closeOutbox) {
     this.jdbc = jdbc;
+    this.closeOutbox = closeOutbox;
   }
 
   public record Claim(
@@ -438,6 +440,7 @@ public class WorkerRegistryRepository {
             """)
         .param("id", sessionId)
         .update();
+    closeOutbox.confirmed(sessionId);
     return List.copyOf(changed);
   }
 

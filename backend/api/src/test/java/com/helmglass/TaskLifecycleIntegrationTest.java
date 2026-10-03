@@ -8,6 +8,7 @@ import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.api.PageQuery;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
+import com.helmglass.browser.infrastructure.repository.BrowserCloseOutboxRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.command.infrastructure.repository.CommandRepository;
 import com.helmglass.continuation.application.TaskContinuationService;
@@ -77,6 +78,7 @@ class TaskLifecycleIntegrationTest {
     ContinuationRepository.class,
     CommandRepository.class,
     BrowserRepository.class,
+    BrowserCloseOutboxRepository.class,
     ControlRepository.class,
     UserPolicyService.class,
     PolicyRepository.class,

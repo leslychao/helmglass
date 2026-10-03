@@ -30,6 +30,7 @@ public class BrowserScheduler {
   private final BrowserOpenService opens;
   private final BrowserStartupRepository startups;
   private final BrowserSessionOperationService sessionOperations;
+  private final BrowserCloseDeliveryService closures;
 
   public BrowserScheduler(
       BrowserAllocationService allocator,
@@ -42,7 +43,8 @@ public class BrowserScheduler {
       ConnectionLoginService logins,
       BrowserOpenService opens,
       BrowserStartupRepository startups,
-      BrowserSessionOperationService sessionOperations) {
+      BrowserSessionOperationService sessionOperations,
+      BrowserCloseDeliveryService closures) {
     this.allocator = allocator;
     this.leadership = leadership;
     this.tasks = tasks;
@@ -54,6 +56,7 @@ public class BrowserScheduler {
     this.opens = opens;
     this.startups = startups;
     this.sessionOperations = sessionOperations;
+    this.closures = closures;
   }
 
   @Scheduled(fixedDelay = 500)
@@ -143,17 +146,6 @@ public class BrowserScheduler {
       }
     }
     sessionOperations.prepareDueClosures();
-    for (Map<String, Object> session : browsers.pendingClosures()) {
-      gateway.send(
-          (UUID) session.get("workerId"),
-          WorkerGateway.envelope(
-              "close",
-              UUID.randomUUID(),
-              Map.of(
-                  "browserSessionId",
-                  session.get("id"),
-                  "allocationEpoch",
-                  session.get("allocationEpoch"))));
-    }
+    closures.dispatch();
   }
 }

@@ -339,6 +339,10 @@ public class WorkerGateway extends TextWebSocketHandler {
   }
 
   public boolean send(UUID workerId, Map<String, Object> message) {
+    return send(workerId, null, message);
+  }
+
+  public boolean send(UUID workerId, UUID expectedBootId, Map<String, Object> message) {
     if ("assign".equals(message.get("type"))) {
       JsonNode assignment =
           registry.assignment(workerId, json.read(json.write(message.get("assignment"))));
@@ -346,7 +350,8 @@ public class WorkerGateway extends TextWebSocketHandler {
       message.put("assignment", assignment);
     }
     WorkerChannel channel = workers.get(workerId);
-    if (channel == null || !channel.socket().isOpen()) {
+    if (channel == null || !channel.socket().isOpen()
+        || expectedBootId != null && !expectedBootId.equals(channel.bootId())) {
       return false;
     }
     try {

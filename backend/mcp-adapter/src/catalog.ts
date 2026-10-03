@@ -71,9 +71,10 @@ export type ToolName = keyof typeof toolSchemas;
 export const supportedScopes = ['tasks:read', 'tasks:write', 'browser:view', 'browser:execute', 'results:write'];
 export function scopesForTool(name: ToolName): string[] {
   if (name === 'connections.resolve') return ['tasks:write'];
-  if (name === 'browser.attach_view' || name === 'tasks.view') return ['browser:view'];
+  if (name === 'browser.attach_view' || name === 'tasks.view') return ['tasks:read', 'browser:view'];
   if (name.startsWith('browser.') || name === 'media.capture') return ['browser:execute'];
-  if (name === 'results.publish' || name === 'tasks.complete') return ['results:write'];
+  if (name === 'tasks.complete') return ['tasks:write', 'results:write'];
+  if (name === 'results.publish') return ['results:write'];
   return [readOnlyTools.has(name) ? 'tasks:read' : 'tasks:write'];
 }
 export const readOnlyTools = new Set<ToolName>(['tasks.get', 'tasks.context', 'tasks.list', 'audio.get', 'audio.segments',

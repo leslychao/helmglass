@@ -10,9 +10,11 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class ControlRepository {
   private final JdbcClient jdbc;
+  private final BrowserCloseOutboxRepository closeOutbox;
 
-  public ControlRepository(JdbcClient jdbc) {
+  public ControlRepository(JdbcClient jdbc, BrowserCloseOutboxRepository closeOutbox) {
     this.jdbc = jdbc;
+    this.closeOutbox = closeOutbox;
   }
 
   public record Lease(
@@ -320,8 +322,6 @@ public class ControlRepository {
   }
 
   public void closeRequested(UUID id) {
-    jdbc.sql("UPDATE browser_sessions SET state='STOPPING',version=version+1 WHERE id=:id")
-        .param("id", id)
-        .update();
+    closeOutbox.request(id);
   }
 }

@@ -128,6 +128,10 @@ test('tool discovery separates model execution from widget callbacks and keeps r
     assert.equal(tools.get('tasks.get')?.['openai/outputTemplate'], undefined);
     assert.deepEqual(tools.get('tasks.get')?.ui, { visibility: ['model'] });
     assert.equal(tools.get('browser.execute')?.['openai/widgetAccessible'], undefined);
+    for (const name of ['tasks.view', 'browser.attach_view']) {
+      assert.deepEqual(tools.get(name)?.securitySchemes, [{ type: 'oauth2', scopes: ['tasks:read', 'browser:view'] }]);
+    }
+    assert.deepEqual(tools.get('tasks.complete')?.securitySchemes, [{ type: 'oauth2', scopes: ['tasks:write', 'results:write'] }]);
   } finally { await handler.close(); }
 });
 

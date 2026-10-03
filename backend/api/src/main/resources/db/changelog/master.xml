@@ -45,4 +45,7 @@
     </preConditions>
     <sqlFile path="028-retire-backup-ledger.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="029-browser-close-outbox" author="helmglass">
+    <sqlFile path="029-browser-close-outbox.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

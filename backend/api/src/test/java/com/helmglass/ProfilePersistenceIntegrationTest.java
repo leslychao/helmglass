@@ -18,6 +18,7 @@ import com.helmglass.browser.application.BrowserControlService;
 import com.helmglass.browser.application.BrowserSessionOperationService;
 import com.helmglass.browser.application.WorkerProtocol;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
+import com.helmglass.browser.infrastructure.repository.BrowserCloseOutboxRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserSessionOperationRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.connection.application.ConnectionLoginService;
@@ -107,6 +108,7 @@ class ProfilePersistenceIntegrationTest {
   private final BrowserSessionOperationService sessionOperations;
   private final BrowserSessionOperationRepository sessionRepository;
   private final BrowserRepository browsers;
+  private final BrowserCloseOutboxRepository closeOutbox;
   private final ControlRepository controls;
   private final OperationRepository operations;
   private final JsonSupport json;
@@ -127,6 +129,7 @@ class ProfilePersistenceIntegrationTest {
       BrowserSessionOperationService sessionOperations,
       BrowserSessionOperationRepository sessionRepository,
       BrowserRepository browsers,
+      BrowserCloseOutboxRepository closeOutbox,
       ControlRepository controls,
       OperationRepository operations,
       JsonSupport json,
@@ -141,6 +144,7 @@ class ProfilePersistenceIntegrationTest {
     this.sessionOperations = sessionOperations;
     this.sessionRepository = sessionRepository;
     this.browsers = browsers;
+    this.closeOutbox = closeOutbox;
     this.controls = controls;
     this.operations = operations;
     this.json = json;
@@ -703,8 +707,9 @@ class ProfilePersistenceIntegrationTest {
     assertThat(operation.initiator()).isEqualTo("SYSTEM");
     assertThat(operation.loginId()).isNull();
     assertThat(operation.controllerInstanceId()).isNull();
-    assertThat(browsers.pendingClosures())
-        .noneMatch(row -> profile.sessionId().equals(row.get("id")));
+    closeOutbox.enqueueDue();
+    assertThat(closeOutbox.due())
+        .noneMatch(row -> profile.sessionId().equals(row.sessionId()));
     sessionOperations.acknowledge(
         profile.workerId(),
         profile.bootId(),
@@ -728,8 +733,9 @@ class ProfilePersistenceIntegrationTest {
         "e".repeat(64),
         new ByteArrayInputStream(new byte[64]));
     sessionOperations.progress(operationId);
-    assertThat(browsers.pendingClosures())
-        .anyMatch(row -> profile.sessionId().equals(row.get("id")));
+    closeOutbox.enqueueDue();
+    assertThat(closeOutbox.due())
+        .anyMatch(row -> profile.sessionId().equals(row.sessionId()));
     assertThat(operations.owned(profile.userId(), operationId).state()).isEqualTo("PENDING");
     jdbc.sql("UPDATE browser_sessions SET state='CLOSED',binding_released_at=now() WHERE id=:id")
         .param("id", profile.sessionId())
@@ -784,8 +790,9 @@ class ProfilePersistenceIntegrationTest {
             "UPDATE application_users SET state='BLOCKED',access_epoch=access_epoch+1 WHERE id=:id")
         .param("id", profile.userId())
         .update();
-    assertThat(browsers.pendingClosures())
-        .anyMatch(row -> profile.sessionId().equals(row.get("id")));
+    closeOutbox.enqueueDue();
+    assertThat(closeOutbox.due())
+        .anyMatch(row -> profile.sessionId().equals(row.sessionId()));
     assertThatThrownBy(
             () ->
                 service.upload(
