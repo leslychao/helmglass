@@ -43,9 +43,9 @@ public class AdministrationService {
   }
 
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
-  public Map<String, Object> browsers(AuthenticatedActor actor, PageQuery query) {
+  public Map<String, Object> browsers(AuthenticatedActor actor, AdminContracts.BrowserQuery query) {
     actor.requireAdmin();
-    return administration.browsers(query);
+    return administration.browsers(actor.userId(), query);
   }
 
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)

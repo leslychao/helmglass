@@ -14,6 +14,7 @@ import com.helmglass.api.JsonSupport;
 import com.helmglass.browser.api.WorkerSignalingGateway;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
+import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.realtime.api.ViewerSignalingGateway;
 import com.helmglass.realtime.application.ChannelTicketService;
@@ -26,6 +27,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -119,6 +121,30 @@ class ViewerSignalingGatewayTest {
       verify(socket).close(new CloseStatus(4403, "CHANNEL_ORIGIN_REJECTED"));
     }
     verifyNoInteractions(tickets, workers);
+  }
+
+  @Test
+  void acceptsTheForwardedWebOAuthHeaderOnlyWithTheSameAdmittedLogin() throws Exception {
+    var socket = socket(Surface.WEB);
+    socket.getHandshakeHeaders().setBearerAuth("upstream-oauth-token");
+    authenticate(socket, ticket(Surface.WEB));
+    verify(socket, never()).close(any());
+    verify(workers).send(eq(workerId), any());
+  }
+
+  @Test
+  void rejectsTicketsFromAnotherWebUserLoginOrAccountEpoch() throws Exception {
+    for (AuthenticatedActor actor :
+        List.of(
+            actor(UUID.randomUUID(), loginId, 1),
+            actor(userId, UUID.randomUUID(), 1),
+            actor(userId, loginId, 2))) {
+      var socket = socket(Surface.WEB);
+      when(socket.getAttributes()).thenReturn(Map.of(AuthenticatedActor.class.getName(), actor));
+      authenticate(socket, ticket(Surface.WEB));
+      verify(socket).close(new CloseStatus(4403, "TICKET_BINDING_MISMATCH"));
+    }
+    verifyNoInteractions(browsers, workers);
   }
 
   @Test
@@ -298,8 +324,26 @@ class ViewerSignalingGatewayTest {
                     ? "wss://helm.example.test/stream/v1/widget/signaling/" + sessionId
                     : webPath()));
     when(socket.getHandshakeHeaders()).thenReturn(headers);
+    when(socket.getAttributes())
+        .thenReturn(
+            surface == Surface.WIDGET
+                ? Map.of()
+                : Map.of(AuthenticatedActor.class.getName(), actor(userId, loginId, 1)));
     when(socket.isOpen()).thenReturn(true);
     return socket;
+  }
+
+  private static AuthenticatedActor actor(UUID user, UUID login, long accessEpoch) {
+    return new AuthenticatedActor(
+        user,
+        login,
+        null,
+        "helm-web",
+        "Fixture",
+        "fixture@example.test",
+        accessEpoch,
+        Set.of(),
+        false);
   }
 
   private String webPath() {

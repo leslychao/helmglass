@@ -18,7 +18,7 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class ChangeRepository {
   private static final UUID ADMIN_SCOPE = UUID.fromString("00000000-0000-0000-0000-000000000001");
-  private static final Set<String> ADMIN_LIST_RESOURCES = Set.of("users", "audit");
+  private static final Set<String> ADMIN_LIST_RESOURCES = Set.of("users", "audit", "nodes", "sessions", "userTasks");
   private final JdbcClient jdbc;
   private final JsonSupport json;
 
@@ -46,7 +46,7 @@ public class ChangeRepository {
           case "tasks" -> List.of("tasks", "usage", "users", "userTasks", "userDays");
           case "operations" -> List.of("operations", "users", "audit");
           case "usage" -> List.of("usage", "userDays");
-          case "sessions" -> List.of("sessions", "users");
+          case "sessions" -> List.of("sessions", "users", "nodes", "userTasks");
           default -> List.of(resource);
         };
     int inserted =

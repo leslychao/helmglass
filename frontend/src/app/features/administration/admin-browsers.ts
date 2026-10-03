@@ -112,7 +112,7 @@ interface BrowserIntent {
           может держать одновременно.
         </p>
         <hg-data-table
-          [columns]="workerColumns"
+          [page]="pool.workers" (changed)="query.change($event)" [columns]="workerColumns"
           [rows]="workerRows()"
           [showEmpty]="true"
           [actions]="true"
@@ -120,11 +120,6 @@ interface BrowserIntent {
           emptyTitle="Узлов нет"
           emptyText="Нет узлов, соответствующих фильтрам."
         />
-        @if (pool.workerTotal > pool.workers.length) {
-          <p class="a-effective-note">
-            Показано {{ pool.workers.length }} из {{ pool.workerTotal }} узлов. Уточните фильтры.
-          </p>
-        }
       </section>
       <section class="panel a-section">
         <header class="a-section-header">
@@ -132,7 +127,7 @@ interface BrowserIntent {
           <small>Одна строка — один браузер</small>
         </header>
         <hg-data-table
-          [columns]="allocationColumns"
+          [page]="pool.allocations" (changed)="allocationQuery.change($event)" [columns]="allocationColumns"
           [rows]="allocationRows()"
           [showEmpty]="true"
           [actions]="true"
@@ -140,11 +135,6 @@ interface BrowserIntent {
           emptyTitle="Нет выделенных браузеров"
           emptyText="Сессии появятся после выделения браузера."
         />
-        @if (pool.allocationTotal > pool.allocations.length) {
-          <p class="a-effective-note">
-            Показано {{ pool.allocations.length }} из {{ pool.allocationTotal }} браузеров.
-          </p>
-        }
       </section>
       <section class="panel a-section">
         <header class="a-section-header">
@@ -152,17 +142,12 @@ interface BrowserIntent {
           <small>Браузер ещё не выделен</small>
         </header>
         <hg-data-table
-          [columns]="queueColumns"
+          [page]="pool.queue" (changed)="queueQuery.change($event)" [columns]="queueColumns"
           [rows]="queueRows()"
           [showEmpty]="true"
           emptyTitle="Очередь пуста"
           emptyText="Нет задач, ожидающих выделения браузера."
         />
-        @if (pool.queueTotal > pool.queue.length) {
-          <p class="a-effective-note">
-            Показано {{ pool.queue.length }} из {{ pool.queueTotal }} задач.
-          </p>
-        }
       </section>
     }
     @if (action.receipt()?.operationId; as operation) {
@@ -208,7 +193,9 @@ interface BrowserIntent {
     }`,
 })
 export class AdminBrowsers {
-  readonly query = new TableQuery();
+  readonly query = new TableQuery({ prefix: 'workers' });
+  readonly allocationQuery = new TableQuery({ prefix: 'allocations' });
+  readonly queueQuery = new TableQuery({ prefix: 'queue' });
   readonly pool = new ServerResource<BrowserPool>(['nodes', 'sessions', 'userTasks', 'users']);
   readonly overview = new ServerResource<AdminOverview>([
     'nodes',
@@ -230,15 +217,15 @@ export class AdminBrowsers {
   draftStates: string[] = [];
   reason = '';
   readonly workerColumns: Column[] = [
-    { key: 'id', title: 'Узел' },
-    { key: 'state', title: 'Состояние', kind: 'status' },
-    { key: 'occupied', title: 'Занято' },
-    { key: 'capacity', title: 'Вместимость' },
-    { key: 'free', title: 'Доступно для запуска' },
+    { key: 'id', sort: 'id', title: 'Узел' },
+    { key: 'state', sort: 'state', title: 'Состояние', kind: 'status' },
+    { key: 'occupied', sort: 'occupied', title: 'Занято' },
+    { key: 'capacity', sort: 'capacity', title: 'Вместимость' },
+    { key: 'free', sort: 'free', title: 'Доступно для запуска' },
   ];
   readonly workerRows = computed<TableItem[]>(
     () =>
-      this.pool.data()?.workers.map((worker) => ({
+      this.pool.data()?.workers.items.map((worker) => ({
         id: worker.id,
         values: {
           id: worker.id,
@@ -255,15 +242,15 @@ export class AdminBrowsers {
       })) ?? [],
   );
   readonly allocationColumns: Column[] = [
-    { key: 'user', title: 'Пользователь', kind: 'person' },
-    { key: 'session', title: 'Браузер' },
+    { key: 'user', title: 'Пользователь', kind: 'person', sort: 'userName' },
+    { key: 'session', title: 'Браузер', sort: 'sessionId' },
     { key: 'state', title: 'Состояние', kind: 'status' },
-    { key: 'worker', title: 'Узел' },
-    { key: 'task', title: 'Задача' },
+    { key: 'worker', title: 'Узел', sort: 'workerId' },
+    { key: 'task', title: 'Задача', sort: 'taskId' },
   ];
   readonly allocationRows = computed<TableItem[]>(
     () =>
-      this.pool.data()?.allocations.map((allocation) => ({
+      this.pool.data()?.allocations.items.map((allocation) => ({
         id: allocation.id,
         link: '/admin/users/' + allocation.userId,
         actionDisabled: allocation.taskId === null,
@@ -279,12 +266,12 @@ export class AdminBrowsers {
   );
   readonly queueColumns: Column[] = [
     { key: 'user', title: 'Пользователь', kind: 'person' },
-    { key: 'task', title: 'Задача' },
-    { key: 'reason', title: 'Причина ожидания' },
+    { key: 'task', title: 'Задача', sort: 'taskId' },
+    { key: 'reason', title: 'Причина ожидания', sort: 'waitReason' },
   ];
   readonly queueRows = computed<TableItem[]>(
     () =>
-      this.pool.data()?.queue.map((task) => ({
+      this.pool.data()?.queue.items.map((task) => ({
         id: task.taskId,
         link: '/admin/users/' + task.userId,
         values: {
@@ -298,7 +285,11 @@ export class AdminBrowsers {
 
   constructor() {
     this.overview.load('/admin/overview');
-    effect(() => this.pool.load('/admin/browsers', this.query.value()));
+    effect(() => {
+      const queries = { workers: this.query.value(), allocations: this.allocationQuery.value(), queue: this.queueQuery.value() };
+      this.pool.load('/admin/browsers', Object.fromEntries(Object.entries(queries).flatMap(([prefix, query]) =>
+        Object.entries(query).map(([name, value]) => [prefix + '.' + name, value]))));
+    });
   }
   openFilters() {
     this.draftQuery = this.query.text('q');
@@ -332,7 +323,7 @@ export class AdminBrowsers {
     });
   }
   changeWorker(id: string) {
-    const worker = this.pool.data()?.workers.find((item) => item.id === id);
+    const worker = this.pool.data()?.workers.items.find((item) => item.id === id);
     if (!worker || this.action.pending() || this.action.unknown()) return;
     const enable = worker.desiredMode === 'DRAINING';
     this.reason = '';
@@ -346,7 +337,7 @@ export class AdminBrowsers {
     });
   }
   stopAllocationTask(id: string) {
-    const taskId = this.pool.data()?.allocations.find((item) => item.id === id)?.taskId;
+    const taskId = this.pool.data()?.allocations.items.find((item) => item.id === id)?.taskId;
     if (!taskId || this.action.pending() || this.action.unknown()) return;
     this.reason = '';
     this.intent.set({

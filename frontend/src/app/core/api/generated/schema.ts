@@ -1722,12 +1722,9 @@ export interface components {
             sessionState: string;
         };
         BrowserPool: {
-            workers: components["schemas"]["Worker"][];
-            allocations: components["schemas"]["Allocation"][];
-            workerTotal: number;
-            allocationTotal: number;
-            queueTotal: number;
-            queue: components["schemas"]["AdminBrowserQueueItem"][];
+            workers: components["schemas"]["AdminWorkerPage"];
+            allocations: components["schemas"]["AdminAllocationPage"];
+            queue: components["schemas"]["AdminBrowserQueuePage"];
         };
         AuditEntry: {
             /** Format: uuid */
@@ -2496,6 +2493,8 @@ export interface components {
             waitReason: string | null;
             /** Format: date-time */
             createdAt: string;
+            /** Format: uuid */
+            id: string;
         };
         AdminAuditValues: {
             accountState?: string;
@@ -2506,6 +2505,42 @@ export interface components {
             acceptingAllocations?: boolean;
             desiredMode?: string;
             state?: string;
+        };
+        AdminWorkerPage: {
+            items: components["schemas"]["Worker"][];
+            total: number;
+            page: number;
+            pageSize: number;
+            sort: {
+                field: string;
+                /** @enum {unknown} */
+                direction: "asc" | "desc";
+            } | null;
+            snapshot: string;
+        };
+        AdminAllocationPage: {
+            items: components["schemas"]["Allocation"][];
+            total: number;
+            page: number;
+            pageSize: number;
+            sort: {
+                field: string;
+                /** @enum {unknown} */
+                direction: "asc" | "desc";
+            } | null;
+            snapshot: string;
+        };
+        AdminBrowserQueuePage: {
+            items: components["schemas"]["AdminBrowserQueueItem"][];
+            total: number;
+            page: number;
+            pageSize: number;
+            sort: {
+                field: string;
+                /** @enum {unknown} */
+                direction: "asc" | "desc";
+            } | null;
+            snapshot: string;
         };
     };
     responses: never;
@@ -3705,8 +3740,25 @@ export interface operations {
     get__admin_browsers: {
         parameters: {
             query?: {
-                q?: string;
-                state?: ("READY" | "DRAINING" | "OFFLINE")[];
+                "workers.page"?: number;
+                "workers.pageSize"?: number;
+                "workers.q"?: string;
+                "workers.sort"?: "id" | "state" | "occupied" | "capacity" | "free";
+                "workers.direction"?: "asc" | "desc";
+                "workers.snapshot"?: string;
+                "allocations.page"?: number;
+                "allocations.pageSize"?: number;
+                "allocations.q"?: string;
+                "allocations.sort"?: "sessionId" | "userName" | "workerId" | "sessionState" | "taskId";
+                "allocations.direction"?: "asc" | "desc";
+                "allocations.snapshot"?: string;
+                "queue.page"?: number;
+                "queue.pageSize"?: number;
+                "queue.q"?: string;
+                "queue.sort"?: "taskId" | "userName" | "waitReason" | "createdAt";
+                "queue.direction"?: "asc" | "desc";
+                "queue.snapshot"?: string;
+                "workers.state"?: ("READY" | "DRAINING" | "OFFLINE")[];
             };
             header?: never;
             path?: never;

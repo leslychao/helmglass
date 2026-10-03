@@ -6,6 +6,7 @@ import com.helmglass.browser.api.WorkerGateway;
 import com.helmglass.browser.api.WorkerSignalingGateway;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
+import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.realtime.application.ChannelTicketService;
 import com.helmglass.realtime.application.ChannelTicketService.TicketBinding;
@@ -94,7 +95,7 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
         || uri.getRawQuery() != null
         || expectedOrigin.isBlank()
         || !expectedOrigin.equals(socket.getHandshakeHeaders().getOrigin())
-        || socket.getHandshakeHeaders().getFirst("Authorization") != null) {
+        || widget && socket.getHandshakeHeaders().getFirst("Authorization") != null) {
       socket.close(new CloseStatus(4403, "CHANNEL_ORIGIN_REJECTED"));
       return;
     }
@@ -183,6 +184,17 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
         || !Objects.equals(ticket.origin(), admission.widget() ? widgetOrigin : origin)) {
       close(socket, 4403, "TICKET_BINDING_MISMATCH");
       return;
+    }
+    if (!admission.widget()) {
+      Object identity = socket.getAttributes().get(AuthenticatedActor.class.getName());
+      if (!(identity instanceof AuthenticatedActor actor)
+          || actor.mcp()
+          || !ticket.userId().equals(actor.userId())
+          || !Objects.equals(ticket.loginId(), actor.loginId())
+          || ticket.accessEpoch() != actor.accessEpoch()) {
+        close(socket, 4403, "TICKET_BINDING_MISMATCH");
+        return;
+      }
     }
     var session = browsers.owned(ticket.userId(), sessionId);
     var viewer =

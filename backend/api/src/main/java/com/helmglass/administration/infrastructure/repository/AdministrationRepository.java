@@ -35,8 +35,15 @@ public class AdministrationRepository {
     var values =
         jdbc.sql(
                 """
-                SELECT (SELECT count(*) FROM browser_allocations WHERE state='ASSIGNED') AS "confirmedBusy",
-                (SELECT count(*) FROM browser_allocations WHERE state IN ('RESERVED','RELEASING','QUARANTINED')) AS "unconfirmedOccupied",
+                WITH occupied AS (
+                  SELECT a.id,(a.state='ASSIGNED' AND b.state='ACTIVE' AND b.worker_boot_id=w.boot_id
+                    AND a.allocation_epoch=b.allocation_epoch AND w.observed_state='READY'
+                    AND w.heartbeat_at>now()-interval '15 seconds') IS TRUE AS confirmed
+                  FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
+                    JOIN browser_workers w ON w.id=a.worker_id WHERE a.state<>'RELEASED'
+                )
+                SELECT (SELECT count(*) FROM occupied WHERE confirmed) AS "confirmedBusy",
+                (SELECT count(*) FROM occupied WHERE NOT confirmed) AS "unconfirmedOccupied",
                 (SELECT count(*) FROM tasks WHERE state IN ('WAITING_AGENT','WAITING_USER','QUEUED')) AS "waitingTasks",
                 (SELECT count(*) FROM tasks WHERE state='QUEUED') AS "queuedForBrowser",
                 (SELECT count(*) FROM browser_workers WHERE heartbeat_at<now()-interval '15 seconds') AS "unavailableWorkers",
@@ -290,7 +297,12 @@ public class AdministrationRepository {
         rows, total, query.page(), query.pageSize(), query.sortDescriptor(), snapshot);
   }
 
-  public Map<String, Object> browsers(PageQuery query) {
+  public Map<String, Object> browsers(UUID actorId, AdminContracts.BrowserQuery query) {
+    return Map.of("workers", workers(actorId, query.workers()),
+        "allocations", allocations(actorId, query.allocations()), "queue", browserQueue(actorId, query.queue()));
+  }
+
+  private PageResult<Map<String, Object>> workers(UUID actorId, PageQuery query) {
     String population = """
         WITH workers AS (
           SELECT w.id,w.boot_id AS "bootId",w.capacity,w.version,w.desired_mode AS "desiredMode",
@@ -318,32 +330,53 @@ public class AdministrationRepository {
             WHEN w.state='READY' AND w."desiredMode"='ENABLED' AND p.accepting_allocations
             THEN greatest(0,w.capacity-w."lastKnownOccupied") ELSE 0 END AS free
         FROM workers w CROSS JOIN platform_settings p
-        """ + where + " ORDER BY w.id LIMIT 1000").params(parameters).query().listOfRows();
+        """ + where + " ORDER BY " + query.sqlOrder(Map.of("id", "w.id", "state", "w.state",
+          "occupied", "occupied", "capacity", "w.capacity", "free", "free"), "w.id") + " LIMIT :limit OFFSET :offset")
+        .params(parameters).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
     long workerTotal = jdbc.sql(population + "SELECT count(*) FROM workers w" + where)
         .params(parameters).query(Long.class).single();
-    var allocations = jdbc.sql("""
-        SELECT a.id,a.session_id AS "sessionId",a.user_id AS "userId",u.display_name AS "userName",
-          a.worker_id AS "workerId",a.slot_index AS "slotIndex",a.state,a.version,
-          b.task_id AS "taskId",b.state AS "sessionState"
+    return new PageResult<>(workers, workerTotal, query.page(), query.pageSize(), query.sortDescriptor(),
+        changes.snapshot(actorId, "nodes", query));
+  }
+
+  private PageResult<Map<String, Object>> allocations(UUID actorId, PageQuery query) {
+    String from = """
         FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
-          JOIN application_users u ON u.id=a.user_id WHERE a.state<>'RELEASED'
-        ORDER BY a.created_at,a.id LIMIT 1000
-        """).query().listOfRows();
+          JOIN application_users u ON u.id=a.user_id JOIN browser_workers w ON w.id=a.worker_id
+        WHERE a.state<>'RELEASED' AND (u.display_name ILIKE :q OR a.session_id::text ILIKE :q OR b.task_id::text ILIKE :q)
+        """;
+    long total = jdbc.sql("SELECT count(*) " + from).param("q", query.escapedQuery()).query(Long.class).single();
+    var rows = jdbc.sql("""
+        SELECT a.id,a.session_id AS "sessionId",a.user_id AS "userId",u.display_name AS "userName",
+          a.worker_id AS "workerId",a.slot_index AS "slotIndex",a.state,a.version,b.task_id AS "taskId",
+          CASE WHEN w.heartbeat_at<=now()-interval '15 seconds' OR w.observed_state<>'READY'
+            OR b.worker_boot_id IS DISTINCT FROM w.boot_id OR a.allocation_epoch<>b.allocation_epoch
+            THEN 'UNKNOWN' ELSE b.state END AS "sessionState"
+        """ + from + " ORDER BY " + query.sqlOrder(Map.of("sessionId", "a.session_id", "userName", "u.display_name",
+          "workerId", "a.worker_id", "sessionState", "\"sessionState\"", "taskId", "b.task_id"), "a.created_at,a.id")
+          + " LIMIT :limit OFFSET :offset")
+        .param("q", query.escapedQuery()).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
+    return new PageResult<>(rows, total, query.page(), query.pageSize(), query.sortDescriptor(),
+        changes.snapshot(actorId, "sessions", query));
+  }
+
+  private PageResult<Map<String, Object>> browserQueue(UUID actorId, PageQuery query) {
     String queued = """
         FROM tasks t JOIN application_users u ON u.id=t.user_id
-        WHERE (t.state='QUEUED' OR EXISTS(SELECT 1 FROM browser_sessions b
+        WHERE (u.display_name ILIKE :q OR t.id::text ILIKE :q) AND (t.state='QUEUED' OR EXISTS(SELECT 1 FROM browser_sessions b
           WHERE b.task_id=t.id AND b.state='REQUESTED' AND b.binding_released_at IS NULL))
           AND NOT EXISTS(SELECT 1 FROM browser_allocations a JOIN browser_sessions b ON b.id=a.session_id
             WHERE b.task_id=t.id AND a.state<>'RELEASED')
         """;
-    var queue = jdbc.sql("""
-        SELECT t.id AS "taskId",t.user_id AS "userId",u.display_name AS "userName",
+    long total = jdbc.sql("SELECT count(*) " + queued).param("q", query.escapedQuery()).query(Long.class).single();
+    var rows = jdbc.sql("""
+        SELECT t.id,t.id AS "taskId",t.user_id AS "userId",u.display_name AS "userName",
           t.wait_reason AS "waitReason",t.created_at AS "createdAt"
-        """ + queued + " ORDER BY t.created_at,t.id LIMIT 1000").query().listOfRows();
-    return Map.of("workers", workers, "workerTotal", workerTotal, "allocations", allocations,
-        "allocationTotal", jdbc.sql("SELECT count(*) FROM browser_allocations WHERE state<>'RELEASED'")
-            .query(Long.class).single(), "queue", queue,
-        "queueTotal", jdbc.sql("SELECT count(*) " + queued).query(Long.class).single());
+        """ + queued + " ORDER BY " + query.sqlOrder(Map.of("taskId", "t.id", "userName", "u.display_name",
+          "waitReason", "t.wait_reason", "createdAt", "t.created_at"), "t.created_at,t.id") + " LIMIT :limit OFFSET :offset")
+        .param("q", query.escapedQuery()).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
+    return new PageResult<>(rows, total, query.page(), query.pageSize(), query.sortDescriptor(),
+        changes.snapshot(actorId, "userTasks", query));
   }
 
   public void limits(UUID userId, AdminContracts.Limits input) {
