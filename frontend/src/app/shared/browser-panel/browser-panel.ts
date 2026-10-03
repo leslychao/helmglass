@@ -1,6 +1,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   computed,
   effect,
   inject,
@@ -8,6 +9,7 @@ import {
   output,
   signal,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import { FormsModule } from '@angular/forms';
 import {
@@ -32,6 +34,8 @@ import { Feedback, MutationFeedback } from '../feedback/feedback';
 import { Dialog } from '../dialog/dialog';
 import { Column, DataTable, TableItem } from '../data-table/data-table';
 import { AsyncOperation } from '../async-operation/async-operation';
+import { Realtime } from '../../core/realtime/realtime.service';
+import { BrowserClock, newerClock, sessionClock } from '../../core/realtime/browser-clock';
 
 @Component({
   selector: 'hg-browser-panel',
@@ -227,9 +231,36 @@ import { AsyncOperation } from '../async-operation/async-operation';
         <footer class="browser-foot">
           <span>{{ controlStatus() | label }}</span
           ><span>·</span><span>{{ browser.siteAccess | label }}</span
-          ><span class="spacer"></span
-          ><span role="status">{{ live() ? 'Живой просмотр' : (viewStatus() | label) }}</span>
+          ><span class="spacer"></span>
+          @if (countdown(); as countdown) {
+            <span aria-label="Оставшееся время браузера"
+              >{{ countdown.label }} {{ countdown.text }}</span
+            >
+            <span>·</span>
+          }
+          <span role="status">{{ live() ? 'Живой просмотр' : (viewStatus() | label) }}</span>
         </footer>
+        @if (countdown(); as countdown) {
+          @if (countdown.warning) {
+            <div class="notice warning">
+              <strong>{{
+                countdown.budget
+                  ? 'Заканчивается время работы браузера'
+                  : 'Браузер закроется при простое'
+              }}</strong>
+              <p>
+                {{
+                  countdown.budget
+                    ? 'Время работы ограничено бюджетом задачи. Переподключение не увеличивает лимит.'
+                    : 'Продолжите работу на странице. Просмотр и переподключение не продлевают ожидание; выполняемая команда завершится до закрытия по простою.'
+                }}
+              </p>
+              @if (countdown.expired) {
+                <p role="status">Срок истёк. Ожидаем подтверждения состояния от сервера.</p>
+              }
+            </div>
+          }
+        }
       }
       <hg-feedback
         [loading]="session.loading() && !session.data()"
@@ -266,6 +297,7 @@ import { AsyncOperation } from '../async-operation/async-operation';
 export class BrowserPanel {
   surface = input<'WEB' | 'WIDGET'>('WEB');
   providedSession = input<BrowserSession | null>(null);
+  providedClock = input<BrowserClock | null>(null);
   providedTicket = input<ViewTicket | null>(null);
   viewerInstanceId = input<string>();
   sessionId = input.required<string>();
@@ -275,6 +307,33 @@ export class BrowserPanel {
   openTask = output<void>();
   readonly instance = inject(BrowserInstance);
   private router = inject(Router);
+  private readonly destroy = inject(DestroyRef);
+  private readonly clock = signal<BrowserClock | null>(null);
+  private readonly hasClock = computed(() => this.clock() !== null);
+  private readonly now = signal(Date.now());
+  readonly countdown = computed(() => {
+    const session = this.session.data();
+    const clock = this.clock();
+    if (
+      !session ||
+      session.state !== 'ACTIVE' ||
+      !clock ||
+      clock.browserSessionId !== session.id ||
+      clock.allocationEpoch !== session.allocationEpoch ||
+      clock.privacyEpoch !== session.privacyEpoch
+    )
+      return null;
+    const budget = Date.parse(clock.budgetDeadlineAt) <= Date.parse(clock.idleDeadlineAt);
+    const deadline = Date.parse(budget ? clock.budgetDeadlineAt : clock.idleDeadlineAt);
+    const seconds = Math.max(0, Math.ceil((deadline - this.now()) / 1000));
+    return {
+      budget,
+      label: budget ? 'Лимит работы:' : 'Без действий:',
+      text: `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`,
+      warning: seconds <= 120,
+      expired: seconds === 0,
+    };
+  });
   readonly session = new ServerResource<BrowserSession>(['tasks', 'sessions', 'connections']);
   readonly events = new ServerResource<Page<TaskEvent>>(['events']);
   readonly action = new Mutation();
@@ -379,6 +438,48 @@ export class BrowserPanel {
     );
   });
   constructor() {
+    effect(() => {
+      const provided = this.providedClock();
+      const session = this.session.data();
+      if (
+        this.surface() === 'WIDGET' &&
+        session?.state === 'ACTIVE' &&
+        provided &&
+        provided.browserSessionId === session.id &&
+        provided.allocationEpoch === session.allocationEpoch &&
+        provided.privacyEpoch === session.privacyEpoch
+      )
+        this.clock.update((current) => newerClock(current, provided));
+    });
+    inject(Realtime)
+      .browserClocks.pipe(takeUntilDestroyed(this.destroy))
+      .subscribe((clock) => {
+        const session = this.session.data();
+        if (
+          clock.browserSessionId === this.sessionId() &&
+          (!session ||
+            (session.state === 'ACTIVE' &&
+              session.allocationEpoch === clock.allocationEpoch &&
+              session.privacyEpoch === clock.privacyEpoch))
+        )
+          this.clock.update((current) => newerClock(current, clock));
+      });
+    effect(() => {
+      const session = this.session.data();
+      const sessionId = this.sessionId();
+      if (!session) {
+        this.clock.update((current) => (current?.browserSessionId === sessionId ? current : null));
+        return;
+      }
+      const clock = sessionClock(session);
+      this.clock.update((current) => (clock ? newerClock(current, clock) : null));
+    });
+    effect((cleanup) => {
+      if (!this.hasClock()) return;
+      this.now.set(Date.now());
+      const timer = setInterval(() => this.now.set(Date.now()), 1000);
+      cleanup(() => clearInterval(timer));
+    });
     effect(() => {
       if (this.surface() === 'WEB')
         this.session.load(`/browser-sessions/${this.sessionId()}`, {

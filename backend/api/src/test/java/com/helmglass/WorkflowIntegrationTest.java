@@ -17,6 +17,7 @@ import com.helmglass.browser.application.WorkerProtocol;
 import com.helmglass.browser.application.WorkerRegistryService;
 import com.helmglass.browser.infrastructure.repository.BrowserOpenRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
+import com.helmglass.browser.infrastructure.repository.BrowserSessionOperationRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserStartupRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.browser.infrastructure.repository.WorkerRegistryRepository;
@@ -321,7 +322,22 @@ class WorkflowIntegrationTest {
           .isEmpty();
     }
 
+    jdbc.sql(
+            "UPDATE browser_sessions SET last_activity_at=now()-interval '20"
+                + " minutes',idle_deadline_at=now()-interval '5 minutes' WHERE id=:id")
+        .param("id", session.id())
+        .update();
+    var idleBefore = browsers.owned(actor.userId(), session.id()).idleDeadlineAt();
+    if (!cancelledBeforeStart) {
+      assertThat(new BrowserSessionOperationRepository(jdbc).closeDue(session.id())).isFalse();
+    }
     commands.acceptResult(worker, boot, result);
+    var idleAfter = browsers.owned(actor.userId(), session.id()).idleDeadlineAt();
+    if (disposition.equals("SUCCEEDED")) {
+      assertThat(idleAfter).isAfter(idleBefore).isAfter(Instant.now());
+    } else {
+      assertThat(idleAfter).isEqualTo(idleBefore);
+    }
     var current = tasks.get(actor, taskId);
     assertThat(current.state())
         .isEqualTo(disposition.equals("UNKNOWN") ? "INTERRUPTED" : "WAITING_USER");
@@ -346,6 +362,7 @@ class WorkflowIntegrationTest {
         .isZero();
     commands.acceptResult(worker, boot, result);
     assertThat(tasks.get(actor, taskId).version()).isEqualTo(current.version());
+    assertThat(browsers.owned(actor.userId(), session.id()).idleDeadlineAt()).isEqualTo(idleAfter);
   }
 
   @Test

@@ -12,6 +12,7 @@
 typedef struct {
   gint64 expires_at;
   GstElement *pipeline;
+  gchar **turn_servers;
 } Consumer;
 
 static GMainLoop *loop;
@@ -78,6 +79,7 @@ static void destroy_consumer(gpointer raw) {
     stop_pipeline(consumer->pipeline, GST_SECOND);
     gst_object_unref(consumer->pipeline);
   }
+  g_strfreev(consumer->turn_servers);
   g_free(consumer);
 }
 
@@ -152,8 +154,21 @@ static gboolean encoder_setup(GstElement *element, const gchar *consumer_id, con
 }
 
 static void consumer_added(GstElement *element, const gchar *peer_id, GstElement *webrtcbin, gpointer data) {
-  (void)element; (void)peer_id; (void)data;
+  (void)element; (void)data;
   if (http_proxy) g_object_set(webrtcbin, "http-proxy", http_proxy, "ice-transport-policy", 1, NULL);
+  /* The capture source is shared; TURN authority belongs to this viewer lease. */
+  g_mutex_lock(&mutex);
+  Consumer *consumer = g_hash_table_lookup(consumers, peer_id);
+  gchar **turn_servers = consumer ? g_strdupv(consumer->turn_servers) : NULL;
+  g_mutex_unlock(&mutex);
+  if (turn_servers) {
+    for (guint index = 0; turn_servers[index]; index++) {
+      gboolean accepted = FALSE;
+      g_signal_emit_by_name(webrtcbin, "add-turn-server", turn_servers[index], &accepted);
+      if (!accepted) { error(NULL, "TURN_BINDING_INVALID"); _exit(EXIT_FAILURE); }
+    }
+    g_strfreev(turn_servers);
+  }
 }
 
 static void consumer_created(GstElement *element, const gchar *peer_id, GstElement *peer_pipeline, gpointer data) {
@@ -276,17 +291,6 @@ static gboolean create_pipeline(JsonObject *request) {
   g_object_set(sink, "video-caps", video, "enable-control-data-channel", FALSE,
       "enable-data-channel-navigation", FALSE, "stun-server", NULL, "ice-transport-policy", 1, NULL);
   gst_caps_unref(video);
-  if (json_object_has_member(request, "turnServers")) {
-    JsonArray *urls = json_object_get_array_member(request, "turnServers");
-    GValue array = G_VALUE_INIT;
-    g_value_init(&array, GST_TYPE_ARRAY);
-    for (guint i = 0; i < json_array_get_length(urls); i++) {
-      GValue entry = G_VALUE_INIT; g_value_init(&entry, G_TYPE_STRING);
-      g_value_set_string(&entry, json_array_get_string_element(urls, i));
-      gst_value_array_append_value(&array, &entry); g_value_unset(&entry);
-    }
-    g_object_set_property(G_OBJECT(sink), "turn-servers", &array); g_value_unset(&array);
-  }
   GstObject *signaller = NULL;
   g_object_get(sink, "signaller", &signaller, NULL);
   g_object_set(signaller, "uri", "ws://127.0.0.1:8443", NULL);
@@ -300,6 +304,25 @@ static gboolean create_pipeline(JsonObject *request) {
   gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, raw_buffer, NULL, NULL); gst_object_unref(pad);
   if (gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) { teardown(); return FALSE; }
   return TRUE;
+}
+
+static gchar **read_turn_servers(JsonObject *request) {
+  JsonNode *node = json_object_get_member(request, "turnServers");
+  if (!node || !JSON_NODE_HOLDS_ARRAY(node)) return NULL;
+  JsonArray *array = json_node_get_array(node);
+  guint length = json_array_get_length(array);
+  if (!length || length > 4) return NULL;
+  gchar **servers = g_new0(gchar *, length + 1);
+  for (guint index = 0; index < length; index++) {
+    JsonNode *entry = json_array_get_element(array, index);
+    if (!JSON_NODE_HOLDS_VALUE(entry) || json_node_get_value_type(entry) != G_TYPE_STRING) {
+      g_strfreev(servers); return NULL;
+    }
+    const char *url = json_node_get_string(entry);
+    if (!url || !*url || strlen(url) > 8192) { g_strfreev(servers); return NULL; }
+    servers[index] = g_strdup(url);
+  }
+  return servers;
 }
 
 static void handle(JsonObject *request) {
@@ -333,7 +356,11 @@ static void handle(JsonObject *request) {
     g_mutex_lock(&mutex);
     Consumer *consumer = g_hash_table_lookup(consumers, peer_id);
     if (!consumer && g_hash_table_size(consumers) < 2) {
-      consumer = g_new0(Consumer, 1); g_hash_table_insert(consumers, g_strdup(peer_id), consumer);
+      gchar **turn_servers = read_turn_servers(request);
+      if (!turn_servers) { g_mutex_unlock(&mutex); error(request_id, "TURN_BINDING_INVALID"); return; }
+      consumer = g_new0(Consumer, 1);
+      consumer->turn_servers = turn_servers;
+      g_hash_table_insert(consumers, g_strdup(peer_id), consumer);
     }
     if (consumer) consumer->expires_at = g_get_monotonic_time() + duration * 1000;
     g_mutex_unlock(&mutex);
@@ -359,6 +386,8 @@ static void handle(JsonObject *request) {
     g_free(http_proxy);
     http_proxy = json_object_has_member(request, "httpProxy") ? g_strdup(json_object_get_string_member(request, "httpProxy")) : NULL;
     Consumer *consumer = g_new0(Consumer, 1);
+    consumer->turn_servers = read_turn_servers(request);
+    if (!consumer->turn_servers) { g_free(consumer); error(request_id, "TURN_BINDING_INVALID"); return; }
     consumer->expires_at = g_get_monotonic_time() + duration * 1000;
     g_mutex_lock(&mutex);
     g_hash_table_insert(consumers, g_strdup(peer_id), consumer);

@@ -23,6 +23,7 @@ import { HelmTransport, StreamState } from './helm-transport';
 import { Icon } from '../icon/icon';
 import { committedTextActions, InputAction, pointerAction } from './input-action';
 import { ReconnectWindow } from '../../core/realtime/reconnect-window';
+import { Realtime } from '../../core/realtime/realtime.service';
 import { PresentedFrames } from './presented-frames';
 
 export type ViewerState = 'CONNECTING' | 'LIVE' | 'HIDDEN' | 'UNAVAILABLE' | 'ERROR' | 'AUTOPLAY';
@@ -69,6 +70,12 @@ export type ViewerState = 'CONNECTING' | 'LIVE' | 'HIDDEN' | 'UNAVAILABLE' | 'ER
           <hg-icon name="browser" />
           <h3>{{ title() }}</h3>
           <p>{{ message() }}</p>
+          @if (technicalDetails()) {
+            <details class="details">
+              <summary>Технические сведения</summary>
+              <p>{{ technicalDetails() }}</p>
+            </details>
+          }
           @if (state() === 'ERROR' || state() === 'AUTOPLAY') {
             <button class="btn" (click)="retry()">
               {{ state() === 'AUTOPLAY' ? 'Включить просмотр' : 'Восстановить просмотр' }}
@@ -91,9 +98,11 @@ export class RemoteBrowser {
   stateChanged = output<ViewerState>();
   readonly state = signal<ViewerState>('CONNECTING');
   readonly message = signal('Подключаемся к текущему браузеру…');
+  readonly technicalDetails = signal<string | null>(null);
   readonly inputReady = signal(false);
   private video = viewChild<ElementRef<HTMLVideoElement>>('video');
   private api = inject(Api);
+  private realtime = inject(Realtime);
   private zone = inject(NgZone);
   private destroy = inject(DestroyRef);
   private transport?: HelmTransport;
@@ -324,47 +333,35 @@ export class RemoteBrowser {
       reconnectionTimeout: 0,
       webrtcConfig,
       transportFactory: (url: string) => {
-        const transport = new HelmTransport(
-          url,
-          ticket.ticket,
-          (state) => {
-            if (generation !== this.generation) return;
-            if (
-              state.sessionId !== session.id ||
-              state.pageEpoch !== session.pageEpoch ||
-              state.privacyEpoch !== session.privacyEpoch ||
-              state.viewGeneration !== ticket.viewGeneration ||
-              (session.mediaGeneration !== undefined &&
-                state.mediaGeneration !== session.mediaGeneration)
-            ) {
-              this.fail('Контекст браузера изменился. Обновляем просмотр.');
-              this.refresh.emit();
-              return;
-            }
-            this.current = state;
-            webrtcConfig.iceServers = state.iceServers;
-            clearTimeout(this.captureTimeout);
-            if (state.captureState !== 'ACTIVE') {
-              this.markStale();
-              return;
-            }
-            this.captureExpiresAt = performance.now() + 2000;
-            if (this.frames?.fresh && this.state() !== 'LIVE') {
-              this.state.set('LIVE');
-              this.live.emit(true);
-              this.connectInput();
-            }
-            this.captureTimeout = setTimeout(() => this.markStale(), 2000);
-          },
-          (code) => {
-            if (generation !== this.generation) return;
-            this.fail(
-              code === 4403 ? 'Доступ к просмотру отозван' : 'Видеоканал прерван',
-              ![4401, 4403, 4404, 4412].includes(code),
-            );
+        const transport = new HelmTransport(url, ticket.ticket, (state) => {
+          if (generation !== this.generation) return;
+          if (
+            state.sessionId !== session.id ||
+            state.pageEpoch !== session.pageEpoch ||
+            state.privacyEpoch !== session.privacyEpoch ||
+            state.viewGeneration !== ticket.viewGeneration ||
+            (session.mediaGeneration !== undefined &&
+              state.mediaGeneration !== session.mediaGeneration)
+          ) {
+            this.fail('Контекст браузера изменился. Обновляем просмотр.');
             this.refresh.emit();
-          },
-        );
+            return;
+          }
+          this.current = state;
+          webrtcConfig.iceServers = state.iceServers;
+          clearTimeout(this.captureTimeout);
+          if (state.captureState !== 'ACTIVE') {
+            this.markStale();
+            return;
+          }
+          this.captureExpiresAt = performance.now() + 2000;
+          if (this.frames?.fresh && this.state() !== 'LIVE') {
+            this.state.set('LIVE');
+            this.live.emit(true);
+            this.connectInput();
+          }
+          this.captureTimeout = setTimeout(() => this.markStale(), 2000);
+        });
         this.transport = transport;
         return transport;
       },
@@ -406,7 +403,10 @@ export class RemoteBrowser {
           this.fail('Не удалось согласовать или декодировать поток');
       });
       consumer.addEventListener('closed', () => {
-        if (generation === this.generation) this.fail('Просмотр завершён');
+        // Upstream closes consumers before emitting channel disconnected. Let that
+        // event handle the captured cause instead of replacing it with a peer error.
+        if (generation === this.generation && !this.transport?.closing)
+          this.fail('Просмотр завершён');
       });
       if (!consumer.connect()) this.fail('Сервер не принял подключение видео');
       this.frameTimeout = setTimeout(() => {
@@ -421,7 +421,7 @@ export class RemoteBrowser {
       },
       disconnected: () => {
         signalingReady = false;
-        if (generation === this.generation) this.fail('Сигнальный канал отключён');
+        if (generation === this.generation) this.signalingClosed();
       },
     });
     this.sdk.registerPeerListener({
@@ -439,6 +439,40 @@ export class RemoteBrowser {
         });
       },
     });
+  }
+  private signalingClosed() {
+    const termination = this.transport?.termination;
+    const code = termination?.code;
+    let message = 'Сигнальный канал отключён';
+    switch (code) {
+      case 4401:
+        message = 'Срок доступа к просмотру истёк';
+        break;
+      case 4403:
+        message = 'Доступ к просмотру отклонён';
+        break;
+      case 4404:
+        message = 'Браузер больше недоступен';
+        break;
+      case 4412:
+        message = 'Просмотр заменён другим';
+        break;
+      case 4429:
+        message = 'Достигнут лимит подключений';
+        break;
+      case 4503:
+        message = 'Видеоканал временно недоступен';
+        break;
+    }
+    this.fail(message, code === undefined || ![4401, 4403, 4404, 4412].includes(code));
+    if (termination) {
+      this.technicalDetails.set(
+        termination.reason
+          ? `${termination.code}: ${termination.reason}`
+          : String(termination.code),
+      );
+    }
+    this.refresh.emit();
   }
   private waitFrame(generation: number) {
     this.zone.runOutsideAngular(() => {
@@ -503,13 +537,27 @@ export class RemoteBrowser {
           socket.onopen = () =>
             socket.send(JSON.stringify({ type: 'authenticate', ticket: ticket.ticket }));
           socket.onmessage = ({ data }: MessageEvent<unknown>) => {
-            if (typeof data !== 'string' || generation !== this.generation) return;
+            if (
+              typeof data !== 'string' ||
+              data.length > 4096 ||
+              generation !== this.generation ||
+              this.inputSocket !== socket
+            )
+              return;
             let msg: unknown;
             try {
               msg = JSON.parse(data);
             } catch {
               return;
             }
+            if (
+              typeof msg === 'object' &&
+              msg &&
+              'type' in msg &&
+              msg.type === 'inputAck' &&
+              'clock' in msg
+            )
+              this.realtime.acceptBrowserClock(msg.clock);
             if (
               typeof msg === 'object' &&
               msg &&
@@ -651,6 +699,7 @@ export class RemoteBrowser {
     }, delay);
   }
   private teardown() {
+    this.technicalDetails.set(null);
     this.releaseKeys();
     this.generation++;
     this.request?.unsubscribe();

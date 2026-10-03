@@ -3,7 +3,6 @@ package com.helmglass;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -22,17 +21,18 @@ import com.helmglass.browser.application.BrowserSessionService;
 import com.helmglass.browser.application.HumanBrowserCommandService;
 import com.helmglass.browser.application.WorkerProtocol;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
+import com.helmglass.browser.infrastructure.repository.BrowserSessionOperationRepository;
 import com.helmglass.browser.infrastructure.repository.HumanBrowserCommandRepository;
 import com.helmglass.connection.infrastructure.repository.ConnectionRepository;
 import com.helmglass.connection.infrastructure.repository.LoginRepository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
-import com.helmglass.realtime.application.ChannelTicketService;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,7 +46,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -69,17 +68,11 @@ class BrowserNavigationIntegrationTest {
     HumanBrowserCommandRepository.class,
     HumanBrowserCommandService.class,
     BrowserControlService.class,
-    BrowserSessionService.class,
     ConnectionRepository.class,
     LoginRepository.class,
     WorkerProtocol.class
   })
-  static class Owners {
-    @Bean
-    ChannelTicketService tickets() {
-      return mock(ChannelTicketService.class);
-    }
-  }
+  static class Owners {}
 
   private record Fixture(
       AuthenticatedActor actor, UUID task, UUID session, UUID worker, UUID boot, UUID controller) {}
@@ -149,6 +142,12 @@ class BrowserNavigationIntegrationTest {
         .containsEntry("controllerInstance", fixture.controller());
     assertThatThrownBy(() -> navigation.permit(fixture.worker(), fixture.boot(), request))
         .isInstanceOf(DomainException.class);
+    jdbc.sql(
+            "UPDATE browser_sessions SET last_activity_at=now()-interval '20"
+                + " minutes',idle_deadline_at=now()-interval '5 minutes' WHERE id=:id")
+        .param("id", fixture.session())
+        .update();
+    assertThat(new BrowserSessionOperationRepository(jdbc).closeDue(fixture.session())).isFalse();
     JsonNode result =
         result(
             command,
@@ -156,7 +155,11 @@ class BrowserNavigationIntegrationTest {
             "CONFIRMED",
             Map.of("safeUrl", "https://example.com/next?token=secret#part"));
     navigation.result(fixture.worker(), fixture.boot(), result);
+    var idleDeadline = browsers.owned(fixture.actor().userId(), fixture.session()).idleDeadlineAt();
+    assertThat(idleDeadline).isAfter(Instant.now());
     navigation.result(fixture.worker(), fixture.boot(), result);
+    assertThat(browsers.owned(fixture.actor().userId(), fixture.session()).idleDeadlineAt())
+        .isEqualTo(idleDeadline);
     assertThat(operations.owned(fixture.actor().userId(), receipt.operationId()).state())
         .isEqualTo("SUCCEEDED");
     assertThat(browsers.owned(fixture.actor().userId(), fixture.session()).currentUrl())

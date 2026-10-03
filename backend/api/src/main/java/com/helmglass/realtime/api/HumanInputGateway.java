@@ -1,11 +1,10 @@
 package com.helmglass.realtime.api;
 
-import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.browser.api.WorkerGateway;
-import com.helmglass.browser.application.WorkerProtocol;
 import com.helmglass.browser.application.BrowserControlService;
-import java.util.concurrent.atomic.AtomicLong;
+import com.helmglass.browser.application.BrowserSessionService;
+import com.helmglass.browser.application.WorkerProtocol;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
@@ -16,9 +15,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.context.event.EventListener;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -27,7 +27,12 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 @Component
 public class HumanInputGateway extends TextWebSocketHandler {
-  private record Controller(ChannelTicketService.TicketBinding binding, WebSocketSession socket, UUID channelId, AtomicLong sequence) {}
+  private record Controller(
+      ChannelTicketService.TicketBinding binding,
+      WebSocketSession socket,
+      UUID channelId,
+      AtomicLong sequence) {}
+
   private final Map<String, Controller> controllers = new ConcurrentHashMap<>();
   private final Map<String, WebSocketSession> pending = new ConcurrentHashMap<>();
   private final Map<String, Instant> deadlines = new ConcurrentHashMap<>();
@@ -39,9 +44,18 @@ public class HumanInputGateway extends TextWebSocketHandler {
   private final JsonSupport json;
   private final WorkerProtocol protocol;
   private final BrowserControlService controlOwner;
+  private final BrowserSessionService sessionOwner;
 
-  public HumanInputGateway(ChannelTicketService tickets, IdentityRepository identities,
-      BrowserRepository browsers, ControlRepository controls, WorkerGateway workers, JsonSupport json, WorkerProtocol protocol, BrowserControlService controlOwner) {
+  public HumanInputGateway(
+      ChannelTicketService tickets,
+      IdentityRepository identities,
+      BrowserRepository browsers,
+      ControlRepository controls,
+      WorkerGateway workers,
+      JsonSupport json,
+      WorkerProtocol protocol,
+      BrowserControlService controlOwner,
+      BrowserSessionService sessionOwner) {
     this.tickets = tickets;
     this.identities = identities;
     this.browsers = browsers;
@@ -50,6 +64,7 @@ public class HumanInputGateway extends TextWebSocketHandler {
     this.json = json;
     this.protocol = protocol;
     this.controlOwner = controlOwner;
+    this.sessionOwner = sessionOwner;
   }
 
   @Override
@@ -64,7 +79,8 @@ public class HumanInputGateway extends TextWebSocketHandler {
   }
 
   @Override
-  protected void handleTextMessage(WebSocketSession socket, TextMessage message) throws IOException {
+  protected void handleTextMessage(WebSocketSession socket, TextMessage message)
+      throws IOException {
     var payload = json.read(message.getPayload());
     Controller controller = controllers.get(socket.getId());
     if (controller == null) {
@@ -75,19 +91,29 @@ public class HumanInputGateway extends TextWebSocketHandler {
       String path = socket.getUri().getPath();
       UUID sessionId = UUID.fromString(path.substring(path.lastIndexOf('/') + 1));
       var binding = tickets.consume(payload.path("ticket").asString(), "HUMAN_INPUT", sessionId);
-      controller = new Controller(binding, pending.remove(socket.getId()), UUID.randomUUID(), new AtomicLong());
+      controller =
+          new Controller(
+              binding, pending.remove(socket.getId()), UUID.randomUUID(), new AtomicLong());
       deadlines.remove(socket.getId());
       if (!authorized(controller)) {
         socket.close(new CloseStatus(4403, "CONTROL_REVOKED"));
         return;
       }
-      if (!controls.claimInput(sessionId, binding.controlEpoch(), binding.controllerInstanceId(),
-          binding.loginId(), controller.channelId())) {
+      if (!controls.claimInput(
+          sessionId,
+          binding.controlEpoch(),
+          binding.controllerInstanceId(),
+          binding.loginId(),
+          controller.channelId())) {
         socket.close(new CloseStatus(4409, "INPUT_CHANNEL_FENCE_REQUIRED"));
         return;
       }
       controllers.put(socket.getId(), controller);
-      controller.socket().sendMessage(new TextMessage(json.write(Map.of("type", "ready", "schemaVersion", 1, "nextInputSequence", 1))));
+      controller
+          .socket()
+          .sendMessage(
+              new TextMessage(
+                  json.write(Map.of("type", "ready", "schemaVersion", 1, "nextInputSequence", 1))));
       return;
     }
     if (!authorized(controller) || !payload.path("type").asString().equals("input")) {
@@ -103,7 +129,9 @@ public class HumanInputGateway extends TextWebSocketHandler {
     }
     protocol.validateInputAction(payload.path("action"));
     long sequence = payload.path("inputSequence").asLong(-1);
-    if (payload.path("schemaVersion").asInt() != 1 || sequence < 1 || sequence > 9007199254740991L
+    if (payload.path("schemaVersion").asInt() != 1
+        || sequence < 1
+        || sequence > 9007199254740991L
         || sequence <= controller.sequence().get()) {
       socket.close(new CloseStatus(4409, "INPUT_SEQUENCE_INVALID"));
       return;
@@ -117,39 +145,66 @@ public class HumanInputGateway extends TextWebSocketHandler {
     input.put("inputSequence", payload.path("inputSequence").asLong());
     input.put("action", payload.path("action"));
     var session = browsers.owned(binding.userId(), binding.sessionId());
-    if (!workers.send(session.workerId(), WorkerGateway.envelope("input", UUID.randomUUID(), input))) {
+    if (!workers.send(
+        session.workerId(), WorkerGateway.envelope("input", UUID.randomUUID(), input))) {
       socket.close(new CloseStatus(4503, "INPUT_UNAVAILABLE"));
     }
   }
 
   private boolean authorized(Controller controller) {
     var binding = controller.binding();
-    if (binding.loginId() == null || !identities.authorizationActive(binding.userId(), binding.loginId(),
-        null, binding.accessEpoch())) {
+    if (binding.loginId() == null
+        || !identities.authorizationActive(
+            binding.userId(), binding.loginId(), null, binding.accessEpoch())) {
       return false;
     }
     var lease = controls.get(binding.sessionId());
     return (lease.inputChannelId() == null || controller.channelId().equals(lease.inputChannelId()))
-        && binding.loginId().equals(lease.loginId()) && lease.state().equals("ACTIVE") && lease.ownerKind().equals("HUMAN")
+        && binding.loginId().equals(lease.loginId())
+        && lease.state().equals("ACTIVE")
+        && lease.ownerKind().equals("HUMAN")
         && binding.controllerInstanceId().equals(lease.controllerInstanceId())
-        && binding.controlEpoch() == lease.epoch() && lease.expiresAt().isAfter(Instant.now());
+        && binding.controlEpoch() == lease.epoch()
+        && lease.expiresAt().isAfter(Instant.now());
   }
 
   @EventListener
   public void acknowledge(WorkerGateway.InputReceipt receipt) throws IOException {
     for (Controller controller : controllers.values()) {
       var binding = controller.binding();
-      if (!binding.sessionId().equals(receipt.sessionId()) || binding.controlEpoch() != receipt.controlEpoch()
-          || receipt.inputSequence() < 1 || receipt.inputSequence() > controller.sequence().get()) {
+      if (!binding.sessionId().equals(receipt.sessionId())
+          || binding.controlEpoch() != receipt.controlEpoch()
+          || receipt.inputSequence() < 1
+          || receipt.inputSequence() > controller.sequence().get()) {
         continue;
       }
       var session = browsers.owned(binding.userId(), binding.sessionId());
-      if (!receipt.workerId().equals(session.workerId()) || !receipt.bootId().equals(session.workerBootId())
+      if (!receipt.workerId().equals(session.workerId())
+          || !receipt.bootId().equals(session.workerBootId())
           || !authorized(controller)) {
         return;
       }
-      controller.socket().sendMessage(new TextMessage(json.write(Map.of("type", "inputAck", "schemaVersion", 1,
-          "controlEpoch", receipt.controlEpoch(), "inputSequence", receipt.inputSequence()))));
+      var activity =
+          sessionOwner.inputApplied(
+              binding,
+              controller.channelId(),
+              receipt.workerId(),
+              receipt.bootId(),
+              receipt.allocationEpoch(),
+              receipt.controlEpoch(),
+              receipt.pageEpoch(),
+              receipt.privacyEpoch(),
+              receipt.inputPageEpoch(),
+              receipt.inputSequence(),
+              receipt.activity());
+      Map<String, Object> acknowledgement = new HashMap<>();
+      acknowledgement.put("type", "inputAck");
+      acknowledgement.put("schemaVersion", 1);
+      acknowledgement.put("controlEpoch", receipt.controlEpoch());
+      acknowledgement.put("inputSequence", receipt.inputSequence());
+      activity.ifPresent(
+          clock -> acknowledgement.put("clock", BrowserSessionService.clockSnapshot(clock)));
+      controller.socket().sendMessage(new TextMessage(json.write(acknowledgement)));
     }
   }
 
@@ -174,8 +229,8 @@ public class HumanInputGateway extends TextWebSocketHandler {
   public void afterConnectionClosed(WebSocketSession socket, CloseStatus status) {
     Controller controller = controllers.remove(socket.getId());
     if (controller != null) {
-      controlOwner.inputDisconnected(controller.binding().userId(), controller.binding().sessionId(),
-          controller.channelId());
+      controlOwner.inputDisconnected(
+          controller.binding().userId(), controller.binding().sessionId(), controller.channelId());
     }
     pending.remove(socket.getId());
     deadlines.remove(socket.getId());

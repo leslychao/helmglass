@@ -54,7 +54,16 @@ public class WorkerGateway extends TextWebSocketHandler {
   private final ApplicationEventPublisher events;
 
   public record InputReceipt(
-      UUID workerId, UUID bootId, UUID sessionId, long controlEpoch, long inputSequence) {}
+      UUID workerId,
+      UUID bootId,
+      UUID sessionId,
+      long allocationEpoch,
+      long controlEpoch,
+      long pageEpoch,
+      long privacyEpoch,
+      long inputPageEpoch,
+      long inputSequence,
+      boolean activity) {}
 
   public WorkerGateway(
       WorkerRegistryService registry,
@@ -204,6 +213,12 @@ public class WorkerGateway extends TextWebSocketHandler {
                     result.path("digest").asString())));
       }
       case "inputAck" -> {
+        if (!payload.path("activity").isBoolean()
+            || !payload.path("inputPageEpoch").isIntegralNumber()
+            || payload.path("inputPageEpoch").asLong(-1) < 1) {
+          throw new DomainException(
+              422, "INVALID_INPUT_RECEIPT", "Input receipt requires activity disposition");
+        }
         UUID sessionId = UUID.fromString(payload.path("browserSessionId").asString());
         browsers.runtimeEpochs(channel.workerId(), channel.bootId(), sessionId, payload);
         events.publishEvent(
@@ -211,8 +226,13 @@ public class WorkerGateway extends TextWebSocketHandler {
                 channel.workerId(),
                 channel.bootId(),
                 sessionId,
+                payload.path("allocationEpoch").asLong(-1),
                 payload.path("controlEpoch").asLong(-1),
-                payload.path("inputSequence").asLong(-1)));
+                payload.path("pageEpoch").asLong(-1),
+                payload.path("privacyEpoch").asLong(-1),
+                payload.path("inputPageEpoch").asLong(-1),
+                payload.path("inputSequence").asLong(-1),
+                payload.path("activity").asBoolean()));
       }
       case "controlAck" -> {
         UUID sessionId = UUID.fromString(payload.path("browserSessionId").asString());

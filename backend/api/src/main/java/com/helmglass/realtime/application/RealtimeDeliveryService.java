@@ -3,6 +3,8 @@ package com.helmglass.realtime.application;
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
+import com.helmglass.browser.application.BrowserSessionService;
+import com.helmglass.browser.domain.BrowserActivityClock;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.domain.MutationReceipt;
@@ -72,6 +74,7 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
   private final OperationRepository operations;
   private final ApplicationEventPublisher events;
   private final ChangeRepository changes;
+  private final BrowserSessionService browsers;
 
   private record Viewer(
       AuthenticatedActor actor,
@@ -91,7 +94,8 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       ChatPresentationRepository presentations,
       OperationRepository operations,
       ApplicationEventPublisher events,
-      ChangeRepository changes) {
+      ChangeRepository changes,
+      BrowserSessionService browsers) {
     this.outbox = outbox;
     this.identities = identities;
     this.json = json;
@@ -99,6 +103,7 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
     this.operations = operations;
     this.events = events;
     this.changes = changes;
+    this.browsers = browsers;
   }
 
   public record TaskInvalidation(UUID userId, UUID resourceId, List<String> resources) {}
@@ -604,6 +609,10 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       authorized(viewer);
     }
     for (var intent : outbox.due()) {
+      if (intent.eventType().equals("browserActivity")) {
+        relayClock(intent);
+        continue;
+      }
       JsonNode payload = json.read(intent.payload());
       List<String> resources = resources(intent, payload);
       String resourceId = payload.path("resourceId").asString();
@@ -634,6 +643,37 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       }
       outbox.published(intent.id());
     }
+  }
+
+  private void relayClock(OutboxRepository.Intent intent) {
+    BrowserActivityClock clock = json.read(intent.payload(), BrowserActivityClock.class);
+    if (intent.userId().equals(clock.userId())
+        && intent.aggregateId().equals(clock.sessionId())
+        && browsers.deadlineCurrent(clock)
+        && clock.privacyMode().equals("NORMAL")) {
+      events.publishEvent(clock);
+      var message =
+          new TextMessage(
+              json.write(
+                  Map.of(
+                      "type",
+                      "browserActivity",
+                      "clock",
+                      BrowserSessionService.clockSnapshot(clock))));
+      for (Viewer viewer : viewers.values()) {
+        if (!viewer.channels().contains("self")
+            || !viewer.actor().userId().equals(clock.userId())
+            || !authorized(viewer)) {
+          continue;
+        }
+        try {
+          viewer.socket().sendMessage(message);
+        } catch (IOException | SessionLimitExceededException error) {
+          close(viewer, 4503, "DELIVERY_FAILED");
+        }
+      }
+    }
+    outbox.publishedClock(intent);
   }
 
   private List<String> resources(OutboxRepository.Intent intent, JsonNode payload) {

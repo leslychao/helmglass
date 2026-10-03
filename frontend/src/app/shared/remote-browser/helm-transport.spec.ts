@@ -28,6 +28,10 @@ class TestSocket {
   receive(message: unknown) {
     this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(message) }));
   }
+  disconnect(code: number, reason: string) {
+    this.readyState = 3;
+    this.onclose?.(new CloseEvent('close', { code, reason }));
+  }
 }
 
 describe('authenticated upstream transport', () => {
@@ -54,7 +58,6 @@ describe('authenticated upstream transport', () => {
     transport = new HelmTransport(
       'wss://helm.example/stream/v1/signaling/session-1',
       'one-use-ticket',
-      vi.fn(),
       vi.fn(),
     );
     const created = TestSocket.instances.at(-1);
@@ -229,6 +232,71 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     fixture.componentRef.setInput('session', currentSession);
     fixture.detectChanges();
   }
+
+  it.each([4401, 4403, 4404, 4412])(
+    'keeps terminal close %i through synchronous upstream teardown without retrying',
+    async (code) => {
+      vi.useFakeTimers();
+      const socket = TestSocket.instances.at(-1);
+      if (!socket) throw new Error('Viewer socket is missing');
+      socket.receive({
+        type: 'streamState',
+        sessionId: session.id,
+        producerId: 'producer-1',
+        pageEpoch: 2,
+        privacyEpoch: 1,
+        mediaGeneration: 1,
+        viewGeneration: 1,
+        viewport: session.viewport,
+        captureState: 'PREPARING',
+        iceServers: [],
+      });
+      socket.receive({ type: 'welcome', peerId: 'viewer-1' });
+      socket.receive({ type: 'peerStatusChanged', peerId: 'viewer-1', roles: ['listener'] });
+      socket.receive({ type: 'list', producers: [{ id: 'producer-1' }] });
+      expect(socket.sent.some((message) => message.includes('startSession'))).toBe(true);
+      mutate.mockClear();
+      socket.disconnect(code, 'VIEW_REVOKED');
+      expect(fixture.componentInstance.state()).toBe('ERROR');
+      expect(fixture.componentInstance.technicalDetails()).toBe(`${code}: VIEW_REVOKED`);
+      expect(fixture.componentInstance.message()).not.toContain(String(code));
+      await vi.advanceTimersByTimeAsync(31000);
+      expect(mutate).not.toHaveBeenCalled();
+    },
+  );
+
+  it('recovers from 4503 with the bounded known cause and ignores a late old close', async () => {
+    vi.useFakeTimers();
+    const socket = TestSocket.instances.at(-1);
+    if (!socket) throw new Error('Viewer socket is missing');
+    const lateClose = socket.onclose;
+    mutate.mockClear();
+    socket.disconnect(4503, 'MEDIA_BINDING_CHANGED');
+    expect(fixture.componentInstance.technicalDetails()).toBe('4503: MEDIA_BINDING_CHANGED');
+    expect(fixture.componentInstance.state()).toBe('CONNECTING');
+    await vi.advanceTimersByTimeAsync(1201);
+    expect(mutate).toHaveBeenCalledOnce();
+    const current = TestSocket.instances.at(-1);
+    lateClose?.(new CloseEvent('close', { code: 4403, reason: 'VIEW_REVOKED' }));
+    expect(current?.closed).toBe(false);
+    expect(fixture.componentInstance.state()).toBe('CONNECTING');
+  });
+
+  it('does not expose arbitrary server close text', () => {
+    const socket = TestSocket.instances.at(-1);
+    if (!socket) throw new Error('Viewer socket is missing');
+    socket.disconnect(4503, 'sensitive-untrusted-close-payload');
+    expect(fixture.componentInstance.technicalDetails()).toBe('4503');
+    expect(fixture.componentInstance.message()).not.toContain('sensitive-untrusted');
+    fixture.detectChanges();
+    const element: unknown = fixture.nativeElement;
+    if (!(element instanceof HTMLElement)) throw new Error('Viewer root is missing');
+    const details = element.querySelector('details');
+    expect(details?.open).toBe(false);
+    expect(details?.querySelector('summary')?.textContent).toBe('Технические сведения');
+    expect(details?.textContent).toContain('4503');
+    expect(element.textContent).not.toContain('sensitive-untrusted');
+  });
 
   it('requires a fresh capture confirmation as well as decoded frames before reporting LIVE', async () => {
     vi.useFakeTimers();

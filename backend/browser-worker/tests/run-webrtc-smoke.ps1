@@ -1,8 +1,10 @@
+param([string]$ReleaseFile)
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 $context = if ($env:HELM_TEST_DOCKER_CONTEXT) { $env:HELM_TEST_DOCKER_CONTEXT } else { 'desktop-linux' }
 $release = @{}
-Get-Content (Join-Path $repo 'Deploy/release.env') | ForEach-Object {
+if (!$ReleaseFile) { $ReleaseFile = Join-Path $repo 'Deploy/release.env' }
+Get-Content -LiteralPath $ReleaseFile | ForEach-Object {
   if ($_ -match '^(WORKER|TURN|EGRESS|NGINX)_IMAGE=(sha256:[a-f0-9]{64})$') { $release[$Matches[1]] = $Matches[2] }
 }
 foreach ($component in @('WORKER', 'TURN', 'EGRESS', 'NGINX')) {

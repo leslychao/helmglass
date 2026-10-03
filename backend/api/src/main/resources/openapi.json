@@ -5226,8 +5226,16 @@
             "format": "date-time"
           },
           "idleDeadlineAt": {
-            "type": "string",
+            "type": ["string", "null"],
             "format": "date-time"
+          },
+          "lastActivityAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "allocationEpoch": {
+            "type": "integer",
+            "minimum": 0
           },
           "loginOperationId": {
             "anyOf": [
@@ -5296,6 +5304,8 @@
           "savePolicy",
           "budgetDeadlineAt",
           "idleDeadlineAt",
+          "lastActivityAt",
+          "allocationEpoch",
           "loginOperationId",
           "siteAccess",
           "currentProfileVersion",
@@ -6833,7 +6843,7 @@
             "minimum": 0
           },
           "idleDeadlineAt": {
-            "type": "string",
+            "type": ["string", "null"],
             "format": "date-time"
           },
           "budgetDeadlineAt": {

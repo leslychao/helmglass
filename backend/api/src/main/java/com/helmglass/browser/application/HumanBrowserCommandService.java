@@ -42,6 +42,7 @@ public class HumanBrowserCommandService {
   private final HumanBrowserCommandRepository navigations;
   private final ArtifactService artifacts;
   private final BrowserRepository browsers;
+  private final BrowserSessionService sessionOwner;
   private final ControlRepository controls;
   private final IdentityRepository identities;
   private final ConnectionRepository connections;
@@ -57,6 +58,7 @@ public class HumanBrowserCommandService {
       HumanBrowserCommandRepository navigations,
       ArtifactService artifacts,
       BrowserRepository browsers,
+      BrowserSessionService sessionOwner,
       ControlRepository controls,
       IdentityRepository identities,
       ConnectionRepository connections,
@@ -70,6 +72,7 @@ public class HumanBrowserCommandService {
     this.navigations = navigations;
     this.artifacts = artifacts;
     this.browsers = browsers;
+    this.sessionOwner = sessionOwner;
     this.controls = controls;
     this.identities = identities;
     this.connections = connections;
@@ -338,6 +341,7 @@ public class HumanBrowserCommandService {
           result,
           BrowserLocation.safe(result.path("safeUrl").asString()));
     }
+    sessionOwner.commandCompleted(navigation.userId(), workerId, bootId, session.id(), result);
     complete(
         navigation,
         session,

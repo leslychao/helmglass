@@ -108,8 +108,9 @@ export class MediaSession {
     this.requireCurrentAllocation(binding);
     const previous = this.generations.get(binding.viewerId);
     if (previous && (previous.state !== 'CLOSED' || binding.viewGeneration <= previous.binding.viewGeneration
-      || binding.workerBootId !== previous.binding.workerBootId || binding.browserSessionId !== previous.binding.browserSessionId
-      || binding.allocationEpoch !== previous.binding.allocationEpoch)) throw new WorkerError('VIEW_BINDING_FENCED');
+      || binding.workerBootId !== previous.binding.workerBootId)) throw new WorkerError('VIEW_BINDING_FENCED');
+    // The mount outlives a browser session. The previous consumer must be physically
+    // closed, but a higher generation may belong to the supervisor's new allocation.
     if (!previous) this.requireCapacity(this.generations.size);
     const generation: ViewerGeneration = { binding: viewerFence(binding), state: 'OPENING' };
     this.generations.set(binding.viewerId, generation);
@@ -169,8 +170,7 @@ export class MediaSession {
     if (!sameFence(generation.binding, binding)) {
       const previous = generation.binding;
       if (generation.state !== 'CLOSED' || binding.viewGeneration <= previous.viewGeneration
-        || binding.workerBootId !== previous.workerBootId || binding.browserSessionId !== previous.browserSessionId
-        || binding.allocationEpoch !== previous.allocationEpoch) throw new WorkerError('VIEW_BINDING_FENCED');
+        || binding.workerBootId !== previous.workerBootId) throw new WorkerError('VIEW_BINDING_FENCED');
       this.requireCurrentAllocation(binding);
       // CLOSED proves the older consumer was physically removed or never existed. No newer
       // open was admitted: admission would have replaced this generation. Fence the unused
@@ -271,21 +271,22 @@ export class MediaSession {
       await welcome;
       if (this.fenceSequence !== fence || this.viewers.get(binding.viewerId) !== viewer) throw new WorkerError('VIEW_REVOKED');
       this.requireOpening(binding).state = 'LIVE';
+      const turnServers = binding.producerIceServer.urls.map((url) => {
+        if (url !== 'turn:coturn:3478?transport=tcp') throw new WorkerError('PRODUCER_TURN_FORBIDDEN');
+        const parsed = new URL(url.replace(/^turn(s?):/, 'turn$1://'));
+        parsed.username = binding.producerIceServer.username; parsed.password = binding.producerIceServer.credential;
+        return parsed.toString();
+      });
       if (!this.started) {
         this.generation = binding.mediaGeneration;
-        const turnServers = [binding.producerIceServer].flatMap((server) => server.urls.map((url) => {
-          if (url !== 'turn:coturn:3478?transport=tcp') throw new WorkerError('PRODUCER_TURN_FORBIDDEN');
-          const parsed = new URL(url.replace(/^turn(s?):/, 'turn$1://'));
-          parsed.username = server.username; parsed.password = server.credential;
-          return parsed.toString();
-        }));
         const httpProxy = new URL(binding.mediaProxy.url);
         httpProxy.username = binding.mediaProxy.username; httpProxy.password = binding.mediaProxy.password;
         await this.helper.request('start', { ...matching[0], generation: this.generation, peerId: viewer.peerId,
           durationMs: this.duration(new Date(viewer.expiresAt).toISOString()), turnServers, httpProxy: httpProxy.toString() });
         if (this.failed || this.fenceSequence !== fence || this.viewers.get(binding.viewerId) !== viewer) throw new WorkerError('VIEW_REVOKED');
         this.started = true;
-      } else await this.helper.request('lease', { peerId: viewer.peerId, generation: this.generation, durationMs: this.duration(binding.leaseExpiresAt) });
+      } else await this.helper.request('lease', { peerId: viewer.peerId, generation: this.generation,
+        durationMs: this.duration(binding.leaseExpiresAt), turnServers });
       socket.send(JSON.stringify({ type: 'setPeerStatus', roles: ['listener'] }));
       socket.send(JSON.stringify({ type: 'list' }));
       const deadline = Date.now() + 10_000;

@@ -1,6 +1,7 @@
 package com.helmglass.browser.infrastructure.repository;
 
 import com.helmglass.api.DomainException;
+import com.helmglass.browser.domain.BrowserActivityClock;
 import com.helmglass.identity.domain.QuotaCeiling;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -13,6 +14,14 @@ import tools.jackson.databind.JsonNode;
 
 @Repository
 public class BrowserRepository {
+  static final String IDLE_EXPIRED =
+      """
+      (s.idle_deadline_at<=now()
+        AND (s.task_id IS NULL OR t.state IN ('WAITING_AGENT','PAUSED','WAITING_USER'))
+        AND NOT EXISTS(SELECT 1 FROM command_attempts a WHERE a.session_id=s.id AND a.state='STARTED')
+        AND NOT EXISTS(SELECT 1 FROM human_browser_commands h
+          WHERE h.session_id=s.id AND h.state='STARTED'))
+      """;
   private final JdbcClient jdbc;
 
   public BrowserRepository(JdbcClient jdbc) {
@@ -35,6 +44,7 @@ public class BrowserRepository {
       String privacy,
       Instant budgetDeadlineAt,
       Instant idleDeadlineAt,
+      Instant lastActivityAt,
       UUID connectionId,
       String purpose,
       String currentUrl,
@@ -73,6 +83,45 @@ public class BrowserRepository {
         .query(Session.class)
         .optional()
         .orElseThrow(DomainException::notFound);
+  }
+
+  public Optional<BrowserActivityClock> recordActivity(
+      UUID sessionId, int idleSeconds, long inputEpoch, long inputSequence) {
+    return jdbc.sql(
+            """
+            UPDATE browser_sessions SET last_activity_at=statement_timestamp(),
+              idle_deadline_at=statement_timestamp()+make_interval(secs=>:seconds),
+              activity_input_epoch=CASE WHEN :sequence>0 THEN :epoch ELSE activity_input_epoch END,
+              activity_input_sequence=CASE WHEN :sequence>0 THEN :sequence ELSE activity_input_sequence END
+            WHERE id=:id AND state='ACTIVE' AND binding_released_at IS NULL
+              AND budget_deadline_at>statement_timestamp()
+              AND (:sequence=0 OR (activity_input_epoch,activity_input_sequence)<(:epoch,:sequence))
+            RETURNING user_id,task_id,id AS session_id,worker_id,worker_boot_id,
+              allocation_epoch,privacy_epoch,privacy AS privacy_mode,
+              last_activity_at,idle_deadline_at,budget_deadline_at
+            """)
+        .param("id", sessionId)
+        .param("seconds", idleSeconds)
+        .param("epoch", inputEpoch)
+        .param("sequence", inputSequence)
+        .query(BrowserActivityClock.class)
+        .optional();
+  }
+
+  public Optional<BrowserActivityClock> updateIdlePolicy(UUID sessionId, int idleSeconds) {
+    return jdbc.sql(
+            """
+            UPDATE browser_sessions SET idle_deadline_at=last_activity_at+make_interval(secs=>:seconds)
+              WHERE id=:id AND state='ACTIVE' AND binding_released_at IS NULL
+              AND idle_deadline_at IS DISTINCT FROM last_activity_at+make_interval(secs=>:seconds)
+            RETURNING user_id,task_id,id AS session_id,worker_id,worker_boot_id,
+              allocation_epoch,privacy_epoch,privacy AS privacy_mode,
+              last_activity_at,idle_deadline_at,budget_deadline_at
+            """)
+        .param("id", sessionId)
+        .param("seconds", idleSeconds)
+        .query(BrowserActivityClock.class)
+        .optional();
   }
 
   public void checkBrowserLimit(UUID userId) {

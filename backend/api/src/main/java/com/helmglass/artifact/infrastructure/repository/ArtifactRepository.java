@@ -124,7 +124,7 @@ public class ArtifactRepository {
             WHERE a.id=:id AND a.state='STARTED' AND c.state='STARTED' AND c.kind='READ_MEDIA'
             AND a.start_permit_id IS NOT NULL AND a.assignment_epoch=s.allocation_epoch
             AND a.control_epoch=l.epoch AND a.worker_id=s.worker_id AND c.cancel_requested_at IS NULL
-            AND c.deadline>now() AND s.budget_deadline_at>now() AND s.idle_deadline_at>now()
+            AND c.deadline>now() AND s.budget_deadline_at>now()
             AND s.state='ACTIVE' AND s.privacy='NORMAL' AND s.binding_released_at IS NULL
             AND t.state='RUNNING' AND NOT t.mutation_barrier
             AND l.owner_kind='AGENT' AND l.state='ACTIVE' AND l.expires_at>now()
@@ -156,7 +156,7 @@ public class ArtifactRepository {
             JOIN application_users u ON u.id=h.user_id
             WHERE h.attempt_id=:id AND h.state='STARTED' AND h.permit_id IS NOT NULL
             AND h.action->>'type'='SNAPSHOT' AND h.execution_mode='HUMAN'
-            AND h.deadline>now() AND s.budget_deadline_at>now() AND s.idle_deadline_at>now()
+            AND h.deadline>now() AND s.budget_deadline_at>now()
             AND s.state='ACTIVE' AND s.privacy='NORMAL' AND s.binding_released_at IS NULL
             AND s.purpose='TASK' AND s.task_id IS NOT NULL
             AND l.owner_kind='HUMAN' AND l.state='ACTIVE' AND l.expires_at>now()

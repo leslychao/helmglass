@@ -137,7 +137,8 @@ public class TaskQueries {
         jdbc.sql(
                 """
                 SELECT s.id,s.version,s.state,s.privacy,s.page_epoch AS "pageEpoch",
-                s.privacy_epoch AS "privacyEpoch",s.idle_deadline_at AS "idleDeadlineAt",
+                s.privacy_epoch AS "privacyEpoch",
+                CASE WHEN s.privacy='NORMAL' THEN s.idle_deadline_at END AS "idleDeadlineAt",
                 s.budget_deadline_at AS "budgetDeadlineAt",s.close_reason AS "closeReason",
                 l.epoch AS "controlEpoch",l.owner_kind AS "controlOwner"
                 FROM browser_sessions s LEFT JOIN browser_control_leases l ON l.session_id=s.id

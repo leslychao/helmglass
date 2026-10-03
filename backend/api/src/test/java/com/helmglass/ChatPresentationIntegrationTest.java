@@ -2,10 +2,13 @@ package com.helmglass;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
+import com.helmglass.browser.application.BrowserSessionService;
+import com.helmglass.browser.domain.BrowserActivityClock;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.UserEphemeralState;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
@@ -89,7 +92,8 @@ class ChatPresentationIntegrationTest {
             presentations,
             new OperationRepository(jdbc, json, changes),
             event -> {},
-            changes);
+            changes,
+            mock(BrowserSessionService.class));
   }
 
   @AfterAll
@@ -539,5 +543,90 @@ class ChatPresentationIntegrationTest {
             true),
         task,
         host());
+  }
+
+  @Test
+  void activityDuringDeliveryKeepsLatestClockPendingAndCoalescesWithoutLosingRollback()
+      throws Exception {
+    var fixture = fixture();
+    var json = new JsonSupport(JsonMapper.builder().findAndAddModules().build());
+    var changes = new ChangeRepository(jdbc, json);
+    UUID session = UUID.randomUUID(), worker = UUID.randomUUID(), boot = UUID.randomUUID();
+    Instant time = Instant.now();
+    var first =
+        new BrowserActivityClock(
+            fixture.actor().userId(),
+            fixture.task(),
+            session,
+            worker,
+            boot,
+            1,
+            1,
+            "NORMAL",
+            time,
+            time.plusSeconds(900),
+            time.plusSeconds(1800));
+    transaction.executeWithoutResult(status -> changes.browserActivity(first));
+    var sending =
+        outbox.due().stream()
+            .filter(intent -> intent.aggregateId().equals(session))
+            .findFirst()
+            .orElseThrow();
+    var releaseSend = new CountDownLatch(1);
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      var acknowledge =
+          executor.submit(
+              () -> {
+                if (!releaseSend.await(5, TimeUnit.SECONDS))
+                  throw new IllegalStateException("Delivery test timed out");
+                outbox.publishedClock(sending);
+                return true;
+              });
+      for (int i = 1; i <= 20; i++) {
+        Instant newer = time.plusSeconds(i);
+        var update =
+            new BrowserActivityClock(
+                first.userId(),
+                first.taskId(),
+                session,
+                worker,
+                boot,
+                1,
+                1,
+                "NORMAL",
+                newer,
+                newer.plusSeconds(900),
+                first.budgetDeadlineAt());
+        transaction.executeWithoutResult(status -> changes.browserActivity(update));
+      }
+      releaseSend.countDown();
+      assertThat(acknowledge.get(5, TimeUnit.SECONDS)).isTrue();
+    }
+    assertThat(unpublished(sending.id())).isTrue();
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM transactional_outbox WHERE aggregate_id=:id AND"
+                        + " event_type='browserActivity'")
+                .param("id", session)
+                .query(Integer.class)
+                .single())
+        .isEqualTo(1);
+    var latest =
+        outbox.due().stream()
+            .filter(intent -> intent.aggregateId().equals(session))
+            .findFirst()
+            .orElseThrow();
+    assertThat(latest.id()).isEqualTo(sending.id());
+    assertThat(json.read(latest.payload(), BrowserActivityClock.class).lastActivityAt())
+        .isEqualTo(time.plusSeconds(20));
+    transaction.executeWithoutResult(
+        status -> {
+          changes.browserActivity(first);
+          status.setRollbackOnly();
+        });
+    outbox.publishedClock(latest);
+    assertThat(unpublished(sending.id())).isFalse();
+    transaction.executeWithoutResult(status -> changes.browserActivity(first));
+    assertThat(unpublished(sending.id())).isTrue();
   }
 }

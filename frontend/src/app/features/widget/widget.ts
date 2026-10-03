@@ -4,6 +4,7 @@ import { BrowserPanel } from '../../shared/browser-panel/browser-panel';
 import { Icon } from '../../shared/icon/icon';
 import { LabelPipe, Status } from '../../shared/status/status';
 import { ReconnectWindow } from '../../core/realtime/reconnect-window';
+import { BrowserClock, browserClockOf, newerClock } from '../../core/realtime/browser-clock';
 import { widgetOrigin } from './widget-config';
 import {
   Presentation,
@@ -42,6 +43,7 @@ import {
             surface="WIDGET"
             [viewerInstanceId]="instanceId"
             [providedSession]="session"
+            [providedClock]="browserClock()"
             [providedTicket]="snapshot()?.viewTicket ?? null"
             (changed)="refreshView()"
             (openTask)="openTask()"
@@ -87,6 +89,7 @@ import {
   </main>`,
 })
 export class Widget {
+  readonly browserClock = signal<BrowserClock | null>(null);
   private readonly publicOrigin = widgetOrigin(document);
   readonly presentation = signal<Presentation | null>(null);
   readonly snapshot = signal<WidgetSnapshot | null>(null);
@@ -402,6 +405,10 @@ export class Widget {
         return;
       }
       if (!record(value)) return;
+      if (value['type'] === 'browserActivity') {
+        const clock = browserClockOf(value['clock']);
+        if (clock) this.browserClock.update((current) => newerClock(current, clock));
+      }
       if (value['type'] === 'pong') {
         lastPong = Date.now();
       }
@@ -561,8 +568,7 @@ export class Widget {
     } finally {
       this.dispatching = false;
       // Visibility may have returned while prepare was still pending in the old generation.
-      if (generation !== this.generation && !document.hidden && !this.disposed)
-        void this.attach();
+      if (generation !== this.generation && !document.hidden && !this.disposed) void this.attach();
     }
   }
   private async finishDelivery(attempt: DeliveryAttempt, generation: number) {
@@ -665,6 +671,7 @@ export class Widget {
     }
   }
   private clear() {
+    this.browserClock.set(null);
     this.generation++;
     this.disconnectEvents();
     clearTimeout(this.renewal);

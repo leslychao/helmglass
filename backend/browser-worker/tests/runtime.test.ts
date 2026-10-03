@@ -184,7 +184,11 @@ test('real Chromium executes through embedded MCP, deduplicates, and fences priv
       mode: 'HUMAN', controllerInstance, leaseExpiresAt: new Date(Date.now() + 250).toISOString() });
     const input = { schemaVersion: 1 as const, type: 'input' as const, requestId: randomUUID(), browserSessionId: assignment.browserSessionId,
       controlEpoch: 4, pageEpoch: assignment.pageEpoch, controllerInstance, inputSequence: 1, action: { type: 'keyDown' as const, key: 'Shift' } };
-    await runtime.input(input);
+    const applied = await runtime.input(input);
+    assert.equal(applied['activity'], true, 'A physically applied key is activity');
+    const heartbeat = await runtime.input({ ...input, inputSequence: 2, action: { type: 'heartbeat' } });
+    assert.equal(heartbeat['activity'], false, 'Control heartbeat is not browser activity');
+    assert.equal(heartbeat['inputSequence'], 2);
     await samePage.waitForFunction(() => document.documentElement.dataset['releasedKey'] === 'Shift', { timeout: 3000 });
     assert.equal(runtime.inventory()['mode'], 'QUIESCED');
     await assert.rejects(runtime.input({ ...input, inputSequence: 2, action: { type: 'heartbeat' } }), /INPUT_FENCED/);
@@ -206,7 +210,7 @@ test('real Chromium executes through embedded MCP, deduplicates, and fences priv
 
 test('standalone login creates no observer and initial permit returns no private page data', { timeout: 30_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'helm-login-test-'));
-  const server = createServer((_request, response) => response.end('<h1>private-account-name</h1><input type="password" value="private-password">'));
+  const server = createServer((_request, response) => response.end('<h1>private-account-name</h1><input type="password" value="private-password"><a href="/next">Next</a>'));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const url = `http://127.0.0.1:${address.port}`;
@@ -224,6 +228,23 @@ test('standalone login creates no observer and initial permit returns no private
     assert.equal(JSON.stringify(result).includes('private-account-name'), false);
     assert.equal(JSON.stringify(result).includes('private-password'), false);
     assert.equal(runtime.usageCheckpoint(), undefined);
+    const controllerInstance = randomUUID();
+    await runtime.control({ schemaVersion: 1, type: 'control', requestId: randomUUID(),
+      browserSessionId: assignment.browserSessionId, allocationEpoch: 1, controlEpoch: 2,
+      pageEpoch: assignment.pageEpoch, privacyEpoch: 2, policyVersion: 1, mode: 'HUMAN_PRIVATE',
+      controllerInstance, leaseExpiresAt: new Date(Date.now() + 5000).toISOString() });
+    const page = runtime.context.pages()[0]; assert.ok(page);
+    await page.getByRole('link', { name: 'Next' }).focus();
+    const inputPageEpoch = assignment.pageEpoch;
+    const navigation = page.waitForURL(url + '/next');
+    const applied = await runtime.input({ schemaVersion: 1, type: 'input', requestId: randomUUID(),
+      browserSessionId: assignment.browserSessionId, controlEpoch: 2, pageEpoch: inputPageEpoch,
+      controllerInstance, inputSequence: 1, action: { type: 'keyDown', key: 'Enter' } });
+    await navigation;
+    assert.equal(applied['activity'], true);
+    assert.equal(applied['inputPageEpoch'], inputPageEpoch, 'Input keeps its admitted page after navigation');
+    assert.ok(assignment.pageEpoch > inputPageEpoch, 'Real Enter input navigated the same Page');
+    assert.equal(JSON.stringify(applied).includes('/next'), false, 'Private input receipt contains no URL');
     await runtime.close();
     const neverReady = runtime.usageCheckpoint();
     assert.ok(neverReady);

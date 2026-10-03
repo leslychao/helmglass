@@ -91,6 +91,10 @@ export interface BrowserSession {
   currentProfileVersion?: string | null;
   closeReason?: string;
   operationId?: string;
+  allocationEpoch?: number;
+  lastActivityAt?: string | null;
+  idleDeadlineAt?: string | null;
+  budgetDeadlineAt?: string;
 }
 export interface ViewTicket {
   ticket: string;

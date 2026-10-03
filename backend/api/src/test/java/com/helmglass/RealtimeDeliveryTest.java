@@ -10,6 +10,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.helmglass.api.JsonSupport;
+import com.helmglass.browser.application.BrowserSessionService;
+import com.helmglass.browser.domain.BrowserActivityClock;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
@@ -34,6 +36,8 @@ import tools.jackson.databind.json.JsonMapper;
 class RealtimeDeliveryTest {
   private final IdentityRepository identities = mock(IdentityRepository.class);
   private final OutboxRepository outbox = mock(OutboxRepository.class);
+  private final BrowserSessionService browsers = mock(BrowserSessionService.class);
+  private final ApplicationEventPublisher events = mock(ApplicationEventPublisher.class);
   private final JsonSupport json = new JsonSupport(JsonMapper.builder().build());
   private final RealtimeDeliveryService realtime =
       new RealtimeDeliveryService(
@@ -42,8 +46,94 @@ class RealtimeDeliveryTest {
           json,
           mock(ChatPresentationRepository.class),
           mock(OperationRepository.class),
-          mock(ApplicationEventPublisher.class),
-          mock(ChangeRepository.class));
+          events,
+          mock(ChangeRepository.class),
+          browsers);
+
+  @Test
+  void deadlineDeltaReachesOnlyOwnAuthorizedViewerAndNeverLeaksInternalBinding() throws Exception {
+    var owner = actor(false);
+    var own = socket(owner);
+    var foreign = socket(actor(false));
+    for (var socket : List.of(own, foreign)) {
+      realtime.afterConnectionEstablished(socket);
+      realtime.handleMessage(
+          socket, new TextMessage("{\"type\":\"subscribe\",\"channels\":[\"self\"]}"));
+    }
+    var now = Instant.now();
+    var clock =
+        new BrowserActivityClock(
+            owner.userId(),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            2,
+            3,
+            "NORMAL",
+            now,
+            now.plusSeconds(900),
+            now.plusSeconds(1800));
+    var intent =
+        new OutboxRepository.Intent(
+            UUID.randomUUID(),
+            owner.userId(),
+            clock.sessionId(),
+            "browserActivity",
+            json.write(clock));
+    when(outbox.due()).thenReturn(List.of(intent));
+    when(browsers.deadlineCurrent(clock)).thenReturn(true);
+    realtime.relay();
+    var messages = ArgumentCaptor.forClass(TextMessage.class);
+    verify(own, times(2)).sendMessage(messages.capture());
+    var payload = json.read(messages.getAllValues().getLast().getPayload());
+    assertEquals("browserActivity", payload.path("type").asString());
+    assertEquals(6, payload.path("clock").size());
+    assertEquals(
+        clock.sessionId().toString(), payload.path("clock").path("browserSessionId").asString());
+    verify(foreign).sendMessage(any(TextMessage.class));
+    verify(events).publishEvent(clock);
+    verify(outbox).publishedClock(intent);
+    verify(outbox, never()).published(intent.id());
+  }
+
+  @Test
+  void obsoleteRuntimeClockIsAcknowledgedWithoutDeliveryAndPrivateClockNeverReachesSharedChannels()
+      throws Exception {
+    var owner = actor(false);
+    var socket = socket(owner);
+    realtime.afterConnectionEstablished(socket);
+    realtime.handleMessage(
+        socket, new TextMessage("{\"type\":\"subscribe\",\"channels\":[\"self\"]}"));
+    var now = Instant.now();
+    var clock =
+        new BrowserActivityClock(
+            owner.userId(),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            2,
+            3,
+            "LOGIN_PRIVATE",
+            now,
+            now.plusSeconds(600),
+            now.plusSeconds(1800));
+    var intent =
+        new OutboxRepository.Intent(
+            UUID.randomUUID(),
+            clock.userId(),
+            clock.sessionId(),
+            "browserActivity",
+            json.write(clock));
+    when(outbox.due()).thenReturn(List.of(intent));
+    when(browsers.deadlineCurrent(clock)).thenReturn(false, true);
+    realtime.relay();
+    realtime.relay();
+    verify(events, never()).publishEvent(any(BrowserActivityClock.class));
+    verify(socket).sendMessage(any(TextMessage.class));
+    verify(outbox, times(2)).publishedClock(intent);
+  }
 
   @Test
   void subscribesBeforeReadyAndOnlyReceivesOwnSafeResources() throws Exception {

@@ -66,4 +66,7 @@
   <changeSet id="035-continuation-origin" author="helmglass">
     <sqlFile path="035-continuation-origin.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="036-browser-activity" author="helmglass">
+    <sqlFile path="036-browser-activity.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

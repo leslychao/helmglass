@@ -148,6 +148,25 @@ class ArtifactPersistenceIntegrationTest {
   }
 
   @Test
+  void executingCaptureUsesCommandAndBudgetDeadlinesInsteadOfTheIdleClock() {
+    Fixture fixture = fixture();
+    jdbc.sql("UPDATE browser_sessions SET idle_deadline_at=now()-interval '1 minute' WHERE id=:id")
+        .param("id", fixture.metadata().browserSessionId())
+        .update();
+    var allocated = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());
+    assertThat(allocated.artifactId()).isNotNull();
+    jdbc.sql(
+            "UPDATE browser_sessions SET budget_deadline_at=now()-interval '1 second' WHERE id=:id")
+        .param("id", fixture.metadata().browserSessionId())
+        .update();
+    assertThatThrownBy(
+            () -> service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata()))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("authorization");
+    verifyNoInteractions(storage, multipart);
+  }
+
+  @Test
   void privacyTransitionRevokesAlreadyIssuedUploadBeforeStorageAccess() {
     Fixture fixture = fixture();
     var grant = service.allocate(fixture.workerId(), fixture.bootId(), fixture.metadata());

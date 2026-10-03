@@ -110,6 +110,11 @@ function sessionOf(value: unknown): BrowserSession | null {
     controlEpoch: number(value['controlEpoch']),
     pageEpoch: number(value['pageEpoch']),
     privacyEpoch: number(value['privacyEpoch']),
+    allocationEpoch:
+      typeof value['allocationEpoch'] === 'number' ? value['allocationEpoch'] : undefined,
+    lastActivityAt: optional(value['lastActivityAt']),
+    idleDeadlineAt: optional(value['idleDeadlineAt']),
+    budgetDeadlineAt: optional(value['budgetDeadlineAt']),
     privacyMode: string(value['privacyMode']),
     siteAccess: string(value['siteAccess']),
     currentUrl: optional(value['currentUrl']),

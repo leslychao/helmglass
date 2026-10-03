@@ -21,6 +21,7 @@ public class OutboxRepository {
           "sites",
           "operations",
           "browserSessions",
+          "browserActivity",
           "users",
           "userTasks",
           "userDays",
@@ -56,6 +57,19 @@ public class OutboxRepository {
                 + " AND published_at IS NULL AND event_type IN (:types)")
         .param("id", id)
         .param("types", UI_EVENTS)
+        .update();
+  }
+
+  /** An input arriving during delivery leaves its newer clock pending. */
+  public void publishedClock(Intent intent) {
+    jdbc.sql(
+            """
+            UPDATE transactional_outbox SET published_at=now()
+            WHERE id=:id AND event_type='browserActivity' AND published_at IS NULL
+              AND payload=CAST(:payload AS jsonb)
+            """)
+        .param("id", intent.id())
+        .param("payload", intent.payload())
         .update();
   }
 }

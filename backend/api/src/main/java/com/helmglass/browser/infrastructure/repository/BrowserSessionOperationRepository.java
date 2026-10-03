@@ -73,12 +73,15 @@ public class BrowserSessionOperationRepository {
               JOIN application_users u ON u.id=s.user_id LEFT JOIN tasks t ON t.id=s.task_id
             WHERE u.state='ACTIVE' AND s.state IN ('ACTIVE','STOPPING')
               AND s.binding_released_at IS NULL AND s.runtime_generation IS NOT NULL
-              AND (s.state='STOPPING' OR s.budget_deadline_at<=now() OR s.idle_deadline_at<=now()
-                OR t.state IN ('STOPPING','COMPLETED','FAILED','CANCELLED'))
-              AND NOT EXISTS(SELECT 1 FROM browser_session_operations o WHERE o.session_id=s.id
-                AND (o.initiator='SYSTEM' OR o.state IN ('QUIESCING','SAVING','RESUMING','CLOSING')))
-            ORDER BY s.requested_at,s.id LIMIT 50
-            """)
+              AND (s.state='STOPPING' OR s.budget_deadline_at<=now() OR\
+            """
+                + BrowserRepository.IDLE_EXPIRED
+                + """
+                    OR t.state IN ('STOPPING','COMPLETED','FAILED','CANCELLED'))
+                  AND NOT EXISTS(SELECT 1 FROM browser_session_operations o WHERE o.session_id=s.id
+                    AND (o.initiator='SYSTEM' OR o.state IN ('QUIESCING','SAVING','RESUMING','CLOSING')))
+                ORDER BY s.requested_at,s.id LIMIT 50
+                """)
         .query(ClosingSession.class)
         .list();
   }
@@ -88,8 +91,12 @@ public class BrowserSessionOperationRepository {
             """
             SELECT EXISTS(SELECT 1 FROM browser_sessions s LEFT JOIN tasks t ON t.id=s.task_id
               WHERE s.id=:id AND (s.state='STOPPING' OR s.budget_deadline_at<=now()
-                OR s.idle_deadline_at<=now() OR t.state IN ('STOPPING','COMPLETED','FAILED','CANCELLED')))
-            """)
+                OR\
+            """
+                + BrowserRepository.IDLE_EXPIRED
+                + """
+                    OR t.state IN ('STOPPING','COMPLETED','FAILED','CANCELLED')))
+                """)
         .param("id", id)
         .query(Boolean.class)
         .single();

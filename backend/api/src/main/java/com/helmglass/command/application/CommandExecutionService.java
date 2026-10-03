@@ -3,6 +3,7 @@ package com.helmglass.command.application;
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
+import com.helmglass.browser.application.BrowserSessionService;
 import com.helmglass.browser.application.WorkerProtocol;
 import com.helmglass.browser.domain.BrowserLocation;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
@@ -44,6 +45,7 @@ public class CommandExecutionService {
   private final ApplicationEventPublisher events;
   private final ReconciliationService reconciliation;
   private final BrowserRepository browsers;
+  private final BrowserSessionService sessionOwner;
   private final ConnectionService connections;
   private final UsageProjectionService usage;
 
@@ -59,6 +61,7 @@ public class CommandExecutionService {
       ApplicationEventPublisher events,
       ReconciliationService reconciliation,
       BrowserRepository browsers,
+      BrowserSessionService sessionOwner,
       ConnectionService connections,
       UsageProjectionService usage) {
     this.commands = commands;
@@ -72,6 +75,7 @@ public class CommandExecutionService {
     this.events = events;
     this.reconciliation = reconciliation;
     this.browsers = browsers;
+    this.sessionOwner = sessionOwner;
     this.connections = connections;
     this.usage = usage;
   }
@@ -208,6 +212,7 @@ public class CommandExecutionService {
   public void acceptResult(UUID workerId, UUID bootId, JsonNode result) {
     UUID commandId = UUID.fromString(result.path("commandId").asString());
     var dispatch = commands.dispatch(commandId);
+    identities.lockState(dispatch.userId());
     commands.lockTask(dispatch.userId(), dispatch.taskId());
     if (!workerId.equals(dispatch.workerId())
         || !bootId.equals(dispatch.workerBootId())
@@ -242,6 +247,8 @@ public class CommandExecutionService {
       browsers.observedLocation(workerId, bootId, dispatch.sessionId(), result, url);
     }
     commands.result(dispatch, status, effect, digest, result);
+    sessionOwner.commandCompleted(
+        dispatch.userId(), workerId, bootId, dispatch.sessionId(), result);
     if (!cancelled) {
       dispositionChanged(dispatch.userId(), dispatch.taskId(), commandId);
     }

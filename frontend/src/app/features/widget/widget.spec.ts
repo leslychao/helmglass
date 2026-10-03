@@ -161,6 +161,27 @@ describe('widget presentation lifecycle', () => {
     expect(bridge.attach).toHaveBeenCalledOnce();
   });
 
+  it('applies a deadline event without another attach or replacing the active presentation', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
+    const fixture = await mount();
+    const calls = bridge.attach.mock.calls.length;
+    const clock = {
+      browserSessionId: 'session',
+      allocationEpoch: 1,
+      privacyEpoch: 1,
+      lastActivityAt: '2026-10-03T00:00:00Z',
+      idleDeadlineAt: '2026-10-03T00:15:00Z',
+      budgetDeadlineAt: '2026-10-03T00:30:00Z',
+    };
+    socket().onmessage?.(
+      new MessageEvent('message', { data: JSON.stringify({ type: 'browserActivity', clock }) }),
+    );
+    await Promise.resolve();
+    expect(fixture.componentInstance.browserClock()).toEqual(clock);
+    expect(bridge.attach).toHaveBeenCalledTimes(calls);
+    expect(fixture.componentInstance.presentation()).toEqual(presentation);
+  });
+
   it('does not attach a superseded presentation or accept an older revision', async () => {
     const fixture = TestBed.createComponent(Widget);
     await Promise.resolve();

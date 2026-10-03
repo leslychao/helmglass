@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Controlled media measurement Page</title>
+<style>
+html, body { margin: 0; overflow: hidden; background: #18232c; color: white; font: 16px sans-serif; }
+canvas { display: block; }
+label { position: fixed; bottom: 12px; left: 24px; }
+input { width: 260px; font: inherit; }
+</style>
+<canvas aria-label="Dynamic test scene"></canvas>
+<label>Latency probe <input aria-label="Latency probe" autofocus autocomplete="off"></label>
+<script type="module" src="/performance/source.mjs"></script>
+</html>

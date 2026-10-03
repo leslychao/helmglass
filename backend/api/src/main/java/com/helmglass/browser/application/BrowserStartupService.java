@@ -31,6 +31,7 @@ import tools.jackson.databind.JsonNode;
 public class BrowserStartupService {
   private final BrowserStartupRepository startups;
   private final BrowserRepository browsers;
+  private final BrowserSessionService sessionOwner;
   private final CommandRepository commands;
   private final IdentityRepository identities;
   private final UserPolicyService policies;
@@ -44,6 +45,7 @@ public class BrowserStartupService {
   public BrowserStartupService(
       BrowserStartupRepository startups,
       BrowserRepository browsers,
+      BrowserSessionService sessionOwner,
       CommandRepository commands,
       IdentityRepository identities,
       UserPolicyService policies,
@@ -55,6 +57,7 @@ public class BrowserStartupService {
       UsageCheckpointService usage) {
     this.startups = startups;
     this.browsers = browsers;
+    this.sessionOwner = sessionOwner;
     this.commands = commands;
     this.identities = identities;
     this.policies = policies;
@@ -149,8 +152,10 @@ public class BrowserStartupService {
           422, "INVALID_READY_USAGE", "Readiness requires an active runtime measurement");
     }
     usage.record(workerId, bootId, sessionId, checkpoint);
-    startups.acknowledgeReady(
-        sessionId, Instant.parse(checkpoint.path("sourceStartedAt").asString()));
+    if (startups.acknowledgeReady(
+        sessionId, Instant.parse(checkpoint.path("sourceStartedAt").asString()))) {
+      sessionOwner.enteredIdle(session.userId(), sessionId);
+    }
   }
 
   @Scheduled(fixedDelay = 1000)

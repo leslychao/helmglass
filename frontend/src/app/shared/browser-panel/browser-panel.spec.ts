@@ -13,7 +13,7 @@ describe('browser address editing', () => {
       providers: [
         provideRouter([]),
         { provide: Api, useValue: { get: () => NEVER } },
-        { provide: Realtime, useValue: { refresh: new Subject() } },
+        { provide: Realtime, useValue: { refresh: new Subject(), browserClocks: new Subject() } },
       ],
     });
     TestBed.overrideComponent(BrowserPanel, { set: { template: '', imports: [] } });
@@ -71,7 +71,7 @@ describe('browser address editing', () => {
       providers: [
         provideRouter([]),
         { provide: Api, useValue: { get: () => NEVER } },
-        { provide: Realtime, useValue: { refresh: new Subject() } },
+        { provide: Realtime, useValue: { refresh: new Subject(), browserClocks: new Subject() } },
       ],
     });
     TestBed.overrideComponent(BrowserPanel, { set: { template: '', imports: [] } });
@@ -113,7 +113,7 @@ describe('browser address editing', () => {
       providers: [
         provideRouter([]),
         { provide: Api, useValue: { get: () => NEVER } },
-        { provide: Realtime, useValue: { refresh: new Subject() } },
+        { provide: Realtime, useValue: { refresh: new Subject(), browserClocks: new Subject() } },
       ],
     });
     TestBed.overrideComponent(BrowserPanel, { set: { template: '', imports: [] } });
@@ -183,7 +183,7 @@ describe('browser address editing', () => {
       providers: [
         provideRouter([]),
         { provide: Api, useValue: { get: () => NEVER, mutate } },
-        { provide: Realtime, useValue: { refresh: new Subject() } },
+        { provide: Realtime, useValue: { refresh: new Subject(), browserClocks: new Subject() } },
       ],
     });
     TestBed.overrideComponent(BrowserPanel, { set: { template: '', imports: [] } });

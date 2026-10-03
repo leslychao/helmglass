@@ -2,6 +2,7 @@ package com.helmglass.browser.application;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.browser.api.BrowserContracts;
+import com.helmglass.browser.domain.BrowserActivityClock;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.connection.infrastructure.repository.LoginRepository;
@@ -9,6 +10,7 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.realtime.application.ChannelTicketService;
 import com.helmglass.realtime.domain.BrowserMediaBinding;
+import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.task.api.TaskContracts.Capability;
 import java.time.Instant;
 import java.util.HashMap;
@@ -19,7 +21,9 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.JsonNode;
 
 @Service
 public class BrowserSessionService {
@@ -29,6 +33,7 @@ public class BrowserSessionService {
   private final ChannelTicketService tickets;
   private final String origin;
   private final LoginRepository logins;
+  private final ChangeRepository changes;
 
   public BrowserSessionService(
       BrowserRepository browsers,
@@ -36,13 +41,156 @@ public class BrowserSessionService {
       IdentityRepository identities,
       ChannelTicketService tickets,
       LoginRepository logins,
+      ChangeRepository changes,
       @Value("${helm.public-origin}") String origin) {
     this.browsers = browsers;
     this.controls = controls;
     this.identities = identities;
     this.tickets = tickets;
     this.logins = logins;
+    this.changes = changes;
     this.origin = origin;
+  }
+
+  /** Applies only a newly accepted, confirmed command receipt in its owner's transaction. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void commandCompleted(
+      UUID userId, UUID workerId, UUID bootId, UUID sessionId, JsonNode receipt) {
+    var control = controls.lock(sessionId);
+    var session = browsers.owned(userId, sessionId);
+    if (receipt.path("status").asString().equals("SUCCEEDED")
+        && receipt.path("effectState").asString().equals("CONFIRMED")
+        && matches(
+            session,
+            control,
+            workerId,
+            bootId,
+            receipt.path("allocationEpoch").asLong(-1),
+            receipt.path("controlEpoch").asLong(-1),
+            receipt.path("pageEpoch").asLong(-1),
+            receipt.path("privacyEpoch").asLong(-1))) {
+      recordActivity(session, 0, 0);
+    }
+  }
+
+  /** The first runtime-ready acknowledgement starts idle time; duplicate readiness does not. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void enteredIdle(UUID userId, UUID sessionId) {
+    controls.lock(sessionId);
+    recordActivity(browsers.owned(userId, sessionId), 0, 0);
+  }
+
+  /** A privacy transition changes the idle interval without manufacturing activity. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void synchronizeIdlePolicy(UUID userId, UUID sessionId) {
+    controls.lock(sessionId);
+    var session = browsers.owned(userId, sessionId);
+    browsers.updateIdlePolicy(sessionId, idleSeconds(session)).ifPresent(changes::browserActivity);
+  }
+
+  /** Records only an applied action from the current authorized input channel. */
+  @Transactional
+  public Optional<BrowserActivityClock> inputApplied(
+      ChannelTicketService.TicketBinding binding,
+      UUID channelId,
+      UUID workerId,
+      UUID bootId,
+      long allocationEpoch,
+      long controlEpoch,
+      long pageEpoch,
+      long privacyEpoch,
+      long inputPageEpoch,
+      long sequence,
+      boolean activity) {
+    if (!activity || sequence < 1 || !identities.lockState(binding.userId()).equals("ACTIVE")) {
+      return Optional.empty();
+    }
+    var control = controls.lock(binding.sessionId());
+    var session = browsers.owned(binding.userId(), binding.sessionId());
+    if (!matches(
+            session,
+            control,
+            workerId,
+            bootId,
+            allocationEpoch,
+            controlEpoch,
+            pageEpoch,
+            privacyEpoch)
+        || !control.state().equals("ACTIVE")
+        || !control.ownerKind().equals("HUMAN")
+        || !control.expiresAt().isAfter(Instant.now())
+        || !Objects.equals(binding.loginId(), control.loginId())
+        || !Objects.equals(binding.controllerInstanceId(), control.controllerInstanceId())
+        || !channelId.equals(control.inputChannelId())
+        || binding.controlEpoch() != controlEpoch
+        || binding.pageEpoch() != inputPageEpoch
+        || inputPageEpoch > pageEpoch
+        || binding.privacyEpoch() != privacyEpoch
+        || !identities.authorizationActive(
+            binding.userId(), binding.loginId(), null, binding.accessEpoch())) {
+      return Optional.empty();
+    }
+    return recordActivity(session, controlEpoch, sequence);
+  }
+
+  private static boolean matches(
+      BrowserRepository.Session session,
+      ControlRepository.Lease control,
+      UUID workerId,
+      UUID bootId,
+      long allocationEpoch,
+      long controlEpoch,
+      long pageEpoch,
+      long privacyEpoch) {
+    return session.state().equals("ACTIVE")
+        && Objects.equals(workerId, session.workerId())
+        && Objects.equals(bootId, session.workerBootId())
+        && session.allocationEpoch() == allocationEpoch
+        && control.epoch() == controlEpoch
+        && session.pageEpoch() == pageEpoch
+        && session.privacyEpoch() == privacyEpoch;
+  }
+
+  private Optional<BrowserActivityClock> recordActivity(
+      BrowserRepository.Session session, long inputEpoch, long inputSequence) {
+    var clock =
+        browsers.recordActivity(session.id(), idleSeconds(session), inputEpoch, inputSequence);
+    clock.ifPresent(changes::browserActivity);
+    return clock;
+  }
+
+  /** Rejects queued projections after the runtime, privacy, account, or activity clock changes. */
+  @Transactional(readOnly = true)
+  public boolean deadlineCurrent(BrowserActivityClock clock) {
+    if (!identities.isActive(clock.userId())) {
+      return false;
+    }
+    var session = browsers.owned(clock.userId(), clock.sessionId());
+    return session.state().equals("ACTIVE")
+        && Objects.equals(session.taskId(), clock.taskId())
+        && Objects.equals(session.workerId(), clock.workerId())
+        && Objects.equals(session.workerBootId(), clock.workerBootId())
+        && session.allocationEpoch() == clock.allocationEpoch()
+        && session.privacyEpoch() == clock.privacyEpoch()
+        && session.privacy().equals(clock.privacyMode())
+        && Objects.equals(session.lastActivityAt(), clock.lastActivityAt())
+        && Objects.equals(session.idleDeadlineAt(), clock.idleDeadlineAt())
+        && Objects.equals(session.budgetDeadlineAt(), clock.budgetDeadlineAt());
+  }
+
+  /** Public clock projection shared by input acknowledgements and realtime delivery. */
+  public static Map<String, Object> clockSnapshot(BrowserActivityClock clock) {
+    return Map.of(
+        "browserSessionId", clock.sessionId(),
+        "allocationEpoch", clock.allocationEpoch(),
+        "privacyEpoch", clock.privacyEpoch(),
+        "lastActivityAt", clock.lastActivityAt(),
+        "idleDeadlineAt", clock.idleDeadlineAt(),
+        "budgetDeadlineAt", clock.budgetDeadlineAt());
+  }
+
+  private static int idleSeconds(BrowserRepository.Session session) {
+    return session.privacy().equals("LOGIN_PRIVATE") ? 600 : 900;
   }
 
   public Map<String, Object> get(AuthenticatedActor actor, UUID id, UUID controller) {
@@ -50,35 +198,50 @@ public class BrowserSessionService {
     return snapshot(actor, session, controller);
   }
 
-  /** Resolves the current task binding through the browser owner, never a historical widget hint. */
+  /**
+   * Resolves the current task binding through the browser owner, never a historical widget hint.
+   */
   public record TaskBrowserView(Map<String, Object> snapshot, BrowserMediaBinding media) {}
 
   public Optional<TaskBrowserView> currentForTask(AuthenticatedActor actor, UUID taskId) {
     actor.requireScope("browser:view");
-    return browsers.binding(taskId)
+    return browsers
+        .binding(taskId)
         .filter(session -> session.userId().equals(actor.userId()))
-        .map(session -> {
-          var control = controls.get(session.id());
-          String reason = null;
-          if (!session.privacy().equals("NORMAL")) {
-            reason = "PRIVACY_HIDDEN";
-          } else if (!session.state().equals("ACTIVE") || !control.state().equals("ACTIVE")) {
-            reason = "BROWSER_NOT_READY";
-          }
-          var media = new BrowserMediaBinding(session.id(), session.workerId(),
-              session.workerBootId(), session.allocationEpoch(), control.epoch(),
-              session.pageEpoch(), session.privacyEpoch(), session.mediaGeneration(), reason);
-          return new TaskBrowserView(snapshot(actor, session, control, null), media);
-        });
+        .map(
+            session -> {
+              var control = controls.get(session.id());
+              String reason = null;
+              if (!session.privacy().equals("NORMAL")) {
+                reason = "PRIVACY_HIDDEN";
+              } else if (!session.state().equals("ACTIVE") || !control.state().equals("ACTIVE")) {
+                reason = "BROWSER_NOT_READY";
+              }
+              var media =
+                  new BrowserMediaBinding(
+                      session.id(),
+                      session.workerId(),
+                      session.workerBootId(),
+                      session.allocationEpoch(),
+                      control.epoch(),
+                      session.pageEpoch(),
+                      session.privacyEpoch(),
+                      session.mediaGeneration(),
+                      reason);
+              return new TaskBrowserView(snapshot(actor, session, control, null), media);
+            });
   }
 
-  private Map<String, Object> snapshot(AuthenticatedActor actor, BrowserRepository.Session session,
-      UUID controller) {
+  private Map<String, Object> snapshot(
+      AuthenticatedActor actor, BrowserRepository.Session session, UUID controller) {
     return snapshot(actor, session, controls.get(session.id()), controller);
   }
 
-  private Map<String, Object> snapshot(AuthenticatedActor actor, BrowserRepository.Session session,
-      ControlRepository.Lease control, UUID controller) {
+  private Map<String, Object> snapshot(
+      AuthenticatedActor actor,
+      BrowserRepository.Session session,
+      ControlRepository.Lease control,
+      UUID controller) {
     UUID id = session.id();
     boolean humanLease =
         control.ownerKind().equals("HUMAN") && control.expiresAt().isAfter(Instant.now());
@@ -190,8 +353,10 @@ public class BrowserSessionService {
     result.put("controlEpoch", control.epoch());
     result.put("pageEpoch", session.pageEpoch());
     result.put("privacyEpoch", session.privacyEpoch());
+    result.put("allocationEpoch", session.allocationEpoch());
     result.put("budgetDeadlineAt", session.budgetDeadlineAt());
-    result.put("idleDeadlineAt", session.idleDeadlineAt());
+    result.put("lastActivityAt", !privateMode || self ? session.lastActivityAt() : null);
+    result.put("idleDeadlineAt", !privateMode || self ? session.idleDeadlineAt() : null);
     result.put(
         "viewport", Map.of("width", session.viewportWidth(), "height", session.viewportHeight()));
     result.put("capabilities", capabilities);

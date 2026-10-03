@@ -119,6 +119,26 @@ describe('cabinet session recovery', () => {
     reads[reads.length - 1].error(new HttpErrorResponse({ status }));
   }
 
+  it('delivers compact deadline state without resource invalidation or HTTP reads', () => {
+    const received = vi.fn();
+    realtime.browserClocks.subscribe(received);
+    const clock = {
+      browserSessionId: 'session',
+      allocationEpoch: 1,
+      privacyEpoch: 1,
+      lastActivityAt: '2026-10-03T00:00:00Z',
+      idleDeadlineAt: '2026-10-03T00:15:00Z',
+      budgetDeadlineAt: '2026-10-03T00:30:00Z',
+    };
+    socket().onmessage?.({ data: JSON.stringify({ type: 'browserActivity', clock }) });
+    socket().onmessage?.({
+      data: JSON.stringify({ type: 'browserActivity', clock: { ...clock, lastActivityAt: 'bad' } }),
+    });
+    expect(received).toHaveBeenCalledExactlyOnceWith(clock);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(reads).toHaveLength(1);
+  });
+
   it.each(['AUTHORIZATION_EXPIRED', 'HEARTBEAT_TIMEOUT', 'SUBSCRIBE_TIMEOUT'])(
     'revalidates the existing session after %s, then resubscribes and refreshes once',
     (reason) => {

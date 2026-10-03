@@ -2,17 +2,20 @@ package com.helmglass;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.api.PageQuery;
 import com.helmglass.browser.application.BrowserControlService;
+import com.helmglass.browser.application.BrowserSessionService;
 import com.helmglass.browser.infrastructure.repository.BrowserCloseOutboxRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.command.infrastructure.repository.CommandRepository;
 import com.helmglass.connection.infrastructure.repository.ConnectionRepository;
+import com.helmglass.connection.infrastructure.repository.LoginRepository;
 import com.helmglass.continuation.application.TaskContinuationService;
 import com.helmglass.continuation.infrastructure.repository.ContinuationRepository;
 import com.helmglass.identity.application.UserPolicyService;
@@ -20,6 +23,7 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.identity.infrastructure.repository.PolicyRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
+import com.helmglass.realtime.application.ChannelTicketService;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
@@ -87,6 +91,7 @@ class TaskLifecycleIntegrationTest {
     OutboxRepository.class,
     BrowserControlService.class,
     ConnectionRepository.class,
+    LoginRepository.class,
     ContinuationRepository.class,
     CommandRepository.class,
     BrowserRepository.class,
@@ -100,6 +105,23 @@ class TaskLifecycleIntegrationTest {
     UsageRepository.class
   })
   static class DatabaseConfiguration {
+    @Bean
+    ChannelTicketService tickets() {
+      return mock(ChannelTicketService.class);
+    }
+
+    @Bean
+    BrowserSessionService browserSessionService(
+        BrowserRepository browsers,
+        ControlRepository controls,
+        IdentityRepository identities,
+        ChannelTicketService tickets,
+        LoginRepository logins,
+        ChangeRepository changes) {
+      return new BrowserSessionService(
+          browsers, controls, identities, tickets, logins, changes, "https://helm.example");
+    }
+
     @Bean
     DataSource dataSource() {
       return new DriverManagerDataSource(
@@ -201,6 +223,48 @@ class TaskLifecycleIntegrationTest {
     assertThatThrownBy(() -> tasks.get(admin, task.resource().id()))
         .isInstanceOf(DomainException.class)
         .hasMessage("Resource not found");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"NORMAL", "LOGIN_PRIVATE"})
+  void currentSessionSummaryNeverExposesPrivateInputTimingToWebOrMcp(String privacy) {
+    var web = actor();
+    var created = tasks.create(web, create("Clock privacy", "PREPARE"), context(), null);
+    UUID sessionId = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO browser_sessions(id,user_id,task_id,purpose,state,privacy,
+              last_activity_at,idle_deadline_at,budget_deadline_at)
+            VALUES(:id,:user,:task,'TASK','ACTIVE',:privacy,now(),
+              now()+interval '10 minutes',now()+interval '30 minutes')
+            """)
+        .param("id", sessionId)
+        .param("user", web.userId())
+        .param("task", created.resource().id())
+        .param("privacy", privacy)
+        .update();
+    var mcp =
+        new AuthenticatedActor(
+            web.userId(),
+            null,
+            UUID.randomUUID(),
+            "helm-mcp",
+            web.displayName(),
+            web.email(),
+            web.accessEpoch(),
+            Set.of("tasks:read"),
+            true);
+    for (var caller : List.of(web, mcp)) {
+      var current = tasks.get(caller, created.resource().id()).currentSession();
+      assertThat(current).containsEntry("id", sessionId).containsEntry("privacy", privacy);
+      assertThat(current.get("budgetDeadlineAt")).isNotNull();
+      assertThat(current).doesNotContainKey("lastActivityAt");
+      if (privacy.equals("LOGIN_PRIVATE")) {
+        assertThat(current).containsEntry("idleDeadlineAt", null);
+      } else {
+        assertThat(current.get("idleDeadlineAt")).isNotNull();
+      }
+    }
   }
 
   @Test

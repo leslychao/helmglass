@@ -514,7 +514,7 @@ export class BrowserSession {
         }
         this.appliedInputSequence = message.inputSequence;
       } catch (error) { this.mutationUnknown = true; throw error; }
-      return { inputSequence: this.appliedInputSequence, allocationEpoch: this.assignment.allocationEpoch,
+      return { inputSequence: this.appliedInputSequence, activity: action.type !== 'heartbeat', inputPageEpoch: message.pageEpoch, allocationEpoch: this.assignment.allocationEpoch,
         controlEpoch: this.assignment.controlEpoch, pageEpoch: this.assignment.pageEpoch, privacyEpoch: this.assignment.privacyEpoch };
     });
   }

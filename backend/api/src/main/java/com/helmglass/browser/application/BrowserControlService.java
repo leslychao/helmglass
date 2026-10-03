@@ -29,6 +29,7 @@ import tools.jackson.databind.JsonNode;
 @Service
 public class BrowserControlService {
   private final BrowserRepository browsers;
+  private final BrowserSessionService sessionOwner;
   private final ControlRepository controls;
   private final IdentityRepository identities;
   private final OperationRepository operations;
@@ -41,6 +42,7 @@ public class BrowserControlService {
 
   public BrowserControlService(
       BrowserRepository browsers,
+      BrowserSessionService sessionOwner,
       ControlRepository controls,
       IdentityRepository identities,
       OperationRepository operations,
@@ -49,6 +51,7 @@ public class BrowserControlService {
       UserPolicyService policies,
       ConnectionRepository connections) {
     this.browsers = browsers;
+    this.sessionOwner = sessionOwner;
     this.controls = controls;
     this.identities = identities;
     this.operations = operations;
@@ -347,6 +350,9 @@ public class BrowserControlService {
 
   private void sendControl(
       UUID userId, UUID id, String mode, boolean changed, Instant cleanupDeadline) {
+    if (changed && !mode.equals("QUIESCED")) {
+      sessionOwner.synchronizeIdlePolicy(userId, id);
+    }
     var session = browsers.owned(userId, id);
     var lease = controls.get(id);
     Map<String, Object> body = new LinkedHashMap<>();

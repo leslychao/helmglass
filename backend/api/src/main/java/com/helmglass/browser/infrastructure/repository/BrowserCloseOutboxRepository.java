@@ -24,11 +24,14 @@ public class BrowserCloseOutboxRepository {
         OR EXISTS(SELECT 1 FROM connections c WHERE c.id=s.connection_id AND c.status='DELETING')
         OR s.runtime_generation IS NULL)
       AND (t.state IN ('STOPPING','COMPLETED','FAILED','CANCELLED') OR s.state IN ('STOPPING','LOST')
-        OR s.budget_deadline_at<=now() OR s.idle_deadline_at<=now()
-        OR s.runtime_generation IS NULL AND a.dispatch_attempts>=6
-        OR EXISTS(SELECT 1 FROM task_commands c WHERE c.expected_session_id=s.id
-          AND c.state='DISPATCHED' AND (c.delivery_attempts>=6 OR c.deadline<=now())))
-      """;
+        OR s.budget_deadline_at<=now() OR\
+      """
+          + BrowserRepository.IDLE_EXPIRED
+          + """
+            OR s.runtime_generation IS NULL AND a.dispatch_attempts>=6
+            OR EXISTS(SELECT 1 FROM task_commands c WHERE c.expected_session_id=s.id
+              AND c.state='DISPATCHED' AND (c.delivery_attempts>=6 OR c.deadline<=now())))
+          """;
   private static final String INSERT_INTENT =
       """
       INSERT INTO transactional_outbox(id,user_id,aggregate_id,aggregate_version,event_type,payload)

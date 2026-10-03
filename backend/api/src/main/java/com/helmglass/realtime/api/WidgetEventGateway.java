@@ -2,6 +2,8 @@ package com.helmglass.realtime.api;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
+import com.helmglass.browser.application.BrowserSessionService;
+import com.helmglass.browser.domain.BrowserActivityClock;
 import com.helmglass.realtime.application.ChannelTicketService;
 import com.helmglass.realtime.application.ChannelTicketService.TicketBinding;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
@@ -167,6 +169,36 @@ public class WidgetEventGateway extends TextWebSocketHandler {
             .sendMessage(
                 new TextMessage(
                     json.write(Map.of("type", "invalidate", "resources", List.of("task")))));
+      } catch (IOException | SessionLimitExceededException error) {
+        close(connection, 4503, "DELIVERY_FAILED");
+      }
+    }
+  }
+
+  @EventListener
+  public void clockChanged(BrowserActivityClock clock) {
+    if (!clock.privacyMode().equals("NORMAL")) {
+      return;
+    }
+    for (Connection connection : connections.values()) {
+      TicketBinding binding = connection.binding();
+      if (binding == null
+          || !binding.userId().equals(clock.userId())
+          || !binding.taskId().equals(clock.taskId())
+          || !authorized(connection)) {
+        continue;
+      }
+      try {
+        connection
+            .socket()
+            .sendMessage(
+                new TextMessage(
+                    json.write(
+                        Map.of(
+                            "type",
+                            "browserActivity",
+                            "clock",
+                            BrowserSessionService.clockSnapshot(clock)))));
       } catch (IOException | SessionLimitExceededException error) {
         close(connection, 4503, "DELIVERY_FAILED");
       }

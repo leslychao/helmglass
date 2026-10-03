@@ -3,6 +3,7 @@ import { Observable, Subject, Subscription, timeout } from 'rxjs';
 import { problemOf } from '../api/api.service';
 import { Me } from '../api/models';
 import { ReconnectWindow } from './reconnect-window';
+import { BrowserClock, browserClockOf } from './browser-clock';
 
 export type ResourceName =
   | 'tasks'
@@ -43,6 +44,7 @@ const resources = new Set<string>([
 @Injectable({ providedIn: 'root' })
 export class Realtime {
   readonly refresh = new Subject<ReadonlySet<string> | null>();
+  readonly browserClocks = new Subject<BrowserClock>();
   readonly state = signal<'connecting' | 'ready' | 'offline' | 'exhausted' | 'denied'>(
     'connecting',
   );
@@ -73,6 +75,7 @@ export class Realtime {
       document.removeEventListener('visibilitychange', visibility);
       this.disconnect();
       this.refresh.complete();
+      this.browserClocks.complete();
     });
   }
 
@@ -83,6 +86,11 @@ export class Realtime {
     clearTimeout(this.reconnect);
     this.reconnect = undefined;
     this.reauthenticate();
+  }
+
+  acceptBrowserClock(value: unknown) {
+    const clock = browserClockOf(value);
+    if (clock) this.zone.run(() => this.browserClocks.next(clock));
   }
 
   start(me: Me, authenticate: () => Observable<Me>) {
@@ -138,6 +146,8 @@ export class Realtime {
         }
         if (typeof message !== 'object' || !message || !('type' in message)) return;
         if (message.type === 'pong') this.lastPong = Date.now();
+        if (message.type === 'browserActivity' && 'clock' in message)
+          this.acceptBrowserClock(message.clock);
         if (message.type === 'ready')
           this.zone.run(() => {
             this.recovery.reset();

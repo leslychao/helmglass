@@ -1512,7 +1512,10 @@ export interface components {
             /** Format: date-time */
             budgetDeadlineAt: string;
             /** Format: date-time */
-            idleDeadlineAt: string;
+            idleDeadlineAt: string | null;
+            /** Format: date-time */
+            lastActivityAt: string | null;
+            allocationEpoch: number;
             loginOperationId: string | null;
             siteAccess: string;
             currentProfileVersion: string | null;
@@ -1872,7 +1875,7 @@ export interface components {
             pageEpoch: number;
             privacyEpoch: number;
             /** Format: date-time */
-            idleDeadlineAt: string;
+            idleDeadlineAt: string | null;
             /** Format: date-time */
             budgetDeadlineAt: string;
             closeReason: string | null;

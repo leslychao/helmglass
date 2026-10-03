@@ -7,6 +7,7 @@ import com.helmglass.browser.api.BrowserContracts;
 import com.helmglass.browser.api.WorkerGateway;
 import com.helmglass.browser.application.BrowserControlService;
 import com.helmglass.browser.application.BrowserControlService.ControlIntent;
+import com.helmglass.browser.application.BrowserSessionService;
 import com.helmglass.browser.application.WorkerProtocol;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
@@ -44,6 +45,7 @@ public class ConnectionLoginService {
   private final LoginRepository logins;
   private final ConnectionRepository connections;
   private final BrowserRepository browsers;
+  private final BrowserSessionService sessionOwner;
   private final ControlRepository controls;
   private final BrowserControlService controlOwner;
   private final IdentityRepository identities;
@@ -59,6 +61,7 @@ public class ConnectionLoginService {
       LoginRepository logins,
       ConnectionRepository connections,
       BrowserRepository browsers,
+      BrowserSessionService sessionOwner,
       ControlRepository controls,
       BrowserControlService controlOwner,
       IdentityRepository identities,
@@ -72,6 +75,7 @@ public class ConnectionLoginService {
     this.logins = logins;
     this.connections = connections;
     this.browsers = browsers;
+    this.sessionOwner = sessionOwner;
     this.controls = controls;
     this.controlOwner = controlOwner;
     this.identities = identities;
@@ -360,6 +364,7 @@ public class ConnectionLoginService {
       failLogin(login, "LOGIN_NAVIGATION_FAILED");
       return;
     }
+    sessionOwner.commandCompleted(login.userId(), workerId, bootId, session.id(), result);
     controls.transfer(session.id(), login.controllerInstanceId(), "HUMAN", true, login.id());
     controlOwner.publishControl(login.userId(), session.id(), "HUMAN_PRIVATE");
     logins.state(login.id(), "WAITING_USER");

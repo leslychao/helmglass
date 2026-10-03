@@ -3,6 +3,7 @@ package com.helmglass.realtime.infrastructure.repository;
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.PageQuery;
+import com.helmglass.browser.domain.BrowserActivityClock;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -30,6 +31,23 @@ public class ChangeRepository {
 
   public void changed(UUID userId, String resource, UUID aggregateId, long version) {
     changed(userId, resource, aggregateId, aggregateId, version, Instant.now());
+  }
+
+  /** Coalesces clock projection updates; movement history is not an audit event. */
+  public void browserActivity(BrowserActivityClock clock) {
+    jdbc.sql(
+            """
+            INSERT INTO transactional_outbox(id,user_id,aggregate_id,aggregate_version,event_type,payload)
+            VALUES(:id,:user,:session,0,'browserActivity',CAST(:payload AS jsonb))
+            ON CONFLICT(aggregate_id,aggregate_version,event_type,ordinal) DO UPDATE
+              SET payload=excluded.payload,published_at=NULL,retry_at=now(),
+                  delivery_attempts=0,last_failure_code=NULL
+            """)
+        .param("id", UUID.randomUUID())
+        .param("user", clock.userId())
+        .param("session", clock.sessionId())
+        .param("payload", json.write(clock))
+        .update();
   }
 
   /**

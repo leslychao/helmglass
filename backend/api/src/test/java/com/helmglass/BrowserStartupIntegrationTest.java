@@ -157,11 +157,15 @@ class BrowserStartupIntegrationTest {
     startup.permit(fixture.workerId(), fixture.bootId(), startupPermit(fixture));
     assertThat(startup.result(fixture.workerId(), fixture.bootId(), navigationReceipt(fixture)))
         .isNull();
+    var readyReceipt = WorkerRuntimeReceipts.ready(json, fixture.bootId(), fixture.sessionId(), 1);
     startup.acknowledgeReady(
-        fixture.workerId(),
-        fixture.bootId(),
-        fixture.sessionId(),
-        WorkerRuntimeReceipts.ready(json, fixture.bootId(), fixture.sessionId(), 1));
+        fixture.workerId(), fixture.bootId(), fixture.sessionId(), readyReceipt);
+    var idle = browsers.owned(fixture.actor().userId(), fixture.sessionId()).idleDeadlineAt();
+    assertThat(idle).isAfter(Instant.now().plusSeconds(890));
+    startup.acknowledgeReady(
+        fixture.workerId(), fixture.bootId(), fixture.sessionId(), readyReceipt);
+    assertThat(browsers.owned(fixture.actor().userId(), fixture.sessionId()).idleDeadlineAt())
+        .isEqualTo(idle);
     opens.ready(fixture.sessionId());
     assertThat(browsers.owned(fixture.actor().userId(), fixture.sessionId()).state())
         .isEqualTo("ACTIVE");

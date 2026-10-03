@@ -98,6 +98,44 @@ export function streamStateOf(value: unknown): StreamState | null {
   };
 }
 
+const CLOSE_REASONS = new Set([
+  'AUTHORIZATION_EXPIRED',
+  'AUTHORIZATION_UNAVAILABLE',
+  'AUTHENTICATION_LIMIT',
+  'CAPTURE_UNAVAILABLE',
+  'CHANNEL_LIMIT',
+  'CHANNEL_ORIGIN_REJECTED',
+  'FENCING_FAILED',
+  'GRANT_REVOKED',
+  'INVALID_MESSAGE',
+  'INVALID_SIGNALING',
+  'MEDIA_BINDING_CHANGED',
+  'PRESENTATION_SUPERSEDED',
+  'PRODUCER_CHANGED',
+  'PRODUCER_UNAVAILABLE',
+  'SIGNALING_CLOSED',
+  'SIGNALING_TIMEOUT',
+  'SIGNALING_UNAVAILABLE',
+  'STREAM_CLOSED',
+  'STREAM_UNAVAILABLE',
+  'TICKET_BINDING_MISMATCH',
+  'TICKET_EXPIRED',
+  'TICKET_REQUIRED',
+  'TICKET_TIMEOUT',
+  'VIEWER_LIMIT',
+  'VIEW_ALREADY_ATTACHED',
+  'VIEW_BINDING_FENCED',
+  'VIEW_LEASE_EXPIRED',
+  'VIEW_OPEN_FAILED',
+  'VIEW_REVOKED',
+  'WORKER_DISCONNECTED',
+]);
+
+interface SignalingTermination {
+  readonly code: number;
+  readonly reason: string | null;
+}
+
 /** A private socket instance; never replaces the global WebSocket constructor. */
 export class HelmTransport {
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
@@ -105,13 +143,14 @@ export class HelmTransport {
   onerror: ((event: ErrorEvent) => void) | null = null;
   private readonly socket: WebSocket;
   private authenticated = false;
+  private closingValue = false;
+  private terminationValue: SignalingTermination | null = null;
   private readonly deadline: ReturnType<typeof setTimeout>;
 
   constructor(
     url: string,
     ticket: string,
     private readonly streamState: (state: StreamState) => void,
-    closed: (code: number) => void,
   ) {
     this.socket = new WebSocket(url);
     this.deadline = setTimeout(() => this.close(), 15000);
@@ -154,9 +193,21 @@ export class HelmTransport {
       this.onerror?.(new ErrorEvent('error', { message: 'Не удалось подключить видеоканал' }));
     this.socket.onclose = (event) => {
       clearTimeout(this.deadline);
+      // The upstream callback synchronously closes consumers and emits disconnected.
+      // Its owner must see the cause before that sequence starts.
+      this.closingValue = true;
+      this.terminationValue = {
+        code: event.code,
+        reason: CLOSE_REASONS.has(event.reason) ? event.reason : null,
+      };
       this.onclose?.();
-      closed(event.code);
     };
+  }
+  get closing(): boolean {
+    return this.closingValue;
+  }
+  get termination(): SignalingTermination | null {
+    return this.terminationValue;
   }
   send(data: string) {
     if (!this.authenticated || this.socket.readyState !== WebSocket.OPEN)
@@ -164,6 +215,7 @@ export class HelmTransport {
     this.socket.send(data);
   }
   close() {
+    this.closingValue = true;
     clearTimeout(this.deadline);
     this.socket.close();
   }

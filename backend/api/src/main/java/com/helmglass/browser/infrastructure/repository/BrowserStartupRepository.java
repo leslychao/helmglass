@@ -245,17 +245,18 @@ public class BrowserStartupRepository {
                     "RUNTIME_READY_FENCED", "Runtime readiness no longer matches its startup"));
   }
 
-  public void acknowledgeReady(UUID sessionId, Instant startedAt) {
-    if (jdbc.sql(
-                    """
-                    UPDATE browser_sessions SET state='ACTIVE',ready_at=:started,version=version+1
-                    WHERE id=:id AND state='STARTING' AND startup_state='READY' AND ready_at IS NULL
-                    AND binding_released_at IS NULL AND budget_deadline_at>now()
-                    """)
-                .param("id", sessionId)
-                .param("started", Timestamp.from(startedAt))
-                .update()
-            == 0
+  public boolean acknowledgeReady(UUID sessionId, Instant startedAt) {
+    int updated =
+        jdbc.sql(
+                """
+                UPDATE browser_sessions SET state='ACTIVE',ready_at=:started,version=version+1
+                WHERE id=:id AND state='STARTING' AND startup_state='READY' AND ready_at IS NULL
+                AND binding_released_at IS NULL AND budget_deadline_at>now()
+                """)
+            .param("id", sessionId)
+            .param("started", Timestamp.from(startedAt))
+            .update();
+    if (updated == 0
         && !jdbc.sql(
                 """
                 SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE id=:id AND state='ACTIVE'
@@ -268,6 +269,7 @@ public class BrowserStartupRepository {
       throw DomainException.conflict(
           "RUNTIME_READY_FENCED", "Runtime readiness clock cannot change");
     }
+    return updated == 1;
   }
 
   public void failed(UUID sessionId, String resultDigest) {

@@ -40,6 +40,7 @@ async function fixture(context: TestContext) {
   const closed: string[] = [];
   const receipts: ViewerClosed[] = [];
   const emitted: { binding: ViewerFence; payload: Record<string, unknown> }[] = [];
+  const nativeRequests: { type: string; properties: Record<string, unknown> }[] = [];
   let stops = 0;
   let revocations = 0;
   let starts = 0;
@@ -49,7 +50,8 @@ async function fixture(context: TestContext) {
     onStart: async (): Promise<void> => undefined,
     onRevoke: async (): Promise<unknown> => ({ type: 'revokeAck' }),
     async stop() { stops++; await this.onStop(); },
-    async request(type: string): Promise<unknown> {
+    async request(type: string, properties: Record<string, unknown> = {}): Promise<unknown> {
+      nativeRequests.push({ type, properties });
       switch (type) {
         case 'capabilities': return { encoder: 'openh264enc', fallbackReason: 'NONE', gstreamerVersion: 'test' };
         case 'discover': return { windows: [{ xid: 1, pid: 42, x: 0, y: 0, width: 1280, height: 720 }] };
@@ -72,9 +74,32 @@ async function fixture(context: TestContext) {
     producerIceServer: { urls: ['turn:coturn:3478?transport=tcp'], username: 'fixture', credential: 'fixture' },
     mediaProxy: { url: 'http://egress-proxy:3128', username: 'fixture', password: 'fixture-'.repeat(4) },
   });
-  return { media, helper, closed, receipts, emitted, wireSignals, assignment, binding, stops: () => stops, revocations: () => revocations,
+  return { media, helper, closed, receipts, emitted, wireSignals, nativeRequests, assignment, binding, stops: () => stops, revocations: () => revocations,
     starts: () => starts, failures: () => failures };
 }
+
+test('both consumers receive their own producer TURN binding on the shared capture source', async (context) => {
+  const value = await fixture(context);
+  const first = value.binding();
+  const second = value.binding();
+  first.producerIceServer.username = 'first-viewer';
+  first.producerIceServer.credential = 'first-secret';
+  second.producerIceServer.username = 'second-viewer';
+  second.producerIceServer.credential = 'second-secret';
+  await value.media.accept(first);
+  await value.media.accept(second);
+  const requests = value.nativeRequests.filter(request => request.type === 'start' || request.type === 'lease');
+  assert.equal(requests.length, 2);
+  assert.equal(value.starts(), 1, 'Adding a viewer must preserve the shared capture source');
+  for (const [index, binding] of [first, second].entries()) {
+    const servers = requests[index]?.properties['turnServers'];
+    assert.ok(Array.isArray(servers) && servers.length === 1 && typeof servers[0] === 'string');
+    const server = new URL(servers[0]);
+    assert.equal(server.username, binding.producerIceServer.username);
+    assert.equal(server.password, binding.producerIceServer.credential);
+  }
+  await value.media.closeAll();
+});
 
 test('all-viewer privacy barrier emits no closure until the native stop is confirmed', async (context) => {
   const value = await fixture(context);
@@ -305,9 +330,66 @@ test('advancing a closed tombstone rejects stale or foreign allocation proofs', 
   }
   value.assignment.allocationEpoch = 2;
   await assert.rejects(value.media.accept(newer), /VIEW_BINDING_FENCED/);
-  await assert.rejects(value.media.accept({ ...newer, requestId: randomUUID(), allocationEpoch: 2 }), /VIEW_BINDING_FENCED/);
+  await assert.rejects(value.media.accept({ ...newer, requestId: randomUUID(), allocationEpoch: 3 }), /VIEW_BINDING_FENCED/);
   assert.equal(value.receipts.length, 1);
   assert.equal(value.starts(), 0);
+});
+
+test('a mounted viewer opens a newer current session only after its previous consumer is closed', async (context) => {
+  const value = await fixture(context);
+  const first = value.binding();
+  await value.media.accept(first);
+  const firstClose = close(first);
+  await value.media.accept(firstClose);
+  await value.media.accept({ ...firstClose, type: 'viewerClosedAck' });
+  value.assignment.browserSessionId = randomUUID();
+  const next = { ...first, requestId: randomUUID(), browserSessionId: value.assignment.browserSessionId, viewGeneration: 2 };
+  await value.media.accept(next);
+  assert.equal(value.starts(), 2);
+  await value.media.accept(firstClose);
+  assert.equal(value.revocations(), 1, 'Historical receipt replay must not touch the new session');
+  await assert.rejects(value.media.accept({ ...first, requestId: randomUUID(), viewGeneration: 3 }), /VIEW_BINDING_FENCED/);
+  await assert.rejects(value.media.accept({ ...close(first), viewGeneration: 3 }), /VIEW_BINDING_FENCED/);
+  assert.equal(value.revocations(), 1);
+  await value.media.accept(close(next));
+  assert.equal(value.revocations(), 2);
+});
+
+for (const changed of ['session', 'allocation'] as const) {
+  test(`an unused ticket in the newer current ${changed} advances the physically closed tombstone`, async (context) => {
+    const value = await fixture(context);
+    const first = value.binding();
+    await value.media.accept(first);
+    await value.media.accept(close(first));
+    if (changed === 'session') value.assignment.browserSessionId = randomUUID();
+    else value.assignment.allocationEpoch++;
+    const next = { ...first, requestId: randomUUID(), browserSessionId: value.assignment.browserSessionId,
+      allocationEpoch: value.assignment.allocationEpoch, viewGeneration: 2 };
+    await value.media.accept(close(next));
+    assert.equal(value.receipts.length, 2);
+    assert.equal(value.starts(), 1, 'No consumer existed for the new ticket');
+    assert.equal(value.revocations(), 1, 'The old native consumer was physically revoked');
+    await assert.rejects(value.media.accept(next), /VIEW_BINDING_FENCED/);
+    await value.media.accept({ ...next, requestId: randomUUID(), viewGeneration: 3 });
+    assert.equal(value.starts(), 2);
+    await value.media.closeAll();
+  });
+}
+
+test('a current allocation never makes a different OPENING or LIVE consumer safe to skip', async (context) => {
+  const value = await fixture(context);
+  const first = value.binding();
+  const opening = value.media.accept(first);
+  value.assignment.browserSessionId = randomUUID();
+  const next = { ...first, requestId: randomUUID(), browserSessionId: value.assignment.browserSessionId, viewGeneration: 2 };
+  await assert.rejects(value.media.accept(next), /VIEW_BINDING_FENCED/);
+  await assert.rejects(value.media.accept(close(next)), /VIEW_BINDING_FENCED/);
+  await opening;
+  await assert.rejects(value.media.accept({ ...next, requestId: randomUUID() }), /VIEW_BINDING_FENCED/);
+  await assert.rejects(value.media.accept(close(next)), /VIEW_BINDING_FENCED/);
+  assert.equal(value.receipts.length, 0);
+  assert.equal(value.revocations(), 0);
+  await value.media.closeAll();
 });
 
 test('close cancels an admitted asynchronous opening and rejects an early receipt ACK', async (context) => {
