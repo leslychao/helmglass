@@ -64,16 +64,24 @@ export function problemOf(error: unknown): Problem {
   }
   if (error instanceof HttpErrorResponse) {
     const body: unknown = error.error;
-    if (
-      typeof body === 'object' &&
-      body !== null &&
-      'title' in body &&
-      typeof body.title === 'string'
-    ) {
+    const fallbackTitle =
+      error.status === 0
+        ? 'Связь с сервером потеряна'
+        : error.status === 401
+          ? 'Войдите в Helm Glass'
+          : error.status === 403
+            ? 'Нет доступа'
+            : 'Не удалось получить ответ сервера';
+    if (typeof body === 'object' && body !== null) {
       return {
-        title: body.title,
+        title: 'title' in body && typeof body.title === 'string' ? body.title : fallbackTitle,
         status: error.status,
-        code: 'code' in body && typeof body.code === 'string' ? body.code : 'HTTP_ERROR',
+        code:
+          'code' in body && typeof body.code === 'string'
+            ? body.code
+            : error.status === 0
+              ? 'NETWORK_ERROR'
+              : 'HTTP_ERROR',
         detail: 'detail' in body && typeof body.detail === 'string' ? body.detail : undefined,
         requestId:
           'requestId' in body && typeof body.requestId === 'string' ? body.requestId : undefined,
@@ -84,14 +92,7 @@ export function problemOf(error: unknown): Problem {
       };
     }
     return {
-      title:
-        error.status === 0
-          ? 'Связь с сервером потеряна'
-          : error.status === 401
-            ? 'Войдите в Helm Glass'
-            : error.status === 403
-              ? 'Нет доступа'
-              : 'Не удалось получить ответ сервера',
+      title: fallbackTitle,
       status: error.status,
       code: error.status === 0 ? 'NETWORK_ERROR' : 'HTTP_ERROR',
     };

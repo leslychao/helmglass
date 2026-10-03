@@ -65,7 +65,7 @@ test('renders and starts real Nginx with TLS, preserving variables and private r
   assert.equal(generated.status, 0, 'A temporary TLS fixture must be generated');
   const certificate = await readFile(certificatePath);
   await writeFile(bundlePath, Buffer.concat([certificate, await readFile(keyPath)]), { mode: 0o600 });
-  // The redirect boundary needs a real forward-auth HTTP 401, without a full identity stack.
+  // Anonymous users can load the shell; protected requests still need forward-auth.
   await writeFile(oauthConfigurationPath, `
 pid /tmp/oauth.pid;
 error_log /dev/stderr crit;
@@ -147,14 +147,16 @@ http {
     const trustedWeb = spawnSync('docker', ['--context', 'desktop-linux', 'exec', containerId, 'wget', '-S', '-O', '-',
       '--header=Host: helm.integration.test', '--header=X-Forwarded-For: 203.0.113.8',
       'http://127.0.0.1:8080/'], { encoding: 'utf8', timeout: 5000 });
-    assert.match(trustedWeb.stderr, /HTTP\/1\.1 302/);
-    const httpLocation = /(?:^|\n)\s*Location:\s*(\S+)/i.exec(trustedWeb.stderr)?.[1];
-    assert.equal(httpLocation, '/oauth2/start?rd=%2F', 'HTTP upstream redirects preserve the public HTTPS origin');
-    const tlsWeb = await request(port, certificate, '/');
-    assert.equal(tlsWeb.status, 302);
-    assert.equal(tlsWeb.headers.location, httpLocation, 'Direct TLS uses the same origin-relative redirect');
-    assert.equal(new URL(httpLocation, 'https://helm.integration.test:8443').origin,
-      'https://helm.integration.test:8443');
+    assert.match(trustedWeb.stderr, /HTTP\/1\.1 200/);
+    for (const path of ['/', '/sign-in', '/tasks/owned-task?view=result', '/index.html']) {
+      const shell = await request(port, certificate, path);
+      assert.equal(shell.status, 200, path + ' loads the public shell without losing navigation');
+      assert.equal(shell.headers.location, undefined);
+    }
+    const anonymousApi = await request(port, certificate, '/api/v1/me');
+    assert.equal(anonymousApi.status, 401);
+    assert.match(anonymousApi.headers['content-type'], /application\/problem\+json/);
+    assert.equal(anonymousApi.headers.location, undefined);
     const configuration = docker(['exec', containerId, 'cat', '/run/nginx.conf']);
     assert.ok(configuration.includes('proxy_set_header Authorization $upstream_authorization;'));
     assert.ok(configuration.includes('proxy_set_header X-Forwarded-Port 8443;'));

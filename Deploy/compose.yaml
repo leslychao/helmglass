@@ -34,17 +34,17 @@ services:
     environment:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
       TRUSTED_EDGE_PROXY: ${TRUSTED_EDGE_PROXY:-}
-    ports: ["${BIND_ADDRESS:?required}:${HTTPS_PORT:?required}:8443"]
-    secrets: [edge_tls_identity]
     networks:
       edge:
         ipv4_address: 172.30.242.3
         aliases: [helmglass-edge]
       application: {ipv4_address: 172.28.40.2}
+      browser-relay: {}
     depends_on:
       api: {condition: service_healthy}
       oauth2-proxy: {condition: service_healthy}
       mcp-adapter: {condition: service_healthy}
+      coturn: {condition: service_healthy}
     cpus: 0.5
     mem_limit: 256m
 
@@ -138,7 +138,7 @@ services:
     environment:
       TURN_INTERNAL_URL: ${TURN_INTERNAL_URL:?required}
     secrets: [egress_identity]
-    networks: [browser-egress, internet-egress]
+    networks: [browser-egress, browser-relay, internet-egress]
     depends_on:
       coturn: {condition: service_healthy}
     cpus: 0.5
@@ -151,16 +151,10 @@ services:
     image: ${TURN_IMAGE:?required release digest}
     environment:
       TURN_REALM: ${TURN_REALM:?required}
-      TURN_ADVERTISED_IP: ${TURN_ADVERTISED_IP:?required}
       TURN_RELAY_MIN: ${TURN_RELAY_MIN:?required}
       TURN_RELAY_MAX: ${TURN_RELAY_MAX:?required}
     secrets: [turn_identity]
-    networks: [internet-egress]
-    ports:
-      - "${TURN_BIND_ADDRESS:?required}:3478:3478/udp"
-      - "${TURN_BIND_ADDRESS:?required}:3478:3478/tcp"
-      - "${TURN_BIND_ADDRESS:?required}:5349:5349/tcp"
-      - "${TURN_BIND_ADDRESS:?required}:${TURN_RELAY_MIN:?required}-${TURN_RELAY_MAX:?required}:${TURN_RELAY_MIN:?required}-${TURN_RELAY_MAX:?required}/udp"
+    networks: [browser-relay]
     cpus: 0.5
     mem_limit: 256m
 
@@ -308,6 +302,7 @@ networks:
   secrets: {internal: true}
   worker-control: {internal: true}
   browser-egress: {internal: true}
+  browser-relay: {internal: true}
   internet-egress: {}
 
 volumes:
@@ -320,7 +315,6 @@ volumes:
 
 secrets:
   backup_recipient: {file: "${SECRETS_DIR:?required}/backup-recipient"}
-  edge_tls_identity: {file: "${SECRETS_DIR:?required}/edge-tls"}
   api_identity: {file: "${SECRETS_DIR:?required}/api-bootstrap"}
   worker_identity: {file: "${SECRETS_DIR:?required}/worker-bootstrap"}
   turn_identity: {file: "${SECRETS_DIR:?required}/turn-bootstrap"}

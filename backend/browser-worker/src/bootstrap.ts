@@ -76,10 +76,12 @@ async function enroll(): Promise<void> {
   if (parsed.publicKey.export({ type: 'spki', format: 'pem' }).toString() !== publicKey.stdout) throw new Error('ENROLLMENT_KEY_MISMATCH');
   expiresAt = Math.min(Date.parse(identity.expiresAt), Date.parse(parsed.validTo));
   if (expiresAt <= Date.now() + 120_000) throw new Error('ENROLLMENT_CERTIFICATE_EXPIRED');
-  await writeFile(certFile + '.new', identity.certificatePem, { mode: 0o600 });
+  // Renewal keeps trusting the bootstrap CA, so send the issued intermediates explicitly.
+  const chain = Buffer.from(identity.certificatePem + '\n' + identity.caPem);
+  await writeFile(certFile + '.new', chain, { mode: 0o600 });
   await rename(certFile + '.new', certFile);
   await writeFile(caFile, identity.caPem, { mode: 0o600 });
-  certificate = Buffer.from(identity.certificatePem);
+  certificate = chain;
 }
 
 // Response loss may retry the identical CSR; the API owns enrollment idempotency.

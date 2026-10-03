@@ -3,17 +3,17 @@ package com.helmglass.identity.api;
 import com.helmglass.api.MutationContext;
 import com.helmglass.identity.application.IdentityService;
 import com.helmglass.identity.application.LogoutService;
-import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.web.bind.annotation.CookieValue;
 import com.helmglass.identity.application.UserPolicyService;
 import com.helmglass.operation.domain.MutationReceipt;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.security.web.csrf.CsrfToken;
+import org.springframework.web.bind.annotation.CookieValue;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -23,11 +23,13 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 public class ProfileController {
+
   private final UserPolicyService policies;
   private final IdentityService identities;
   private final LogoutService logout;
 
-  public ProfileController(UserPolicyService policies, IdentityService identities, LogoutService logout) {
+  public ProfileController(
+      UserPolicyService policies, IdentityService identities, LogoutService logout) {
     this.policies = policies;
     this.identities = identities;
     this.logout = logout;
@@ -37,8 +39,13 @@ public class ProfileController {
   Map<String, Object> me(HttpServletRequest request, HttpServletResponse response, CsrfToken csrf) {
     var actor = Actors.current(request);
     SessionCsrfTokenRepository.expose(csrf, response);
-    return Map.of("id", actor.userId(), "displayName", actor.displayName(), "email", actor.email(),
-        "accountState", "ACTIVE", "permissions", actor.permissions(), "policy", policies.get(actor),
+    return Map.of(
+        "id", actor.userId(),
+        "displayName", actor.displayName(),
+        "email", actor.email(),
+        "accountState", "ACTIVE",
+        "permissions", actor.permissions(),
+        "policy", policies.get(actor),
         "serverTime", Instant.now());
   }
 
@@ -48,7 +55,8 @@ public class ProfileController {
   }
 
   @PatchMapping("/api/v1/me/policy")
-  MutationReceipt update(@Valid @RequestBody PolicyContracts.Update input, HttpServletRequest request) {
+  MutationReceipt update(
+      @Valid @RequestBody PolicyContracts.Update input, HttpServletRequest request) {
     return policies.update(Actors.current(request), input, MutationContext.from(request));
   }
 
@@ -68,12 +76,16 @@ public class ProfileController {
   }
 
   @PostMapping("/api/v1/auth/logout")
-  Map<String, Object> logout(HttpServletRequest request, HttpServletResponse response,
+  Map<String, Object> logout(
+      HttpServletRequest request,
+      HttpServletResponse response,
       @CookieValue(name = "__Host-helm_session", required = false) String ticket) {
     var receipt = identities.logout(Actors.current(request), MutationContext.from(request));
+    boolean providerEnded = logout.finishProviderSession(receipt.operationId());
     for (String cookie : logout.clearProxySession(ticket)) {
       response.addHeader("Set-Cookie", cookie);
     }
-    return Map.of("receipt", receipt, "redirect", "/sign-in");
+    return Map.of(
+        "receipt", receipt, "redirect", providerEnded ? "/sign-in" : "/sign-in?logoutPending=1");
   }
 }

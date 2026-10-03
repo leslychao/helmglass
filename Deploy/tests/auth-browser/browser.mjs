@@ -140,14 +140,34 @@ async function signIn(username) {
     });
   });
   page.on("pageerror", (error) => evidence.errors.push(error.name));
-  await page.goto(fixture.origin + "/sign-in");
+  await page.goto(fixture.origin + "/tasks?sort=updated");
   await page.locator("#username").waitFor();
+  assert.equal(await page.locator(".auth-story").count(), 1, "Helm Glass owns the login design");
+  assert.equal(await page.locator("#kc-page-title").innerText(), "Войти в Helm Glass");
+  assert.equal(await page.getByText("Войти через Keycloak", { exact: true }).count(), 0);
+  assert.equal(new URL(page.url()).origin, fixture.origin, "Login stays on the application origin");
   assert.equal(
     new URL(page.url()).searchParams.get("prompt"),
     "login",
     "Every new web authorization requires a fresh password login",
   );
   await page.locator("#username").fill(username);
+  if (username === "admin") {
+    const toggle = page.getByRole("button", { name: "Показать пароль", exact: true });
+    await toggle.click();
+    assert.equal(await page.locator("#password").getAttribute("type"), "text");
+    await page.getByRole("button", { name: "Скрыть пароль", exact: true }).click();
+    assert.equal(await page.locator("#password").getAttribute("type"), "password");
+    assert.equal(await toggle.innerText(), "", "Password visibility uses only the eye icon");
+    await page.locator("#username").focus();
+    await page.screenshot({ path: "/evidence/helm-login.png", fullPage: true });
+    await page.locator("#password").fill("incorrect-fixture-password");
+    await page.locator("#kc-login").click();
+    await page.locator("#input-error").waitFor();
+    assert.equal(await page.locator("#username").inputValue(), username);
+    assert.equal(await page.locator("#password").inputValue(), "");
+    evidence.invalidPassword = "PASS";
+  }
   await page.locator("#password").fill(fixture[username].password);
   const bootstrap = page.waitForResponse(
     (response) => response.url() === fixture.origin + "/api/v1/me",
@@ -206,7 +226,7 @@ async function signIn(username) {
     );
     throw new Error("Authenticated profile bootstrap was rejected");
   }
-  await page.waitForURL(fixture.origin + "/tasks", { timeout: 30000 });
+  await page.waitForURL(fixture.origin + "/tasks?sort=updated", { timeout: 30000 });
   await page.getByRole("heading", { name: "Задачи", exact: true }).waitFor();
   assert.equal(
     await page
@@ -496,12 +516,27 @@ try {
     .getByRole("button", { name: "Выйти", exact: true })
     .click();
   await regular.page.locator("#password").waitFor();
+  assert.equal(await regular.page.locator(".auth-story").count(), 1);
+  assert.equal(await regular.page.locator("#username").inputValue(), "", "Logout forgets the previous account");
   assert.ok(
     !(await regular.context.cookies()).some(
       (cookie) => cookie.name === "__Host-helm_session",
     ),
   );
   assert.equal((await read(regular, "/api/v1/me")).status, 401);
+  // Reuse the same browser, including the old provider cookies. Logout must not
+  // silently sign the user back in or let a revoked sid break a fresh login.
+  await regular.page.locator("#username").fill("angelina");
+  await regular.page.locator("#password").fill(fixture.angelina.password);
+  await regular.page.locator("#kc-login").click();
+  await regular.page.waitForURL(fixture.origin + "/tasks");
+  assert.equal((await read(regular, "/api/v1/me")).status, 200);
+  await regular.page.reload();
+  await regular.page.getByRole("button", { name: "Меню профиля" }).click();
+  await regular.page.getByRole("button", { name: "Выйти", exact: true }).click();
+  await regular.page.locator("#password").waitFor();
+  assert.equal((await read(regular, "/api/v1/me")).status, 401);
+  evidence.sameBrowserRelogin = "PASS";
   evidence.logout = "PASS";
   assert.ok(
     evidence.accounts.every((account) => account.websocketReady),

@@ -61,6 +61,16 @@ test('real Keycloak provisioning, repeat run, role revocation and conflict handl
       mcpRedirectUris: ['https://chatgpt.com/connector_platform_oauth_redirect'],
     };
     await provisionRealm(client, configuration);
+    const initialRealm = await client.request('GET', 'admin/realms/helm');
+    assert.equal(initialRealm.loginTheme, 'helmglass');
+    assert.equal(initialRealm.defaultLocale, 'ru');
+    // Upgrade an already provisioned realm without resetting users or security policy.
+    await client.request('PUT', 'admin/realms/helm', { loginTheme: 'keycloak' });
+    await provisionRealm(client, configuration);
+    const upgraded = await client.request('GET', 'admin/realms/helm');
+    assert.equal(upgraded.loginTheme, 'helmglass');
+    assert.equal(upgraded.bruteForceProtected, initialRealm.bruteForceProtected);
+    assert.deepEqual(upgraded.attributes, initialRealm.attributes);
     const data = {
       installationId: configuration.installationId,
       admin: { email: 'admin@example.test', lastName: 'Fixture', password: randomBytes(32).toString('base64url') },

@@ -93,6 +93,16 @@ export async function provisionRealm(client, input) {
     throw new ProvisioningError('REALM_OWNERSHIP_CONFLICT', 'Existing realm is not managed by this installation.');
   }
 
+  // Reconcile presentation for both new and existing managed installations.
+  // Keep realm security, authentication flows and user state unchanged.
+  if (realm.loginTheme !== 'helmglass' || !realm.internationalizationEnabled
+      || realm.defaultLocale !== 'ru' || !realm.supportedLocales?.includes('ru')) {
+    await client.request('PUT', REALM_PATH, {
+      loginTheme: 'helmglass', internationalizationEnabled: true, defaultLocale: 'ru',
+      supportedLocales: [...new Set([...(realm.supportedLocales ?? []), 'ru'])],
+    });
+  }
+
   const profilePath = `${REALM_PATH}/users/profile`;
   const profile = await client.request('GET', profilePath);
   let profileChanged = false;

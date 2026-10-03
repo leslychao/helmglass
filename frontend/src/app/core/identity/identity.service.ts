@@ -41,6 +41,7 @@ export class Identity {
 export const authenticated: CanActivateFn = (_, state) => {
   const identity = inject(Identity),
     router = inject(Router);
+  if (identity.me()) return true;
   return identity
     .load()
     .pipe(

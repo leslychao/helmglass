@@ -1,13 +1,14 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { lstat, readFile, readdir, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOOTSTRAP_FILES } from './configuration.mjs';
 import { isInside, protectDirectory, readProtectedFile, replaceProtectedFile, writeProtectedFile } from './protected-files.mjs';
-import { createAuthority, createIdentity, readTlsBundle, validateBackupRecipient, validateInternalIdentity } from './tls.mjs';
+import { createAuthority, createIdentity, validateBackupRecipient, validateInternalIdentity } from './tls.mjs';
 import { VAULT_ROLES } from './provision/src/vault-services.mjs';
 import { validatePredefinedInput } from './provision/src/predefined-users.mjs';
 import { upgradeRedisAcl } from './provision/src/redis-acl-upgrade.mjs';
+import { upgradeTurnBootstrap } from './provision/src/turn-bootstrap-upgrade.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const secret = () => randomBytes(32).toString('base64url');
@@ -48,7 +49,11 @@ export async function prepareBootstrap(configuration, environment = process.env)
       'installation-ca.crt', 'installation-ca.key']) {
       await readProtectedFile(join(directory, file));
     }
-    await readTlsBundle(join(directory, 'edge-tls'), new URL(configuration.PUBLIC_ORIGIN).hostname);
+    const legacyEdgePath = join(directory, 'edge-tls');
+    if (entries.includes('edge-tls')) {
+      const legacyEdge = await lstat(legacyEdgePath);
+      if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()) throw new Error('Unsafe legacy edge TLS file');
+    }
     validateBackupRecipient((await readProtectedFile(join(directory, 'backup-recipient'))).toString('utf8'));
     for (const [name, file] of Object.entries({ api: 'api-bootstrap', vault: 'vault-tls',
       minio: 'minio-bootstrap', 'mcp-adapter': 'mcp-adapter-bootstrap' })) {
@@ -58,15 +63,19 @@ export async function prepareBootstrap(configuration, environment = process.env)
     const aclPath = join(directory, 'redis-bootstrap.acl');
     const previousAcl = await readProtectedFile(aclPath);
     const upgradedAcl = upgradeRedisAcl(previousAcl);
+    const turnPath = join(directory, 'turn-bootstrap');
+    const previousTurn = await readProtectedFile(turnPath);
+    const upgradedTurn = upgradeTurnBootstrap(previousTurn);
     if (!previousAcl.equals(upgradedAcl)) {
       await replaceProtectedFile(aclPath, upgradedAcl, createHash('sha256').update(previousAcl).digest('hex'));
     }
+    if (!previousTurn.equals(upgradedTurn)) {
+      await replaceProtectedFile(turnPath, upgradedTurn, createHash('sha256').update(previousTurn).digest('hex'));
+    }
+    if (entries.includes('edge-tls')) await unlink(legacyEdgePath);
     return { directory, created: false };
   }
   // Validate every operator-supplied value before creating installation credentials.
-  const edge = await readTlsBundle(configuration.EDGE_TLS_FILE, new URL(configuration.PUBLIC_ORIGIN).hostname);
-  const turn = await readTlsBundle(configuration.TURN_TLS_FILE, configuration.TURN_REALM);
-  if (!turn.caPem.includes('BEGIN CERTIFICATE')) throw new Error('TURN TLS bundle must include its CA chain');
   const backupRecipient = validateBackupRecipient(
     (await readProtectedFile(configuration.BACKUP_RECIPIENT_FILE, 65_536)).toString('utf8'));
   await protectDirectory(directory, repository);
@@ -103,7 +112,6 @@ export async function prepareBootstrap(configuration, environment = process.env)
     'egress-proxy': { mediaProxyUsername, mediaProxyPassword },
   };
   const files = {
-    'edge-tls': edge.pem,
     'vault-tls': { schemaVersion: 1, tls: identities.vault },
     'mcp-adapter-bootstrap': { schemaVersion: 1, tls: identities['mcp-adapter'] },
     'postgres-bootstrap': postgres,
@@ -111,8 +119,7 @@ export async function prepareBootstrap(configuration, environment = process.env)
     'minio-bootstrap': { schemaVersion: 1, rootUser: minio.rootUser, rootPassword: minio.rootPassword, tls: identities.minio },
     'backup-recipient': backupRecipient,
     'worker-bootstrap': { schemaVersion: 1, installationId: configuration.INSTALLATION_ID, enrollmentToken, caPem },
-    'turn-bootstrap': { schemaVersion: 1, turnSharedSecret,
-      tls: { certificatePem: turn.certificatePem, privateKeyPem: turn.privateKeyPem, caPem: turn.caPem } },
+    'turn-bootstrap': { schemaVersion: 2, turnSharedSecret },
     'egress-bootstrap': { schemaVersion: 1, mediaProxyUsername, mediaProxyPassword },
     'predefined-users-input': users,
     'vault-services-input': { schemaVersion: 1, installationId: configuration.INSTALLATION_ID, caPem, services, credentials },

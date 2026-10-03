@@ -2,17 +2,17 @@ import { createHash } from 'node:crypto';
 import { chown, chmod, lstat, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { upgradeRedisAcl } from './redis-acl-upgrade.mjs';
+import { upgradeTurnBootstrap } from './turn-bootstrap-upgrade.mjs';
 
 // Runs once with no network and one explicit daemon-side bootstrap-directory mount.
 // Secrets arrive through stdin, never Docker environment, image layers, command arguments or logs.
-const allowed = new Set(['edge-tls', 'api-bootstrap', 'worker-bootstrap', 'turn-bootstrap', 'egress-bootstrap',
+const allowed = new Set(['api-bootstrap', 'worker-bootstrap', 'turn-bootstrap', 'egress-bootstrap',
   'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap',
   'mcp-adapter-bootstrap', 'vault-tls', 'provision-bootstrap', 'migration-bootstrap', 'keycloak-bootstrap',
   'oauth-bootstrap', 'predefined-users-input', 'backup-recipient']);
 const directory = '/bootstrap';
 const checksum = bytes => createHash('sha256').update(bytes).digest('hex');
-const ownerUid = name => name === 'edge-tls' ? 101
-  : name === 'postgres-bootstrap' ? 999 : name === 'backup-recipient' ? 0 : 10001;
+const ownerUid = name => name === 'postgres-bootstrap' ? 999 : name === 'backup-recipient' ? 0 : 10001;
 const fileMode = name => name === 'backup-recipient' ? 0o444 : 0o400;
 
 async function main() {
@@ -48,7 +48,14 @@ async function main() {
     if (entries.length || input.mode !== 'stage') throw new Error('Unowned mount');
     owner = { schemaVersion: 1, installationId: input.installationId };
   }
-  if (entries.some(name => !allowed.has(name) && name !== '.helm-owner.json'
+  const legacyEdgePath = join(directory, 'edge-tls');
+  if (entries.includes('edge-tls')) {
+    const legacyEdge = await lstat(legacyEdgePath);
+    if (input.mode === 'verify' || !legacyEdge.isFile() || legacyEdge.isSymbolicLink()) {
+      throw new Error('Legacy edge TLS must be retired safely');
+    }
+  }
+  if (entries.some(name => !allowed.has(name) && name !== '.helm-owner.json' && name !== 'edge-tls'
       && !(name.endsWith('.pending') && input.files.some(file => `${file.name}.pending` === name)))) throw new Error('Unexpected file');
   // Inspect all destinations before the first write. Normal restart cannot replace a credential.
   for (const file of input.files) {
@@ -69,6 +76,8 @@ async function main() {
     if (checksum(current) === file.sha256) continue;
     if (input.mode === 'stage' && file.name === 'redis-bootstrap.acl'
         && upgradeRedisAcl(current).equals(file.bytes)) continue;
+    if (input.mode === 'stage' && file.name === 'turn-bootstrap'
+        && upgradeTurnBootstrap(current).equals(file.bytes)) continue;
     throw new Error('Credential drift');
   }
   if (input.mode !== 'verify') {
@@ -97,6 +106,11 @@ async function main() {
     const uid = ownerUid(file.name);
     if (metadata.uid !== uid || (metadata.mode & 0o777) !== fileMode(file.name)
         || checksum(await readFile(join(directory, file.name))) !== file.sha256) throw new Error('Protected delivery verification failed');
+  }
+  if (input.mode === 'stage' && entries.includes('edge-tls')) {
+    const legacyEdge = await lstat(legacyEdgePath);
+    if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()) throw new Error('Unsafe legacy edge TLS file');
+    await unlink(legacyEdgePath);
   }
   process.stdout.write(JSON.stringify({ status: 'READY', count: input.files.length }) + '\n');
 }

@@ -4,12 +4,12 @@ import { isAbsolute } from 'node:path';
 import { parseEnv } from 'node:util';
 
 const INPUT_NAMES = [
-  'DOCKER_HOST', 'INSTALLATION_ID', 'PUBLIC_ORIGIN', 'BIND_ADDRESS', 'HTTPS_PORT',
+  'DOCKER_HOST', 'INSTALLATION_ID', 'PUBLIC_ORIGIN',
   'TRUSTED_EDGE_PROXY', 'WORKER_COUNT', 'GPU_DEVICE_ID', 'LOCAL_SECRETS_DIR', 'SECRETS_DIR',
-  'TURN_INTERNAL_URL', 'TURN_PUBLIC_URLS', 'TURN_REALM', 'TURN_ADVERTISED_IP', 'TURN_BIND_ADDRESS',
+  'TURN_INTERNAL_URL', 'TURN_PUBLIC_URLS', 'TURN_REALM',
   'TURN_RELAY_MIN', 'TURN_RELAY_MAX', 'KEYCLOAK_ADMIN_EMAIL', 'KEYCLOAK_ADMIN_LAST_NAME',
   'KEYCLOAK_ANGELINA_EMAIL', 'KEYCLOAK_ANGELINA_LAST_NAME', 'MCP_REDIRECT_URIS',
-  'EDGE_TLS_FILE', 'TURN_TLS_FILE', 'LOCAL_RECOVERY_DIR', 'DELETION_LEDGER_DIR',
+  'LOCAL_RECOVERY_DIR', 'DELETION_LEDGER_DIR',
   'BACKUP_DIR', 'BACKUP_WORK_DIR', 'BACKUP_RECIPIENT_FILE',
   'MINIO_DATA_DIR', 'OPERATOR_INPUT_FILE',
 ];
@@ -19,7 +19,7 @@ export const IMAGE_NAMES = [
   'KEYCLOAK_IMAGE', 'PROVISION_IMAGE', 'OAUTH_IMAGE',
 ];
 export const BOOTSTRAP_FILES = [
-  'edge-tls', 'api-bootstrap', 'worker-bootstrap', 'turn-bootstrap', 'egress-bootstrap',
+  'api-bootstrap', 'worker-bootstrap', 'turn-bootstrap', 'egress-bootstrap',
   'postgres-bootstrap', 'redis-bootstrap.acl', 'redis-health-bootstrap', 'minio-bootstrap',
   'mcp-adapter-bootstrap', 'vault-tls', 'provision-bootstrap', 'migration-bootstrap',
   'keycloak-bootstrap', 'oauth-bootstrap', 'predefined-users-input',
@@ -72,7 +72,7 @@ export function validateDeployment(input) {
     if (name === 'OPERATOR_INPUT_FILE' && (input[name] === undefined || input[name] === '')) {
       configuration[name] = '';
     } else {
-      configuration[name] = name === 'TRUSTED_EDGE_PROXY' ? input[name] ?? '' : requireValue(input, name);
+      configuration[name] = requireValue(input, name);
     }
   }
   if (configuration.OPERATOR_INPUT_FILE && !isAbsolute(configuration.OPERATOR_INPUT_FILE)) {
@@ -85,16 +85,11 @@ export function validateDeployment(input) {
     throw new ConfigurationError('INSTALLATION_ID', 'must be a stable installation identifier');
   }
   origin(configuration, 'PUBLIC_ORIGIN');
-  for (const name of ['BIND_ADDRESS', 'TURN_BIND_ADDRESS', 'TURN_ADVERTISED_IP']) {
-    if (isIP(configuration[name]) !== 4) {
-      throw new ConfigurationError(name, 'must be an IPv4 address for the configured Docker/TURN deployment');
-    }
-  }
   if (!/^(?:[0-9]+|GPU-[a-fA-F0-9-]+)$/.test(configuration.GPU_DEVICE_ID)) {
     throw new ConfigurationError('GPU_DEVICE_ID', 'must identify one NVIDIA device by index or GPU UUID');
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$/.test(configuration.TURN_REALM)) {
-    throw new ConfigurationError('TURN_REALM', 'must be the configured TURN certificate hostname');
+    throw new ConfigurationError('TURN_REALM', 'must be the configured TURN authentication realm');
   }
   if (configuration.TRUSTED_EDGE_PROXY) {
     const [address, prefix, extra] = configuration.TRUSTED_EDGE_PROXY.split('/');
@@ -105,7 +100,6 @@ export function validateDeployment(input) {
     }
     if (Number(prefix) === 0) throw new ConfigurationError('TRUSTED_EDGE_PROXY', 'must not trust the whole internet');
   }
-  integer(configuration, 'HTTPS_PORT', 1, 65535);
   integer(configuration, 'WORKER_COUNT', 1, 64);
   const relayMinimum = integer(configuration, 'TURN_RELAY_MIN', 1024, 65535);
   const relayMaximum = integer(configuration, 'TURN_RELAY_MAX', relayMinimum, 65535);

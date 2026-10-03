@@ -15,6 +15,8 @@ FROM ${KEYCLOAK_BASE_IMAGE}
 USER root
 COPY --from=tools /mnt/rootfs /
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
+COPY Deploy/keycloak/themes/helmglass /opt/keycloak/themes/helmglass
+COPY frontend/public/helm-logo.png /opt/keycloak/themes/helmglass/login/resources/img/helm-logo.png
 COPY --from=vault-cli /bin/vault /usr/local/bin/vault
 RUN rmdir /opt/keycloak/data && ln -s /run/helm/keycloak-data /opt/keycloak/data
 COPY Deploy/runtime/vault-bootstrap /opt/helm/bin/vault-bootstrap
