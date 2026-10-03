@@ -6,7 +6,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.helmglass.api.DomainException;
@@ -182,6 +184,42 @@ class ProfilePersistenceIntegrationTest {
           .hasMessage("Profile assignment has changed");
     }
     verifyNoInteractions(storage);
+  }
+
+  @Test
+  void deletionDuringAStalledPrefixCannotStartALateProfilePut() {
+    Fixture fixture = fixture();
+    var input =
+        new ByteArrayInputStream(new byte[64]) {
+          @Override
+          public byte[] readNBytes(int length) {
+            transaction.executeWithoutResult(
+                status -> {
+                  identities.lockState(fixture.userId());
+                  jdbc.sql("UPDATE connections SET status='DELETING' WHERE id=:id")
+                      .param("id", fixture.connectionId())
+                      .update();
+                  service.revokeConnection(fixture.userId(), fixture.connectionId());
+                });
+            return new byte[] {'H', 'G', 'P', '1'};
+          }
+        };
+    when(storage.metadata("hg-browser-profiles", fixture.version().objectKey()))
+        .thenReturn(Optional.empty());
+    assertThatThrownBy(
+            () ->
+                service.upload(
+                    fixture.transfer().id(),
+                    fixture.token(),
+                    fixture.workerId(),
+                    fixture.bootId(),
+                    64,
+                    "a".repeat(64),
+                    input))
+        .isInstanceOf(DomainException.class)
+        .hasMessage("Profile transfer is no longer authorized");
+    verify(storage).metadata("hg-browser-profiles", fixture.version().objectKey());
+    verifyNoMoreInteractions(storage);
   }
 
   @Test

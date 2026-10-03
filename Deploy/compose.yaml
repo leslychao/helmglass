@@ -1,5 +1,7 @@
 name: helm-glass
 
+x-coturn-ipv4: &coturn-ipv4 172.28.41.2
+
 x-runtime: &runtime
   restart: unless-stopped
   init: true
@@ -105,6 +107,9 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
     secrets: [worker_identity]
     networks: [worker-control, browser-egress]
+    # libnice resolves TURN locally before its authenticated HTTP CONNECT.
+    extra_hosts:
+      coturn: *coturn-ipv4
     depends_on:
       api: {condition: service_healthy}
       egress-proxy: {condition: service_healthy}
@@ -150,7 +155,8 @@ services:
       TURN_RELAY_MIN: ${TURN_RELAY_MIN:?required}
       TURN_RELAY_MAX: ${TURN_RELAY_MAX:?required}
     secrets: [turn_identity]
-    networks: [browser-relay]
+    networks:
+      browser-relay: {ipv4_address: *coturn-ipv4}
     cpus: 0.5
     mem_limit: 256m
 
@@ -286,7 +292,11 @@ networks:
   secrets: {internal: true}
   worker-control: {internal: true}
   browser-egress: {internal: true}
-  browser-relay: {internal: true}
+  browser-relay:
+    internal: true
+    ipam:
+      # Reserve coturn's address without exposing this network to browser workers.
+      config: [{subnet: 172.28.41.0/24, ip_range: 172.28.41.128/25}]
   internet-egress: {}
 
 volumes:

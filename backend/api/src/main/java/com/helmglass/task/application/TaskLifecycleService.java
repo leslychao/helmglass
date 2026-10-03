@@ -341,6 +341,26 @@ public class TaskLifecycleService {
     changes.changed(target.userId(), "tasks", target.taskId(), task.getVersion());
   }
 
+  /** Cancels pending work when a bound connection is removed, preserving unknown effects. */
+  @Transactional
+  public void connectionUnavailable(UUID userId, UUID taskId) {
+    identities.lockState(userId);
+    var task = tasks.lockOwned(taskId, userId).orElseThrow(DomainException::notFound);
+    if (task.getState() == TaskState.DRAFT || task.getState().terminal()) {
+      return;
+    }
+    for (UUID commandId : queries.cancelUnstarted(taskId, "CONNECTION_REQUIRED")) {
+      operations.completeCommandTarget(commandId, "commands.accept:" + taskId, "FAILED");
+    }
+    queries.cancelActionRequests(taskId);
+    continuations.cancel(taskId);
+    if (task.connectionUnavailable()) {
+      tasks.flush();
+      queries.event(task, "SYSTEM", "CONNECTION_REQUIRED", "Task connection is unavailable");
+      changes.changed(userId, "tasks", taskId, task.getVersion());
+    }
+  }
+
   private TaskAggregate owned(AuthenticatedActor actor, UUID id) {
     return tasks.findByIdAndUserId(id, actor.userId()).orElseThrow(DomainException::notFound);
   }

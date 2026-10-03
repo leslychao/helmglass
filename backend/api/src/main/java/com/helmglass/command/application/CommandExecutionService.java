@@ -231,13 +231,20 @@ public class CommandExecutionService {
         || (status.equals("UNKNOWN") != effect.equals("UNKNOWN"))) {
       throw new DomainException(422, "INVALID_RECEIPT", "Invalid attempt disposition");
     }
+    boolean cancelled = commands.commandState(commandId).equals("CANCELLED");
+    if (cancelled && (!status.equals("FAILED") || !effect.equals("NOT_STARTED"))) {
+      throw DomainException.conflict(
+          "START_PERMIT_DENIED", "Cancelled command has no execution permit");
+    }
     browsers.runtimeEpochs(workerId, bootId, dispatch.sessionId(), result);
     if (result.has("observation")) {
       String url = observedLocation(result);
       browsers.observedLocation(workerId, bootId, dispatch.sessionId(), result, url);
     }
     commands.result(dispatch, status, effect, digest, result);
-    dispositionChanged(dispatch.userId(), dispatch.taskId(), commandId);
+    if (!cancelled) {
+      dispositionChanged(dispatch.userId(), dispatch.taskId(), commandId);
+    }
   }
 
   /** Publishes a durable terminal command disposition, including recovery without a receipt. */

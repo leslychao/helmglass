@@ -41,6 +41,8 @@ import java.util.UUID;
 import javax.sql.DataSource;
 import liquibase.integration.spring.SpringLiquibase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -148,16 +150,19 @@ class TaskLifecycleIntegrationTest {
   private final IdentityRepository identities;
   private final OperationRepository operations;
   private final TransactionTemplate transaction;
+  private final JdbcClient jdbc;
 
   @Autowired
   TaskLifecycleIntegrationTest(
       TaskLifecycleService tasks,
       IdentityRepository identities,
       OperationRepository operations,
+      JdbcClient jdbc,
       PlatformTransactionManager transactionManager) {
     this.tasks = tasks;
     this.identities = identities;
     this.operations = operations;
+    this.jdbc = jdbc;
     transaction = new TransactionTemplate(transactionManager);
   }
 
@@ -241,6 +246,196 @@ class TaskLifecycleIntegrationTest {
     assertThat(tasks.get(actor, created.resource().id()).state()).isEqualTo("PAUSED");
     tasks.stop(actor, created.resource().id(), context());
     assertThat(tasks.get(actor, created.resource().id()).state()).isEqualTo("CANCELLED");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"ACCEPTED", "WAITING_RESOURCE", "DISPATCHED"})
+  void unavailableConnectionCancelsUnstartedWorkAndPublishesOneDurableTransition(String state) {
+    var actor = actor();
+    var created =
+        tasks.create(actor, create("Keep collected findings", "PREPARE"), context(), null);
+    UUID taskId = created.resource().id();
+    UUID commandId = pendingCommand(actor, taskId, state);
+    UUID requestId = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO user_action_requests(id,task_id,command_id,kind,intent_hash,prompt,expires_at)
+            VALUES(:id,:task,:command,'LOGIN','login-intent','Sign in',now()+interval '5 minutes')
+            """)
+        .param("id", requestId)
+        .param("task", taskId)
+        .param("command", commandId)
+        .update();
+    UUID resultId = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO task_results(id,task_id,revision,conclusion)
+            VALUES(:id,:task,1,'Already confirmed findings')
+            """)
+        .param("id", resultId)
+        .param("task", taskId)
+        .update();
+    UUID continuationId = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO task_continuations(id,task_id,user_id,source_operation_id,instruction_revision,
+              reason,mode,binding_version,expires_at)
+            VALUES(:id,:task,:user,:operation,1,'USER_RESPONSE','MANUAL',1,now()+interval '5 minutes')
+            """)
+        .param("id", continuationId)
+        .param("task", taskId)
+        .param("user", actor.userId())
+        .param("operation", created.operationId())
+        .update();
+    long priorEvents =
+        count("SELECT count(*) FROM task_execution_events WHERE task_id=:id", taskId);
+    long priorOutbox =
+        count("SELECT count(*) FROM transactional_outbox WHERE user_id=:id", actor.userId());
+
+    tasks.connectionUnavailable(actor.userId(), taskId);
+
+    var current = tasks.get(actor, taskId);
+    assertThat(current.state()).isEqualTo("WAITING_USER");
+    assertThat(current.waitReason()).isEqualTo("CONNECTION_REQUIRED");
+    assertThat(current.mutationBarrier()).isFalse();
+    assertThat(current.activeRequest()).isNull();
+    assertThat(
+            jdbc.sql("SELECT state,failure_code FROM task_commands WHERE id=:id")
+                .param("id", commandId)
+                .query()
+                .singleRow())
+        .containsEntry("state", "CANCELLED")
+        .containsEntry("failure_code", "CONNECTION_REQUIRED");
+    assertThat(
+            jdbc.sql("SELECT state,failure_code FROM operations WHERE target_id=:id")
+                .param("id", commandId)
+                .query()
+                .singleRow())
+        .containsEntry("state", "FAILED")
+        .containsEntry("failure_code", "CONNECTION_REQUIRED");
+    assertThat(
+            jdbc.sql("SELECT status FROM user_action_requests WHERE id=:id")
+                .param("id", requestId)
+                .query(String.class)
+                .single())
+        .isEqualTo("CANCELLED");
+    assertThat(
+            jdbc.sql("SELECT state FROM task_continuations WHERE id=:id")
+                .param("id", continuationId)
+                .query(String.class)
+                .single())
+        .isEqualTo("CANCELLED");
+    assertThat(
+            jdbc.sql("SELECT conclusion FROM task_results WHERE id=:id")
+                .param("id", resultId)
+                .query(String.class)
+                .single())
+        .isEqualTo("Already confirmed findings");
+    assertThat(count("SELECT count(*) FROM task_execution_events WHERE task_id=:id", taskId))
+        .isEqualTo(priorEvents + 1);
+    long deliveredOutbox =
+        count("SELECT count(*) FROM transactional_outbox WHERE user_id=:id", actor.userId());
+    assertThat(deliveredOutbox).isGreaterThan(priorOutbox);
+
+    tasks.connectionUnavailable(actor.userId(), taskId);
+    assertThat(tasks.get(actor, taskId).version()).isEqualTo(current.version());
+    assertThat(count("SELECT count(*) FROM transactional_outbox WHERE user_id=:id", actor.userId()))
+        .isEqualTo(deliveredOutbox);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"DRAFT", "COMPLETED", "FAILED", "CANCELLED", "STOPPING"})
+  void unavailableConnectionDoesNotReviveUnpreparedTerminalOrStoppingTask(String state) {
+    var actor = actor();
+    UUID taskId =
+        tasks.create(actor, create("Preserve lifecycle", "DRAFT"), context(), null).resource().id();
+    jdbc.sql("UPDATE tasks SET state=:state WHERE id=:id")
+        .param("state", state)
+        .param("id", taskId)
+        .update();
+    var before = tasks.get(actor, taskId);
+    tasks.connectionUnavailable(actor.userId(), taskId);
+    var after = tasks.get(actor, taskId);
+    assertThat(after.state()).isEqualTo(state);
+    assertThat(after.version()).isEqualTo(before.version());
+  }
+
+  @Test
+  void unavailableConnectionPreservesUnknownEffectsAndCannotAffectAnotherOwner() {
+    var actor = actor();
+    UUID taskId =
+        tasks.create(actor, create("Reconcile first", "PREPARE"), context(), null).resource().id();
+    jdbc.sql("UPDATE tasks SET state='INTERRUPTED',mutation_barrier=true WHERE id=:id")
+        .param("id", taskId)
+        .update();
+    tasks.connectionUnavailable(actor.userId(), taskId);
+    var current = tasks.get(actor, taskId);
+    assertThat(current.state()).isEqualTo("INTERRUPTED");
+    assertThat(current.waitReason()).isEqualTo("CONNECTION_REQUIRED");
+    assertThat(current.mutationBarrier()).isTrue();
+    var other = actor();
+    assertThatThrownBy(() -> tasks.connectionUnavailable(other.userId(), taskId))
+        .isInstanceOf(DomainException.class)
+        .hasMessage("Resource not found");
+    assertThat(tasks.get(actor, taskId).version()).isEqualTo(current.version());
+  }
+
+  @Test
+  void unavailableConnectionAndItsOutboxRollBackTogether() {
+    var actor = actor();
+    UUID taskId =
+        tasks
+            .create(actor, create("Atomic cancellation", "PREPARE"), context(), null)
+            .resource()
+            .id();
+    UUID commandId = pendingCommand(actor, taskId, "ACCEPTED");
+    long before =
+        count("SELECT count(*) FROM transactional_outbox WHERE user_id=:id", actor.userId());
+    transaction.executeWithoutResult(
+        status -> {
+          tasks.connectionUnavailable(actor.userId(), taskId);
+          status.setRollbackOnly();
+        });
+    assertThat(tasks.get(actor, taskId).state()).isEqualTo("WAITING_AGENT");
+    assertThat(
+            jdbc.sql("SELECT state FROM task_commands WHERE id=:id")
+                .param("id", commandId)
+                .query(String.class)
+                .single())
+        .isEqualTo("ACCEPTED");
+    assertThat(count("SELECT count(*) FROM transactional_outbox WHERE user_id=:id", actor.userId()))
+        .isEqualTo(before);
+  }
+
+  private UUID pendingCommand(AuthenticatedActor actor, UUID taskId, String state) {
+    UUID commandId = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO task_commands(id,task_id,user_id,command_sequence,kind,payload,payload_hash,
+              accepted_task_version,instruction_revision,deadline,state)
+            VALUES(:id,:task,:user,1,'NAVIGATE','{}',repeat('a',64),0,1,now()+interval '5 minutes',:state)
+            """)
+        .param("id", commandId)
+        .param("task", taskId)
+        .param("user", actor.userId())
+        .param("state", state)
+        .update();
+    transaction.executeWithoutResult(
+        status ->
+            operations.save(
+                actor,
+                "commands.accept:" + taskId,
+                context(),
+                Map.of("commandId", commandId),
+                "command",
+                commandId,
+                1,
+                false));
+    return commandId;
+  }
+
+  private long count(String sql, UUID id) {
+    return jdbc.sql(sql).param("id", id).query(Long.class).single();
   }
 
   private AuthenticatedActor actor() {

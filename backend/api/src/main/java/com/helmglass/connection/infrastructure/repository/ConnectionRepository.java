@@ -6,6 +6,7 @@ import com.helmglass.api.PageResult;
 import com.helmglass.connection.api.ConnectionContracts;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import java.net.URI;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -179,20 +180,188 @@ public class ConnectionRepository {
         .update();
   }
 
+  public record Deletion(
+      UUID operationId, UUID userId, UUID connectionId, int progress, Instant deadline) {}
+
+  public Optional<UUID> deletionOperation(UUID id) {
+    return jdbc.sql(
+            "SELECT id FROM operations WHERE target_id=:id AND kind=:kind ORDER BY created_at DESC"
+                + " LIMIT 1")
+        .param("id", id)
+        .param("kind", "connections.delete:" + id)
+        .query(UUID.class)
+        .optional();
+  }
+
+  public List<Deletion> dueDeletions() {
+    return jdbc.sql(
+            """
+            SELECT o.id operation_id,o.user_id,o.target_id connection_id,o.progress,o.deadline
+            FROM operations o JOIN connections c ON c.id=o.target_id AND c.user_id=o.user_id
+            WHERE o.kind='connections.delete:'||c.id::text AND c.status='DELETING'
+              AND o.state IN ('PENDING','RUNNING') AND o.next_attempt_at<=now() AND o.attempts<8
+            ORDER BY o.next_attempt_at,o.id LIMIT 1
+            """)
+        .query(Deletion.class)
+        .list();
+  }
+
+  public Optional<Deletion> claimDeletion(UUID operationId) {
+    return jdbc.sql(
+            """
+            UPDATE operations SET state='RUNNING',next_attempt_at=now()+interval '30 seconds',
+              deadline=CASE WHEN progress=0 THEN now()+interval '5 minutes' ELSE deadline END,
+              version=version+1,updated_at=now()
+            WHERE id=:id AND state IN ('PENDING','RUNNING') AND next_attempt_at<=now() AND attempts<8
+            RETURNING id operation_id,user_id,target_id connection_id,progress,deadline
+            """)
+        .param("id", operationId)
+        .query(Deletion.class)
+        .optional();
+  }
+
+  public void prepareDeletion(UUID connectionId, UUID operationId) {
+    jdbc.sql(
+            """
+            INSERT INTO operation_items(operation_id,item_key,target_id,phase)
+            SELECT :operation,'task:'||id::text,id,'CONNECTION_REQUIRED' FROM (
+              SELECT task_id id FROM task_connections WHERE connection_id=:connection
+              UNION SELECT task_id id FROM browser_sessions WHERE connection_id=:connection AND task_id IS NOT NULL
+            ) tasks ON CONFLICT DO NOTHING
+            """)
+        .param("operation", operationId)
+        .param("connection", connectionId)
+        .update();
+    jdbc.sql("UPDATE operations SET progress=25 WHERE id=:id AND progress<25")
+        .param("id", operationId)
+        .update();
+  }
+
+  public List<UUID> deletionTasks(UUID operationId) {
+    return jdbc.sql(
+            """
+            SELECT target_id FROM operation_items WHERE operation_id=:id
+              AND phase='CONNECTION_REQUIRED' AND state='PENDING' ORDER BY item_key LIMIT 100
+            """)
+        .param("id", operationId)
+        .query(UUID.class)
+        .list();
+  }
+
+  public void taskDetached(UUID operationId, UUID taskId) {
+    jdbc.sql(
+            """
+            UPDATE operation_items SET state='SUCCEEDED',version=version+1,updated_at=now()
+            WHERE operation_id=:operation AND target_id=:task AND phase='CONNECTION_REQUIRED'
+            """)
+        .param("operation", operationId)
+        .param("task", taskId)
+        .update();
+  }
+
+  public List<UUID> activeSessions(UUID connectionId) {
+    return jdbc.sql(
+            """
+            SELECT id FROM browser_sessions WHERE connection_id=:id AND binding_released_at IS NULL
+              AND state<>'STOPPING'
+                ORDER BY id LIMIT 100 FOR UPDATE
+            """)
+        .param("id", connectionId)
+        .query(UUID.class)
+        .list();
+  }
+
+  public boolean deletionRuntimeClosed(UUID connectionId) {
+    return !jdbc.sql(
+            """
+            SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE connection_id=:id AND binding_released_at IS NULL)
+              OR EXISTS(SELECT 1 FROM browser_allocations WHERE connection_id=:id AND state<>'RELEASED')
+            """)
+        .param("id", connectionId)
+        .query(Boolean.class)
+        .single();
+  }
+
+  public void deferDeletion(Deletion deletion, String code, boolean failed) {
+    jdbc.sql(
+            """
+            UPDATE operations SET attempts=attempts+CASE WHEN :failed THEN 1 ELSE 0 END,
+              state=CASE WHEN deadline<=now() OR :failed AND attempts>=7 THEN 'NEEDS_ATTENTION' ELSE 'RUNNING' END,
+              failure_code=:code,next_attempt_at=now()+interval '5 seconds',version=version+1,updated_at=now()
+            WHERE id=:id AND state IN ('PENDING','RUNNING')
+            """)
+        .param("id", deletion.operationId())
+        .param("failed", failed)
+        .param("code", code)
+        .update();
+    deletionChanged(deletion);
+  }
+
+  public boolean resumeDeletion(UUID operationId) {
+    var resumed =
+        jdbc.sql(
+                """
+                UPDATE operations SET state='PENDING',attempts=0,next_attempt_at=now(),deadline=now()+interval '5 minutes',
+                  failure_code=NULL,version=version+1,updated_at=now() WHERE id=:id AND state='NEEDS_ATTENTION'
+                  RETURNING id operation_id,user_id,target_id connection_id,progress,deadline
+                """)
+            .param("id", operationId)
+            .query(Deletion.class)
+            .optional();
+    resumed.ifPresent(this::deletionChanged);
+    return resumed.isPresent();
+  }
+
+  public void deletionChanged(Deletion deletion) {
+    long version =
+        jdbc.sql("SELECT version FROM operations WHERE id=:id")
+            .param("id", deletion.operationId())
+            .query(Long.class)
+            .single();
+    changes.changed(deletion.userId(), "operations", deletion.operationId(), version);
+  }
+
+  public void deleted(UUID id) {
+    jdbc.sql("DELETE FROM connection_origins WHERE connection_id=:id").param("id", id).update();
+    jdbc.sql(
+            "UPDATE task_connections SET selected=false,version=version+1 WHERE connection_id=:id"
+                + " AND selected")
+        .param("id", id)
+        .update();
+    jdbc.sql(
+            "UPDATE connections SET"
+                + " status='DELETED',account_label=NULL,version=version+1,updated_at=now() WHERE"
+                + " id=:id AND status='DELETING'")
+        .param("id", id)
+        .update();
+  }
+
   public PageResult<ConnectionContracts.ConnectionView> list(UUID userId, PageQuery query) {
     String snapshot = changes.snapshot(userId, "connections", query);
     String where =
         " WHERE c.user_id=:user AND c.status<>'DELETED' AND (display_name ILIKE :q OR origin ILIKE"
             + " :q)";
     String status = query.filters().getFirst("status");
+    String excludedStatus = query.filters().getFirst("excludeStatus");
     if (status != null) {
       where += " AND status=:status";
+    }
+    if (excludedStatus != null) {
+      if (!excludedStatus.equals("DELETING")
+          || query.filters().getOrDefault("excludeStatus", List.of()).size() != 1) {
+        throw new DomainException(
+            400, "INVALID_CONNECTION_FILTER", "Only DELETING may be excluded");
+      }
+      where += " AND c.status<>:excludedStatus";
     }
     var parameters = new HashMap<String, Object>();
     parameters.put("user", userId);
     parameters.put("q", query.escapedQuery());
     if (status != null) {
       parameters.put("status", status);
+    }
+    if (excludedStatus != null) {
+      parameters.put("excludedStatus", excludedStatus);
     }
     List<String> sites = query.filters().getOrDefault("siteId", List.of());
     if (sites.size() > 50) {

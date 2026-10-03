@@ -3,6 +3,7 @@ package com.helmglass.mcp.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -208,6 +209,16 @@ class McpOwnerControllerTest {
                 "PREPARE"),
             new MutationContext("create-contract", requestId),
             hostContext);
+  }
+
+  @Test
+  void resumeAcceptsAdvertisedArgumentsWithoutAnUnrelatedBrowserConsent() {
+    ObjectNode args = arguments().put("expectedTaskVersion", 9).put("idempotencyKey", "resume-contract");
+    controller.call("tasks.resume", payload(args, hostContext), request());
+    verify(tasks).resume(eq(actor), eq(taskId),
+        argThat(input -> input.expectedTaskVersion() == 9
+            && input.resolutionId() == null),
+        eq(new MutationContext("resume-contract", requestId)));
   }
 
   @Test

@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   computed,
+  DestroyRef,
   effect,
   inject,
   signal,
@@ -137,7 +138,16 @@ import { TaskUsage } from '../usage/task-usage';
                 <header class="between">
                   <h2>Результат</h2>
                   <span class="small muted">Редакция {{ result.revision }}</span>
+                  <button
+                    type="button"
+                    class="btn small quiet"
+                    [disabled]="copyPending()"
+                    (click)="copyConclusion()"
+                  >
+                    <hg-icon name="copy" />Скопировать вывод
+                  </button>
                 </header>
+                <p class="small muted" role="status">{{ copyNotice() }}</p>
                 <p class="report-text">{{ result.conclusion }}</p>
                 @if (result.limitations.length || result.missing.length) {
                   <div class="notice warning">
@@ -539,6 +549,7 @@ import { TaskUsage } from '../usage/task-usage';
 export class TaskDetail {
   private route = inject(ActivatedRoute);
   private router = inject(Router);
+  private readonly destroy = inject(DestroyRef);
   private readonly browserInstance = inject(BrowserInstance);
   readonly id = this.route.snapshot.paramMap.get('id') ?? '';
   readonly resultTab = this.route.snapshot.data['result'] === true;
@@ -552,6 +563,8 @@ export class TaskDetail {
   readonly openDialog = signal(false);
   readonly rowOpen = signal(false);
   readonly usageOpen = signal(false);
+  readonly copyPending = signal(false);
+  readonly copyNotice = signal('');
   readonly operationId = computed(() => this.action.receipt()?.operationId);
   private readonly activeRequestId = computed(() => this.task.data()?.activeRequest?.id ?? null);
   readonly sessionId = computed(() => this.task.data()?.currentSession?.id);
@@ -594,6 +607,7 @@ export class TaskDetail {
     if (this.resultTab) this.result.load(`/tasks/${this.id}/result`);
     effect(() => {
       if (this.result.data()?.outputFormat === 'TABLE') this.readRows({ page: 1 });
+      this.copyNotice.set('');
     });
     effect(() => {
       this.activeRequestId();
@@ -627,6 +641,21 @@ export class TaskDetail {
       {},
       (receipt) => void this.router.navigate(['/tasks', receipt.resource.id, 'edit']),
     );
+  }
+  async copyConclusion() {
+    const result = this.result.data();
+    if (!result || this.copyPending()) return;
+    this.copyNotice.set('');
+    this.copyPending.set(true);
+    let notice = 'Вывод скопирован';
+    try {
+      await navigator.clipboard.writeText(result.conclusion);
+    } catch {
+      notice = 'Не удалось скопировать вывод. Выделите текст и скопируйте его вручную.';
+    }
+    if (this.destroy.destroyed) return;
+    this.copyPending.set(false);
+    if (this.result.data() === result) this.copyNotice.set(notice);
   }
   reconcile() {
     const task = this.task.data();

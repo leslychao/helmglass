@@ -136,6 +136,18 @@ public class LoginRepository {
         .list();
   }
 
+  public List<Login> pendingForConnection(UUID userId, UUID connectionId) {
+    return jdbc.sql(
+            """
+            SELECT * FROM connection_login_operations WHERE user_id=:user AND connection_id=:connection
+              AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED') ORDER BY id LIMIT 100 FOR UPDATE
+            """)
+        .param("user", userId)
+        .param("connection", connectionId)
+        .query(Login.class)
+        .list();
+  }
+
   public void assigned(UUID id, UUID sessionId) {
     jdbc.sql(
             """

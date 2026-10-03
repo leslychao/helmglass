@@ -20,9 +20,11 @@ import com.helmglass.command.api.CommandContracts;
 import com.helmglass.command.application.CommandExecutionService;
 import com.helmglass.command.infrastructure.repository.CommandRepository;
 import com.helmglass.connection.api.ConnectionContracts;
+import com.helmglass.connection.application.ConnectionLoginService;
 import com.helmglass.connection.application.ConnectionService;
 import com.helmglass.connection.infrastructure.repository.ConnectionRepository;
 import com.helmglass.connection.infrastructure.repository.ConnectionResolutionRepository;
+import com.helmglass.connection.infrastructure.repository.LoginRepository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.domain.MutationReceipt;
@@ -62,6 +64,8 @@ class BrowserStartupIntegrationTest {
     CommandExecutionService.class,
     WorkerProtocol.class,
     ConnectionService.class,
+    ConnectionLoginService.class,
+    LoginRepository.class,
     ConnectionRepository.class,
     ConnectionResolutionRepository.class,
     BrowserStartupRepository.class,

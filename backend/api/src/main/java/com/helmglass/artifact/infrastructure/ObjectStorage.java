@@ -2,6 +2,7 @@ package com.helmglass.artifact.infrastructure;
 
 import java.io.InputStream;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -34,9 +35,19 @@ public class ObjectStorage {
   }
 
   public void putImmutable(
-      String bucket, String key, InputStream bytes, long length, String sha256, String mime) {
+      String bucket,
+      String key,
+      InputStream bytes,
+      long length,
+      String sha256,
+      String mime,
+      Instant deadline) {
     if (length < 1 || !sha256.matches("[a-f0-9]{64}")) {
       throw new IllegalArgumentException("Object length and checksum are required");
+    }
+    Duration timeout = Duration.between(Instant.now(), deadline);
+    if (timeout.isNegative() || timeout.isZero()) {
+      throw new IllegalStateException("Immutable upload authorization expired");
     }
     String checksum = Base64.getEncoder().encodeToString(HexFormat.of().parseHex(sha256));
     s3.putObject(
@@ -48,6 +59,8 @@ public class ObjectStorage {
             .checksumSHA256(checksum)
             .ifNoneMatch("*")
             .metadata(Map.of("sha256", sha256))
+            .overrideConfiguration(
+                value -> value.apiCallTimeout(timeout).apiCallAttemptTimeout(timeout))
             .build(),
         RequestBody.fromInputStream(bytes, length));
   }
@@ -110,8 +123,24 @@ public class ObjectStorage {
       throw new IllegalArgumentException("Unsupported private bucket");
     }
     String prefix = "u/" + userId + "/";
+    return purgePrefixBatch(bucket, prefix);
+  }
+
+  public boolean purgeConnectionProfilesBatch(UUID userId, UUID connectionId) {
+    return purgePrefixBatch("hg-browser-profiles", "u/" + userId + "/c/" + connectionId + "/");
+  }
+
+  private boolean purgePrefixBatch(String bucket, String prefix) {
+    Instant deadline = Instant.now().plusSeconds(20);
     var versions =
-        s3.listObjectVersions(request -> request.bucket(bucket).prefix(prefix).maxKeys(100));
+        s3.listObjectVersions(
+            request ->
+                request
+                    .bucket(bucket)
+                    .prefix(prefix)
+                    .maxKeys(100)
+                    .overrideConfiguration(
+                        value -> value.apiCallTimeout(remainingPurgeTime(deadline))));
     var objects = new ArrayList<ObjectIdentifier>();
     for (var version : versions.versions()) {
       objects.add(
@@ -125,17 +154,37 @@ public class ObjectStorage {
       var deleted =
           s3.deleteObjects(
               request ->
-                  request.bucket(bucket).delete(value -> value.objects(objects).quiet(true)));
+                  request
+                      .bucket(bucket)
+                      .delete(value -> value.objects(objects).quiet(true))
+                      .overrideConfiguration(
+                          value -> value.apiCallTimeout(remainingPurgeTime(deadline))));
       if (!deleted.errors().isEmpty()) {
         throw new IllegalStateException("Private object deletion has unconfirmed items");
       }
     }
     var uploads =
-        s3.listMultipartUploads(request -> request.bucket(bucket).prefix(prefix).maxUploads(100));
+        s3.listMultipartUploads(
+            request ->
+                request
+                    .bucket(bucket)
+                    .prefix(prefix)
+                    .maxUploads(100)
+                    .overrideConfiguration(
+                        value -> value.apiCallTimeout(remainingPurgeTime(deadline))));
     for (var upload : uploads.uploads()) {
+      if (!Instant.now().isBefore(deadline)) {
+        return false;
+      }
       try {
         s3.abortMultipartUpload(
-            request -> request.bucket(bucket).key(upload.key()).uploadId(upload.uploadId()));
+            request ->
+                request
+                    .bucket(bucket)
+                    .key(upload.key())
+                    .uploadId(upload.uploadId())
+                    .overrideConfiguration(
+                        value -> value.apiCallTimeout(remainingPurgeTime(deadline))));
       } catch (S3Exception error) {
         if (error.statusCode() != 404) {
           throw error;
@@ -143,12 +192,34 @@ public class ObjectStorage {
       }
     }
     var remaining =
-        s3.listObjectVersions(request -> request.bucket(bucket).prefix(prefix).maxKeys(1));
+        s3.listObjectVersions(
+            request ->
+                request
+                    .bucket(bucket)
+                    .prefix(prefix)
+                    .maxKeys(1)
+                    .overrideConfiguration(
+                        value -> value.apiCallTimeout(remainingPurgeTime(deadline))));
     var pending =
-        s3.listMultipartUploads(request -> request.bucket(bucket).prefix(prefix).maxUploads(1));
+        s3.listMultipartUploads(
+            request ->
+                request
+                    .bucket(bucket)
+                    .prefix(prefix)
+                    .maxUploads(1)
+                    .overrideConfiguration(
+                        value -> value.apiCallTimeout(remainingPurgeTime(deadline))));
     return remaining.versions().isEmpty()
         && remaining.deleteMarkers().isEmpty()
         && pending.uploads().isEmpty();
+  }
+
+  private static Duration remainingPurgeTime(Instant deadline) {
+    Duration remaining = Duration.between(Instant.now(), deadline);
+    if (remaining.isNegative() || remaining.isZero()) {
+      throw new IllegalStateException("Private object deletion deadline exceeded");
+    }
+    return remaining;
   }
 
   public record ObjectPage(List<String> keys, String nextCursor) {}

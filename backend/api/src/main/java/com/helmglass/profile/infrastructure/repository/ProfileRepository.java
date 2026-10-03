@@ -151,6 +151,82 @@ public class ProfileRepository {
         .single();
   }
 
+  public void revokeConnection(UUID userId, UUID connectionId) {
+    jdbc.sql(
+            """
+            UPDATE profile_transfers SET state='REVOKED',wrapped_token=NULL
+            WHERE user_id=:user AND connection_id=:connection
+              AND (state<>'REVOKED' OR wrapped_token IS NOT NULL)
+            """)
+        .param("user", userId)
+        .param("connection", connectionId)
+        .update();
+    jdbc.sql(
+            """
+            UPDATE browser_profiles SET state='DELETING',version=version+1,updated_at=now()
+            WHERE user_id=:user AND connection_id=:connection AND state='ACTIVE'
+            """)
+        .param("user", userId)
+        .param("connection", connectionId)
+        .update();
+  }
+
+  public boolean deletionReady(UUID userId, UUID connectionId) {
+    return jdbc.sql(
+            """
+            SELECT EXISTS(SELECT 1 FROM connections WHERE user_id=:user AND id=:connection
+              AND status='DELETING')
+              AND NOT EXISTS(SELECT 1 FROM browser_sessions WHERE user_id=:user
+                AND connection_id=:connection AND binding_released_at IS NULL)
+              AND NOT EXISTS(SELECT 1 FROM profile_transfers WHERE user_id=:user
+                AND connection_id=:connection AND upload_lease_until>now())
+            """)
+        .param("user", userId)
+        .param("connection", connectionId)
+        .query(Boolean.class)
+        .single();
+  }
+
+  /** Removes one bounded metadata batch only after the entire object prefix was confirmed empty. */
+  public boolean deleteConnectionBatch(UUID userId, UUID connectionId) {
+    jdbc.sql(
+            """
+            UPDATE browser_profiles SET current_version_id=NULL
+            WHERE user_id=:user AND connection_id=:connection AND state='DELETING'
+            """)
+        .param("user", userId)
+        .param("connection", connectionId)
+        .update();
+    jdbc.sql(
+            """
+            UPDATE browser_profile_versions SET state='DELETED',wrapped_dek='',vault_key_ref='',
+              origins_manifest='{}'::jsonb,version=version+1 WHERE id IN (
+              SELECT v.id FROM browser_profile_versions v JOIN browser_profiles p ON p.id=v.profile_id
+              WHERE p.user_id=:user AND p.connection_id=:connection AND v.state<>'DELETED'
+              ORDER BY v.id LIMIT 100)
+            """)
+        .param("user", userId)
+        .param("connection", connectionId)
+        .update();
+    jdbc.sql(
+            """
+            UPDATE browser_profiles p SET state='DELETED',version=version+1,updated_at=now()
+            WHERE p.user_id=:user AND p.connection_id=:connection
+              AND p.state='DELETING' AND NOT EXISTS(
+                SELECT 1 FROM browser_profile_versions v WHERE v.profile_id=p.id AND v.state<>'DELETED')
+            """)
+        .param("user", userId)
+        .param("connection", connectionId)
+        .update();
+    return !jdbc.sql(
+            "SELECT EXISTS(SELECT 1 FROM browser_profiles WHERE user_id=:user AND"
+                + " connection_id=:connection AND state<>'DELETED')")
+        .param("user", userId)
+        .param("connection", connectionId)
+        .query(Boolean.class)
+        .single();
+  }
+
   public boolean saveInProgress(UUID connectionId) {
     return jdbc.sql(
             """

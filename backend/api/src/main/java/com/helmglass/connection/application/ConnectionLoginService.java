@@ -183,12 +183,24 @@ public class ConnectionLoginService {
   }
 
   @Transactional
+  public void connectionDeleted(UUID userId, UUID connectionId) {
+    identities.lockState(userId);
+    for (Login login : logins.pendingForConnection(userId, connectionId)) {
+      failLogin(login, "CONNECTION_DELETED");
+    }
+  }
+
+  @Transactional
   public Optional<ControlIntent> allocate(UUID id) {
     Login initial = logins.get(id);
     identities.lockActive(initial.userId());
     Login login = logins.owned(initial.userId(), id, true);
-    connections.owned(login.userId(), login.connectionId(), true);
+    var connection = connections.owned(login.userId(), login.connectionId(), true);
     if (!login.state().equals("WAITING_RESOURCE")) {
+      return Optional.empty();
+    }
+    if (List.of("DELETING", "DELETED").contains(connection.status())) {
+      failLogin(login, "CONNECTION_DELETED");
       return Optional.empty();
     }
     if (!identities.loginActive(login.userId(), login.loginId())

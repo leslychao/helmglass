@@ -2949,7 +2949,10 @@ export interface operations {
     };
     get__api_v1_connections: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Exclude connections being deleted from selectable connections. */
+                excludeStatus?: "DELETING";
+            };
             header?: never;
             path?: never;
             cookie?: never;

@@ -95,6 +95,30 @@ public class BrowserProfileService {
     transaction.setTimeout(5);
   }
 
+  /** Fences profile creators in the connection owner's deletion transaction. */
+  public void revokeConnection(UUID userId, UUID connectionId) {
+    profiles.revokeConnection(userId, connectionId);
+  }
+
+  /** Replays only idempotent deletion after runtime closure and admitted upload leases expire. */
+  public boolean deleteConnection(UUID userId, UUID connectionId) {
+    boolean ready =
+        transact(
+            () -> {
+              identities.lockState(userId);
+              return profiles.deletionReady(userId, connectionId);
+            });
+    if (!ready || !storage.purgeConnectionProfilesBatch(userId, connectionId)) {
+      return false;
+    }
+    return transact(
+        () -> {
+          identities.lockState(userId);
+          return profiles.deletionReady(userId, connectionId)
+              && profiles.deleteConnectionBatch(userId, connectionId);
+        });
+  }
+
   /** Called by the connection/control owner after user save intent, at a quiescent boundary. */
   public Grant prepareSave(UUID userId, UUID sessionId, UUID connectionId, boolean confirmed) {
     return transact(
@@ -335,6 +359,21 @@ public class BrowserProfileService {
         throw new DomainException(
             422, "PROFILE_FORMAT", "Only encrypted profile format v1 is accepted");
       }
+      // Reading a stalled request prefix can outlive deletion or the admitted upload lease.
+      // Recheck before any external PUT and leave time to reconcile an unconfirmed response.
+      Instant uploadDeadline =
+          transact(
+              () -> {
+                Transfer current = authorize(transferId, token, workerId, bootId, "SAVE");
+                if (current.uploadLeaseUntil() == null) {
+                  throw DomainException.conflict(
+                      "PROFILE_UPLOAD_PENDING", "Upload admission is missing");
+                }
+                Instant leaseDeadline = current.uploadLeaseUntil().minusSeconds(30);
+                return leaseDeadline.isBefore(current.expiresAt())
+                    ? leaseDeadline
+                    : current.expiresAt();
+              });
       try {
         storage.putImmutable(
             BUCKET,
@@ -342,7 +381,8 @@ public class BrowserProfileService {
             new SequenceInputStream(new ByteArrayInputStream(header), bytes),
             length,
             checksum,
-            "application/vnd.helm.profile-encrypted");
+            "application/vnd.helm.profile-encrypted",
+            uploadDeadline);
       } catch (SdkException error) {
         // PUT is conditional and immutable. Only a matching stored checksum can resolve a lost
         // response; absence is reported as unknown, never treated as successful publication.

@@ -144,6 +144,20 @@ public class TaskAggregate {
     updatedAt = Instant.now();
   }
 
+  public boolean connectionUnavailable() {
+    if (state == TaskState.DRAFT || state.terminal() || state == TaskState.STOPPING) {
+      return false;
+    }
+    TaskState next = mutationBarrier ? TaskState.INTERRUPTED : TaskState.WAITING_USER;
+    if (state == next && "CONNECTION_REQUIRED".equals(waitReason)) {
+      return false;
+    }
+    state = next;
+    waitReason = "CONNECTION_REQUIRED";
+    updatedAt = Instant.now();
+    return true;
+  }
+
   public void complete(String finalOutcome) {
     requireState(TaskState.WAITING_AGENT);
     if (mutationBarrier) {

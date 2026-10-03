@@ -542,6 +542,18 @@
     "/api/v1/connections": {
       "get": {
         "operationId": "get__api_v1_connections",
+        "parameters": [
+          {
+            "name": "excludeStatus",
+            "in": "query",
+            "required": false,
+            "description": "Exclude connections being deleted from selectable connections.",
+            "schema": {
+              "type": "string",
+              "enum": ["DELETING"]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success",

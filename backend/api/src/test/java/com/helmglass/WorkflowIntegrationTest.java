@@ -54,12 +54,15 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.event.EventListener;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -138,6 +141,7 @@ class WorkflowIntegrationTest {
   private final JsonSupport json;
   private final Messages messages;
   private final TransactionTemplate transaction;
+  private final JdbcClient jdbc;
 
   @Autowired
   WorkflowIntegrationTest(
@@ -156,7 +160,8 @@ class WorkflowIntegrationTest {
       PlatformTransactionManager transactions,
       ActionRequestService actions,
       WorkerRegistryService registry,
-      BrowserStartupService startup) {
+      BrowserStartupService startup,
+      JdbcClient jdbc) {
     this.tasks = tasks;
     this.continuations = continuations;
     this.commands = commands;
@@ -171,8 +176,176 @@ class WorkflowIntegrationTest {
     this.controls = controls;
     this.identities = identities;
     this.json = json;
+    this.jdbc = jdbc;
     this.messages = messages;
     transaction = new TransactionTemplate(transactions);
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"})
+  void lateCommandReceiptsRespectConnectionDeletionAndStartPermission(String disposition) {
+    var actor = actor();
+    UUID taskId =
+        tasks
+            .create(
+                actor,
+                new TaskContracts.Create(
+                    "Preserve late effects",
+                    "https://example.com",
+                    List.of(),
+                    "TEXT",
+                    false,
+                    1800,
+                    "PREPARE"),
+                context(),
+                null)
+            .resource()
+            .id();
+    UUID worker = UUID.randomUUID();
+    UUID boot = UUID.randomUUID();
+    UUID commandId = UUID.randomUUID();
+    UUID attemptId = UUID.randomUUID();
+    var session =
+        Objects.requireNonNull(
+            transaction.execute(
+                status -> {
+                  jdbc.sql(
+                          "INSERT INTO browser_workers(id,boot_id,capacity,image_version)"
+                              + " VALUES(:id,:boot,1,'test')")
+                      .param("id", worker)
+                      .param("boot", boot)
+                      .update();
+                  var allocated =
+                      browsers.reserve(
+                          actor.userId(),
+                          taskId,
+                          new BrowserRepository.Worker(worker, boot, 1),
+                          1800);
+                  jdbc.sql("UPDATE browser_sessions SET state='ACTIVE' WHERE id=:id")
+                      .param("id", allocated.id())
+                      .update();
+                  jdbc.sql(
+                          """
+                          INSERT INTO task_commands(id,task_id,user_id,command_sequence,kind,payload,payload_hash,
+                            accepted_task_version,instruction_revision,deadline,state,started_at)
+                          VALUES(:id,:task,:user,1,'NAVIGATE','{}',repeat('a',64),0,1,
+                            now()+interval '5 minutes','STARTED',now())
+                          """)
+                      .param("id", commandId)
+                      .param("task", taskId)
+                      .param("user", actor.userId())
+                      .update();
+                  jdbc.sql(
+                          """
+                          INSERT INTO command_attempts(id,command_id,session_id,worker_id,attempt_no,
+                            assignment_epoch,control_epoch,state,started_at,start_permit_id)
+                          VALUES(:id,:command,:session,:worker,1,1,1,'STARTED',now(),:permit)
+                          """)
+                      .param("id", attemptId)
+                      .param("command", commandId)
+                      .param("session", allocated.id())
+                      .param("worker", worker)
+                      .param("permit", UUID.randomUUID())
+                      .update();
+                  jdbc.sql("UPDATE tasks SET state='RUNNING' WHERE id=:id")
+                      .param("id", taskId)
+                      .update();
+                  return allocated;
+                }));
+
+    boolean cancelledBeforeStart = disposition.equals("CANCELLED");
+    if (cancelledBeforeStart) {
+      jdbc.sql("UPDATE task_commands SET state='DISPATCHED',started_at=NULL WHERE id=:id")
+          .param("id", commandId)
+          .update();
+      jdbc.sql(
+              """
+              UPDATE command_attempts SET state='DISPATCHED',started_at=NULL,start_permit_id=NULL
+              WHERE id=:id
+              """)
+          .param("id", attemptId)
+          .update();
+    }
+    tasks.connectionUnavailable(actor.userId(), taskId);
+    assertThat(commands.get(actor, commandId))
+        .containsEntry("state", cancelledBeforeStart ? "CANCELLED" : "STARTED");
+    assertThat(tasks.get(actor, taskId).state()).isEqualTo("WAITING_USER");
+    String effect =
+        switch (disposition) {
+          case "UNKNOWN" -> "UNKNOWN";
+          case "CANCELLED" -> "NOT_STARTED";
+          default -> "CONFIRMED";
+        };
+    ObjectNode result =
+        (ObjectNode)
+            json.read(
+                json.write(
+                    Map.of(
+                        "schemaVersion",
+                        1,
+                        "commandId",
+                        commandId,
+                        "attemptId",
+                        attemptId,
+                        "browserSessionId",
+                        session.id(),
+                        "status",
+                        cancelledBeforeStart ? "FAILED" : disposition,
+                        "effectState",
+                        effect,
+                        "allocationEpoch",
+                        1,
+                        "controlEpoch",
+                        1,
+                        "pageEpoch",
+                        1,
+                        "privacyEpoch",
+                        1)));
+    result.put("digest", json.workerDigest(result));
+
+    if (cancelledBeforeStart) {
+      ObjectNode unexpected = result.deepCopy();
+      unexpected.remove("digest");
+      unexpected.put("status", "SUCCEEDED").put("effectState", "CONFIRMED");
+      unexpected.put("digest", json.workerDigest(unexpected));
+      assertThatThrownBy(() -> commands.acceptResult(worker, boot, unexpected))
+          .isInstanceOf(DomainException.class)
+          .extracting("code")
+          .isEqualTo("START_PERMIT_DENIED");
+      assertThat(commands.get(actor, commandId)).containsEntry("state", "CANCELLED");
+      assertThat(
+              jdbc.sql("SELECT result_digest FROM command_attempts WHERE id=:id")
+                  .param("id", attemptId)
+                  .query(String.class)
+                  .optional())
+          .isEmpty();
+    }
+
+    commands.acceptResult(worker, boot, result);
+    var current = tasks.get(actor, taskId);
+    assertThat(current.state())
+        .isEqualTo(disposition.equals("UNKNOWN") ? "INTERRUPTED" : "WAITING_USER");
+    assertThat(current.waitReason()).isEqualTo("CONNECTION_REQUIRED");
+    assertThat(current.mutationBarrier()).isEqualTo(disposition.equals("UNKNOWN"));
+    assertThat(commands.get(actor, commandId)).containsEntry("state", disposition);
+    if (cancelledBeforeStart) {
+      assertThat(commands.get(actor, commandId))
+          .containsEntry("failureCode", "CONNECTION_REQUIRED");
+    }
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM task_commands WHERE task_id=:id")
+                .param("id", taskId)
+                .query(Long.class)
+                .single())
+        .isEqualTo(1);
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM task_continuations WHERE task_id=:id AND state='READY'")
+                .param("id", taskId)
+                .query(Long.class)
+                .single())
+        .isZero();
+    commands.acceptResult(worker, boot, result);
+    assertThat(tasks.get(actor, taskId).version()).isEqualTo(current.version());
   }
 
   @Test

@@ -74,7 +74,7 @@ export class TaskEditor {
   );
   readonly connectionTiles = computed(() => this.connections.data()?.items.slice(0, 5) ?? []);
   connectionPage(page: number) {
-    this.connections.load('/connections', { page, pageSize: 10 });
+    this.connections.load('/connections', { page, pageSize: 10, excludeStatus: 'DELETING' });
   }
   constructor() {
     this.connectionPage(1);

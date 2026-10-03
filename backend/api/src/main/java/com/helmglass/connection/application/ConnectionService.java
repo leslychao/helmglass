@@ -5,9 +5,12 @@ import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.api.PageQuery;
 import com.helmglass.api.PageResult;
+import com.helmglass.browser.infrastructure.repository.BrowserCloseOutboxRepository;
+import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.connection.api.ConnectionContracts;
 import com.helmglass.connection.api.ConnectionContracts.Resolve;
 import com.helmglass.connection.infrastructure.repository.ConnectionRepository;
+import com.helmglass.connection.infrastructure.repository.ConnectionRepository.Deletion;
 import com.helmglass.connection.infrastructure.repository.ConnectionResolutionRepository;
 import com.helmglass.connection.infrastructure.repository.ConnectionResolutionRepository.Candidate;
 import com.helmglass.identity.application.UserPolicyService;
@@ -15,9 +18,12 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
+import com.helmglass.profile.application.BrowserProfileService;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
+import com.helmglass.task.application.TaskLifecycleService;
 import com.helmglass.task.infrastructure.repository.TaskQueries;
 import java.net.URI;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -25,11 +31,16 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
+@Slf4j
 public class ConnectionService {
   private final ConnectionRepository connections;
   private final IdentityRepository identities;
@@ -39,6 +50,12 @@ public class ConnectionService {
   private final UserPolicyService policies;
   private final ConnectionResolutionRepository resolution;
   private final JsonSupport json;
+  private final BrowserProfileService profiles;
+  private final ConnectionLoginService logins;
+  private final ControlRepository controls;
+  private final BrowserCloseOutboxRepository closeOutbox;
+  private final TaskLifecycleService tasks;
+  private final TransactionTemplate transaction;
 
   public ConnectionService(
       ConnectionRepository connections,
@@ -48,7 +65,13 @@ public class ConnectionService {
       ChangeRepository changes,
       UserPolicyService policies,
       ConnectionResolutionRepository resolution,
-      JsonSupport json) {
+      JsonSupport json,
+      BrowserProfileService profiles,
+      ConnectionLoginService logins,
+      ControlRepository controls,
+      BrowserCloseOutboxRepository closeOutbox,
+      TaskLifecycleService tasks,
+      PlatformTransactionManager transactions) {
     this.connections = connections;
     this.identities = identities;
     this.operations = operations;
@@ -57,6 +80,13 @@ public class ConnectionService {
     this.policies = policies;
     this.resolution = resolution;
     this.json = json;
+    this.profiles = profiles;
+    this.logins = logins;
+    this.controls = controls;
+    this.closeOutbox = closeOutbox;
+    this.tasks = tasks;
+    transaction = new TransactionTemplate(transactions);
+    transaction.setTimeout(10);
   }
 
   @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
@@ -128,17 +158,142 @@ public class ConnectionService {
     if (replay.isPresent()) {
       return replay.get();
     }
+    if (connection.status().equals("DELETING")) {
+      UUID operationId = connections.deletionOperation(id).orElseThrow();
+      if (connections.resumeDeletion(operationId)) {
+        closeOutbox.resumeConnection(actor.userId(), id);
+      }
+      return operations.bindExisting(
+          actor,
+          "connections.delete:" + id,
+          context,
+          input,
+          operationId,
+          "connection",
+          id,
+          connection.version());
+    }
+    if (connection.status().equals("DELETED")) {
+      return operations.save(
+          actor,
+          "connections.delete:" + id,
+          context,
+          input,
+          "connection",
+          id,
+          connection.version(),
+          true);
+    }
     connections.deleting(id);
     changes.changed(actor.userId(), "connections", id, connection.version() + 1);
-    return operations.save(
-        actor,
-        "connections.delete:" + id,
-        context,
-        input,
-        "connection",
-        id,
-        connection.version() + 1,
-        false);
+    var receipt =
+        operations.save(
+            actor,
+            "connections.delete:" + id,
+            context,
+            input,
+            "connection",
+            id,
+            connection.version() + 1,
+            false);
+    prepareDeletion(actor.userId(), id, receipt.operationId());
+    return receipt;
+  }
+
+  @Scheduled(fixedDelay = 1000)
+  public void advanceDeletions() {
+    for (Deletion deletion : connections.dueDeletions()) {
+      try {
+        processDeletion(deletion);
+      } catch (RuntimeException error) {
+        transaction.executeWithoutResult(
+            status -> connections.deferDeletion(deletion, "CONNECTION_DELETE_UNCONFIRMED", true));
+        log.warn(
+            "Connection deletion preparation failed; operationId={}, errorType={}",
+            deletion.operationId(),
+            error.getClass().getSimpleName());
+      }
+    }
+  }
+
+  public void processDeletion(Deletion candidate) {
+    Deletion work =
+        transaction.execute(
+            status -> {
+              identities.lockState(candidate.userId());
+              var current = connections.owned(candidate.userId(), candidate.connectionId(), true);
+              if (!current.status().equals("DELETING")) {
+                return null;
+              }
+              var claimed = connections.claimDeletion(candidate.operationId());
+              if (claimed.isEmpty()) {
+                return null;
+              }
+              Deletion deletion = claimed.get();
+              if (deletion.progress() < 25) {
+                prepareDeletion(deletion.userId(), deletion.connectionId(), deletion.operationId());
+              }
+              closeConnectionBrowsers(deletion.connectionId());
+              for (UUID taskId : connections.deletionTasks(deletion.operationId())) {
+                tasks.connectionUnavailable(deletion.userId(), taskId);
+                connections.taskDetached(deletion.operationId(), taskId);
+              }
+              if (!connections.deletionTasks(deletion.operationId()).isEmpty()
+                  || !connections.deletionRuntimeClosed(deletion.connectionId())) {
+                connections.deferDeletion(deletion, "CONNECTION_CLOSE_PENDING", false);
+                return null;
+              }
+              if (!deletion.deadline().isAfter(Instant.now())) {
+                connections.deferDeletion(deletion, "CONNECTION_DELETE_DEADLINE", false);
+                return null;
+              }
+              connections.deletionChanged(deletion);
+              return deletion;
+            });
+    if (work == null) {
+      return;
+    }
+    try {
+      boolean deleted = profiles.deleteConnection(work.userId(), work.connectionId());
+      transaction.executeWithoutResult(
+          status -> {
+            identities.lockState(work.userId());
+            var current = connections.owned(work.userId(), work.connectionId(), true);
+            if (!current.status().equals("DELETING")) {
+              return;
+            }
+            if (!deleted) {
+              connections.deferDeletion(work, "PROFILE_DELETE_PENDING", false);
+              return;
+            }
+            connections.deleted(work.connectionId());
+            operations.completeForTarget(
+                work.connectionId(), "connections.delete:" + work.connectionId());
+            changes.changed(
+                work.userId(), "connections", work.connectionId(), current.version() + 1);
+          });
+    } catch (RuntimeException error) {
+      transaction.executeWithoutResult(
+          status -> connections.deferDeletion(work, "PROFILE_DELETE_UNCONFIRMED", true));
+      log.warn(
+          "Connection deletion remains unconfirmed; operationId={}, errorType={}",
+          work.operationId(),
+          error.getClass().getSimpleName());
+    }
+  }
+
+  private void prepareDeletion(UUID userId, UUID connectionId, UUID operationId) {
+    connections.prepareDeletion(connectionId, operationId);
+    profiles.revokeConnection(userId, connectionId);
+    logins.connectionDeleted(userId, connectionId);
+    closeConnectionBrowsers(connectionId);
+  }
+
+  private void closeConnectionBrowsers(UUID connectionId) {
+    for (UUID sessionId : connections.activeSessions(connectionId)) {
+      connections.discardChanges(sessionId);
+      controls.closeRequested(sessionId);
+    }
   }
 
   @Transactional

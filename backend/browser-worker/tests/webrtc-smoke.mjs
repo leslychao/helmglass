@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHmac, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { lookup } from 'node:dns/promises';
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
 import { WebSocketServer } from 'ws';
@@ -10,6 +12,32 @@ import { BrowserSession } from '../dist/src/session.js';
 import { MediaSession } from '../dist/src/media-session.js';
 
 const credentials = JSON.parse(await readFile('/fixture/credentials.json', 'utf8'));
+assert.equal((await lookup('coturn')).address, credentials.turnAddress,
+  'Isolated worker must resolve only the configured TURN address before libnice CONNECT');
+await new Promise((resolve, reject) => {
+  const socket = connect(3478, 'coturn');
+  socket.setTimeout(1000);
+  socket.once('connect', () => { socket.destroy(); reject(new Error('Worker bypassed the relay network boundary')); });
+  socket.once('error', () => resolve());
+  socket.once('timeout', () => { socket.destroy(); resolve(); });
+});
+async function proxyConnect(authority, password) {
+  return new Promise((resolve, reject) => {
+    const socket = connect(3128, 'egress-proxy');
+    socket.setTimeout(3000);
+    socket.once('connect', () => socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${password ? `Proxy-Authorization: Basic ${Buffer.from('helm-media:' + password).toString('base64')}\r\n` : ''}\r\n`));
+    socket.once('data', data => { socket.destroy(); resolve(Number(data.toString().split(' ')[1])); });
+    socket.once('error', reject);
+    socket.once('timeout', () => socket.destroy(new Error('Proxy admission timeout')));
+  });
+}
+for (const password of [undefined, 'wrong']) {
+  assert.ok([403, 407].includes(await proxyConnect(credentials.turnAddress + ':3478', password)));
+}
+assert.equal(await proxyConnect('10.0.0.1:3478', credentials.proxy), 403);
+assert.equal(await proxyConnect('169.254.169.254:443', credentials.proxy), 403);
+assert.equal(await proxyConnect(credentials.turnAddress + ':3478', credentials.proxy), 200);
+console.log('Isolated worker DNS, direct relay denial and exact authenticated Squid route verified');
 const children = [spawn('Xvfb', [':99', '-screen', '0', '1280x720x24', '-nolisten', 'tcp', '-noreset'], { stdio: 'ignore' }),
   spawn('gst-webrtc-signalling-server', ['--host', '127.0.0.1', '--port', '8443'], { stdio: 'ignore' })];
 await delay(500); children.push(spawn('openbox', ['--sm-disable'], { stdio: 'ignore' })); await delay(500);
@@ -22,6 +50,7 @@ const media = new MediaSession(() => runtime, (_id, value) => {
 const username = `${Math.floor(Date.now() / 1000) + 120}:test`;
 const credential = createHmac('sha1', credentials.turn).update(username).digest('base64');
 const ice = { urls: ['turn:coturn:3478?transport=tcp'], username, credential };
+const viewerIce = { ...ice, urls: ['turn:viewer-gateway:3478?transport=tcp'] };
 const server = createServer(async (request, response) => {
   if (/^\/sdk\/[a-z-]+\.js$/.test(request.url ?? '')) { response.setHeader('content-type', 'text/javascript'); response.end(await readFile(request.url)); return; }
   response.setHeader('content-type', 'text/html');
@@ -31,7 +60,7 @@ const server = createServer(async (request, response) => {
     const video=document.querySelector('video');
     const decoded=()=>{window.framesDecoded++;window.lastFrameAt=performance.now();video.requestVideoFrameCallback(decoded)};
     video.requestVideoFrameCallback(decoded);
-    const api=new GstWebRTCAPI({signalingServerUrl:'ws://127.0.0.1:8099',reconnectionTimeout:0,webrtcConfig:{iceServers:[${JSON.stringify(ice)}],iceTransportPolicy:'relay'},
+    const api=new GstWebRTCAPI({signalingServerUrl:'ws://127.0.0.1:8099',reconnectionTimeout:0,webrtcConfig:{iceServers:[${JSON.stringify(viewerIce)}],iceTransportPolicy:'relay'},
       transportFactory:url=>{const ws=new WebSocket(url);const bridge={send:data=>ws.send(data),close:()=>ws.close(),onmessage:null,onclose:null,onerror:null};
         ws.onmessage=event=>{const value=JSON.parse(event.data);if(value.type==='streamState'){window.captureState=value.captureState;return}bridge.onmessage?.(event)};
         ws.onclose=()=>bridge.onclose?.();ws.onerror=()=>bridge.onerror?.(new ErrorEvent('error',{message:'socket'}));return bridge;}});

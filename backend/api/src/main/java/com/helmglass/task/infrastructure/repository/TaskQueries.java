@@ -515,14 +515,26 @@ public class TaskQueries {
         > 0;
   }
 
-  public void cancelUnstarted(UUID taskId, String code) {
-    jdbc.sql(
+  public List<UUID> cancelUnstarted(UUID taskId, String code) {
+    return jdbc.sql(
             """
             UPDATE task_commands SET state='CANCELLED',failure_code=:code,finished_at=now(),version=version+1
             WHERE task_id=:task AND state IN ('ACCEPTED','WAITING_RESOURCE','DISPATCHED')
+            RETURNING id
             """)
         .param("task", taskId)
         .param("code", code)
+        .query(UUID.class)
+        .list();
+  }
+
+  public void cancelActionRequests(UUID taskId) {
+    jdbc.sql(
+            """
+            UPDATE user_action_requests SET status='CANCELLED',resolved_at=now(),version=version+1
+            WHERE task_id=:task AND status='OPEN'
+            """)
+        .param("task", taskId)
         .update();
   }
 

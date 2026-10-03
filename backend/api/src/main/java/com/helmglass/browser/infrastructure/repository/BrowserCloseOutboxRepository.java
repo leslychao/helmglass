@@ -15,11 +15,13 @@ public class BrowserCloseOutboxRepository {
       s.binding_released_at IS NULL
       AND (NOT EXISTS(SELECT 1 FROM browser_session_operations p WHERE p.session_id=s.id
         AND p.state IN ('QUIESCING','SAVING','RESUMING') AND p.deadline>now())
-        OR EXISTS(SELECT 1 FROM application_users u WHERE u.id=s.user_id AND u.state<>'ACTIVE'))
+        OR EXISTS(SELECT 1 FROM application_users u WHERE u.id=s.user_id AND u.state<>'ACTIVE')
+        OR EXISTS(SELECT 1 FROM connections c WHERE c.id=s.connection_id AND c.status='DELETING'))
       AND (s.state NOT IN ('ACTIVE','STOPPING')
         OR EXISTS(SELECT 1 FROM browser_session_operations p WHERE p.session_id=s.id
           AND (p.state IN ('CLOSING','FAILED','UNKNOWN','SUCCEEDED') OR p.deadline<=now()))
         OR EXISTS(SELECT 1 FROM application_users u WHERE u.id=s.user_id AND u.state<>'ACTIVE')
+        OR EXISTS(SELECT 1 FROM connections c WHERE c.id=s.connection_id AND c.status='DELETING')
         OR s.runtime_generation IS NULL)
       AND (t.state IN ('STOPPING','COMPLETED','FAILED','CANCELLED') OR s.state IN ('STOPPING','LOST')
         OR s.budget_deadline_at<=now() OR s.idle_deadline_at<=now()
@@ -65,6 +67,22 @@ public class BrowserCloseOutboxRepository {
             """
                 + INSERT_INTENT)
         .param("id", sessionId)
+        .update();
+  }
+
+  /** Explicitly retries an exhausted close without changing its durable ID or physical binding. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void resumeConnection(UUID userId, UUID connectionId) {
+    jdbc.sql(
+            """
+            UPDATE transactional_outbox o SET delivery_attempts=0,retry_at=now(),last_failure_code=NULL
+            FROM browser_sessions s JOIN browser_workers w ON w.id=s.worker_id
+            WHERE o.aggregate_id=s.id AND s.user_id=:user AND s.connection_id=:connection
+              AND s.binding_released_at IS NULL AND o.delivery_attempts>=8 AND
+            """
+                + CURRENT_BINDING)
+        .param("user", userId)
+        .param("connection", connectionId)
         .update();
   }
 
