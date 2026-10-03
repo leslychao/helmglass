@@ -24,7 +24,7 @@ const binding = { browserSessionId: uuid.optional(), controlEpoch: version.optio
 const page = { page: z.number().int().min(1).default(1), pageSize: z.number().int().min(1).max(100).default(20), search: z.string().max(200).optional() };
 
 export const toolSchemas = {
-  'tasks.create': z.strictObject({ idempotencyKey: idempotency, title: z.string().min(1).max(200).optional(), goal: z.string().min(1).max(16_384),
+  'tasks.create': z.strictObject({ idempotencyKey: idempotency, goal: z.string().min(1).max(16_384),
     startUrl: z.url(), connectionIds: z.array(uuid).max(20).default([]), outputFormat: z.enum(['TEXT', 'TABLE', 'FILE']),
     browserTimeLimitSeconds: z.number().int().min(60).max(7200), confirmImportantActions: z.boolean(), intent: z.enum(['DRAFT', 'PREPARE']).default('PREPARE') }),
   'tasks.get': z.strictObject(task),

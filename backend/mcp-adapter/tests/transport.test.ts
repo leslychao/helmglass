@@ -105,6 +105,40 @@ test('typed transport cannot expose arbitrary JS or accept missing mutation idem
   assert.equal(toolSchemas['continuations.record_delivery'].safeParse({ dispatchId: randomUUID(), idempotencyKey: randomUUID(), outcome: 'UNKNOWN' }).success, true);
 });
 
+test('task creation exposes supported instructions and rejects an unsupported title before mutation', async () => {
+  const args = { idempotencyKey: randomUUID(), goal: 'Read the public page',
+    startUrl: 'https://example.com/', connectionIds: [], outputFormat: 'TEXT',
+    browserTimeLimitSeconds: 600, confirmImportantActions: true, intent: 'DRAFT' };
+  let calls = 0;
+  const handler = createAdapter({ call: async (name, input) => {
+    calls++;
+    assert.equal(name, 'tasks.create');
+    assert.deepEqual(input, args);
+    return { content: [{ type: 'text', text: 'created' }] };
+  } }, widgetHtml, publicOrigin);
+  const app = authenticatedAdapter(handler, async token => ({ token, clientId: 'fixture-client',
+    scopes: ['tasks:write'] }), publicOrigin, `${publicOrigin}/idp`);
+  try {
+    const discovery = await app.fetch(request({ jsonrpc: '2.0', id: 70, method: 'tools/list' }));
+    const catalog = z.object({ result: z.object({ tools: z.array(z.object({
+      name: z.string(), inputSchema: z.object({ properties: z.record(z.string(), z.unknown()) }),
+    })) }) }).parse(await resultEnvelope(discovery));
+    const create = catalog.result.tools.find(tool => tool.name === 'tasks.create');
+    assert.ok(create);
+    assert.ok('goal' in create.inputSchema.properties);
+    assert.ok(!('title' in create.inputSchema.properties));
+
+    const rejected = await app.fetch(request({ jsonrpc: '2.0', id: 71, method: 'tools/call',
+      params: { name: 'tasks.create', arguments: { ...args, title: 'Silently ignored title' } } }));
+    assert.ok(!JSON.stringify(await resultEnvelope(rejected)).includes('created'));
+    assert.equal(calls, 0);
+    const accepted = await app.fetch(request({ jsonrpc: '2.0', id: 72, method: 'tools/call',
+      params: { name: 'tasks.create', arguments: args } }));
+    assert.match(await accepted.text(), /created/);
+    assert.equal(calls, 1);
+  } finally { await handler.close(); }
+});
+
 test('tool discovery separates model execution from widget callbacks and keeps reads non-rendering', async () => {
   const handler = createAdapter({ call: async () => ({ content: [] }) }, widgetHtml, publicOrigin);
   const app = authenticatedAdapter(handler, async (token) => ({ token, clientId: 'fixture-client', scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
