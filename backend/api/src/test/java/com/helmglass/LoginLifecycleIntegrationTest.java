@@ -110,12 +110,35 @@ class LoginLifecycleIntegrationTest {
     assertThat(loginRepository.get(id).state()).isEqualTo("FAILED");
     assertThat(browsers.owned(actor.userId(), session.id()).state()).isEqualTo("STOPPING");
     assertThat(allocationState(session.id())).isEqualTo("RESERVED");
+    UUID closeIntent =
+        jdbc.sql(
+                "SELECT id FROM transactional_outbox WHERE aggregate_id=:id"
+                    + " AND event_type='worker.close' AND published_at IS NULL")
+            .param("id", session.id())
+            .query(UUID.class)
+            .single();
     assertThatThrownBy(() -> begin(actor, connectionId, null))
         .isInstanceOf(DomainException.class)
         .hasMessageContaining("already used");
     long sessionVersion = browsers.owned(actor.userId(), session.id()).version();
     logins.reconcileLogins();
     assertThat(browsers.owned(actor.userId(), session.id()).version()).isEqualTo(sessionVersion);
+    assertThat(
+            jdbc.sql(
+                    "SELECT id FROM transactional_outbox WHERE aggregate_id=:id"
+                        + " AND event_type='worker.close' AND published_at IS NULL")
+                .param("id", session.id())
+                .query(UUID.class)
+                .single())
+        .isEqualTo(closeIntent);
+    confirmClosed(session.id());
+    assertThat(allocationState(session.id())).isEqualTo("RELEASED");
+    assertThat(
+            jdbc.sql("SELECT published_at IS NOT NULL FROM transactional_outbox WHERE id=:id")
+                .param("id", closeIntent)
+                .query(Boolean.class)
+                .single())
+        .isTrue();
   }
 
   @Test
