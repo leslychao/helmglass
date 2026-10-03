@@ -139,7 +139,7 @@ test('task creation exposes supported instructions and rejects an unsupported ti
   } finally { await handler.close(); }
 });
 
-test('tool discovery separates model execution from widget callbacks and keeps reads non-rendering', async () => {
+test('tool discovery renders only explicit presentation and keeps execution claims and reads non-rendering', async () => {
   const handler = createAdapter({ call: async () => ({ content: [] }) }, widgetHtml, publicOrigin);
   const app = authenticatedAdapter(handler, async (token) => ({ token, clientId: 'fixture-client', scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
   try {
@@ -151,9 +151,11 @@ test('tool discovery separates model execution from widget callbacks and keeps r
     const tools = new Map(body.result.tools.map(tool => [tool.name, tool._meta]));
     for (const name of ['tasks.view', 'tasks.continue', 'browser.execute', 'browser.observe', 'media.capture']) {
       assert.deepEqual(tools.get(name)?.ui, {
-        ...(name === 'tasks.view' || name === 'tasks.continue' ? { resourceUri: widgetResourceUri } : {}),
+        ...(name === 'tasks.view' ? { resourceUri: widgetResourceUri } : {}),
         visibility: ['model'],
       }, name);
+      assert.equal(tools.get(name)?.['openai/outputTemplate'],
+        name === 'tasks.view' ? widgetResourceUri : undefined, name);
     }
     for (const name of ['browser.attach_view', 'continuations.prepare_message', 'continuations.record_delivery']) {
       assert.deepEqual(tools.get(name)?.ui, { visibility: ['app'] }, name);
