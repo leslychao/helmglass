@@ -19,10 +19,13 @@ public class RealtimeConfiguration implements WebSocketConfigurer {
   private final RealtimeDeliveryService realtime;
   private final ActorHandshakeInterceptor actor;
   private final String origin;
+  private final String widgetOrigin;
+  private final WidgetEventGateway widgetEvents;
 
   public RealtimeConfiguration(WorkerGateway workers, WorkerSignalingGateway workerSignaling,
       ViewerSignalingGateway viewers, HumanInputGateway input, RealtimeDeliveryService realtime, ActorHandshakeInterceptor actor,
-      @Value("${helm.public-origin}") String origin) {
+      @Value("${helm.public-origin}") String origin,
+      @Value("${helm.widget-origin:}") String widgetOrigin, WidgetEventGateway widgetEvents) {
     this.workers = workers;
     this.workerSignaling = workerSignaling;
     this.viewers = viewers;
@@ -30,6 +33,8 @@ public class RealtimeConfiguration implements WebSocketConfigurer {
     this.realtime = realtime;
     this.actor = actor;
     this.origin = origin;
+    this.widgetOrigin = widgetOrigin;
+    this.widgetEvents = widgetEvents;
   }
 
   @Override
@@ -40,5 +45,8 @@ public class RealtimeConfiguration implements WebSocketConfigurer {
     registry.addHandler(input, "/stream/v1/input/*").setAllowedOrigins(origin);
     registry.addHandler(viewers, "/stream/v1/signaling/*")
         .addInterceptors(actor).setAllowedOrigins(origin);
+    if (!widgetOrigin.isBlank()) {
+      registry.addHandler(widgetEvents, "/events/v1/widget/tasks/*").setAllowedOrigins(widgetOrigin);
+    }
   }
 }

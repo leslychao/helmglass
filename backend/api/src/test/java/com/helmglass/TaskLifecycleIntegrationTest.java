@@ -7,6 +7,8 @@ import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.api.PageQuery;
+import com.helmglass.browser.application.BrowserControlService;
+import com.helmglass.connection.infrastructure.repository.ConnectionRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserCloseOutboxRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
@@ -19,6 +21,9 @@ import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.identity.infrastructure.repository.PolicyRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
+import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
+import com.helmglass.realtime.infrastructure.repository.OutboxRepository;
+import com.helmglass.realtime.application.RealtimeDeliveryService;
 import com.helmglass.task.api.TaskContracts;
 import com.helmglass.task.application.ReconciliationService;
 import com.helmglass.task.application.TaskLifecycleService;
@@ -75,6 +80,11 @@ class TaskLifecycleIntegrationTest {
     ChangeRepository.class,
     JsonSupport.class,
     TaskContinuationService.class,
+    RealtimeDeliveryService.class,
+    ChatPresentationRepository.class,
+    OutboxRepository.class,
+    BrowserControlService.class,
+    ConnectionRepository.class,
     ContinuationRepository.class,
     CommandRepository.class,
     BrowserRepository.class,

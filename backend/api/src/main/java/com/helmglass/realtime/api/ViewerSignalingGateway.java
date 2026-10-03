@@ -9,10 +9,10 @@ import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.realtime.application.ChannelTicketService;
 import com.helmglass.realtime.application.IceServerService;
+import com.helmglass.realtime.domain.ViewerFence;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,11 +27,19 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 @Component
 public class ViewerSignalingGateway extends TextWebSocketHandler {
-  private record Viewer(UUID viewerId, UUID workerId, ChannelTicketService.TicketBinding binding,
-      WebSocketSession socket, Instant authorizationExpiresAt) {}
+  private record Viewer(
+      UUID viewerId,
+      UUID workerId,
+      UUID workerBootId,
+      long allocationEpoch,
+      ChannelTicketService.TicketBinding binding,
+      WebSocketSession socket,
+      Instant authorizationExpiresAt) {}
+
   private final Map<String, Instant> pending = new ConcurrentHashMap<>();
   private final Map<String, WebSocketSession> sockets = new ConcurrentHashMap<>();
   private final Map<UUID, Viewer> viewers = new ConcurrentHashMap<>();
+  private final Map<UUID, ViewerFence> pendingWebFences = new ConcurrentHashMap<>();
   private final ChannelTicketService tickets;
   private final IdentityRepository identities;
   private final BrowserRepository browsers;
@@ -40,9 +48,14 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
   private final JsonSupport json;
   private final IceServerService ice;
 
-  public ViewerSignalingGateway(ChannelTicketService tickets, IdentityRepository identities,
-      BrowserRepository browsers, ControlRepository controls, WorkerSignalingGateway workers,
-      JsonSupport json, IceServerService ice) {
+  public ViewerSignalingGateway(
+      ChannelTicketService tickets,
+      IdentityRepository identities,
+      BrowserRepository browsers,
+      ControlRepository controls,
+      WorkerSignalingGateway workers,
+      JsonSupport json,
+      IceServerService ice) {
     this.tickets = tickets;
     this.identities = identities;
     this.browsers = browsers;
@@ -64,7 +77,8 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
   }
 
   @Override
-  protected void handleTextMessage(WebSocketSession socket, TextMessage message) throws IOException {
+  protected void handleTextMessage(WebSocketSession socket, TextMessage message)
+      throws IOException {
     var payload = json.read(message.getPayload());
     if (pending.containsKey(socket.getId())) {
       if (!payload.path("type").asString().equals("authenticate") || socket.getUri() == null) {
@@ -78,12 +92,23 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
         var session = browsers.owned(binding.userId(), sessionId);
         UUID viewerId = binding.viewerInstanceId();
         synchronized (viewers) {
-          long count = viewers.values().stream().filter(viewer -> viewer.binding().sessionId().equals(sessionId)).count();
+          long count =
+              viewers.values().stream()
+                  .filter(viewer -> viewer.binding().sessionId().equals(sessionId))
+                  .count();
           if (count >= 2 || viewers.containsKey(viewerId)) {
-            throw DomainException.conflict("VIEWER_LIMIT", "Browser already has the maximum viewers");
+            throw DomainException.conflict(
+                "VIEWER_LIMIT", "Browser already has the maximum viewers");
           }
-          var viewer = new Viewer(viewerId, session.workerId(), binding, sockets.get(socket.getId()),
-              binding.viewerAuthorizationExpiresAt());
+          var viewer =
+              new Viewer(
+                  viewerId,
+                  session.workerId(),
+                  session.workerBootId(),
+                  session.allocationEpoch(),
+                  binding,
+                  sockets.get(socket.getId()),
+                  binding.viewerAuthorizationExpiresAt());
           if (!authorized(viewer)) {
             throw new DomainException(403, "VIEW_REVOKED", "Browser view authorization changed");
           }
@@ -99,30 +124,47 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
       }
       return;
     }
-    var viewer = viewers.values().stream().filter(value -> value.socket().getId().equals(socket.getId()))
-        .findFirst().orElse(null);
+    var viewer =
+        viewers.values().stream()
+            .filter(value -> value.socket().getId().equals(socket.getId()))
+            .findFirst()
+            .orElse(null);
     if (viewer == null || !authorized(viewer)) {
       socket.close(new CloseStatus(4403, "VIEW_REVOKED"));
       return;
     }
-    workers.send(viewer.workerId(), WorkerGateway.envelope("signal", UUID.randomUUID(),
-        Map.of("viewerId", viewer.viewerId(), "payload", payload)));
+    Map<String, Object> signal = new HashMap<>(binding(viewer, UUID.randomUUID()).binding());
+    signal.put("payload", payload);
+    workers.send(viewer.workerId(), WorkerGateway.envelope("signal", UUID.randomUUID(), signal));
   }
 
   private boolean authorized(Viewer viewer) {
     var binding = viewer.binding();
     if (!viewer.authorizationExpiresAt().isAfter(Instant.now())
-        || !identities.authorizationActive(binding.userId(), binding.loginId(), binding.grantId(), binding.accessEpoch())) {
+        || !identities.authorizationActive(
+            binding.userId(), binding.loginId(), binding.grantId(), binding.accessEpoch())) {
       return false;
     }
     var session = browsers.owned(binding.userId(), binding.sessionId());
     var control = controls.get(binding.sessionId());
-    boolean privateAuthorized = binding.purpose().equals("PRIVATE_VIDEO") && binding.loginId() != null
-        && binding.controllerInstanceId() != null && binding.controllerInstanceId().equals(control.controllerInstanceId())
-        && control.ownerKind().equals("HUMAN") && control.expiresAt().isAfter(Instant.now());
-    return session.state().equals("ACTIVE") && (session.privacy().equals("NORMAL") || privateAuthorized)
-        && session.privacyEpoch() == binding.privacyEpoch() && control.state().equals("ACTIVE")
-        && session.mediaGeneration() == binding.mediaGeneration() && control.epoch() == binding.controlEpoch();
+    if (!viewer.workerId().equals(session.workerId())
+        || !viewer.workerBootId().equals(session.workerBootId())
+        || viewer.allocationEpoch() != session.allocationEpoch()) {
+      return false;
+    }
+    boolean privateAuthorized =
+        binding.purpose().equals("PRIVATE_VIDEO")
+            && binding.loginId() != null
+            && binding.controllerInstanceId() != null
+            && binding.controllerInstanceId().equals(control.controllerInstanceId())
+            && control.ownerKind().equals("HUMAN")
+            && control.expiresAt().isAfter(Instant.now());
+    return session.state().equals("ACTIVE")
+        && (session.privacy().equals("NORMAL") || privateAuthorized)
+        && session.privacyEpoch() == binding.privacyEpoch()
+        && control.state().equals("ACTIVE")
+        && session.mediaGeneration() == binding.mediaGeneration()
+        && control.epoch() == binding.controlEpoch();
   }
 
   private Map<String, Object> leaseMessage(Viewer viewer, String type) {
@@ -130,6 +172,7 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
     var session = browsers.owned(binding.userId(), binding.sessionId());
     Map<String, Object> message = new HashMap<>();
     message.put("viewerId", viewer.viewerId());
+    message.put("workerBootId", viewer.workerBootId());
     message.put("browserSessionId", session.id());
     message.put("allocationEpoch", session.allocationEpoch());
     message.put("controlEpoch", controls.get(session.id()).epoch());
@@ -145,8 +188,12 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
       if (binding.controllerInstanceId() == null) {
         message.remove("controllerInstance");
       }
-      message.put("iceServers", ice.forViewer(binding.userId(), viewer.viewerId(), viewer.authorizationExpiresAt()));
-      message.put("producerIceServer", ice.forProducer(binding.userId(), viewer.viewerId(), viewer.authorizationExpiresAt()));
+      message.put(
+          "iceServers",
+          ice.forViewer(binding.userId(), viewer.viewerId(), viewer.authorizationExpiresAt()));
+      message.put(
+          "producerIceServer",
+          ice.forProducer(binding.userId(), viewer.viewerId(), viewer.authorizationExpiresAt()));
       message.put("mediaProxy", ice.mediaProxy());
     }
     return WorkerGateway.envelope(type, UUID.randomUUID(), message);
@@ -161,7 +208,8 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
     }
     for (Viewer viewer : viewers.values()) {
       try {
-        if (!authorized(viewer) || !workers.send(viewer.workerId(), leaseMessage(viewer, "viewRenew"))) {
+        if (!authorized(viewer)
+            || !workers.send(viewer.workerId(), leaseMessage(viewer, "viewRenew"))) {
           close(viewer.socket(), 4403, "VIEW_REVOKED");
         }
       } catch (RuntimeException error) {
@@ -172,8 +220,8 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
 
   @EventListener
   public void message(WorkerSignalingGateway.ViewerMessage event) {
-    Viewer viewer = viewers.get(event.viewerId());
-    if (viewer == null || !viewer.workerId().equals(event.workerId())) {
+    Viewer viewer = viewers.get(event.binding().viewerId());
+    if (viewer == null || !sameBinding(viewer, event.binding())) {
       return;
     }
     try {
@@ -190,8 +238,24 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
   }
 
   @EventListener
+  public void physicallyClosed(WorkerSignalingGateway.ViewerClosed event) {
+    ViewerFence expected = pendingWebFences.get(event.binding().requestId());
+    if (expected != null && expected.equals(event.binding())) {
+      workers.send(
+          expected.workerId(),
+          WorkerGateway.envelope("viewerClosedAck", expected.requestId(), expected.binding()));
+      pendingWebFences.remove(expected.requestId(), expected);
+    }
+    Viewer viewer = viewers.get(event.binding().viewerId());
+    if (viewer != null && sameBinding(viewer, event.binding())) {
+      close(viewer.socket(), 4412, "PRESENTATION_SUPERSEDED");
+    }
+  }
+
+  @EventListener
   public void disconnected(WorkerSignalingGateway.WorkerDisconnected event) {
-    viewers.values().stream().filter(viewer -> viewer.workerId().equals(event.workerId()))
+    viewers.values().stream()
+        .filter(viewer -> viewer.workerId().equals(event.workerId()))
         .forEach(viewer -> close(viewer.socket(), 4503, "WORKER_DISCONNECTED"));
   }
 
@@ -200,11 +264,32 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
     pending.remove(socket.getId());
     sockets.remove(socket.getId());
     for (Viewer viewer : viewers.values()) {
-      if (viewer.socket().getId().equals(socket.getId()) && viewers.remove(viewer.viewerId(), viewer)) {
-        workers.send(viewer.workerId(), WorkerGateway.envelope("viewClose", UUID.randomUUID(),
-            Map.of("viewerId", viewer.viewerId())));
+      if (viewer.socket().getId().equals(socket.getId())
+          && viewers.remove(viewer.viewerId(), viewer)) {
+        ViewerFence fence = binding(viewer, UUID.randomUUID());
+        if (pendingWebFences.size() < 1000) {
+          pendingWebFences.put(fence.requestId(), fence);
+          workers.send(
+              viewer.workerId(),
+              WorkerGateway.envelope("viewClose", fence.requestId(), fence.binding()));
+        }
       }
     }
+  }
+
+  private static ViewerFence binding(Viewer viewer, UUID requestId) {
+    return new ViewerFence(
+        requestId,
+        viewer.workerId(),
+        viewer.workerBootId(),
+        viewer.binding().sessionId(),
+        viewer.allocationEpoch(),
+        viewer.viewerId(),
+        viewer.binding().viewGeneration());
+  }
+
+  private static boolean sameBinding(Viewer viewer, ViewerFence value) {
+    return binding(viewer, value.requestId()).equals(value);
   }
 
   private static void close(WebSocketSession socket, int code, String reason) {

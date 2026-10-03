@@ -158,6 +158,7 @@ public class TaskLifecycleService {
     boolean outstanding = queries.outstanding(id);
     continuations.cancel(id);
     task.pause(outstanding);
+    events.publishEvent(new TaskContinuationService.Consent(id, false));
     return changed(
         actor, task, "tasks.pause:" + id, input, context, !outstanding, "Pause requested");
   }
@@ -176,6 +177,7 @@ public class TaskLifecycleService {
     }
     task.resume(queries.resolved(id, input.resolutionId()));
     var receipt = changed(actor, task, "tasks.resume:" + id, input, context, true, "Task resumed");
+    events.publishEvent(new TaskContinuationService.Consent(id, true));
     events.publishEvent(
         new TaskContinuationService.Ready(id, receipt.operationId(), null, "EXPLICIT_RESUME"));
     return receipt;

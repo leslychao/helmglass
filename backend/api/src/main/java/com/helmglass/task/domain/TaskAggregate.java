@@ -63,6 +63,7 @@ public class TaskAggregate {
     this.origin = origin;
     state = TaskState.DRAFT;
     continuationPreference = "MANUAL";
+    continuationConsent = origin.equals("MCP");
     createdAt = Instant.now();
     updatedAt = createdAt;
   }

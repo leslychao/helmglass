@@ -2,10 +2,10 @@ package com.helmglass.browser.api;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
-import com.helmglass.browser.application.BrowserControlService;
 import com.helmglass.browser.application.BrowserOpenService;
 import com.helmglass.browser.application.BrowserSessionOperationService;
 import com.helmglass.browser.application.BrowserStartupService;
+import com.helmglass.browser.application.ControlDispatcher;
 import com.helmglass.browser.application.HumanBrowserCommandService;
 import com.helmglass.browser.application.WorkerRegistryService;
 import com.helmglass.browser.infrastructure.repository.BrowserRepository;
@@ -44,7 +44,7 @@ public class WorkerGateway extends TextWebSocketHandler {
   private final BrowserSessionOperationService sessionOperations;
   private final BrowserProfileService profiles;
   private final HumanBrowserCommandService navigation;
-  private final BrowserControlService controls;
+  private final ControlDispatcher controlDispatcher;
   private final CommandExecutionService execution;
   private final CommandRepository commands;
   private final BrowserRepository browsers;
@@ -62,7 +62,6 @@ public class WorkerGateway extends TextWebSocketHandler {
       CommandRepository commands,
       BrowserRepository browsers,
       JsonSupport json,
-      BrowserControlService controls,
       UsageCheckpointService usage,
       ConnectionLoginService logins,
       ApplicationEventPublisher events,
@@ -70,14 +69,15 @@ public class WorkerGateway extends TextWebSocketHandler {
       HumanBrowserCommandService navigation,
       BrowserSessionOperationService sessionOperations,
       BrowserProfileService profiles,
-      BrowserOpenService opens) {
+      BrowserOpenService opens,
+      ControlDispatcher controlDispatcher) {
     this.registry = registry;
     this.startup = startup;
     this.sessionOperations = sessionOperations;
     this.profiles = profiles;
     this.opens = opens;
     this.navigation = navigation;
-    this.controls = controls;
+    this.controlDispatcher = controlDispatcher;
     this.execution = execution;
     this.commands = commands;
     this.browsers = browsers;
@@ -216,22 +216,9 @@ public class WorkerGateway extends TextWebSocketHandler {
       }
       case "controlAck" -> {
         UUID sessionId = UUID.fromString(payload.path("browserSessionId").asString());
-        if (registry.acknowledgeRecovery(
-            channel.workerId(), channel.bootId(), sessionId, payload)) {
+        if (controlDispatcher.acknowledge(channel.workerId(), channel.bootId(), payload)) {
           onRuntimeReady(channel, sessionId);
-          break;
         }
-        if (sessionOperations.acknowledge(
-            channel.workerId(), channel.bootId(), sessionId, payload)) {
-          break;
-        }
-        if (controls.acknowledgeInputFence(
-            channel.workerId(), channel.bootId(), sessionId, payload)) {
-          break;
-        }
-        controls.acknowledge(
-            channel.workerId(), channel.bootId(), sessionId, payload.path("controlEpoch").asLong());
-        logins.exited(channel.workerId(), channel.bootId(), sessionId, false);
       }
       case "profileChecked" ->
           logins.checked(

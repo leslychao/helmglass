@@ -55,6 +55,7 @@ services:
     image: ${API_IMAGE:?required release digest}
     environment:
       HELM_PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
+      HELM_WIDGET_ORIGIN: ${WIDGET_ORIGIN:-}
       HELM_WORKER_REGISTRATION_LIMIT: ${WORKER_COUNT:?required}
       HELM_ISSUER_URI: ${PUBLIC_ORIGIN:?required}/auth/realms/helm
       HELM_JWK_SET_URI: http://keycloak:8080/auth/realms/helm/protocol/openid-connect/certs

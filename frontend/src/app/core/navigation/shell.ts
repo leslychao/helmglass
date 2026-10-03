@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  computed,
   effect,
   inject,
   signal,
@@ -189,6 +190,7 @@ export class Shell {
   readonly loggingOut = signal(false);
   readonly logoutError = signal<Problem | null>(null);
   readonly identity = inject(Identity);
+  private readonly userId = computed(() => this.identity.me()?.id);
   readonly navigation = inject(Navigation);
   readonly realtime = inject(Realtime);
   readonly notifications = new ServerResource<Notifications>(['notifications']);
@@ -203,7 +205,8 @@ export class Shell {
   ];
   constructor() {
     effect(() => {
-      if (this.identity.me()) this.notifications.load('/notifications', { limit: 20 });
+      if (this.userId()) this.notifications.load('/notifications', { limit: 20 });
+      else this.notifications.clear();
     });
   }
   toggleNotifications() {

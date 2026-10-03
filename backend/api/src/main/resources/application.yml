@@ -47,6 +47,7 @@ helm:
   issuer-uri: ${HELM_ISSUER_URI}
   jwk-set-uri: ${HELM_JWK_SET_URI}
   public-origin: ${HELM_PUBLIC_ORIGIN}
+  widget-origin: ${HELM_WIDGET_ORIGIN:}
   worker-registration-limit: ${HELM_WORKER_REGISTRATION_LIMIT}
   mcp-clients: ${HELM_MCP_CLIENTS:helm-mcp}
   internal-tls:

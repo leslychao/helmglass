@@ -54,4 +54,7 @@
   <changeSet id="031-continuation-delivery" author="helmglass">
     <sqlFile path="031-continuation-delivery.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="032-control-delivery" author="helmglass">
+    <sqlFile path="032-control-delivery.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

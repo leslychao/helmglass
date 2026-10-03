@@ -202,16 +202,30 @@ public class IdentityRepository {
     if (!actor.mcp() || actor.grantId() == null) {
       throw new DomainException(403, "MCP_GRANT_REQUIRED", "An active MCP grant is required");
     }
-    return jdbc.sql("""
-        SELECT g.version FROM client_grants g JOIN application_users u ON u.id=g.user_id
-        WHERE g.id=:grant AND g.user_id=:user AND g.client_id=:client AND g.status='ACTIVE'
-          AND u.state='ACTIVE' AND u.access_epoch=:epoch
-          AND g.scopes @> '["tasks:read","browser:view"]'::jsonb
-        """)
-        .param("grant", actor.grantId()).param("user", actor.userId())
-        .param("client", actor.clientId()).param("epoch", actor.accessEpoch())
-        .query(Long.class).optional()
+    return jdbc.sql(
+            """
+            SELECT g.version FROM client_grants g JOIN application_users u ON u.id=g.user_id
+            WHERE g.id=:grant AND g.user_id=:user AND g.client_id=:client AND g.status='ACTIVE'
+              AND u.state='ACTIVE' AND u.access_epoch=:epoch
+              AND g.scopes @> '["tasks:read","browser:view"]'::jsonb
+            """)
+        .param("grant", actor.grantId())
+        .param("user", actor.userId())
+        .param("client", actor.clientId())
+        .param("epoch", actor.accessEpoch())
+        .query(Long.class)
+        .optional()
         .orElseThrow(() -> new DomainException(403, "GRANT_REVOKED", "Client access has changed"));
+  }
+
+  public boolean grantAuthorizationActive(UUID userId, UUID grantId, long version, long epoch) {
+    return jdbc.sql("""
+        SELECT EXISTS(SELECT 1 FROM client_grants g JOIN application_users u ON u.id=g.user_id
+          WHERE g.id=:grant AND g.user_id=:user AND g.status='ACTIVE' AND g.version=:version
+            AND u.state='ACTIVE' AND u.access_epoch=:epoch
+            AND g.scopes @> '["tasks:read","browser:view"]'::jsonb)
+        """).param("grant", grantId).param("user", userId).param("version", version)
+        .param("epoch", epoch).query(Boolean.class).single();
   }
 
   public void revokeLogin(UUID id) {

@@ -3,8 +3,9 @@ ARG FRONTEND_IMAGE=helmglass-nginx:0.1.0
 FROM ${FRONTEND_IMAGE} AS frontend
 FROM ${NODE_IMAGE} AS build
 WORKDIR /app
-COPY package.json package-lock.json tsconfig.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline --ignore-scripts --no-audit --no-fund
+COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev --ignore-scripts
 

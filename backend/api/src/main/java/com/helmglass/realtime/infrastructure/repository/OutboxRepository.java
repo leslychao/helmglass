@@ -9,9 +9,24 @@ import org.springframework.transaction.annotation.Transactional;
 @Repository
 public class OutboxRepository {
   private static final List<String> UI_EVENTS =
-      List.of("tasks", "usage", "connections", "result", "events", "artifacts", "audio",
-          "notifications", "sites", "operations", "browserSessions", "users", "userTasks",
-          "userDays", "nodes", "sessions", "audit");
+      List.of(
+          "tasks",
+          "usage",
+          "connections",
+          "result",
+          "events",
+          "artifacts",
+          "audio",
+          "notifications",
+          "sites",
+          "operations",
+          "browserSessions",
+          "users",
+          "userTasks",
+          "userDays",
+          "nodes",
+          "sessions",
+          "audit");
   private final JdbcClient jdbc;
 
   public OutboxRepository(JdbcClient jdbc) {

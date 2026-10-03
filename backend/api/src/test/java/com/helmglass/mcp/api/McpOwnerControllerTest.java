@@ -12,6 +12,7 @@ import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.command.application.CommandExecutionService;
 import com.helmglass.connection.application.ConnectionService;
+import com.helmglass.continuation.api.ContinuationContracts;
 import com.helmglass.continuation.application.TaskContinuationService;
 import com.helmglass.continuation.application.TaskPresentationService;
 import com.helmglass.identity.domain.AuthenticatedActor;
@@ -37,6 +38,7 @@ class McpOwnerControllerTest {
   private final JsonMapper mapper = JsonMapper.builder().build();
   private final TaskLifecycleService tasks = mock(TaskLifecycleService.class);
   private final TaskPresentationService presentations = mock(TaskPresentationService.class);
+  private final TaskContinuationService continuations = mock(TaskContinuationService.class);
   private final McpOwnerController controller =
       new McpOwnerController(
           tasks,
@@ -48,7 +50,7 @@ class McpOwnerControllerTest {
           mock(Validator.class),
           mock(ResultService.class),
           mock(MediaAnalysisService.class),
-          mock(TaskContinuationService.class),
+          continuations,
           mock(ReconciliationService.class),
           mock(TaskContextService.class),
           presentations,
@@ -152,6 +154,44 @@ class McpOwnerControllerTest {
 
   private ObjectNode arguments() {
     return mapper.createObjectNode().put("taskId", taskId.toString());
+  }
+
+  @Test
+  void deliveryToolsReachContinuationOwnerWithVerifiedConversationAndStableKey() {
+    UUID continuationId = UUID.randomUUID();
+    UUID viewerId = UUID.randomUUID();
+    ObjectNode prepare =
+        arguments()
+            .put("continuationId", continuationId.toString())
+            .put("viewScopeId", scopeId.toString())
+            .put("presentationRevision", 8)
+            .put("viewerInstanceId", viewerId.toString())
+            .put("idempotencyKey", "prepare-continuation");
+    controller.call("continuations.prepare_message", payload(prepare, hostContext), request());
+    verify(continuations)
+        .prepareMessage(
+            actor,
+            hostContext,
+            taskId,
+            new ContinuationContracts.PrepareMessage(continuationId, scopeId, 8L, viewerId),
+            new MutationContext("prepare-continuation", requestId));
+
+    UUID dispatchId = UUID.randomUUID();
+    ObjectNode delivery =
+        mapper
+            .createObjectNode()
+            .put("dispatchId", dispatchId.toString())
+            .put("outcome", "UNKNOWN")
+            .put("idempotencyKey", "record-continuation");
+    controller.call("continuations.record_delivery", payload(delivery, hostContext), request());
+    verify(continuations)
+        .recordDelivery(
+            actor,
+            hostContext,
+            new ContinuationContracts.RecordDelivery(
+                dispatchId, ContinuationContracts.DeliveryOutcome.UNKNOWN),
+            new MutationContext("record-continuation", requestId));
+    verifyNoInteractions(presentations);
   }
 
   private McpOwnerController.ToolRequest payload(

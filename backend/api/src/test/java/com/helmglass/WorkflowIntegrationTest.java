@@ -356,9 +356,9 @@ class WorkflowIntegrationTest {
     var claimInput =
         new ContinuationContracts.Claim(continuationId, snapshot.instructionRevision());
     var claimKey = context();
-    var claim = continuations.claim(actor, taskId, claimInput, claimKey);
-    assertThat(continuations.claim(actor, taskId, claimInput, claimKey)).isEqualTo(claim);
-    assertThatThrownBy(() -> continuations.claim(actor, taskId, claimInput, context()))
+    var claim = continuations.claim(actor, null, taskId, claimInput, claimKey);
+    assertThat(continuations.claim(actor, null, taskId, claimInput, claimKey)).isEqualTo(claim);
+    assertThatThrownBy(() -> continuations.claim(actor, null, taskId, claimInput, context()))
         .isInstanceOf(DomainException.class);
     JsonNode action = json.read("{\"type\":\"NAVIGATE\",\"url\":\"https://example.com\"}");
     var missingClaim =
@@ -390,7 +390,9 @@ class WorkflowIntegrationTest {
             null,
             action);
     commands.accept(actor, taskId, accepted, context());
-    assertThat(tasks.get(actor, taskId).continuation()).containsEntry("state", "CONSUMED");
+    assertThat(tasks.get(actor, taskId).continuation())
+        .containsEntry("state", "WAITING_RESULT")
+        .doesNotContainEntry("id", continuationId);
   }
 
   @Test

@@ -14,6 +14,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -45,6 +46,20 @@ public class BrowserSessionService {
 
   public Map<String, Object> get(AuthenticatedActor actor, UUID id, UUID controller) {
     var session = browsers.owned(actor.userId(), id);
+    return snapshot(actor, session, controller);
+  }
+
+  /** Resolves the current task binding through the browser owner, never a historical widget hint. */
+  public Optional<Map<String, Object>> currentForTask(AuthenticatedActor actor, UUID taskId) {
+    actor.requireScope("browser:view");
+    return browsers.binding(taskId)
+        .filter(session -> session.userId().equals(actor.userId()))
+        .map(session -> snapshot(actor, session, null));
+  }
+
+  private Map<String, Object> snapshot(AuthenticatedActor actor, BrowserRepository.Session session,
+      UUID controller) {
+    UUID id = session.id();
     var control = controls.get(id);
     boolean humanLease =
         control.ownerKind().equals("HUMAN") && control.expiresAt().isAfter(Instant.now());
@@ -286,6 +301,10 @@ public class BrowserSessionService {
         viewer == null ? 1 : tickets.nextViewGeneration(actor.userId(), session.id(), viewer),
         purpose,
         Instant.now().plusSeconds(30),
-        Instant.now().plusSeconds(300));
+        Instant.now().plusSeconds(300),
+        null,
+        0,
+        0,
+        origin);
   }
 }

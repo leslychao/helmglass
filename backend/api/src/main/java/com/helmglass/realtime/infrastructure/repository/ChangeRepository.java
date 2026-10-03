@@ -30,26 +30,34 @@ public class ChangeRepository {
     changed(userId, resource, aggregateId, aggregateId, version, Instant.now());
   }
 
-  /** Uses the changing owner's version while invalidating its public resource after a durable delay. */
-  public void changed(UUID userId, String resource, UUID resourceId, UUID aggregateId,
-      long version, Instant notBefore) {
+  /**
+   * Uses the changing owner's version while invalidating its public resource after a durable delay.
+   */
+  public void changed(
+      UUID userId,
+      String resource,
+      UUID resourceId,
+      UUID aggregateId,
+      long version,
+      Instant notBefore) {
     List<String> resources =
         resource.equals("tasks") ? List.of("tasks", "usage") : List.of(resource);
-    int inserted = jdbc.sql(
-            """
-            INSERT INTO transactional_outbox(id,user_id,aggregate_id,aggregate_version,
-              event_type,payload,retry_at)
-            VALUES(:id,:user,:aggregate,:version,:resource,CAST(:payload AS jsonb),:notBefore)
-            ON CONFLICT(aggregate_id,aggregate_version,event_type,ordinal) DO NOTHING
-            """)
-        .param("id", UUID.randomUUID())
-        .param("user", userId)
-        .param("aggregate", aggregateId)
-        .param("version", version)
-        .param("resource", resource)
-        .param("payload", json.write(Map.of("resources", resources, "resourceId", resourceId)))
-        .param("notBefore", notBefore)
-        .update();
+    int inserted =
+        jdbc.sql(
+                """
+                INSERT INTO transactional_outbox(id,user_id,aggregate_id,aggregate_version,
+                  event_type,payload,retry_at)
+                VALUES(:id,:user,:aggregate,:version,:resource,CAST(:payload AS jsonb),:notBefore)
+                ON CONFLICT(aggregate_id,aggregate_version,event_type,ordinal) DO NOTHING
+                """)
+            .param("id", UUID.randomUUID())
+            .param("user", userId)
+            .param("aggregate", aggregateId)
+            .param("version", version)
+            .param("resource", resource)
+            .param("payload", json.write(Map.of("resources", resources, "resourceId", resourceId)))
+            .param("notBefore", notBefore)
+            .update();
     if (inserted != 0) {
       for (String changedResource : resources) {
         advance(userId, changedResource);

@@ -1,6 +1,7 @@
 package com.helmglass.browser.api;
 
 import com.helmglass.api.JsonSupport;
+import com.helmglass.realtime.domain.ViewerFence;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.Map;
@@ -14,11 +15,15 @@ import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 
 @Component
 public class WorkerSignalingGateway extends TextWebSocketHandler {
-  public record ViewerMessage(UUID workerId, UUID viewerId, JsonNode payload, String code) {}
+  public record ViewerMessage(ViewerFence binding, JsonNode payload, String code) {}
+
+  public record ViewerClosed(ViewerFence binding) {}
+
   public record WorkerDisconnected(UUID workerId) {}
 
   private final Map<UUID, WebSocketSession> workers = new ConcurrentHashMap<>();
@@ -33,6 +38,7 @@ public class WorkerSignalingGateway extends TextWebSocketHandler {
   @Override
   public void afterConnectionEstablished(WebSocketSession socket) throws IOException {
     UUID id = UUID.fromString(socket.getHandshakeHeaders().getFirst("x-worker-id"));
+    socket.setTextMessageSizeLimit(65536);
     var previous = workers.put(id, new ConcurrentWebSocketSessionDecorator(socket, 3000, 524288));
     if (previous != null) {
       previous.close(new CloseStatus(4409, "WORKER_REPLACED"));
@@ -40,14 +46,68 @@ public class WorkerSignalingGateway extends TextWebSocketHandler {
   }
 
   @Override
-  protected void handleTextMessage(WebSocketSession socket, TextMessage message) {
-    var value = json.read(message.getPayload());
+  protected void handleTextMessage(WebSocketSession socket, TextMessage message)
+      throws IOException {
     UUID workerId = UUID.fromString(socket.getHandshakeHeaders().getFirst("x-worker-id"));
-    String type = value.path("type").asString();
-    if (type.equals("viewerMessage") || type.equals("viewerClosed")) {
-      events.publishEvent(new ViewerMessage(workerId, UUID.fromString(value.path("viewerId").asString()),
-          value.get("payload"), value.path("code").asString()));
+    WebSocketSession current = workers.get(workerId);
+    if (current == null || !current.getId().equals(socket.getId())) {
+      socket.close(new CloseStatus(4409, "WORKER_REPLACED"));
+      return;
     }
+    try {
+      JsonNode value = json.read(message.getPayload());
+      String type = value.path("type").asString();
+      if (!type.equals("viewerMessage")
+          && !type.equals("viewerEnded")
+          && !type.equals("viewerClosed")) {
+        return;
+      }
+      if (value.path("schemaVersion").asInt() != 1 || message.getPayloadLength() > 65536) {
+        throw new IllegalArgumentException("Invalid worker signaling envelope");
+      }
+      ViewerFence binding =
+          new ViewerFence(
+              uuid(value, "requestId"),
+              workerId,
+              uuid(value, "workerBootId"),
+              uuid(value, "browserSessionId"),
+              positive(value, "allocationEpoch"),
+              uuid(value, "viewerId"),
+              positive(value, "viewGeneration"));
+      if (type.equals("viewerClosed")) {
+        if (!value.path("code").asString().equals("VIEW_CLOSED")) {
+          throw new IllegalArgumentException("Invalid physical fence receipt");
+        }
+        events.publishEvent(new ViewerClosed(binding));
+      } else {
+        String code = value.path("code").asString();
+        if (code.length() > 80) {
+          throw new IllegalArgumentException("Invalid viewer termination code");
+        }
+        events.publishEvent(
+            new ViewerMessage(
+                binding, type.equals("viewerMessage") ? value.get("payload") : null, code));
+      }
+    } catch (JacksonException | IllegalArgumentException error) {
+      socket.close(new CloseStatus(4400, "INVALID_SIGNALING_MESSAGE"));
+    }
+  }
+
+  private static UUID uuid(JsonNode value, String name) {
+    String text = value.path(name).asString();
+    if (!text.matches(
+        "[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}")) {
+      throw new IllegalArgumentException("Invalid binding identifier");
+    }
+    return UUID.fromString(text);
+  }
+
+  private static long positive(JsonNode value, String name) {
+    JsonNode number = value.path(name);
+    if (!number.isIntegralNumber() || !number.canConvertToLong() || number.asLong() <= 0) {
+      throw new IllegalArgumentException("Invalid binding generation");
+    }
+    return number.asLong();
   }
 
   public boolean send(UUID workerId, Map<String, Object> message) {
@@ -76,7 +136,9 @@ public class WorkerSignalingGateway extends TextWebSocketHandler {
   @Override
   public void afterConnectionClosed(WebSocketSession socket, CloseStatus status) {
     UUID id = UUID.fromString(socket.getHandshakeHeaders().getFirst("x-worker-id"));
-    workers.computeIfPresent(id, (key, value) -> value.getId().equals(socket.getId()) ? null : value);
-    events.publishEvent(new WorkerDisconnected(id));
+    WebSocketSession current = workers.get(id);
+    if (current != null && current.getId().equals(socket.getId()) && workers.remove(id, current)) {
+      events.publishEvent(new WorkerDisconnected(id));
+    }
   }
 }

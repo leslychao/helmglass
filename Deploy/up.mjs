@@ -14,7 +14,7 @@ import { acquireMaintenance, deploymentContainers } from './maintenance.mjs';
 import { ProvisioningError } from './provision/src/keycloak-client.mjs';
 import { VaultCli } from './provision/src/vault-cli.mjs';
 import { provisionVaultServices } from './provision/src/vault-services.mjs';
-import { WorkerRelease } from './worker-release.mjs';
+import { deployWorkerRelease } from './worker-release.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -74,15 +74,6 @@ async function main() {
   }
   maintenance = await acquireMaintenance({ docker, image: release.PROVISION_IMAGE,
     installationId: configuration.INSTALLATION_ID });
-  const workerRelease = new WorkerRelease({ docker, identifiers: () => identifiers('browser-worker'),
-    imageId: imageIds.get(release.WORKER_IMAGE), count: Number(configuration.WORKER_COUNT) });
-  await workerRelease.prepare();
-  for (const id of await identifiers('api')) {
-    const current = await inspect(id);
-    if (current.State.Running && current.Image !== imageIds.get(release.API_IMAGE)) {
-      throw new ConfigurationError('api release', 'drain active browser work before replacing this running component');
-    }
-  }
   progress('validating operator inputs and preparing protected installation files');
   const { directory } = await prepareBootstrap(configuration, operatorInputs);
   const delivery = [];
@@ -231,10 +222,9 @@ async function main() {
   await Promise.all(['api', 'oauth2-proxy', 'coturn'].map(service => healthy(service)));
   await compose(['up', '-d', '--no-deps', 'mcp-adapter', 'egress-proxy']);
   await Promise.all(['mcp-adapter', 'egress-proxy'].map(service => healthy(service)));
-  await workerRelease.removeObsolete();
-  await compose(['up', '-d', '--no-deps', '--no-recreate', '--scale', `browser-worker=${configuration.WORKER_COUNT}`, 'browser-worker']);
+  await deployWorkerRelease({ docker, compose, identifiers: () => identifiers('browser-worker'),
+    imageId: imageIds.get(release.WORKER_IMAGE), count: Number(configuration.WORKER_COUNT) });
   await healthy('browser-worker');
-  await workerRelease.verify();
   await compose(['up', '-d', '--no-deps', 'nginx']);
   await healthy('nginx');
   process.stdout.write(`Helm Glass services are ready at ${configuration.PUBLIC_ORIGIN}. Browser and external-host acceptance must be verified separately.\n`);

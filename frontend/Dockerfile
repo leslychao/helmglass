@@ -3,12 +3,13 @@ ARG NGINX_BASE_IMAGE=nginx:1.30.5-alpine3.24@sha256:0985e772fb9f729e6fa0980da05f
 FROM ${NODE_BASE_IMAGE} AS build
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/tools/patch-gst.mjs ./tools/patch-gst.mjs
+RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline --no-audit --no-fund
 COPY frontend/tools ./tools
-RUN npm ci
 COPY frontend/angular.json frontend/tsconfig*.json ./
 COPY frontend/src ./src
 COPY frontend/public ./public
-RUN npm run build
+RUN --mount=type=cache,id=helmglass-angular,target=/app/.angular/cache,sharing=locked npm run build
 
 FROM ${NGINX_BASE_IMAGE}
 COPY --from=build /app/dist/helm-glass/browser /usr/share/nginx/html

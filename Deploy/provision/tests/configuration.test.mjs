@@ -39,6 +39,19 @@ test('operator password file is optional and accepts only an absolute local path
   }
 });
 
+test('widget admission requires an exact HTTPS origin or stays disabled', () => {
+  assert.equal(validateDeployment(configuration()).WIDGET_ORIGIN, '');
+  assert.equal(validateDeployment({ ...configuration(), WIDGET_ORIGIN: '' }).WIDGET_ORIGIN, '');
+  const origin = 'https://helm-example-test.web-sandbox.oaiusercontent.com';
+  assert.equal(validateDeployment({ ...configuration(), WIDGET_ORIGIN: origin }).WIDGET_ORIGIN, origin);
+  for (const value of ['null', '*', 'https://*.oaiusercontent.com', 'http://localhost',
+    origin + '/', origin + '/path', origin + '?ticket=secret', 'https://user:secret@example.test',
+    ' ', origin + '\n']) {
+    assert.throws(() => validateDeployment({ ...configuration(), WIDGET_ORIGIN: value }),
+      { parameter: 'WIDGET_ORIGIN' });
+  }
+});
+
 test('rejects secrets, public trust, unsafe origins and malformed remote paths', () => {
   for (const [key, value] of [
     ['KEYCLOAK_ADMIN_PASSWORD', 'secret-must-not-appear'],

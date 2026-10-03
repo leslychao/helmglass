@@ -104,8 +104,7 @@ public class ControlRepository {
         jdbc.sql(
                 """
                 UPDATE browser_control_leases SET state='ACTIVE',owner_kind=desired_owner,desired_owner=NULL,
-                version=version+1,expires_at=CASE WHEN desired_owner='AGENT' THEN expires_at
-                ELSE now()+interval '15 seconds' END
+                version=version+1
                 WHERE session_id=:id AND epoch=:epoch AND operation_id=:operation AND state='TRANSFERRING'
                 """)
             .param("id", sessionId)

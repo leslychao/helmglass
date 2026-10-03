@@ -1,0 +1,8 @@
+**/node_modules
+**/target
+**/dist
+**/.cache
+**/coverage
+**/test-results
+**/playwright-report
+**/*.log

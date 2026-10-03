@@ -4,7 +4,7 @@ import { isAbsolute } from 'node:path';
 import { parseEnv } from 'node:util';
 
 const INPUT_NAMES = [
-  'DOCKER_HOST', 'INSTALLATION_ID', 'PUBLIC_ORIGIN',
+  'DOCKER_HOST', 'INSTALLATION_ID', 'PUBLIC_ORIGIN', 'WIDGET_ORIGIN',
   'TRUSTED_EDGE_PROXY', 'WORKER_COUNT', 'GPU_DEVICE_ID', 'LOCAL_SECRETS_DIR', 'SECRETS_DIR',
   'TURN_INTERNAL_URL', 'TURN_PUBLIC_URLS', 'TURN_REALM',
   'TURN_RELAY_MIN', 'TURN_RELAY_MAX', 'KEYCLOAK_ADMIN_EMAIL', 'KEYCLOAK_ADMIN_LAST_NAME',
@@ -67,7 +67,8 @@ export function validateDeployment(input) {
   }
   const configuration = {};
   for (const name of INPUT_NAMES) {
-    if (name === 'OPERATOR_INPUT_FILE' && (input[name] === undefined || input[name] === '')) {
+    if (['OPERATOR_INPUT_FILE', 'WIDGET_ORIGIN'].includes(name)
+        && (input[name] === undefined || input[name] === '')) {
       configuration[name] = '';
     } else {
       configuration[name] = requireValue(input, name);
@@ -83,6 +84,12 @@ export function validateDeployment(input) {
     throw new ConfigurationError('INSTALLATION_ID', 'must be a stable installation identifier');
   }
   origin(configuration, 'PUBLIC_ORIGIN');
+  if (configuration.WIDGET_ORIGIN) {
+    origin(configuration, 'WIDGET_ORIGIN');
+    if (configuration.WIDGET_ORIGIN.includes('*')) {
+      throw new ConfigurationError('WIDGET_ORIGIN', 'requires one exact origin without wildcards');
+    }
+  }
   if (!/^(?:[0-9]+|GPU-[a-fA-F0-9-]+)$/.test(configuration.GPU_DEVICE_ID)) {
     throw new ConfigurationError('GPU_DEVICE_ID', 'must identify one NVIDIA device by index or GPU UUID');
   }

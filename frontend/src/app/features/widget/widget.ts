@@ -423,16 +423,21 @@ export class Widget {
       await this.finishDelivery(attempt, generation);
       return;
     }
-    if (!continuation || continuation.mode !== 'WIDGET_RETURN'
-      || presentation.presentationState !== 'ACTIVE') return;
-    const sameAttempt = attempt?.continuationId === continuation.id
-      && attempt.taskId === presentation.taskId
-      && attempt.viewScopeId === presentation.viewScopeId
-      && attempt.presentationRevision === presentation.presentationRevision;
+    if (
+      !continuation ||
+      continuation.mode !== 'WIDGET_RETURN' ||
+      presentation.presentationState !== 'ACTIVE'
+    )
+      return;
+    const sameAttempt =
+      attempt?.continuationId === continuation.id &&
+      attempt.taskId === presentation.taskId &&
+      attempt.viewScopeId === presentation.viewScopeId &&
+      attempt.presentationRevision === presentation.presentationRevision;
     if (sameAttempt && (attempt?.recorded || attempt?.stopped || attempt?.hostInvoked)) return;
     // DISPATCHING may be recovered only by the mount that still knows it has not invoked the host.
-    if (continuation.state !== 'READY'
-      && !(sameAttempt && continuation.state === 'DISPATCHING')) return;
+    if (continuation.state !== 'READY' && !(sameAttempt && continuation.state === 'DISPATCHING'))
+      return;
     if (!this.app.getHostCapabilities()?.message?.text) {
       this.manualText.set(
         `Продолжи задачу ${presentation.taskId} после моего участия. Не создавай новую задачу.`,
@@ -484,9 +489,15 @@ export class Widget {
         throw new Error();
       attempt.prepared = { dispatchId, text };
       attempt.outcome = 'REJECTED';
-      if (generation === this.generation && !document.hidden && !this.inactive()
-        && !this.disposed && !this.accessDenied() && this.snapshotFresh && !this.dirty
-        && expiresAt > Date.now()) {
+      if (
+        generation === this.generation &&
+        !document.hidden &&
+        !this.inactive() &&
+        !this.disposed &&
+        !this.accessDenied() &&
+        this.eventsReady &&
+        expiresAt > Date.now()
+      ) {
         // A timeout does not prove that ChatGPT rejected the message.
         attempt.hostInvoked = true;
         try {
@@ -520,14 +531,17 @@ export class Widget {
   }
   private async recordDelivery(attempt: DeliveryAttempt) {
     if (!attempt.prepared || !attempt.outcome) return;
-    const receipt = await this.app.callServerTool({
-      name: 'continuations.record_delivery',
-      arguments: {
-        dispatchId: attempt.prepared.dispatchId,
-        outcome: attempt.outcome,
-        idempotencyKey: attempt.recordKey,
+    const receipt = await this.app.callServerTool(
+      {
+        name: 'continuations.record_delivery',
+        arguments: {
+          dispatchId: attempt.prepared.dispatchId,
+          outcome: attempt.outcome,
+          idempotencyKey: attempt.recordKey,
+        },
       },
-    }, { timeout: 15000 });
+      { timeout: 15000 },
+    );
     if (receipt.isError) {
       attempt.stopped = !unknownToolOutcome(receipt);
       throw new Error();
@@ -537,8 +551,10 @@ export class Widget {
   private showDelivery(attempt: DeliveryAttempt, generation: number) {
     if (generation !== this.generation) return;
     const current = this.snapshot()?.continuation;
-    if (current?.id === attempt.continuationId
-      && !['CLAIMED', 'CONSUMED', 'CANCELLED', 'EXPIRED'].includes(current.state)) {
+    if (
+      current?.id === attempt.continuationId &&
+      !['CLAIMED', 'CONSUMED', 'CANCELLED', 'EXPIRED'].includes(current.state)
+    ) {
       if (attempt.outcome !== 'DELIVERED') this.manualText.set(attempt.prepared?.text ?? '');
       else this.message.set('Сообщение отправлено. Ожидаем принятия задачи ChatGPT.');
     }
@@ -547,7 +563,9 @@ export class Widget {
   private deliveryFailed(attempt: DeliveryAttempt, generation: number) {
     if (generation !== this.generation) return;
     this.error.set(
-      'Результат передачи продолжения пока неизвестен. Сообщение автоматически не повторяется.',
+      attempt.stopped
+        ? 'Автоматическое продолжение сейчас недоступно. Откройте ту же задачу в кабинете.'
+        : 'Восстанавливаем связь с ChatGPT. Уже отправленное сообщение не повторяется.',
     );
     if (!attempt.stopped) this.scheduleRecovery(attempt.recovery);
   }

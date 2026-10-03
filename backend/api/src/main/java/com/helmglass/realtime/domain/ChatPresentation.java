@@ -19,6 +19,7 @@ public record ChatPresentation(
     long accessEpoch,
     Instant viewerLeaseExpiresAt,
     Instant viewerAuthorizationExpiresAt,
+    boolean eventsConnected,
     UUID browserSessionId,
     UUID workerId,
     UUID workerBootId,

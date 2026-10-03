@@ -155,8 +155,22 @@ public class McpOwnerController {
                   : null,
               input.hostContext(),
               authorizationExpiresAt(request));
-      case "continuations.prepare_message" -> presentations.prepareMessage(actor, required(taskId));
-      case "continuations.record_delivery" -> throw DomainException.notFound();
+      case "continuations.prepare_message" ->
+          continuations.prepareMessage(
+              actor,
+              input.hostContext(),
+              required(taskId),
+              decode(
+                  args,
+                  ContinuationContracts.PrepareMessage.class,
+                  Set.of("taskId", "idempotencyKey")),
+              required(context));
+      case "continuations.record_delivery" ->
+          continuations.recordDelivery(
+              actor,
+              input.hostContext(),
+              decode(args, ContinuationContracts.RecordDelivery.class, Set.of("idempotencyKey")),
+              required(context));
       case "tasks.answer" ->
           requests.answer(
               actor,
@@ -169,6 +183,7 @@ public class McpOwnerController {
       case "tasks.continue" ->
           continuations.claim(
               actor,
+              input.hostContext(),
               required(taskId),
               decode(args, ContinuationContracts.Claim.class, Set.of("taskId", "idempotencyKey")),
               required(context));

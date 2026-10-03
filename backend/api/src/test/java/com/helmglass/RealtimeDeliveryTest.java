@@ -32,8 +32,12 @@ class RealtimeDeliveryTest {
   private final OutboxRepository outbox = mock(OutboxRepository.class);
   private final JsonSupport json = new JsonSupport(JsonMapper.builder().build());
   private final RealtimeDeliveryService realtime =
-      new RealtimeDeliveryService(outbox, identities, json,
-          mock(ChatPresentationRepository.class), mock(OperationRepository.class));
+      new RealtimeDeliveryService(
+          outbox,
+          identities,
+          json,
+          mock(ChatPresentationRepository.class),
+          mock(OperationRepository.class));
 
   @Test
   void subscribesBeforeReadyAndOnlyReceivesOwnSafeResources() throws Exception {

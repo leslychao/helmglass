@@ -4,6 +4,7 @@ ALTER TABLE chat_view_slots
   ADD COLUMN access_epoch bigint NOT NULL DEFAULT 0,
   ADD COLUMN viewer_lease_expires_at timestamptz,
   ADD COLUMN viewer_authorization_expires_at timestamptz,
+  ADD COLUMN events_connected boolean NOT NULL DEFAULT false,
   ADD COLUMN browser_session_id uuid REFERENCES browser_sessions,
   ADD COLUMN worker_id uuid REFERENCES browser_workers,
   ADD COLUMN worker_boot_id uuid,

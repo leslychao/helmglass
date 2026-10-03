@@ -125,6 +125,7 @@ public class CommandExecutionService {
     }
     continuations.consume(actor, taskId, task.instructionRevision(), input.continuationClaimId());
     commands.insert(actor, taskId, input, kind, digest, deadline);
+    continuations.waitForResult(taskId, null, input.commandId(), "ASYNC_RESULT_READY");
     usage.refresh(actor.userId(), taskId);
     if (confirmationNeeded) {
       commands.requireConfirmation(taskId, input.commandId(), digest);

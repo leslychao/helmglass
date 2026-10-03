@@ -140,6 +140,9 @@ public class ConnectionLoginService {
         logins.state(id, "WAITING_USER");
       }
     }
+    if (input.taskId() != null) {
+      events.publishEvent(new TaskContinuationService.Waiting(input.taskId(), id, null, "LOGIN_COMPLETED"));
+    }
     changes.changed(actor.userId(), "connections", connectionId, connection.version());
     return receipt;
   }
@@ -345,7 +348,7 @@ public class ConnectionLoginService {
       return;
     }
     controls.transfer(session.id(), login.controllerInstanceId(), "HUMAN", true, login.id());
-    sendControl(login.userId(), session.id(), "HUMAN_PRIVATE");
+    controlOwner.publishControl(login.userId(), session.id(), "HUMAN_PRIVATE");
     logins.state(login.id(), "WAITING_USER");
   }
 
@@ -396,6 +399,12 @@ public class ConnectionLoginService {
             login.version() + 1,
             false);
     logins.completeRequested(id, receipt.operationId(), input);
+    if (login.taskId() != null) {
+      events.publishEvent(new TaskContinuationService.Consent(login.taskId(), input.continuationIntent().equals("CONTINUE")));
+      if (input.continuationIntent().equals("CONTINUE")) {
+        events.publishEvent(new TaskContinuationService.Waiting(login.taskId(), login.id(), null, "LOGIN_COMPLETED"));
+      }
+    }
     controls.quiesceInput(session.id());
     Map<String, Object> message = scope(session);
     for (String key :
@@ -459,7 +468,7 @@ public class ConnectionLoginService {
             logins.verificationRejected(current.id());
             controls.transfer(
                 sessionId, control.controllerInstanceId(), "HUMAN", true, current.id());
-            sendControl(current.userId(), sessionId, "HUMAN_PRIVATE");
+            controlOwner.publishControl(current.userId(), sessionId, "HUMAN_PRIVATE");
             return;
           }
           if (current.state().equals("SAVED_VERIFYING")) {
@@ -557,6 +566,9 @@ public class ConnectionLoginService {
   private void failLogin(Login login, String code) {
     logins.state(login.id(), "FAILED");
     operations.finishLogin(login.userId(), login.id(), "FAILED", code);
+    if (login.taskId() != null) {
+      events.publishEvent(new TaskContinuationService.Cancelled(login.taskId()));
+    }
     closeLoginBrowser(login);
     changes.changed(login.userId(), "connections", login.connectionId(), login.version() + 1);
   }
@@ -634,7 +646,7 @@ public class ConnectionLoginService {
         && control.state().equals("QUIESCED")
         && identities.loginActive(login.userId(), control.loginId())) {
       controls.transfer(session.id(), control.controllerInstanceId(), "HUMAN", true, login.id());
-      sendControl(login.userId(), session.id(), "HUMAN_PRIVATE");
+      controlOwner.publishControl(login.userId(), session.id(), "HUMAN_PRIVATE");
     }
     changes.changed(login.userId(), "connections", login.connectionId(), login.version() + 1);
   }
@@ -649,7 +661,7 @@ public class ConnectionLoginService {
         connections.discardChanges(session.id());
       }
       controls.transfer(session.id(), null, "AGENT", false, login.completeOperationId());
-      sendControl(login.userId(), session.id(), "AGENT");
+      controlOwner.publishControl(login.userId(), session.id(), "AGENT");
       logins.state(login.id(), "EXITING_PRIVATE");
     }
   }
@@ -711,6 +723,9 @@ public class ConnectionLoginService {
     closeLoginBrowser(login);
     logins.state(id, "CANCELLED");
     operations.finishLogin(login.userId(), id, "CANCELLED", "LOGIN_CANCELLED");
+    if (login.taskId() != null) {
+      events.publishEvent(new TaskContinuationService.Cancelled(login.taskId()));
+    }
     changes.changed(login.userId(), "connections", login.connectionId(), login.version() + 1);
     boolean closed =
         login.sessionId() == null
@@ -755,29 +770,6 @@ public class ConnectionLoginService {
     return scope;
   }
 
-  private void sendControl(UUID userId, UUID sessionId, String mode) {
-    var session = browsers.owned(userId, sessionId);
-    var control = controls.get(sessionId);
-    Map<String, Object> message = new HashMap<>();
-    message.put("browserSessionId", sessionId);
-    message.put("allocationEpoch", session.allocationEpoch());
-    message.put("controlEpoch", control.epoch());
-    message.put("pageEpoch", session.pageEpoch());
-    message.put("privacyEpoch", session.privacyEpoch());
-    message.put("policyVersion", policies.getForExecution(userId).version());
-    if (session.connectionId() != null) {
-      message.put("connectionId", session.connectionId());
-      message.put(
-          "scopeVersion", connections.owned(userId, session.connectionId(), false).scopeVersion());
-    }
-    message.put("mode", mode);
-    message.put("leaseExpiresAt", control.expiresAt());
-    if (control.controllerInstanceId() != null) {
-      message.put("controllerInstance", control.controllerInstanceId());
-    }
-    send(session.workerId(), "control", message);
-  }
-
   private void send(UUID workerId, String type, Map<String, ?> message) {
     events.publishEvent(
         new ControlIntent(workerId, WorkerGateway.envelope(type, UUID.randomUUID(), message)));
@@ -790,3 +782,4 @@ public class ConnectionLoginService {
     }
   }
 }
+

@@ -4,10 +4,10 @@ COPY pom.xml ./pom.xml
 COPY api/pom.xml ./api/pom.xml
 COPY .mvn ./.mvn
 COPY --chmod=755 mvnw ./mvnw
-RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -ntp -pl api dependency:go-offline
+RUN --mount=type=cache,target=/root/.m2,sharing=locked ./mvnw -B -ntp -pl api dependency:go-offline
 COPY api/src ./api/src
 COPY worker-protocol/schemas ./worker-protocol/schemas
-RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -ntp -pl api package -DskipTests
+RUN --mount=type=cache,target=/root/.m2,sharing=locked ./mvnw -B -ntp -pl api package -DskipTests
 FROM eclipse-temurin:25-jre@sha256:fcd7fd7b387f94bb2ac461478a7436ad8e349924c374ea8313919624dceae636
 RUN groupadd --gid 10001 helm && useradd --uid 10001 --gid helm --no-create-home helm
 WORKDIR /app

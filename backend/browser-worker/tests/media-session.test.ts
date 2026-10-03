@@ -5,8 +5,8 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { WebSocketServer } from 'ws';
 import { MediaSession } from '../src/media-session.js';
-import { signalingMessageSchema, viewerClosedSchema, viewerEndedSchema } from '../src/protocol.js';
-import type { Assignment, ViewClose, ViewOpen, ViewerClosed } from '../src/protocol.js';
+import { signalingMessageSchema, viewerClosedSchema, viewerEndedSchema, viewerMessageSchema } from '../src/protocol.js';
+import type { Assignment, ViewClose, ViewOpen, ViewerClosed, ViewerFence } from '../src/protocol.js';
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const close = (binding: ViewOpen): ViewClose => ({ schemaVersion: 1, type: 'viewClose', requestId: randomUUID(),
@@ -16,8 +16,16 @@ const close = (binding: ViewOpen): ViewClose => ({ schemaVersion: 1, type: 'view
 async function fixture(context: TestContext) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 8443 });
   await once(server, 'listening');
+  const wireSignals: unknown[] = [];
   server.on('connection', (socket) => {
     socket.send(JSON.stringify({ type: 'welcome', peerId: randomUUID() }));
+    socket.on('message', raw => {
+      const message: unknown = JSON.parse(raw.toString());
+      wireSignals.push(message);
+      if (typeof message === 'object' && message !== null && 'type' in message && message.type === 'list') {
+        socket.send(JSON.stringify({ type: 'list', producers: [{ id: 'fixture-producer' }] }));
+      }
+    });
   });
   context.after(async () => {
     for (const socket of server.clients) socket.terminate();
@@ -31,6 +39,7 @@ async function fixture(context: TestContext) {
   };
   const closed: string[] = [];
   const receipts: ViewerClosed[] = [];
+  const emitted: { binding: ViewerFence; payload: Record<string, unknown> }[] = [];
   let stops = 0;
   let revocations = 0;
   let starts = 0;
@@ -52,7 +61,7 @@ async function fixture(context: TestContext) {
     },
   };
   const media = new MediaSession(() => ({ assignment, captureBinding: async () => ({ pid: 42, width: 1280, height: 720 }) }),
-    () => undefined, (binding) => closed.push(binding.viewerId), receipt => receipts.push(receipt),
+    (binding, payload) => emitted.push({ binding, payload }), (binding) => closed.push(binding.viewerId), receipt => receipts.push(receipt),
     { helper, onFailure: () => { failures++; } });
   const binding = (): ViewOpen => ({
     schemaVersion: 1, type: 'viewOpen', requestId: randomUUID(), viewerId: randomUUID(),
@@ -63,7 +72,7 @@ async function fixture(context: TestContext) {
     producerIceServer: { urls: ['turn:coturn:3478?transport=tcp'], username: 'fixture', credential: 'fixture' },
     mediaProxy: { url: 'http://egress-proxy:3128', username: 'fixture', password: 'fixture-'.repeat(4) },
   });
-  return { media, helper, closed, receipts, assignment, binding, stops: () => stops, revocations: () => revocations,
+  return { media, helper, closed, receipts, emitted, wireSignals, assignment, binding, stops: () => stops, revocations: () => revocations,
     starts: () => starts, failures: () => failures };
 }
 
@@ -306,4 +315,43 @@ test('wire contract requires exact close bindings and separates unsolicited end 
   assert.equal(viewerEndedSchema.safeParse(ended).success, true);
   assert.equal(viewerClosedSchema.safeParse(ended).success, false);
   assert.equal(viewerClosedSchema.safeParse({ ...ended, type: 'viewerClosed' }).success, false);
+});
+
+test('a stale generation signal cannot enter the replacement consumer', async (context) => {
+  const value = await fixture(context);
+  const first = value.binding();
+  await value.media.accept(first);
+  await value.media.accept(close(first));
+  const next = { ...first, requestId: randomUUID(), viewGeneration: 2 };
+  await value.media.accept(next);
+  const stale = { ...close(first), type: 'signal' as const, payload: { type: 'listConsumers' } };
+  await assert.rejects(value.media.accept(stale), /VIEW_BINDING_FENCED/);
+  const deadline = Date.now() + 1000;
+  while (!value.emitted.some(event => event.payload['type'] === 'welcome') && Date.now() < deadline) {
+    await new Promise<void>(resolve => setTimeout(resolve, 5));
+  }
+  await value.media.accept({ ...stale, viewGeneration: 2 });
+  const event = value.emitted.findLast(entry => entry.payload['type'] === 'listConsumers');
+  assert.ok(event);
+  assert.deepEqual(event.binding, { workerBootId: next.workerBootId, browserSessionId: next.browserSessionId,
+    allocationEpoch: next.allocationEpoch, viewerId: next.viewerId, viewGeneration: 2 });
+  assert.equal(viewerMessageSchema.safeParse({ schemaVersion: 1, type: 'viewerMessage', requestId: randomUUID(),
+    ...event.binding, payload: event.payload }).success, true);
+  assert.ok(value.wireSignals.every(message => JSON.stringify(message) !== JSON.stringify(stale.payload)));
+  await value.media.closeAll();
+});
+
+test('acknowledged receipts do not evict the tombstones that prevent delayed reopen', async (context) => {
+  const value = await fixture(context);
+  const first = value.binding();
+  for (let index = 0; index < 256; index++) {
+    const command = close(index === 0 ? first : value.binding());
+    await value.media.accept(command);
+    await value.media.accept({ ...command, type: 'viewerClosedAck' });
+  }
+  value.media.replayClosures();
+  assert.equal(value.receipts.length, 256);
+  await assert.rejects(value.media.accept(first), /VIEW_BINDING_FENCED/);
+  await assert.rejects(value.media.accept(value.binding()), /FENCING_FAILED/);
+  assert.equal(value.starts(), 0);
 });

@@ -428,6 +428,178 @@ describe('widget presentation lifecycle', () => {
     expect(fixture.componentInstance.manualText()).toContain(presentation.taskId);
   });
 
+  function deliveryScenario(initialState = 'READY') {
+    let state = initialState;
+    const prepared = () => ({
+      structuredContent: {
+        dispatchId: '3f1978bb-80d8-4990-b345-edebeb351513',
+        text: 'Продолжи ту же задачу после подтверждённого результата.',
+        expiresAt: new Date(Date.now() + 30000).toISOString(),
+      },
+    });
+    const prepare = vi.fn(async (_arguments: Record<string, unknown>) => prepared());
+    const recordDelivery = vi.fn(async (_arguments: Record<string, unknown>) => ({}));
+    bridge.attach.mockImplementation(
+      (request: { name: string; arguments: Record<string, unknown> }) => {
+        if (request.name === 'continuations.prepare_message') {
+          state = 'DISPATCHING';
+          return prepare(request.arguments);
+        }
+        if (request.name === 'continuations.record_delivery') {
+          state = request.arguments['outcome'] === 'DELIVERED' ? 'DELIVERED' : 'DELIVERY_UNKNOWN';
+          return recordDelivery(request.arguments);
+        }
+        return Promise.resolve(
+          attached({ id: 'continuation-1', state, mode: 'WIDGET_RETURN' }, true),
+        );
+      },
+    );
+    return { prepare, recordDelivery, prepared };
+  }
+
+  it('recovers a lost prepare response with the same key and sends only once', async () => {
+    const protocol = deliveryScenario();
+    protocol.prepare.mockRejectedValueOnce(new Error('Response lost after commit'));
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(protocol.prepare).toHaveBeenCalledOnce();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(protocol.prepare).toHaveBeenCalledTimes(2);
+    expect(protocol.prepare.mock.calls[1]?.[0]).toEqual(protocol.prepare.mock.calls[0]?.[0]);
+    expect(bridge.sendMessage).toHaveBeenCalledOnce();
+    expect(protocol.recordDelivery).toHaveBeenCalledOnce();
+  });
+
+  it('retries a lost delivery receipt with the same key without resending to ChatGPT', async () => {
+    const protocol = deliveryScenario();
+    protocol.recordDelivery.mockRejectedValueOnce(new Error('Receipt response lost'));
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.sendMessage).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(protocol.recordDelivery).toHaveBeenCalledTimes(2);
+    expect(protocol.recordDelivery.mock.calls[1]?.[0]).toEqual(
+      protocol.recordDelivery.mock.calls[0]?.[0],
+    );
+    expect(protocol.prepare).toHaveBeenCalledOnce();
+    expect(bridge.sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('does not dispatch a server DISPATCHING continuation after remount', async () => {
+    const protocol = deliveryScenario('DISPATCHING');
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    socket().receive('invalidate');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(protocol.prepare).not.toHaveBeenCalled();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('records an unknown host outcome and never treats it as permission to resend', async () => {
+    const protocol = deliveryScenario();
+    bridge.sendMessage.mockRejectedValueOnce(new Error('Host acknowledgement lost'));
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    socket().receive('invalidate');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bridge.sendMessage).toHaveBeenCalledOnce();
+    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('UNKNOWN');
+    expect(protocol.prepare).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a prepared message if the widget becomes hidden before host invocation', async () => {
+    const protocol = deliveryScenario();
+    let resolve: ((value: ReturnType<typeof protocol.prepared>) => void) | undefined;
+    protocol.prepare.mockImplementationOnce(
+      () =>
+        new Promise((complete) => {
+          resolve = complete;
+        }),
+    );
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    document.dispatchEvent(new Event('visibilitychange'));
+    resolve?.(protocol.prepared());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('REJECTED');
+  });
+
+  it('bounds receipt repair even while attach and heartbeat remain healthy', async () => {
+    const protocol = deliveryScenario();
+    protocol.recordDelivery.mockRejectedValue(new Error('Receipt unavailable'));
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(120000);
+    const attempts = protocol.recordDelivery.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(120000);
+
+    expect(protocol.recordDelivery).toHaveBeenCalledTimes(attempts);
+    expect(attempts).toBeGreaterThan(1);
+    expect(bridge.sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it('does not mistake the prepare transaction invalidation for a rejected delivery', async () => {
+    const protocol = deliveryScenario();
+    protocol.prepare.mockImplementationOnce(async () => {
+      socket().receive('invalidate');
+      return protocol.prepared();
+    });
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bridge.sendMessage).toHaveBeenCalledOnce();
+    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('DELIVERED');
+  });
+
+  it('rejects an expired prepare receipt without invoking the host', async () => {
+    const protocol = deliveryScenario();
+    const expired = protocol.prepared();
+    expired.structuredContent.expiresAt = new Date(Date.now() - 1).toISOString();
+    protocol.prepare.mockResolvedValueOnce(expired);
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('REJECTED');
+  });
+
+  it('does not send a delayed prepare response after presentation supersession', async () => {
+    const protocol = deliveryScenario();
+    let resolve: ((value: ReturnType<typeof protocol.prepared>) => void) | undefined;
+    protocol.prepare.mockImplementationOnce(
+      () =>
+        new Promise((complete) => {
+          resolve = complete;
+        }),
+    );
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    bridge.listener?.({ structuredContent: { ...presentation, presentationState: 'SUPERSEDED' } });
+    resolve?.(protocol.prepared());
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('REJECTED');
+  });
+
   it('does not attach after destruction while the host handshake is pending', async () => {
     let connect: (() => void) | undefined;
     bridge.connect.mockImplementation(

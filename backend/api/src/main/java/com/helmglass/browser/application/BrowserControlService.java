@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
 
@@ -99,6 +100,9 @@ public class BrowserControlService {
     controls.transfer(
         id, input.controllerInstanceId(), "HUMAN", input.privateLogin(), receipt.operationId());
     controls.bindLogin(id, actor.loginId());
+    if (session.taskId() != null) {
+      events.publishEvent(new TaskContinuationService.Cancelled(session.taskId()));
+    }
     publishControl(actor.userId(), id, input.privateLogin() ? "HUMAN_PRIVATE" : "HUMAN");
     return receipt;
   }
@@ -139,6 +143,16 @@ public class BrowserControlService {
             false);
     controls.returnIntent(id, input.intent());
     controls.transfer(id, null, "AGENT", false, receipt.operationId());
+    if (session.taskId() != null) {
+      boolean continueTask =
+          "CONTINUE_IF_ALLOWED".equals(input.intent()) && !"PAUSED".equals(lease.priorTaskState());
+      events.publishEvent(new TaskContinuationService.Consent(session.taskId(), continueTask));
+      if (continueTask) {
+        events.publishEvent(
+            new TaskContinuationService.Waiting(
+                session.taskId(), receipt.operationId(), null, "CONTROL_RETURNED"));
+      }
+    }
     publishControl(actor.userId(), id, "AGENT");
     return receipt;
   }
@@ -244,15 +258,18 @@ public class BrowserControlService {
     return true;
   }
 
+  @Transactional(propagation = Propagation.MANDATORY)
   public void publishControl(UUID userId, UUID id, String mode) {
     sendControl(userId, id, mode, true, null);
   }
 
   /** Redelivery preserves the control binding without emitting another resource invalidation. */
+  @Transactional(propagation = Propagation.MANDATORY)
   public void redeliverControl(UUID userId, UUID id, String mode) {
     sendControl(userId, id, mode, false, null);
   }
 
+  @Transactional(propagation = Propagation.MANDATORY)
   public void publishCleanup(UUID userId, UUID id, Instant cleanupDeadline) {
     sendControl(userId, id, "QUIESCED", false, cleanupDeadline);
   }

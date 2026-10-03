@@ -13,18 +13,31 @@ export class Identity {
   private readonly realtime = inject(Realtime);
 
   load(): Observable<boolean> {
-    return this.api.get<Me>('/me').pipe(
+    return this.read().pipe(
       tap((me) => {
-        this.me.set(me);
-        this.error.set(null);
-        this.realtime.start(me.permissions.includes('platform_admin'));
+        this.realtime.start(me, () => this.read());
       }),
       map(() => true),
-      catchError((error: unknown) => {
-        this.error.set(problemOf(error));
+      catchError(() => {
         this.me.set(null);
         this.realtime.stop();
         return of(false);
+      }),
+    );
+  }
+
+  private read(): Observable<Me> {
+    return this.api.get<Me>('/me').pipe(
+      tap({
+        next: (me) => {
+          this.me.set(me);
+          this.error.set(null);
+        },
+        error: (error: unknown) => {
+          const problem = problemOf(error);
+          this.error.set(problem);
+          if (problem.status === 401 || problem.status === 403) this.me.set(null);
+        },
       }),
     );
   }

@@ -1,5 +1,7 @@
 import { DestroyRef, Injectable, NgZone, inject, signal } from '@angular/core';
-import { Subject } from 'rxjs';
+import { Observable, Subject, Subscription, timeout } from 'rxjs';
+import { problemOf } from '../api/api.service';
+import { Me } from '../api/models';
 import { ReconnectWindow } from './reconnect-window';
 
 export type ResourceName =
@@ -45,6 +47,8 @@ export class Realtime {
     'connecting',
   );
   private readonly zone = inject(NgZone);
+  private authenticate?: () => Observable<Me>;
+  private authentication?: Subscription;
   private socket?: WebSocket;
   private reconnect?: ReturnType<typeof setTimeout>;
   private heartbeat?: ReturnType<typeof setInterval>;
@@ -52,6 +56,7 @@ export class Realtime {
   private lastPong = 0;
   private enabled = false;
   private admin = false;
+  private userId?: string;
 
   constructor() {
     const hide = () => this.disconnect();
@@ -73,17 +78,20 @@ export class Realtime {
 
   retry() {
     if (!this.enabled || document.hidden || this.state() === 'denied') return;
+    if (this.socket || this.authentication) return;
     this.recovery.reset();
     clearTimeout(this.reconnect);
     this.reconnect = undefined;
-    this.refresh.next(null);
-    this.connect();
+    this.reauthenticate();
   }
 
-  start(admin = false) {
+  start(me: Me, authenticate: () => Observable<Me>) {
     if (!this.enabled) this.recovery.reset();
     this.enabled = true;
-    if (this.admin !== admin) {
+    this.authenticate = authenticate;
+    const admin = me.permissions.includes('platform_admin');
+    if (this.userId !== me.id || this.admin !== admin) {
+      this.userId = me.id;
       this.admin = admin;
       this.disconnect();
     }
@@ -105,6 +113,7 @@ export class Realtime {
       );
       this.socket = socket;
       socket.onopen = () => {
+        if (this.socket !== socket) return;
         this.lastPong = Date.now();
         socket.send(
           JSON.stringify({
@@ -149,24 +158,61 @@ export class Realtime {
       socket.onclose = (event) => {
         if (this.socket !== socket) return;
         this.disconnect();
-        this.zone.run(() =>
-          this.state.set(event.code === 4401 || event.code === 4403 ? 'denied' : 'offline'),
-        );
-        if (!this.enabled || document.hidden || event.code === 4401 || event.code === 4403) return;
-        const delay = this.recovery.nextDelay();
-        if (delay === null) {
-          this.zone.run(() => this.state.set('exhausted'));
+        if (event.code === 4403) {
+          this.zone.run(() => this.stop());
           return;
         }
-        this.reconnect = setTimeout(() => {
-          this.reconnect = undefined;
-          this.connect();
-        }, delay);
+        this.scheduleReconnect();
       };
     });
   }
 
+  private reauthenticate() {
+    const authenticate = this.authenticate;
+    if (!this.enabled || document.hidden || this.socket || this.authentication || !authenticate)
+      return;
+    // HTTP exposes 401/403 and lets OAuth2 Proxy refresh the session. A failed
+    // WebSocket handshake only exposes code 1006 to the browser.
+    const request = new Subscription();
+    this.authentication = request;
+    request.add(
+      authenticate()
+        .pipe(timeout(10000))
+        .subscribe({
+          next: (me) => {
+            this.authentication = undefined;
+            this.zone.run(() => this.start(me, authenticate));
+          },
+          error: (error: unknown) => {
+            this.authentication = undefined;
+            const problem = problemOf(error);
+            if (problem.status === 401 || problem.status === 403) {
+              this.zone.run(() => this.stop());
+            } else {
+              this.scheduleReconnect();
+            }
+          },
+        }),
+    );
+  }
+
+  private scheduleReconnect() {
+    this.zone.run(() => this.state.set('offline'));
+    if (!this.enabled || document.hidden) return;
+    const delay = this.recovery.nextDelay();
+    if (delay === null) {
+      this.zone.run(() => this.state.set('exhausted'));
+      return;
+    }
+    this.reconnect = setTimeout(() => {
+      this.reconnect = undefined;
+      this.reauthenticate();
+    }, delay);
+  }
+
   private disconnect() {
+    this.authentication?.unsubscribe();
+    this.authentication = undefined;
     clearTimeout(this.reconnect);
     clearInterval(this.heartbeat);
     this.reconnect = undefined;
@@ -174,6 +220,8 @@ export class Realtime {
     const socket = this.socket;
     this.socket = undefined;
     if (socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
       socket.onclose = null;
       socket.close();
     }

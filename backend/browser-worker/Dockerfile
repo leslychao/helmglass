@@ -18,10 +18,11 @@ RUN cc -std=c17 -O2 -Wall -Wextra -Werror /build/media-helper.c -o /build/helm-m
 
 FROM ${NODE_IMAGE} AS node-build
 WORKDIR /app
-COPY package.json package-lock.json tsconfig.json ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline --ignore-scripts --no-audit --no-fund
 COPY patches ./patches
 RUN npm run patch:upstream
+COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build && npm prune --omit=dev --ignore-scripts
 
