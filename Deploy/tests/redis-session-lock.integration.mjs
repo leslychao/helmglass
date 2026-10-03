@@ -138,7 +138,7 @@ chmod 400 /secrets/*
           await t.test('legacy ACL reproduces the denied refresh lock acquisition', async () => {
             const denied = await redis(container, acquire(owner), [0, 1]);
             assert.equal(denied.code, 1);
-            assert.match(denied.stdout + denied.stderr, /NOPERM|not allowed|can't run/i);
+            assert.match(denied.stdout + denied.stderr, /ACL failure in script:.*no permissions.*msetnx/i);
             assert.equal(await value(container, ['EXISTS', key]), '0');
           });
           continue;
