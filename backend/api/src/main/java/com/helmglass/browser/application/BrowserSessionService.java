@@ -69,6 +69,7 @@ public class BrowserSessionService {
     boolean canAcquire =
         runtimeActive
             && web
+            && !self
             && !control.state().equals("TRANSFERRING")
             && !controls.sessionOperationPending(id);
     Map<String, Capability> capabilities = new HashMap<>();
@@ -77,11 +78,11 @@ public class BrowserSessionService {
         capability(
             active && (!privateMode || self),
             true,
-            viewUnavailableReason(session.state(), control.state(), otherHuman)));
+            viewUnavailableReason(session.state(), control.state(), privateMode, otherHuman)));
     capabilities.put(
         "acquire",
         capability(
-            canAcquire && !self && !otherHuman,
+            canAcquire && !otherHuman,
             web && !otherHuman,
             "Управление пока недоступно. Дождитесь готовности браузера."));
     capabilities.put(
@@ -101,7 +102,8 @@ public class BrowserSessionService {
             "Acquire private control to continue login"));
     capabilities.put(
         "release",
-        capability(active && self && !privateMode, self && !privateMode, "Finish private login first"));
+        capability(
+            active && self && !privateMode, self && !privateMode, "Finish private login first"));
     capabilities.put("input", capability(active && self, self, "Acquire control to interact"));
     capabilities.put(
         "close",
@@ -227,7 +229,7 @@ public class BrowserSessionService {
   }
 
   private static String viewUnavailableReason(
-      String sessionState, String controlState, boolean otherHuman) {
+      String sessionState, String controlState, boolean privateMode, boolean otherHuman) {
     if (!sessionState.equals("ACTIVE")) {
       return switch (sessionState) {
         case "CLOSED" -> "Браузер закрыт. Вернитесь к подключению или задаче.";
@@ -240,10 +242,12 @@ public class BrowserSessionService {
     if (controlState.equals("TRANSFERRING") || controlState.equals("QUIESCING")) {
       return "Подготавливаем безопасную передачу управления. Дождитесь её завершения.";
     }
-    if (otherHuman) {
+    if (privateMode && otherHuman) {
       return "Приватный браузер открыт в другой вкладке. Перенесите управление сюда.";
     }
-    return "Сеанс управления прерван. Нажмите «Восстановить управление», чтобы продолжить вход.";
+    return privateMode
+        ? "Сеанс управления прерван. Нажмите «Восстановить управление», чтобы продолжить вход."
+        : "Сеанс управления прерван. Нажмите «Взять управление», чтобы продолжить работу.";
   }
 
   private static String siteAccess(

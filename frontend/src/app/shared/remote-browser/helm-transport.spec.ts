@@ -337,4 +337,22 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     fixture.componentInstance.fail('Не удалось согласовать поток');
     expect(fixture.componentInstance.message()).toContain('Не удалось согласовать поток');
   });
+
+  it('uses the fresh denial reason without requesting an unauthorized video ticket', () => {
+    currentSession = {
+      ...session,
+      capabilities: {
+        view: {
+          allowed: false,
+          reason: 'Сеанс управления прерван. Восстановите управление.',
+        },
+      },
+    };
+    mutate.mockClear();
+    fixture.componentInstance.retry();
+    fixture.detectChanges();
+    expect(mutate).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.state()).toBe('UNAVAILABLE');
+    expect(fixture.componentInstance.message()).toContain('Сеанс управления прерван');
+  });
 });

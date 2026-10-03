@@ -57,6 +57,22 @@ export async function verifyPrivateLogin(
   await page
     .getByText("Живой просмотр", { exact: true })
     .waitFor({ timeout: 40_000 });
+  assert.equal(
+    await page.getByRole("button", { name: "Продолжить вход", exact: true }).count(),
+    0,
+    "The login page must not offer navigation to itself",
+  );
+  const input = page.getByRole("textbox", { name: "Управление удалённым браузером.", exact: false });
+  await input.waitFor({ timeout: 10_000 });
+  await delay(20_000);
+  assert.equal(await input.isVisible(), true, "Private control survives its initial 15-second lease");
+  assert.equal(await page.locator(".browser-head").getByText("Подключён", { exact: true }).count(), 1);
+
+  await page.reload();
+  await page.getByRole("button", { name: /^(Перенести управление сюда|Восстановить управление)$/ })
+    .click({ timeout: 30_000 });
+  await input.waitFor({ timeout: 40_000 });
+  assert.equal(await page.getByText("Живой просмотр", { exact: true }).isVisible(), true);
   const login = await read(page, fixture.origin + loginPath);
   assert.equal(
     login.sessionId,

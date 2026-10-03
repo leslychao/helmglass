@@ -340,7 +340,8 @@ class BrowserNavigationIntegrationTest {
         .param("id", fixture.session())
         .update();
     var view =
-        json.read(json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
+        json.read(
+            json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
     assertThat(view.path("state").asString()).isEqualTo("ACTIVE");
     assertThat(view.path("controllerRelation").asString()).isEqualTo("NONE");
     assertThat(view.path("capabilities").path("view").path("allowed").asBoolean()).isFalse();
@@ -363,7 +364,8 @@ class BrowserNavigationIntegrationTest {
             context());
     assertThat(receipt.resource().id()).isEqualTo(fixture.session());
     var transferring =
-        json.read(json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
+        json.read(
+            json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
     assertThat(transferring.path("controlState").asString()).isEqualTo("TRANSFERRING");
     assertThat(transferring.path("capabilities").path("acquire").path("allowed").asBoolean())
         .isFalse();
@@ -371,7 +373,8 @@ class BrowserNavigationIntegrationTest {
         .contains("передачу управления");
     controls.acknowledge(fixture.worker(), fixture.boot(), fixture.session(), 2L);
     var restored =
-        json.read(json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
+        json.read(
+            json.write(sessions.get(fixture.actor(), fixture.session(), fixture.controller())));
     assertThat(restored.path("capabilities").path("view").path("allowed").asBoolean()).isTrue();
     assertThat(restored.path("privacyMode").asString()).isEqualTo("LOGIN_PRIVATE");
     assertThat(restored.path("capabilities").path("release").path("visible").asBoolean()).isFalse();

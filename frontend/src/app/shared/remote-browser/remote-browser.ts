@@ -14,7 +14,7 @@ import {
   viewChild,
 } from '@angular/core';
 import { HttpErrorResponse } from '@angular/common/http';
-import { Subscription, exhaustMap, switchMap, timeout, timer } from 'rxjs';
+import { EMPTY, Subscription, exhaustMap, switchMap, timeout, timer } from 'rxjs';
 import GstWebRTCAPI from 'gstwebrtc-api/src/gstwebrtc-api.js';
 import type ConsumerSession from 'gstwebrtc-api/types/consumer-session';
 import { Api, problemOf } from '../../core/api/api.service';
@@ -275,6 +275,12 @@ export class RemoteBrowser {
       .pipe(
         switchMap((current) => {
           this.channelSession = current;
+          if (!current.capabilities['view']?.allowed) {
+            this.state.set('UNAVAILABLE');
+            this.message.set(current.capabilities['view']?.reason || 'Просмотр сейчас недоступен');
+            this.refresh.emit();
+            return EMPTY;
+          }
           return this.api.mutate<ViewTicket>(
             'POST',
             `/browser-sessions/${session.id}/view-tickets`,
