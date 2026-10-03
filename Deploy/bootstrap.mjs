@@ -46,10 +46,14 @@ export async function prepareBootstrap(configuration, environment = process.env)
       throw new Error('Existing bootstrap belongs to a different installation or origin; use an explicit certificate rotation');
     }
     let serviceSecrets;
+    let manifestBytes;
     for (const file of [...BOOTSTRAP_FILES, 'vault-services-input',
       'installation-ca.crt', 'installation-ca.key']) {
       const bytes = await readProtectedFile(join(directory, file));
-      if (file === 'vault-services-input') serviceSecrets = JSON.parse(bytes.toString('utf8')).services;
+      if (file === 'vault-services-input') {
+        manifestBytes = bytes;
+        serviceSecrets = JSON.parse(bytes.toString('utf8')).services;
+      }
     }
     const legacyEdgePath = join(directory, 'edge-tls');
     if (entries.includes('edge-tls')) {
@@ -71,12 +75,24 @@ export async function prepareBootstrap(configuration, environment = process.env)
     if (turnSecret !== serviceSecrets?.api?.turnSharedSecret || turnSecret !== serviceSecrets?.coturn?.turnSharedSecret) {
       throw new Error('TURN credential differs from installation credentials');
     }
+    const retiredFiles = ['backup-bootstrap', 'backup-recipient'].filter(name => entries.includes(name));
+    for (const name of retiredFiles) {
+      const metadata = await lstat(join(directory, name));
+      if (!metadata.isFile() || metadata.isSymbolicLink()) throw new Error('Unsafe retired backup input');
+    }
     if (!previousAcl.equals(upgradedAcl)) {
       await replaceProtectedFile(aclPath, upgradedAcl, createHash('sha256').update(previousAcl).digest('hex'));
     }
     if (!previousTurn.equals(upgradedTurn)) {
       await replaceProtectedFile(turnPath, upgradedTurn, createHash('sha256').update(previousTurn).digest('hex'));
     }
+    const manifest = JSON.parse(manifestBytes.toString('utf8'));
+    if (Object.hasOwn(manifest.credentials, 'backup')) {
+      delete manifest.credentials.backup;
+      await replaceProtectedFile(join(directory, 'vault-services-input'), manifest,
+        createHash('sha256').update(manifestBytes).digest('hex'));
+    }
+    for (const name of retiredFiles) await unlink(join(directory, name));
     if (entries.includes('edge-tls')) {
       const legacyEdge = await lstat(legacyEdgePath);
       if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()) throw new Error('Unsafe legacy edge TLS file');

@@ -39,4 +39,10 @@
   <changeSet id="025-usage-calendar" author="helmglass"><sqlFile path="025-usage-calendar.sql" relativeToChangelogFile="true"/></changeSet>
   <changeSet id="026-browser-close-consent" author="helmglass"><sqlFile path="026-browser-close-consent.sql" relativeToChangelogFile="true"/></changeSet>
   <changeSet id="027-screenshot-artifacts" author="helmglass"><sqlFile path="027-screenshot-artifacts.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="028-retire-backup-ledger" author="helmglass">
+    <preConditions onFail="HALT" onFailMessage="Complete the legacy restore with its original release before upgrading.">
+      <sqlCheck expectedResult="0">SELECT count(*) FROM platform_settings WHERE recovery_state NOT IN ('NORMAL','READY')</sqlCheck>
+    </preConditions>
+    <sqlFile path="028-retire-backup-ledger.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

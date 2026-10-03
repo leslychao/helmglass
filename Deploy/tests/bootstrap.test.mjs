@@ -88,6 +88,18 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     await assert.rejects(prepareBootstrap(configuration, environment), /Unsafe legacy edge TLS/);
     await rmdir(legacyEdgePath);
     assert.deepEqual(await readFile(join(first.directory, 'vault-services-input')), kvBefore);
+    assert.equal(Object.hasOwn(secrets.credentials, 'backup'), false);
+    for (const name of ['backup-bootstrap', 'backup-recipient']) {
+      await assert.rejects(readFile(join(first.directory, name)), { code: 'ENOENT' });
+      await writeProtectedFile(join(first.directory, name), 'Retired fixture');
+    }
+    await writeFile(join(first.directory, 'vault-services-input'), JSON.stringify({ ...secrets,
+      credentials: { ...secrets.credentials, backup: { roleId: 'retired', secretId: 'retired' } } }));
+    assert.equal((await prepareBootstrap(configuration, environment)).created, false);
+    assert.deepEqual(JSON.parse(await readFile(join(first.directory, 'vault-services-input'), 'utf8')), secrets);
+    for (const name of ['backup-bootstrap', 'backup-recipient']) {
+      await assert.rejects(readFile(join(first.directory, name)), { code: 'ENOENT' });
+    }
     await assert.rejects(prepareBootstrap({ ...configuration, PUBLIC_ORIGIN: 'https://changed.example.test' }, environment), /different installation/);
     await unlink(join(first.directory, 'worker-bootstrap'));
     await assert.rejects(prepareBootstrap(configuration, environment), { code: 'ENOENT' });

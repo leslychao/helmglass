@@ -162,8 +162,7 @@ class VaultIntegrationTest {
     }
   }
 
-  private void verifyMigrationBootstrap(
-      VaultTemplate administrator, URI endpoint, String ca)
+  private void verifyMigrationBootstrap(VaultTemplate administrator, URI endpoint, String ca)
       throws Exception {
     var databaseImage =
         DockerImageName.parse(

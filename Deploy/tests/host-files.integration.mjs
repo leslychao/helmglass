@@ -59,6 +59,7 @@ test('daemon-side delivery migrates TURN atomically, retires managed edge TLS an
       'import {writeFile,chown} from "node:fs/promises";let text="";for await(const chunk of process.stdin)text+=chunk;'
       + 'const input=JSON.parse(text);await writeFile("/bootstrap/turn-bootstrap",Buffer.from(input.turn,"base64"));'
       + 'await writeFile("/bootstrap/edge-tls",Buffer.from(input.edge,"base64"),{mode:0o400,flag:"wx"});'
+      + 'await writeFile("/bootstrap/backup-recipient","Retired public certificate",{mode:0o444,flag:"wx"});'
       + 'await chown("/bootstrap/edge-tls",101,101);'],
     { input: JSON.stringify({ turn: legacyTurn.toString('base64'), edge: content.toString('base64') }) });
     const beforeMigration = JSON.parse((await inspect()).stdout);

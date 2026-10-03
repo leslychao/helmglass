@@ -48,14 +48,34 @@ import org.springframework.transaction.support.TransactionTemplate;
 @SpringJUnitConfig(AccountCleanupIntegrationTest.Owners.class)
 class AccountCleanupIntegrationTest {
   @Configuration
-  @Import({TaskLifecycleIntegrationTest.DatabaseConfiguration.class, AccountLifecycleService.class,
-      AccountCleanupService.class, AccountCleanupRepository.class, AccountDataRepository.class,
-      AdministrationRepository.class})
+  @Import({
+    TaskLifecycleIntegrationTest.DatabaseConfiguration.class,
+    AccountLifecycleService.class,
+    AccountCleanupService.class,
+    AccountCleanupRepository.class,
+    AccountDataRepository.class,
+    AdministrationRepository.class
+  })
   static class Owners {
-    @Bean KeycloakSessionClient keycloak() { return mock(KeycloakSessionClient.class); }
-    @Bean UserEphemeralState ephemeral() { return mock(UserEphemeralState.class); }
-    @Bean ObjectStorage storage() { return mock(ObjectStorage.class); }
-    @Bean ProfileKeyService keys() { return mock(ProfileKeyService.class); }
+    @Bean
+    KeycloakSessionClient keycloak() {
+      return mock(KeycloakSessionClient.class);
+    }
+
+    @Bean
+    UserEphemeralState ephemeral() {
+      return mock(UserEphemeralState.class);
+    }
+
+    @Bean
+    ObjectStorage storage() {
+      return mock(ObjectStorage.class);
+    }
+
+    @Bean
+    ProfileKeyService keys() {
+      return mock(ProfileKeyService.class);
+    }
   }
 
   private final AccountLifecycleService accounts;
@@ -71,10 +91,17 @@ class AccountCleanupIntegrationTest {
   private final TransactionTemplate transaction;
 
   @Autowired
-  AccountCleanupIntegrationTest(AccountLifecycleService accounts, AccountCleanupService cleanup,
-      IdentityRepository identities, TaskLifecycleService tasks, BrowserRepository browsers,
-      JdbcClient jdbc, KeycloakSessionClient keycloak, UserEphemeralState ephemeral,
-      ObjectStorage storage, ProfileKeyService keys,
+  AccountCleanupIntegrationTest(
+      AccountLifecycleService accounts,
+      AccountCleanupService cleanup,
+      IdentityRepository identities,
+      TaskLifecycleService tasks,
+      BrowserRepository browsers,
+      JdbcClient jdbc,
+      KeycloakSessionClient keycloak,
+      UserEphemeralState ephemeral,
+      ObjectStorage storage,
+      ProfileKeyService keys,
       PlatformTransactionManager transactions) {
     this.accounts = accounts;
     this.cleanup = cleanup;
@@ -103,10 +130,17 @@ class AccountCleanupIntegrationTest {
     var deletion = delete(admin, user);
     cleanup.processPurge(deletion.resource().id());
     verify(storage, never()).purgeUserBatch(anyString(), any());
-    accounts.restore(admin, deletion.resource().id(), new AdminContracts.Reason(1L, "Recover"), context());
+    accounts.restore(
+        admin, deletion.resource().id(), new AdminContracts.Reason(1L, "Recover"), context());
     assertThat(identities.isActive(user.userId())).isTrue();
 
-    var second = accounts.change(admin, user.userId(), new AdminContracts.Reason(3L, "Delete again"), context(), "delete");
+    var second =
+        accounts.change(
+            admin,
+            user.userId(),
+            new AdminContracts.Reason(3L, "Delete again"),
+            context(),
+            "delete");
     UUID requestId = second.resource().id();
     expire(requestId);
     cleanup.processPurge(requestId);
@@ -117,32 +151,69 @@ class AccountCleanupIntegrationTest {
     assertThat(state(user.userId())).isEqualTo("PURGING");
     verify(storage).purgeUserBatch("hg-artifacts", user.userId());
     verify(keys, never()).destroy(any());
-    assertThatThrownBy(() -> accounts.restore(admin, requestId, new AdminContracts.Reason(2L, "Too late"), context()))
+    assertThatThrownBy(
+            () ->
+                accounts.restore(
+                    admin, requestId, new AdminContracts.Reason(2L, "Too late"), context()))
         .isInstanceOf(DomainException.class);
-    assertThat(jdbc.sql("SELECT count(*) FROM operation_items WHERE operation_id=(SELECT purge_operation_id FROM account_deletion_requests WHERE id=:id) AND state='SUCCEEDED'")
-        .param("id", requestId).query(Long.class).single()).isOne();
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM operation_items WHERE operation_id=(SELECT"
+                        + " purge_operation_id FROM account_deletion_requests WHERE id=:id) AND"
+                        + " state='SUCCEEDED'")
+                .param("id", requestId)
+                .query(Long.class)
+                .single())
+        .isOne();
   }
 
   @Test
   void occupiedRuntimeKeepsQuotaUntilConfirmedCloseBeforeAnyObjectDeletion() {
     var admin = actor(true);
     var user = actor(false);
-    var task = tasks.create(user, new TaskContracts.Create("Read", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"), context());
+    var task =
+        tasks.create(
+            user,
+            new TaskContracts.Create(
+                "Read", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
+            context());
     UUID worker = UUID.randomUUID();
     UUID boot = UUID.randomUUID();
-    jdbc.sql("INSERT INTO browser_workers(id,boot_id,capacity,observed_state,image_version) VALUES(:id,:boot,1,'READY','fixture')")
-        .param("id", worker).param("boot", boot).update();
-    var session = Objects.requireNonNull(transaction.execute(status -> browsers.reserve(user.userId(), task.resource().id(), new BrowserRepository.Worker(worker, boot, 1), 1800)));
+    jdbc.sql(
+            "INSERT INTO browser_workers(id,boot_id,capacity,observed_state,image_version)"
+                + " VALUES(:id,:boot,1,'READY','fixture')")
+        .param("id", worker)
+        .param("boot", boot)
+        .update();
+    var session =
+        Objects.requireNonNull(
+            transaction.execute(
+                status ->
+                    browsers.reserve(
+                        user.userId(),
+                        task.resource().id(),
+                        new BrowserRepository.Worker(worker, boot, 1),
+                        1800)));
     UUID request = delete(admin, user).resource().id();
     expire(request);
     cleanup.processPurge(request);
     next(request);
     cleanup.processPurge(request);
     verify(storage, never()).purgeUserBatch(anyString(), any());
-    assertThat(jdbc.sql("SELECT count(*) FROM browser_allocations WHERE session_id=:id AND state<>'RELEASED'")
-        .param("id", session.id()).query(Long.class).single()).isOne();
-    jdbc.sql("UPDATE browser_sessions SET state='CLOSED',binding_released_at=now() WHERE id=:id").param("id", session.id()).update();
-    jdbc.sql("UPDATE browser_allocations SET state='RELEASED' WHERE session_id=:id").param("id", session.id()).update();
+    assertThat(
+            jdbc.sql(
+                    "SELECT count(*) FROM browser_allocations WHERE session_id=:id AND"
+                        + " state<>'RELEASED'")
+                .param("id", session.id())
+                .query(Long.class)
+                .single())
+        .isOne();
+    jdbc.sql("UPDATE browser_sessions SET state='CLOSED',binding_released_at=now() WHERE id=:id")
+        .param("id", session.id())
+        .update();
+    jdbc.sql("UPDATE browser_allocations SET state='RELEASED' WHERE session_id=:id")
+        .param("id", session.id())
+        .update();
     finish(request);
     assertThat(state(user.userId())).isEqualTo("DELETED");
   }
@@ -151,39 +222,89 @@ class AccountCleanupIntegrationTest {
   void confirmedPurgeRemovesOwnedDataKeepsAuditAndPreventsIdentityResurrection() {
     var admin = actor(true);
     var user = actor(false);
-    String subject = jdbc.sql("SELECT subject FROM application_users WHERE id=:id").param("id", user.userId()).query(String.class).single();
-    tasks.create(user, new TaskContracts.Create("Private draft", "https://example.com", List.of(), "TEXT", false, 1800, "DRAFT"), context());
+    String subject =
+        jdbc.sql("SELECT subject FROM application_users WHERE id=:id")
+            .param("id", user.userId())
+            .query(String.class)
+            .single();
+    tasks.create(
+        user,
+        new TaskContracts.Create(
+            "Private draft", "https://example.com", List.of(), "TEXT", false, 1800, "DRAFT"),
+        context());
     UUID request = delete(admin, user).resource().id();
     expire(request);
     finish(request);
     assertThat(state(user.userId())).isEqualTo("DELETED");
-    assertThat(jdbc.sql("SELECT count(*) FROM tasks WHERE user_id=:id").param("id", user.userId()).query(Long.class).single()).isZero();
-    assertThat(jdbc.sql("SELECT count(*) FROM user_policies WHERE user_id=:id").param("id", user.userId()).query(Long.class).single()).isZero();
-    assertThat(jdbc.sql("SELECT count(*) FROM admin_audit_log WHERE target_user_id=:id").param("id", user.userId()).query(Long.class).single()).isGreaterThanOrEqualTo(3);
-    assertThat(jdbc.sql("SELECT email FROM application_users WHERE id=:id").param("id", user.userId()).query(String.class).single()).isEmpty();
-    assertThatThrownBy(() -> transaction.execute(status -> identities.resolve("https://issuer.example", subject, "Old identity", "old@example.test")))
-        .isInstanceOf(DomainException.class).hasMessageContaining("permanently deleted");
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM tasks WHERE user_id=:id")
+                .param("id", user.userId())
+                .query(Long.class)
+                .single())
+        .isZero();
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM user_policies WHERE user_id=:id")
+                .param("id", user.userId())
+                .query(Long.class)
+                .single())
+        .isZero();
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM admin_audit_log WHERE target_user_id=:id")
+                .param("id", user.userId())
+                .query(Long.class)
+                .single())
+        .isGreaterThanOrEqualTo(3);
+    assertThat(
+            jdbc.sql("SELECT email FROM application_users WHERE id=:id")
+                .param("id", user.userId())
+                .query(String.class)
+                .single())
+        .isEmpty();
+    assertThatThrownBy(
+            () ->
+                transaction.execute(
+                    status ->
+                        identities.resolve(
+                            "https://issuer.example", subject, "Old identity", "old@example.test")))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("permanently deleted");
     verify(keycloak).deleteUser(subject);
     cleanup.processPurge(request);
-    assertThat(jdbc.sql("SELECT count(*) FROM operations WHERE target_id=:id AND kind='ACCOUNT_PURGE'")
-        .param("id", request).query(Long.class).single()).isOne();
+    assertThat(
+            jdbc.sql("SELECT count(*) FROM operations WHERE target_id=:id AND kind='ACCOUNT_PURGE'")
+                .param("id", request)
+                .query(Long.class)
+                .single())
+        .isOne();
   }
 
   @Test
   void latestIdentityIntentWinsAndProviderFailuresNeverCompleteTheOperation() {
     var admin = actor(true);
     var user = actor(false);
-    String subject = jdbc.sql("SELECT subject FROM application_users WHERE id=:id").param("id", user.userId()).query(String.class).single();
-    var blocked = accounts.change(admin, user.userId(), new AdminContracts.Reason(1L, "Block"), context(), "block");
-    var unblocked = accounts.change(admin, user.userId(), new AdminContracts.Reason(2L, "Unblock"), context(), "unblock");
+    String subject =
+        jdbc.sql("SELECT subject FROM application_users WHERE id=:id")
+            .param("id", user.userId())
+            .query(String.class)
+            .single();
+    var blocked =
+        accounts.change(
+            admin, user.userId(), new AdminContracts.Reason(1L, "Block"), context(), "block");
+    var unblocked =
+        accounts.change(
+            admin, user.userId(), new AdminContracts.Reason(2L, "Unblock"), context(), "unblock");
     cleanup.processIdentity(user.userId());
     cleanup.advanceIdentity();
     verify(keycloak).reconcileUser(subject, true);
     verify(keycloak, never()).reconcileUser(subject, false);
     assertThat(operationState(blocked.operationId())).isEqualTo("CANCELLED");
     assertThat(operationState(unblocked.operationId())).isEqualTo("SUCCEEDED");
-    var failed = accounts.change(admin, user.userId(), new AdminContracts.Reason(3L, "Block again"), context(), "block");
-    doThrow(new DomainException(503, "IDENTITY_PROVIDER_UNAVAILABLE", "Unavailable")).when(keycloak).reconcileUser(subject, false);
+    var failed =
+        accounts.change(
+            admin, user.userId(), new AdminContracts.Reason(3L, "Block again"), context(), "block");
+    doThrow(new DomainException(503, "IDENTITY_PROVIDER_UNAVAILABLE", "Unavailable"))
+        .when(keycloak)
+        .reconcileUser(subject, false);
     for (int attempt = 0; attempt < 3; attempt++) {
       cleanup.processIdentity(user.userId());
     }
@@ -192,14 +313,19 @@ class AccountCleanupIntegrationTest {
   }
 
   private MutationReceipt delete(AuthenticatedActor admin, AuthenticatedActor user) {
-    return accounts.change(admin, user.userId(), new AdminContracts.Reason(1L, "Remove account"), context(), "delete");
+    return accounts.change(
+        admin, user.userId(), new AdminContracts.Reason(1L, "Remove account"), context(), "delete");
   }
 
   private void finish(UUID request) {
     for (int batch = 0; batch < 100; batch++) {
       next(request);
       cleanup.processPurge(request);
-      String status = jdbc.sql("SELECT status FROM account_deletion_requests WHERE id=:id").param("id", request).query(String.class).single();
+      String status =
+          jdbc.sql("SELECT status FROM account_deletion_requests WHERE id=:id")
+              .param("id", request)
+              .query(String.class)
+              .single();
       if (status.equals("PURGED")) {
         return;
       }
@@ -208,26 +334,53 @@ class AccountCleanupIntegrationTest {
   }
 
   private void expire(UUID request) {
-    jdbc.sql("UPDATE account_deletion_requests SET delete_requested_at=now()-interval '169 hours',restore_until=now()-interval '1 hour' WHERE id=:id")
-        .param("id", request).update();
+    jdbc.sql(
+            "UPDATE account_deletion_requests SET delete_requested_at=now()-interval '169"
+                + " hours',restore_until=now()-interval '1 hour' WHERE id=:id")
+        .param("id", request)
+        .update();
   }
 
   private void next(UUID request) {
-    jdbc.sql("UPDATE account_deletion_requests SET next_attempt_at=now() WHERE id=:id").param("id", request).update();
+    jdbc.sql("UPDATE account_deletion_requests SET next_attempt_at=now() WHERE id=:id")
+        .param("id", request)
+        .update();
   }
 
   private String state(UUID userId) {
-    return jdbc.sql("SELECT state FROM application_users WHERE id=:id").param("id", userId).query(String.class).single();
+    return jdbc.sql("SELECT state FROM application_users WHERE id=:id")
+        .param("id", userId)
+        .query(String.class)
+        .single();
   }
 
   private String operationState(UUID operationId) {
-    return jdbc.sql("SELECT state FROM operations WHERE id=:id").param("id", operationId).query(String.class).single();
+    return jdbc.sql("SELECT state FROM operations WHERE id=:id")
+        .param("id", operationId)
+        .query(String.class)
+        .single();
   }
 
   private AuthenticatedActor actor(boolean admin) {
-    var account = Objects.requireNonNull(transaction.execute(status -> identities.resolve("https://issuer.example", UUID.randomUUID().toString(), "User", "user@example.test")));
-    return new AuthenticatedActor(account.id(), UUID.randomUUID(), null, "helm-web", "User", "user@example.test", 1,
-        admin ? Set.of("platform_admin") : Set.of(), false);
+    var account =
+        Objects.requireNonNull(
+            transaction.execute(
+                status ->
+                    identities.resolve(
+                        "https://issuer.example",
+                        UUID.randomUUID().toString(),
+                        "User",
+                        "user@example.test")));
+    return new AuthenticatedActor(
+        account.id(),
+        UUID.randomUUID(),
+        null,
+        "helm-web",
+        "User",
+        "user@example.test",
+        1,
+        admin ? Set.of("platform_admin") : Set.of(),
+        false);
   }
 
   private static MutationContext context() {

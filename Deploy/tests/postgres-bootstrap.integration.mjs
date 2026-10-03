@@ -77,6 +77,8 @@ test('protected delivery supports fresh PostgreSQL and guarded empty-cluster boo
             '/docker-entrypoint-initdb.d/10-helm-databases.sh']);
         }
         await wait(name, ['/opt/helm/bin/healthcheck']);
+        assert.equal(await sql(name, 'SHOW archive_mode'), 'off');
+        assert.equal(await sql(name, 'SHOW archive_command'), '');
         assert.equal(await sql(name,
           "SELECT count(*) FROM pg_roles WHERE rolname IN ('helm_api','helm_migration','keycloak')"), '3');
         await sql(name, 'CREATE TABLE bootstrap_preserved (id integer PRIMARY KEY); INSERT INTO bootstrap_preserved VALUES (42)');

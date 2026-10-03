@@ -3,7 +3,8 @@
 - [Техническая спецификация](architecture.html) — канонический владелец архитектуры, контрактов и критериев готовности; HTML с оглавлением, поиском, диаграммами и печатью в PDF открывается без интернета.
 - [Последний HTML-дизайн](Helm-Glass-v8.html) — интерактивный демонстрационный макет, не подключённый к backend или ChatGPT.
 - Развёртывание: [единственное рабочее окружение dev](architecture.html#section-27), [predefined-пользователи admin и Ангелина](architecture.html#predefined-users), [приёмка входа и прав](architecture.html#predefined-users-acceptance).
-- Запуск: [команды сборки, защищённая конфигурация и Vault recovery](architecture.html#launcher-commands).
+- Запуск: [команды сборки, защищённая конфигурация и разблокировка Vault](architecture.html#launcher-commands).
+- Сохранность данных: [границы текущей версии без резервного копирования](architecture.html#data-durability-scope).
 - Готовые компоненты: [реестр зависимостей](architecture.html#reuse-matrix), [границы применения и источники](architecture.html#reuse-candidates).
 - Исполнение: [наблюдение страницы и действия](architecture.html#browser-observation), [передача аудио в ChatGPT и условия расчёта признаков](architecture.html#audio-analysis), [проверка аудиомаршрута](architecture.html#audio-acceptance).
 - Восстановление и совместный просмотр: [фоновое восстановление](architecture.html#background-recovery), [контекст задачи](architecture.html#task-recovery-context), [связь задачи с браузером](architecture.html#browser-continuity), [передача управления](architecture.html#control-handoff), [контракт виджета](architecture.html#widget-transport), [приёмка](architecture.html#continuity-acceptance).

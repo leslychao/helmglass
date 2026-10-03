@@ -35,6 +35,10 @@ async function main() {
   const release = validateRelease(await readEnvironmentFile(new URL('./release.env', import.meta.url)));
   const operatorInputs = await readOperatorInputs(configuration);
   const environment = { ...process.env, ...configuration, ...release, COMPOSE_PROJECT_NAME: 'helm-glass' };
+  if (await optionalJson(join(configuration.LOCAL_SECRETS_DIR, 'recovery-state.json'))) {
+    throw new ConfigurationError('INSTALLATION_UPGRADE',
+      'retire the legacy restore marker only after verifying the selected persistent storage; see the deployment specification');
+  }
   for (const name of ['DOCKER_CONTEXT', 'COMPOSE_PROFILES', 'COMPOSE_FILE']) delete environment[name];
   delete environment.VAULT_TOKEN;
   const docker = (arguments_, options = {}) => run('docker', arguments_, { environment, cwd: repository, ...options });

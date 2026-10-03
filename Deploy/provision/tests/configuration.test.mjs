@@ -42,6 +42,8 @@ test('operator password file is optional and accepts only an absolute local path
 test('rejects secrets, public trust, unsafe origins and malformed remote paths', () => {
   for (const [key, value] of [
     ['KEYCLOAK_ADMIN_PASSWORD', 'secret-must-not-appear'],
+    ['BACKUP_DIR', '/srv/retired/backup'], ['BACKUP_WORK_DIR', '/srv/retired/scratch'],
+    ['BACKUP_RECIPIENT_FILE', 'retired.pem'], ['DELETION_LEDGER_DIR', '/srv/retired/ledger'],
     ['TRUSTED_EDGE_PROXY', '0.0.0.0/0'], ['TRUSTED_EDGE_PROXY', '127.0.0.1;include /tmp/attack'],
     ['TRUSTED_EDGE_PROXY', ''], ['EDGE_TLS_FILE', 'obsolete.pem'], ['TURN_TLS_FILE', 'obsolete.pem'],
     ['PUBLIC_ORIGIN', 'http://helm.example.test'], ['PUBLIC_ORIGIN', 'https://helm.example.test/path'],
@@ -49,6 +51,7 @@ test('rejects secrets, public trust, unsafe origins and malformed remote paths',
     ['PUBLIC_ORIGIN', 'https://helm.example.test?query=private'],
     ['SECRETS_DIR', 'C:/private/helm-glass'], ['SECRETS_DIR', '/'],
     ['SECRETS_DIR', '/var/lib/../etc'], ['WORKER_COUNT', '2; command'],
+    ['MINIO_DATA_DIR', '/var/lib/helm-glass/bootstrap/data'], ['MINIO_DATA_DIR', '/'],
     ['TURN_RELAY_MAX', '65535'], ['MCP_REDIRECT_URIS', 'https://chatgpt.com/*'],
     ['KEYCLOAK_ADMIN_EMAIL', ''], ['KEYCLOAK_ANGELINA_EMAIL', 'admin@example.test'],
   ]) {

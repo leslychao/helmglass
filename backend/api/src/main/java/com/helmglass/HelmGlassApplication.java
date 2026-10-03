@@ -15,6 +15,11 @@ public class HelmGlassApplication {
       MigrationApplication.run();
       return;
     }
+    for (String argument : args) {
+      if (!argument.startsWith("--")) {
+        throw new IllegalArgumentException("Unsupported application command");
+      }
+    }
     SpringApplication.run(HelmGlassApplication.class, args);
   }
 }
