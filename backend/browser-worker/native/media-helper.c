@@ -26,6 +26,7 @@ static guint64 generation;
 static const char *encoder_name;
 static Display *display;
 static gchar *http_proxy;
+static const gint SOURCE_FPS_CEILING = 90;
 
 static void emit(JsonBuilder *builder) {
   JsonGenerator *generator = json_generator_new();
@@ -285,7 +286,7 @@ static gboolean create_pipeline(JsonObject *request) {
   pipeline = gst_pipeline_new("helm-viewport");
   g_object_set(source, "xid", (guint64)window, "use-damage", FALSE, "show-pointer", FALSE, NULL);
   g_object_set(queue, "leaky", 2, "max-size-buffers", 1, "max-size-bytes", 0, "max-size-time", (guint64)0, NULL);
-  GstCaps *raw = gst_caps_new_simple("video/x-raw", "framerate", GST_TYPE_FRACTION, 30, 1, NULL);
+  GstCaps *raw = gst_caps_new_simple("video/x-raw", "framerate", GST_TYPE_FRACTION, SOURCE_FPS_CEILING, 1, NULL);
   g_object_set(capsfilter, "caps", raw, NULL); gst_caps_unref(raw);
   GstCaps *video = gst_caps_from_string("video/x-h264");
   g_object_set(sink, "video-caps", video, "enable-control-data-channel", FALSE,

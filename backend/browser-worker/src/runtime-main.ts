@@ -129,7 +129,7 @@ process.on('message', (raw: unknown) => {
             taskId: assignment.taskId, browserSessionId: assignment.browserSessionId,
             allocationEpoch: assignment.allocationEpoch, controlEpoch: assignment.controlEpoch,
             pageEpoch: assignment.pageEpoch, privacyEpoch: assignment.privacyEpoch,
-            policyVersion: assignment.policyVersion, instructionRevision: assignment.instructionRevision, actionDigest });
+            policyVersion: assignment.policyVersion, instructionRevision: message.command.instructionRevision, actionDigest });
           return permitPromise;
         });
         send({ schemaVersion: 1, type: 'commandResult', requestId: message.requestId, result });

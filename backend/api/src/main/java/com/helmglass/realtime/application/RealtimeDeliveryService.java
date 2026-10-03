@@ -51,6 +51,7 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
       Set.of("users", "userTasks", "userDays", "nodes", "sessions", "audit");
   private static final Set<String> SELF_RESOURCES =
       Set.of(
+          "policy",
           "tasks",
           "usage",
           "connections",

@@ -109,6 +109,14 @@ describe('cabinet session recovery', () => {
     return Socket.instances[Socket.instances.length - 1];
   }
 
+  it('accepts policy invalidation on the existing self channel without identity reload', () => {
+    const readCount = reads.length;
+    socket().onmessage?.({ data: JSON.stringify({ type: 'invalidate', resources: ['policy'] }) });
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(refresh).toHaveBeenCalledWith(new Set(['policy']));
+    expect(reads).toHaveLength(readCount);
+  });
+
   function respond(profile: Me) {
     const response = reads[reads.length - 1];
     response.next(profile);

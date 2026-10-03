@@ -28,6 +28,8 @@ import com.helmglass.connection.infrastructure.repository.LoginRepository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
+import com.helmglass.task.api.TaskContracts;
+import com.helmglass.task.application.TaskLifecycleService;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -50,6 +52,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.event.ApplicationEvents;
+import org.springframework.test.context.event.RecordApplicationEvents;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -60,6 +64,7 @@ import tools.jackson.databind.JsonNode;
 
 @SpringJUnitConfig(BrowserNavigationIntegrationTest.Owners.class)
 @TestPropertySource(properties = "helm.public-origin=https://helm.example")
+@RecordApplicationEvents
 class BrowserNavigationIntegrationTest {
   @Configuration
   @Import({
@@ -91,6 +96,8 @@ class BrowserNavigationIntegrationTest {
   @Autowired private ArtifactRepository artifactRepository;
   @Autowired private ObjectStorage storage;
   @Autowired private MultipartStorage multipart;
+  @Autowired private TaskLifecycleService tasks;
+  @Autowired private ApplicationEvents events;
 
   @BeforeEach
   void resetArtifactTransports() {
@@ -119,6 +126,58 @@ class BrowserNavigationIntegrationTest {
     this.jdbc = jdbc;
     this.json = json;
     transaction = new TransactionTemplate(transactions);
+  }
+
+  @Test
+  void clarificationRevisionTravelsWithHumanCommandAndIsRecheckedAtPermit() {
+    var fixture = fixture(false);
+    tasks.clarify(
+        fixture.actor(),
+        fixture.task(),
+        new TaskContracts.Clarification(UUID.randomUUID(), "Use the revised instructions", 1L, 1L),
+        context());
+    var receipt =
+        navigation.navigate(fixture.actor(), fixture.session(), input(fixture), context());
+    var wire =
+        events.stream(BrowserControlService.ControlIntent.class)
+            .map(intent -> json.tree(intent.message()).path("command"))
+            .filter(
+                command ->
+                    receipt.operationId().toString().equals(command.path("commandId").asString()))
+            .findFirst()
+            .orElseThrow();
+    assertThat(wire.path("instructionRevision").asLong(-1)).isEqualTo(2);
+    var command = transaction.execute(status -> repository.lock(receipt.operationId()));
+    Objects.requireNonNull(command);
+    var stale = new HashMap<>(json.map(command.scope()));
+    stale.put("commandId", command.id());
+    stale.put("attemptId", command.attemptId());
+    stale.put("actionDigest", command.actionDigest());
+    stale.put("instructionRevision", 1);
+    assertThatThrownBy(() -> navigation.permit(fixture.worker(), fixture.boot(), json.tree(stale)))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("binding has changed");
+    assertThat(navigation.permit(fixture.worker(), fixture.boot(), request(command)))
+        .containsEntry("instructionRevision", 2L);
+  }
+
+  @Test
+  void clarificationBetweenHumanAdmissionAndPermitCannotAuthorizeOldAction() {
+    var fixture = fixture(false);
+    var receipt =
+        navigation.navigate(fixture.actor(), fixture.session(), input(fixture), context());
+    var command = transaction.execute(status -> repository.lock(receipt.operationId()));
+    Objects.requireNonNull(command);
+    tasks.clarify(
+        fixture.actor(),
+        fixture.task(),
+        new TaskContracts.Clarification(UUID.randomUUID(), "Do not run the old action", 1L, 1L),
+        context());
+    assertThatThrownBy(() -> navigation.permit(fixture.worker(), fixture.boot(), request(command)))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("binding has changed");
+    var unchanged = transaction.execute(status -> repository.lock(receipt.operationId()));
+    assertThat(Objects.requireNonNull(unchanged).permitId()).isNull();
   }
 
   @Test

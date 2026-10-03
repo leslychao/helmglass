@@ -76,6 +76,7 @@ public class UserPolicyService {
       }
     }
     policies.update(actor.userId(), input);
+    changes.changed(actor.userId(), "policy", actor.userId(), current.version() + 1);
     changes.changed(actor.userId(), "tasks", actor.userId(), current.version() + 1);
     changes.changed(actor.userId(), "users", actor.userId(), current.version() + 1);
     return operations.save(

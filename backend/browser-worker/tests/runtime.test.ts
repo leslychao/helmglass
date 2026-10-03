@@ -74,7 +74,7 @@ test('real Chromium executes through embedded MCP, deduplicates, and fences priv
     assert.equal(typeof initialUsage['sourceStartedAt'], 'string');
     assert.ok(Date.now() - Date.parse(String(initialUsage['sourceStartedAt'])) < 10_000);
     const deniedCommand: Command = { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId,
-      browserSessionId: assignment.browserSessionId, action: { type: 'NAVIGATE', url: origin } };
+      browserSessionId: assignment.browserSessionId, instructionRevision: assignment.instructionRevision, action: { type: 'NAVIGATE', url: origin } };
     const denied = await runtime.execute(deniedCommand, async () => ({ ...assignment, instructionRevision: 0,
       commandId: deniedCommand.commandId, attemptId: deniedCommand.attemptId, permitId: randomUUID(), actionDigest: digest(deniedCommand.action),
       deadline: new Date(Date.now() + 30_000).toISOString() }));
@@ -82,7 +82,7 @@ test('real Chromium executes through embedded MCP, deduplicates, and fences priv
     assert.equal(runtime.context.pages()[0]?.url(), 'about:blank');
     const run = async (action: Action, existing?: Command) => {
       assert.ok(assignment.taskId);
-      const command: Command = existing ?? { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId, browserSessionId: assignment.browserSessionId, action };
+      const command: Command = existing ?? { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId, browserSessionId: assignment.browserSessionId, instructionRevision: assignment.instructionRevision, action };
       const permit: () => Promise<ExecutionPermit> = async () => ({ ...assignment,
         commandId: command.commandId, attemptId: command.attemptId, permitId: randomUUID(), actionDigest: digest(action), deadline: new Date(Date.now() + 30_000).toISOString() });
       return { result: await runtime.execute(command, permit), command };
@@ -221,7 +221,7 @@ test('standalone login creates no observer and initial permit returns no private
   try {
     runtime = await BrowserSession.create(assignment, { stagingDirectory: directory, headless: true, mediaBarrier: async () => undefined });
     assert.equal(runtime.inventory()['mode'], 'QUIESCED');
-    const command: Command = { commandId: randomUUID(), attemptId: randomUUID(), taskId: null, browserSessionId: assignment.browserSessionId, action: { type: 'NAVIGATE', url } };
+    const command: Command = { commandId: randomUUID(), attemptId: randomUUID(), taskId: null, browserSessionId: assignment.browserSessionId, instructionRevision: assignment.instructionRevision, action: { type: 'NAVIGATE', url } };
     const result = await runtime.execute(command, async () => ({ ...assignment, commandId: command.commandId, attemptId: command.attemptId,
       permitId: randomUUID(), actionDigest: digest(command.action), deadline: new Date(Date.now() + 15_000).toISOString() }));
     assert.equal(result.status, 'SUCCEEDED'); assert.equal(result.observation, undefined);
@@ -351,7 +351,7 @@ test('human navigation uses the same Page, fences permits and keeps private rece
     await control();
     const run = async (action: Action, commandPatch: Partial<Command> = {}, permitPatch: Partial<ExecutionPermit> = {}, wait = 0) => {
       const command: Command = { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId,
-        browserSessionId: assignment.browserSessionId, executionMode: mode, controllerInstance, action, ...commandPatch };
+        browserSessionId: assignment.browserSessionId, instructionRevision: assignment.instructionRevision, executionMode: mode, controllerInstance, action, ...commandPatch };
       const result = await session.execute(command, async () => {
         if (wait) await delay(wait);
         return { ...assignment, commandId: command.commandId, attemptId: command.attemptId,

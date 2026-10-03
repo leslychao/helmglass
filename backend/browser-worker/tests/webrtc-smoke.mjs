@@ -21,6 +21,9 @@ const warmupMs = mode === 'baseline' ? 60_000 : 1000;
 const durationMs = mode === 'baseline' ? 600_000 : 5000;
 const lifetimeMs = measuring ? warmupMs + durationMs + 60_000 : 150_000;
 const inputDelayMs = measuring ? 0 : 150;
+const traceCongestion = process.env.HELM_MEDIA_TRACE_CONGESTION === 'True';
+const encoderProfile = process.env.HELM_MEDIA_ENCODER_PROFILE ?? 'software';
+assert.ok(['software', 'nvenc'].includes(encoderProfile));
 const watchdog = setTimeout(() => {
   console.error('Media fixture exceeded its bounded runtime'); process.exit(1);
 }, lifetimeMs + 30_000);
@@ -69,13 +72,17 @@ function viewerFor(binding) {
   return [...viewers.values()].find(viewer => viewer.id === binding.viewerId
     && viewer.binding?.viewGeneration === binding.viewGeneration);
 }
+function recordViewerDiagnostic(viewer, field, value) {
+  if (viewer[field].length >= 40) { viewer.diagnosticOverflow = true; return; }
+  viewer[field].push(typeof value === 'string' ? value.slice(0, 512) : value);
+}
 const media = new MediaSession(() => runtime, (binding, value) => {
   const socket = viewerFor(binding)?.socket;
   if (socket?.readyState === 1) socket.send(JSON.stringify(value));
 }, (binding, code) => {
   const viewer = viewerFor(binding);
   if (!viewer) return;
-  viewer.ended.push({ generation: binding.viewGeneration, code });
+  recordViewerDiagnostic(viewer, 'ended', { generation: binding.viewGeneration, code });
   clearInterval(viewer.renew);
   viewer.socket?.close();
 }, () => undefined);
@@ -102,6 +109,9 @@ const server = createServer(async (request, response) => {
     import { observeVideo } from '/performance/collector.mjs';
     window.framesDecoded=0;window.lastFrameAt=0;window.firstFrameMs=null;window.failures=[];
     window.signaling=[];window.iceErrors=[];const observedPeers=new WeakSet();
+    window.diagnosticOverflow=false;
+    const remember=(field,value)=>{if(window[field].length>=40){window.diagnosticOverflow=true;return;}
+      window[field].push(String(value).slice(0,512));};
     const trace=(direction,value)=>{if(window.signaling.length>=40||value.type==='streamState')return;
       window.signaling.push({direction,type:value.type,sdpType:value.sdp?.type,
         media:value.sdp?.sdp?.split(String.fromCharCode(13,10)).filter(line=>/^m=|^a=(sendrecv|sendonly|recvonly|inactive|rtpmap|fmtp)/.test(line)),ice:!!value.ice});};
@@ -124,11 +134,11 @@ const server = createServer(async (request, response) => {
     const api=new GstWebRTCAPI({signalingServerUrl:'ws://127.0.0.1:8099/?surface='+surface,reconnectionTimeout:0,webrtcConfig:{iceServers:[${JSON.stringify(viewerIce)}],iceTransportPolicy:'relay'},
       transportFactory:url=>{const ws=new WebSocket(url);signal=ws;const bridge={send:data=>{trace('out',JSON.parse(data));ws.send(data)},close:()=>ws.close(),onmessage:null,onclose:null,onerror:null};
         ws.onmessage=event=>{const value=JSON.parse(event.data);trace('in',value);if(value.type==='streamState'){window.captureState=value.captureState;window.captureSequence=value.captureSequence;window.captureAgeMs=value.captureAgeMs;return}bridge.onmessage?.(event);
-          const peer=window.consumer?.rtcPeerConnection;if(peer&&!observedPeers.has(peer)){observedPeers.add(peer);peer.addEventListener('icecandidateerror',error=>window.iceErrors.push(error.errorCode));}};
+          const peer=window.consumer?.rtcPeerConnection;if(peer&&!observedPeers.has(peer)){observedPeers.add(peer);peer.addEventListener('icecandidateerror',error=>remember('iceErrors',error.errorCode));}};
         ws.onclose=()=>bridge.onclose?.();ws.onerror=()=>bridge.onerror?.(new ErrorEvent('error',{message:'socket'}));return bridge;}});
-    api.registerConnectionListener({connected:()=>console.log('SDK connected'),disconnected:()=>console.log('SDK disconnected'),error:error=>window.failures.push(String(error))});
+    api.registerConnectionListener({connected:()=>console.log('SDK connected'),disconnected:()=>console.log('SDK disconnected'),error:error=>remember('failures',error)});
     api.registerPeerListener({producerAdded:producer=>{if(window.consumer)return;const consumer=api.createConsumerSession(producer.id);if(!consumer)return;window.consumer=consumer;
-      consumer.addEventListener('error',event=>{window.failures.push(event.message);console.log('consumer error',event.message)});
+      consumer.addEventListener('error',event=>{remember('failures',event.message);console.log('consumer error',event.message)});
       consumer.addEventListener('streamsChanged',()=>{if(consumer.streams[0]){video.srcObject=consumer.streams[0];video.play().then(()=>{
         if(!${measuring}){measurement?.stop('PEER_REPLACED');measurement=observeVideo(video,{run:${measurementRun},startedAt:performance.now(),durationMs:20000});}
       })}});consumer.connect();},producerRemoved:()=>{}});
@@ -169,7 +179,7 @@ ws.on('connection', (client, request) => {
         workerBootId: binding.workerBootId, browserSessionId: binding.browserSessionId,
         allocationEpoch: binding.allocationEpoch, viewGeneration: binding.viewGeneration, payload });
     } catch (error) {
-      viewer.failures.push(error.code ?? error.message);
+      recordViewerDiagnostic(viewer, 'failures', String(error.code ?? error.message));
     }
   });
   client.once('close', () => {
@@ -178,8 +188,8 @@ ws.on('connection', (client, request) => {
   void media.accept(binding).then(() => {
     viewer.renew = setInterval(() => void media.accept({ ...binding, type: 'viewRenew',
       requestId: randomUUID(), leaseExpiresAt: new Date(Date.now() + 4500).toISOString() })
-      .catch(error => viewer.failures.push(error.code ?? error.message)), 1000);
-  }).catch(error => { viewer.failures.push(error.code ?? error.message); client.close(); });
+      .catch(error => recordViewerDiagnostic(viewer, 'failures', String(error.code ?? error.message))), 1000);
+  }).catch(error => { recordViewerDiagnostic(viewer, 'failures', String(error.code ?? error.message)); client.close(); });
 });
 
 async function decodedProof(viewer, stage) {
@@ -228,11 +238,29 @@ async function recoverViewers(stage) {
   }
 }
 
+async function congestionSnapshot() {
+  const log = await open('/runtime/helper.log', 'r');
+  try {
+    const size = (await log.stat()).size;
+    assert.ok(size <= 16 * 1024 * 1024, 'Native diagnostic log limit exceeded');
+    const tail = Buffer.alloc(Math.min(size, 65536));
+    const { bytesRead } = await log.read(tail, 0, tail.length, size - tail.length);
+    const text = tail.subarray(0, bytesRead).toString('utf8');
+    const rates = [...text.matchAll(/(Delay|Loss): ([\d.]+)kbps => ([\d.]+)kbps \(([^\n]*)\) - effective bitrate: ([\d.]+)kbps/g)];
+    const numeric = match => match ? { controller: match[1], previousKbps: Number(match[2]),
+      targetKbps: Number(match[3]), effectiveKbps: Number(match[5]),
+      direction: /Decrease/.test(match[4]) ? 'decrease' : 'increase',
+      overuse: /Over use/.test(match[4]), highLoss: /High loss/.test(match[4]) } : null;
+    // A decrease and the next increase can occur between two receiver samples.
+    return { latest: numeric(rates.at(-1)),
+      lastDecrease: numeric(rates.findLast(match => /Decrease/.test(match[4]))) };
+  } finally { await log.close(); }
+}
+
 async function performanceBaseline(viewer, capabilities) {
   console.log(`PERFORMANCE_WARMUP mode=${mode} viewport=${viewportName} seconds=${warmupMs / 1000}`);
   await delay(warmupMs);
   await viewer.page.evaluate(() => window.startMeasurement());
-  const samples = [];
   const start = performance.now();
   const stats = async () => viewer.page.evaluate(async () => {
     const pc = window.consumer?.rtcPeerConnection;
@@ -248,7 +276,7 @@ async function performanceBaseline(viewer, capabilities) {
       connectionState: pc?.connectionState ?? null, codec: report.get(received?.codecId)?.mimeType ?? null,
       localType: local?.candidateType ?? null, remoteType: remote?.candidateType ?? null,
       protocol: local?.protocol ?? null, relayProtocol: local?.relayProtocol ?? null,
-      rttSeconds: pair?.currentRoundTripTime ?? null };
+      rttSeconds: pair?.currentRoundTripTime ?? null, diagnosticOverflow: window.diagnosticOverflow };
     for (const field of ['framesReceived', 'framesDecoded', 'framesDropped', 'bytesReceived',
       'packetsLost', 'nackCount', 'pliCount', 'jitter', 'jitterBufferDelay',
       'jitterBufferEmittedCount', 'totalDecodeTime', 'freezeCount', 'totalFreezesDuration'])
@@ -256,23 +284,36 @@ async function performanceBaseline(viewer, capabilities) {
     return result;
   });
   const initial = await stats();
-  const memoryPeaks = { totalCgroupBytes: 0, anonymousBytes: 0, fileCacheBytes: 0, kernelBytes: 0 };
+  let lastSample = initial;
+  const memoryPeaks = { totalCgroupBytes: 0, anonymousBytes: 0, fileBytesIncludingSharedMemory: 0,
+    sharedMemoryBytes: 0, kernelBytes: 0 };
   const cpuStart = await readFile('/sys/fs/cgroup/cpu.stat', 'utf8');
   const cpuUsage = value => Number(/^usage_usec (\d+)$/m.exec(value)?.[1] ?? NaN);
   for (let second = 1; second <= durationMs / 1000; second++) {
     await delay(Math.max(0, start + second * 1000 - performance.now()));
     const sample = await stats();
+    lastSample = sample;
+    const memory = await readFile('/sys/fs/cgroup/memory.stat', 'utf8');
+    for (const [field, counter] of [['anonymousBytes', 'anon'], ['fileBytesIncludingSharedMemory', 'file'],
+      ['sharedMemoryBytes', 'shmem'], ['kernelBytes', 'kernel']]) {
+      memoryPeaks[field] = Math.max(memoryPeaks[field], Number(new RegExp(`^${counter} (\\d+)$`, 'm').exec(memory)?.[1] ?? NaN));
+    }
+    sample.memoryBytes = Number(await readFile('/sys/fs/cgroup/memory.current', 'utf8'));
+    memoryPeaks.totalCgroupBytes = Math.max(memoryPeaks.totalCgroupBytes, sample.memoryBytes);
+    const cpu = await readFile('/sys/fs/cgroup/cpu.stat', 'utf8');
+    sample.cpuUsageUsec = cpuUsage(cpu);
+    sample.cpuThrottledUsec = Number(/^throttled_usec (\d+)$/m.exec(cpu)?.[1] ?? NaN);
+    if (traceCongestion) sample.congestion = await congestionSnapshot();
+    const clock = await viewer.page.evaluate(() => window.measurementSnapshot());
+    // Persist bounded numeric evidence before a guard can stop the measurement.
+    console.log('MEDIA_PERFORMANCE_SAMPLE=' + JSON.stringify({ second, ...sample,
+      unique: clock.unique, matchedInputs: clock.matched, timedOutInputs: clock.timedOut,
+      observedLatencyMs: clock.observedLatencyMs }));
     assert.equal(sample.width, viewport.width, 'Unexpected resolution adaptation');
     assert.equal(sample.height, viewport.height, 'Unexpected resolution adaptation');
     assert.equal(sample.connectionState, 'connected');
-    samples.push(sample);
-    const memory = await readFile('/sys/fs/cgroup/memory.stat', 'utf8');
-    for (const [field, counter] of [['anonymousBytes', 'anon'], ['fileCacheBytes', 'file'], ['kernelBytes', 'kernel']]) {
-      memoryPeaks[field] = Math.max(memoryPeaks[field], Number(new RegExp(`^${counter} (\\d+)$`, 'm').exec(memory)?.[1] ?? NaN));
-    }
-    memoryPeaks.totalCgroupBytes = Math.max(memoryPeaks.totalCgroupBytes,
-      Number(await readFile('/sys/fs/cgroup/memory.current', 'utf8')));
-    const clock = await viewer.page.evaluate(() => window.measurementSnapshot());
+    assert.equal(sample.diagnosticOverflow, false, 'Viewer diagnostic limit exceeded');
+    assert.ok(!viewer.diagnosticOverflow, 'Worker diagnostic limit exceeded');
     if (second % 5 === 1 && second * 1000 < durationMs - 3000) {
       assert.equal(clock.inputs, clock.matched + clock.timedOut + clock.abandoned,
         'Only one unreplayed input probe may be outstanding');
@@ -281,27 +322,39 @@ async function performanceBaseline(viewer, capabilities) {
     if (second % 60 === 0) console.log(`PERFORMANCE_PROGRESS seconds=${second} unique=${clock.unique} matched=${clock.matched} timedOut=${clock.timedOut}`);
   }
   const measurement = await viewer.page.evaluate(() => window.stopMeasurement());
-  const cpuEnd = await readFile('/sys/fs/cgroup/cpu.stat', 'utf8');
-  const cpuCores = (cpuUsage(cpuEnd) - cpuUsage(cpuStart)) / (performance.now() - start) / 1000;
-  const result = { scope: 'LOCAL_EQUIVALENT_WORKER_NOT_107', mode, viewport, sessions: 1, viewers: 1,
-    warmupMs, durationMs, deliberatePageDelayMs: inputDelayMs, capabilities,
-    chromium: viewerBrowser.version(), receiver: 'headless Chromium in the same 2CPU/2GiB container',
-    inputPath: 'viewer click -> fixture WebSocket -> production BrowserSession.input -> Chromium',
-    limitations: ['No Java API/OAuth path or physical display', 'Native capture/copy/encode element timings unavailable',
-      'No NVENC device requested; software profile', 'Observed unique FPS is a lower bound for missed callbacks'],
-    cpuCores, memoryPeaks, ...measurement, initial, samples,
-    inputTargetMet: measurement.inputs > 0 && measurement.unmatchedInputs === 0 && measurement.observedLatencyMs.p95 <= 100,
-    fullPerformanceAcceptance: false };
-  console.log('MEDIA_PERFORMANCE_BASELINE=' + JSON.stringify(result));
+  const diagnostics = await viewer.page.evaluate(() => ({ failures: window.failures, iceErrors: window.iceErrors }));
+  assert.equal(measurement.reason, 'DURATION_COMPLETE', 'Truncated measurement is not a baseline');
+  assert.equal(measurement.elapsedMs, durationMs);
   assert.ok(measurement.unique > 0);
   assert.equal(measurement.foreign, 0);
   assert.equal(measurement.abandoned, 0);
+  assert.deepEqual(diagnostics.failures, []);
   assert.deepEqual(viewer.failures, []);
+  const cpuEnd = await readFile('/sys/fs/cgroup/cpu.stat', 'utf8');
+  const cpuCores = (cpuUsage(cpuEnd) - cpuUsage(cpuStart)) / (performance.now() - start) / 1000;
+  assert.ok(Number.isInteger(initial.captureSequence) && Number.isInteger(lastSample.captureSequence));
+  const captureFps = (lastSample.captureSequence - initial.captureSequence) * 1000
+    / (lastSample.clientMs - initial.clientMs);
+  const result = { scope: 'LOCAL_WORKER_FIXTURE_NOT_107', mode, viewport, sessions: 1, viewers: 1,
+    warmupMs, durationMs, deliberatePageDelayMs: inputDelayMs, traceCongestion, capabilities,
+    chromium: viewerBrowser.version(), receiver: 'headless Chromium in the same 2CPU/2GiB container',
+    inputPath: 'viewer click -> fixture WebSocket -> production BrowserSession.input -> Chromium',
+    limitations: ['No Java API/OAuth path or physical display', 'Native capture/copy/encode element timings unavailable',
+      'Observed unique FPS is a lower bound for missed callbacks',
+      'Capture FPS counts raw buffers, not distinct Page paints or useful presented frames'],
+    encoderProfile, captureFps, cpuCores, memoryPeaks, ...measurement, initial, lastSample, diagnostics,
+    inputTargetMet: mode === 'baseline' && measurement.inputs > 0 && measurement.unmatchedInputs === 0
+      && measurement.observedLatencyMs.p95 <= 100,
+    fullPerformanceAcceptance: false };
+  console.log('MEDIA_PERFORMANCE_BASELINE=' + JSON.stringify(result));
+  if (mode === 'selftest') assert.ok(captureFps > 35, 'Native capture remains limited to 30fps');
 }
 
 try {
   const capabilities = await media.capabilities;
   console.log('encoder', capabilities);
+  assert.equal(capabilities.encoder, encoderProfile === 'nvenc' ? 'nvh264enc' : 'openh264enc',
+    'Requested encoder profile must be confirmed by the native encode/decode capability probe');
   const assignment = { purpose: 'TASK', taskId: randomUUID(), userId: randomUUID(), browserSessionId: randomUUID(), workerBootId: randomUUID(), instructionRevision: 1,
     allocationEpoch: 1, controlEpoch: 1, pageEpoch: 1, privacyEpoch: 1, policyVersion: 1, originPolicy: 'PUBLIC', allowedOrigins: [],
     deadline: new Date(Date.now() + lifetimeMs).toISOString(), viewport };
@@ -364,6 +417,7 @@ try {
   const originalRuntime = runtime.runtimeGeneration;
   const pageEpoch = assignment.pageEpoch;
   const reload = { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId,
+    instructionRevision: assignment.instructionRevision,
     browserSessionId: assignment.browserSessionId, executionMode: 'HUMAN', controllerInstance,
     action: { type: 'RELOAD' } };
   const navigation = await runtime.execute(reload, async actionDigest => ({

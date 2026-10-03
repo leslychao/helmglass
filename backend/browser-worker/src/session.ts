@@ -220,6 +220,7 @@ export class BrowserSession {
         if (command.action.type === 'NAVIGATE') this.assertAllowedUrl(command.action.url);
         const permit = await getPermit(digest(command.action));
         this.assertPermit(command, permit);
+        this.assignment.instructionRevision = permit.instructionRevision;
         this.usedPermits.add(permit.permitId);
         if (command.action.type !== 'OBSERVE') this.observations.invalidate();
         dispatched = true;
@@ -566,6 +567,7 @@ export class BrowserSession {
   private assertExecutionOwner(command: Command, readOnly: boolean): void {
     this.assertLive();
     if (command.browserSessionId !== this.assignment.browserSessionId || command.taskId !== this.assignment.taskId) throw new WorkerError('ASSIGNMENT_MISMATCH');
+    if (command.instructionRevision < this.assignment.instructionRevision) throw new WorkerError('INSTRUCTION_SUPERSEDED');
     if (command.executionMode !== undefined) {
       if (command.executionMode !== this.mode || command.controllerInstance !== this.controllerInstance
           || this.leaseExpiresAt <= Date.now() || this.leaseDeadline <= performance.now()) throw new WorkerError('CONTROL_FENCED');
@@ -588,9 +590,10 @@ export class BrowserSession {
   }
   private assertPermit(command: Command, permit: ExecutionPermit): void {
     this.assertExecutionOwner(command, command.action.type === 'OBSERVE' || command.action.type === 'WAIT_FOR' || command.action.type === 'READ_MEDIA');
-    for (const field of ['taskId', 'userId', 'browserSessionId', 'workerBootId', 'allocationEpoch', 'controlEpoch', 'pageEpoch', 'privacyEpoch', 'policyVersion', 'instructionRevision', 'connectionId', 'scopeVersion', 'continuationClaimId'] as const) {
+    for (const field of ['taskId', 'userId', 'browserSessionId', 'workerBootId', 'allocationEpoch', 'controlEpoch', 'pageEpoch', 'privacyEpoch', 'policyVersion', 'connectionId', 'scopeVersion', 'continuationClaimId'] as const) {
       if (permit[field] !== this.assignment[field]) throw new WorkerError('PERMIT_FENCED');
     }
+    if (permit.instructionRevision !== command.instructionRevision) throw new WorkerError('PERMIT_FENCED');
     if (permit.commandId !== command.commandId || permit.attemptId !== command.attemptId || permit.actionDigest !== digest(command.action)
         || permit.executionMode !== command.executionMode || permit.controllerInstance !== command.controllerInstance
         || (command.executionMode !== undefined && Date.parse(permit.deadline) > this.leaseExpiresAt)

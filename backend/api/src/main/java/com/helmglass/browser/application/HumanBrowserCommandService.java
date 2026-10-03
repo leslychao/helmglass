@@ -435,6 +435,8 @@ public class HumanBrowserCommandService {
     body.put("attemptId", navigation.attemptId());
     body.put("taskId", session.taskId());
     body.put("browserSessionId", session.id());
+    body.put(
+        "instructionRevision", json.read(navigation.scope()).path("instructionRevision").asLong());
     body.put("executionMode", navigation.executionMode());
     body.put("controllerInstance", navigation.controllerInstanceId());
     body.put("action", json.read(navigation.action()));

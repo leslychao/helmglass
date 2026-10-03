@@ -55,12 +55,13 @@ try {
   const page = runtime.context.pages()[0];
   await page.setContent('<h1 style="color:red">Captured once</h1>');
   const command = { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId,
-    browserSessionId: assignment.browserSessionId, executionMode: 'HUMAN', controllerInstance, action: { type: 'SNAPSHOT' } };
+    browserSessionId: assignment.browserSessionId, instructionRevision: assignment.instructionRevision,
+    executionMode: 'HUMAN', controllerInstance, action: { type: 'SNAPSHOT' } };
   const permit = async input => ({ ...assignment, commandId: input.commandId, attemptId: input.attemptId,
     executionMode: input.executionMode, controllerInstance: input.controllerInstance,
     permitId: randomUUID(), actionDigest: digest(input.action), deadline: leaseExpiresAt });
   const agent = { commandId: command.commandId, attemptId: command.attemptId, taskId: command.taskId,
-    browserSessionId: command.browserSessionId, action: command.action };
+    browserSessionId: command.browserSessionId, instructionRevision: command.instructionRevision, action: command.action };
   assert.equal((await runtime.execute(agent, () => { throw Error('Agent screenshot must not request a permit'); })).code, 'HUMAN_COMMAND_REQUIRED');
   await runtime.control({ schemaVersion: 1, type: 'control', requestId: randomUUID(), browserSessionId: assignment.browserSessionId,
     allocationEpoch: 1, controlEpoch: 2, pageEpoch: assignment.pageEpoch, privacyEpoch: 1, policyVersion: 1,

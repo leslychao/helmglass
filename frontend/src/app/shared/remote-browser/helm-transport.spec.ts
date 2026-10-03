@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { HttpErrorResponse } from '@angular/common/http';
 import { of, Subject, throwError } from 'rxjs';
-import { Api } from '../../core/api/api.service';
+import { Api, MutationProgress } from '../../core/api/api.service';
 import { BrowserSession } from '../../core/api/models';
 import { ResponseContractError } from '../../core/api/response-contract';
 import { HelmTransport, streamStateOf } from './helm-transport';
@@ -116,15 +116,22 @@ describe('authenticated upstream transport', () => {
 describe('remote viewer with the pinned upstream signaling client', () => {
   let fixture: ComponentFixture<RemoteBrowser>;
   let currentSession: BrowserSession;
-  const mutate = vi.fn((_method: string, path: string) =>
-    of(
-      path.endsWith('/control/renew')
-        ? {
-            controlEpoch: currentSession.controlEpoch,
-            expiresAt: new Date(Date.now() + 15000).toISOString(),
-          }
-        : { ticket: 'scoped-ticket', signalingUrl: 'wss://helm.test/stream', viewGeneration: 1 },
-    ),
+  const mutate = vi.fn(
+    (
+      _method: string,
+      path: string,
+      _body?: unknown,
+      _key?: string,
+      _observe?: (progress: MutationProgress) => void,
+    ) =>
+      of(
+        path.endsWith('/control/renew')
+          ? {
+              controlEpoch: currentSession.controlEpoch,
+              expiresAt: new Date(Date.now() + 15000).toISOString(),
+            }
+          : { ticket: 'scoped-ticket', signalingUrl: 'wss://helm.test/stream', viewGeneration: 1 },
+      ),
   );
   const session: BrowserSession = {
     id: 'browser-1',
@@ -156,6 +163,7 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     vi.stubGlobal('WebSocket', TestSocket);
     vi.stubGlobal('MediaStream', class {});
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
     Object.defineProperty(HTMLVideoElement.prototype, 'cancelVideoFrameCallback', {
       configurable: true,
@@ -483,6 +491,7 @@ describe('remote viewer with the pinned upstream signaling client', () => {
       await vi.advanceTimersByTimeAsync(0);
       fixture.detectChanges();
       expect(fixture.componentInstance.technicalDetails()).toBe(details);
+      expect(console.warn).toHaveBeenCalledExactlyOnceWith(details);
       const element: unknown = fixture.nativeElement;
       if (!(element instanceof HTMLElement)) throw new Error('Viewer element is missing');
       const disclosure = element.querySelector('details');
@@ -493,6 +502,7 @@ describe('remote viewer with the pinned upstream signaling client', () => {
       const calls = mutate.mock.calls.length;
       await vi.advanceTimersByTimeAsync(20000);
       expect(mutate).toHaveBeenCalledTimes(calls);
+      expect(console.warn).toHaveBeenCalledExactlyOnceWith(details);
     },
   );
 
@@ -509,6 +519,66 @@ describe('remote viewer with the pinned upstream signaling client', () => {
     const calls = mutate.mock.calls.length;
     await vi.advanceTimersByTimeAsync(20000);
     expect(mutate).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each(['SENT', 'RESPONSE_RECEIVED'] as const)(
+    'retains the %s stage on a four-second renewal timeout without restarting control',
+    async (stage) => {
+      vi.useFakeTimers();
+      const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+      const requestId = '049221e3-6e39-43ef-9c36-4dab85d49760';
+      privateControl();
+      mutate.mockImplementationOnce((_method, _path, _body, _key, observe) => {
+        observe?.({ stage, requestId });
+        return new Subject<never>();
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(fixture.componentInstance.technicalDetails()).toBeNull();
+      clock.mockReturnValue(4100);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(fixture.componentInstance.technicalDetails()).toBe(
+        `CONTROL_RENEW_TIMEOUT · stage=${stage} · elapsedMs=4000 · gapMs=first · visible=true/true · requestId=${requestId}`,
+      );
+      expect(fixture.componentInstance.state()).toBe('ERROR');
+      expect(fixture.componentInstance.inputReady()).toBe(false);
+      const calls = mutate.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(mutate).toHaveBeenCalledTimes(calls);
+    },
+  );
+
+  it('bounds renewal timing and excludes untrusted fields while retaining the gap and visibility', async () => {
+    vi.useFakeTimers();
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(100);
+    privateControl();
+    await vi.advanceTimersByTimeAsync(0);
+    mutate.mockImplementationOnce((_method, _path, _body, _key, observe) => {
+      const progress = {
+        stage: 'SENT' as const,
+        requestId: 'private content',
+        url: 'https://secret.test',
+        body: 'secret body',
+        token: 'secret token',
+      };
+      observe?.(progress);
+      return new Subject<never>();
+    });
+    clock.mockReturnValue(5500);
+    await vi.advanceTimersByTimeAsync(5000);
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    clock.mockReturnValue(1_000_000_000);
+    await vi.advanceTimersByTimeAsync(4000);
+    const details = fixture.componentInstance.technicalDetails();
+    expect(details).toBe(
+      'CONTROL_RENEW_TIMEOUT · stage=SENT · elapsedMs=3600000 · gapMs=5400 · visible=true/false',
+    );
+    expect(details?.length).toBeLessThan(256);
+    expect(details).not.toMatch(/private|secret|https|body|token|requestId/);
+    expect(console.warn).toHaveBeenCalledExactlyOnceWith(details);
+    fixture.componentInstance.technicalDetails.set(null);
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(console.warn).toHaveBeenCalledExactlyOnceWith(details);
   });
 
   it('cancels a pending renewal on transfer so its late error cannot close the new viewer', async () => {

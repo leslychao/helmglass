@@ -271,6 +271,7 @@ public class ConnectionLoginService {
     body.put("attemptId", command.attemptId());
     body.put("taskId", session.taskId());
     body.put("browserSessionId", sessionId);
+    body.put("instructionRevision", connections.instructionRevision(session.taskId()));
     body.put("action", json.read(command.action()));
     send(session.workerId(), "command", Map.of("command", body));
   }

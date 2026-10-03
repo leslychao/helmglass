@@ -6,6 +6,7 @@ import { ReconnectWindow } from './reconnect-window';
 import { BrowserClock, browserClockOf } from './browser-clock';
 
 export type ResourceName =
+  | 'policy'
   | 'tasks'
   | 'connections'
   | 'result'
@@ -23,6 +24,7 @@ export type ResourceName =
   | 'sessions'
   | 'audit';
 const resources = new Set<string>([
+  'policy',
   'tasks',
   'connections',
   'result',

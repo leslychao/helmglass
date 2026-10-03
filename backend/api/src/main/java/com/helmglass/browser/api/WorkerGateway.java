@@ -341,6 +341,8 @@ public class WorkerGateway extends TextWebSocketHandler {
                     dispatch.taskId(),
                     "browserSessionId",
                     dispatch.sessionId(),
+                    "instructionRevision",
+                    dispatch.instructionRevision(),
                     "action",
                     json.read(dispatch.payload())))));
   }

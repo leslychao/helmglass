@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class OutboxRepository {
   private static final List<String> UI_EVENTS =
       List.of(
+          "policy",
           "tasks",
           "usage",
           "connections",

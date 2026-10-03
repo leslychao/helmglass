@@ -97,7 +97,8 @@ test('real Chromium blocks forbidden redirect hops, subresources and sockets bef
     }, blockedOrigin);
     assert.deepEqual(deniedResults, ['blocked', 'blocked']);
     const command = { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId,
-      browserSessionId: assignment.browserSessionId, action: { type: 'NAVIGATE' as const, url: origin + '/redirect-denied?private-fixture-value' } };
+      browserSessionId: assignment.browserSessionId, instructionRevision: assignment.instructionRevision,
+      action: { type: 'NAVIGATE' as const, url: origin + '/redirect-denied?private-fixture-value' } };
     const failure = await session.execute(command, async () => ({ ...assignment, commandId: command.commandId,
       attemptId: command.attemptId, permitId: randomUUID(), actionDigest: digest(command.action),
       deadline: new Date(Date.now() + 10_000).toISOString() }));

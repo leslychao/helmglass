@@ -47,6 +47,7 @@ export const assignmentSchema = z.strictObject({
 });
 export const commandSchema = z.strictObject({
   commandId: id, attemptId: id, taskId: id.nullable(), browserSessionId: id,
+  instructionRevision: epoch,
   executionMode: z.enum(['HUMAN', 'HUMAN_PRIVATE']).optional(), controllerInstance: id.optional(),
   action: actionSchema,
 }).refine(value => (value.executionMode === undefined) === (value.controllerInstance === undefined),

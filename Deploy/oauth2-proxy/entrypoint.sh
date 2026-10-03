@@ -47,7 +47,8 @@ cookie_secure = true
 cookie_httponly = true
 cookie_samesite = "lax"
 cookie_expire = "8h"
-cookie_refresh = "5m"
+# Refresh before the five-minute access token expires. Session age begins after OIDC exchange.
+cookie_refresh = "2m"
 cookie_csrf_per_request = true
 cookie_csrf_per_request_limit = 5
 cookie_csrf_expire = "5m"

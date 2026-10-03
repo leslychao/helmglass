@@ -179,6 +179,11 @@ class CoreOwnersIntegrationTest {
         .isInstanceOf(DomainException.class)
         .hasMessageContaining("authorization changed");
     permitRequest.put("controlEpoch", dispatch.controlEpoch());
+    permitRequest.put("instructionRevision", dispatch.instructionRevision() + 1);
+    assertThatThrownBy(() -> commands.start(workerId, bootId, json.read(json.write(permitRequest))))
+        .isInstanceOf(DomainException.class)
+        .hasMessageContaining("authorization changed");
+    permitRequest.put("instructionRevision", dispatch.instructionRevision());
     assertThat(commands.start(workerId, bootId, json.read(json.write(permitRequest))))
         .containsKey("permitId");
     assertThatThrownBy(() -> commands.start(workerId, bootId, json.read(json.write(permitRequest))))

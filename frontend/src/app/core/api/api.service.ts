@@ -1,8 +1,21 @@
-import { HttpClient, HttpErrorResponse, HttpHeaders, HttpParams } from '@angular/common/http';
+import {
+  HttpClient,
+  HttpErrorResponse,
+  HttpEventType,
+  HttpHeaders,
+  HttpParams,
+  HttpResponse,
+} from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
-import { Observable, mergeMap } from 'rxjs';
+import { Observable, defer, filter, finalize, mergeMap, tap } from 'rxjs';
 import { Problem, Query, Receipt } from './models';
 import { ResponseContractError, validateResponse } from './response-contract';
+
+export interface MutationProgress {
+  readonly stage: 'SUBSCRIBED' | 'SENT' | 'RESPONSE_HEADERS' | 'RESPONSE_RECEIVED' | 'VALIDATED';
+  readonly requestId: string;
+  readonly serverRequestId?: string;
+}
 
 @Injectable({ providedIn: 'root' })
 export class Api {
@@ -28,18 +41,53 @@ export class Api {
     path: string,
     body: unknown,
     key: string,
+    observe?: (progress: MutationProgress) => void,
   ): Observable<T> {
-    return this.http
-      .request<T>(method, `/api/v1${path}`, {
-        body,
-        headers: new HttpHeaders({ 'Idempotency-Key': key, 'X-Request-Id': crypto.randomUUID() }),
-      })
-      .pipe(
-        mergeMap(async (value) => {
-          await validateResponse(method, path, value);
-          return value;
-        }),
-      );
+    const requestId = crypto.randomUUID();
+    return defer(() => {
+      let active = true;
+      let serverRequestId: string | undefined;
+      const report = (stage: MutationProgress['stage'], headers?: HttpHeaders) => {
+        if (!observe || !active) return;
+        if (headers) {
+          const value = headers.get('X-Request-ID');
+          serverRequestId = value?.length === 32 && /^[a-f0-9]{32}$/i.test(value) ? value : undefined;
+        }
+        try {
+          observe({ stage, requestId, ...(serverRequestId ? { serverRequestId } : {}) });
+        } catch {
+          // Optional diagnostics must neither cancel the request nor replace its result.
+        }
+      };
+      report('SUBSCRIBED');
+      return this.http
+        .request<T>(method, `/api/v1${path}`, {
+          body,
+          observe: 'events',
+          reportProgress: observe !== undefined,
+          headers: new HttpHeaders({ 'Idempotency-Key': key, 'X-Request-Id': requestId }),
+        })
+        .pipe(
+          tap((event) => {
+            // SENT means handed to the browser transport, not arrival at the server.
+            if (event.type === HttpEventType.Sent) report('SENT');
+            if (event.type === HttpEventType.ResponseHeader)
+              report('RESPONSE_HEADERS', event.headers);
+          }),
+          filter((event): event is HttpResponse<T> => event instanceof HttpResponse),
+          mergeMap(async (response) => {
+            report('RESPONSE_RECEIVED');
+            await validateResponse(method, path, response.body);
+            report('VALIDATED');
+            // The canonical runtime validator above admits the endpoint's response body,
+            // including null only where its schema allows it.
+            return response.body as T;
+          }),
+          finalize(() => {
+            active = false;
+          }),
+        );
+    });
   }
 
   lookup(kind: string, key: string) {

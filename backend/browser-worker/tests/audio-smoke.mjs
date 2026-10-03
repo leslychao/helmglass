@@ -83,7 +83,8 @@ try {
     stagingDirectory: '/runtime/sessions', mediaBarrier: async () => undefined });
   const page = runtime.context.pages()[0];
   async function command(action) {
-    const input = { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId, browserSessionId: assignment.browserSessionId, action };
+    const input = { commandId: randomUUID(), attemptId: randomUUID(), taskId: assignment.taskId,
+      browserSessionId: assignment.browserSessionId, instructionRevision: assignment.instructionRevision, action };
     const result = await runtime.execute(input, async () => ({ ...assignment, commandId: input.commandId, attemptId: input.attemptId,
       permitId: randomUUID(), actionDigest: digest(action), deadline: new Date(Date.now() + 30_000).toISOString() }));
     return result;

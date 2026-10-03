@@ -1,6 +1,8 @@
 param(
   [string]$ReleaseFile,
   [string]$WorkerDist,
+  [switch]$TraceCongestion,
+  [switch]$Gpu,
   [ValidateSet('smoke', 'selftest', 'baseline')][string]$Mode = 'smoke',
   [ValidateSet('720p', '1080p')][string]$Viewport = '720p'
 )
@@ -45,6 +47,9 @@ GST_DEBUG=webrtc*:5,nice*:5 exec /usr/local/bin/helm-media-helper 2>/runtime/hel
 if ($Mode -ne 'smoke') {
   $helperWrapper = "#!/bin/sh`nexec /usr/local/bin/helm-media-helper 2>/runtime/helper.log"
 }
+if ($TraceCongestion) {
+  $helperWrapper = "#!/bin/sh`nGST_DEBUG_NO_COLOR=1 GST_DEBUG=webrtcsink:6,rtpgccbwe:4 exec /usr/local/bin/helm-media-helper 2>/runtime/helper.log"
+}
 [IO.File]::WriteAllText((Join-Path $fixture 'helm-media-helper'), $helperWrapper.Replace([string][char]13, '') + [char]10)
 $gatewayConfiguration = @'
 events {}
@@ -85,6 +90,8 @@ try {
   $workerArgs = @('run', '--rm', '--name', "$testId-worker", '--network', $workerNetwork,
     '--read-only', '--cap-drop=ALL', '--env', 'PATH=/fixture:/usr/local/bin:/usr/bin:/bin',
     '--env', "HELM_MEDIA_MODE=$Mode", '--env', "HELM_MEDIA_VIEWPORT=$Viewport",
+    '--env', "HELM_MEDIA_TRACE_CONGESTION=$($TraceCongestion.IsPresent)",
+    '--env', "HELM_MEDIA_ENCODER_PROFILE=$(if ($Gpu) { 'nvenc' } else { 'software' })",
     '--security-opt', "seccomp=$repo/Deploy/security/chromium-seccomp.json",
     '--tmpfs', '/runtime:uid=10001,gid=10001,mode=0700', '--tmpfs', '/tmp:mode=1777',
     '--mount', "type=bind,source=$fixture,target=/fixture,readonly",
@@ -92,6 +99,9 @@ try {
     '--mount', "type=bind,source=$WorkerDist,target=/app/dist,readonly",
     '--mount', "type=bind,source=$repo/frontend/node_modules/gstwebrtc-api/src,target=/sdk,readonly",
     '--entrypoint', 'node')
+  if ($Gpu) {
+    $workerArgs += @('--gpus', 'all', '--env', 'NVIDIA_DRIVER_CAPABILITIES=compute,video,utility')
+  }
   if ($Mode -ne 'smoke') {
     # Includes the local receiver Chromium: report this shared CPU budget explicitly.
     $workerArgs += @('--cpus', '2', '--memory', '2g', '--memory-swap', '2g', '--shm-size', '512m')

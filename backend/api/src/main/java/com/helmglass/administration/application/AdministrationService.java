@@ -10,7 +10,9 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
+import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.task.application.TaskLifecycleService;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -25,16 +27,19 @@ public class AdministrationService {
   private final IdentityRepository identities;
   private final OperationRepository operations;
   private final TaskLifecycleService tasks;
+  private final ChangeRepository changes;
 
   public AdministrationService(
       AdministrationRepository administration,
       IdentityRepository identities,
       OperationRepository operations,
-      TaskLifecycleService tasks) {
+      TaskLifecycleService tasks,
+      ChangeRepository changes) {
     this.administration = administration;
     this.identities = identities;
     this.operations = operations;
     this.tasks = tasks;
+    this.changes = changes;
   }
 
   public Map<String, Object> overview(AuthenticatedActor actor) {
@@ -112,6 +117,7 @@ public class AdministrationService {
         before,
         administration.limits(id, false),
         receipt);
+    changes.changed(id, "policy", id, receipt.operationId(), 1, Instant.now());
     return receipt;
   }
 

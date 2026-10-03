@@ -128,6 +128,8 @@ public class BrowserStartupService {
                         dispatch.taskId(),
                         "browserSessionId",
                         sessionId,
+                        "instructionRevision",
+                        dispatch.instructionRevision(),
                         "action",
                         json.read(startup.action()))))));
   }

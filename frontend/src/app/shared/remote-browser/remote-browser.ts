@@ -17,7 +17,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { EMPTY, Subscription, TimeoutError, exhaustMap, switchMap, timeout, timer } from 'rxjs';
 import GstWebRTCAPI from 'gstwebrtc-api/src/gstwebrtc-api.js';
 import type ConsumerSession from 'gstwebrtc-api/types/consumer-session';
-import { Api, problemOf } from '../../core/api/api.service';
+import { Api, MutationProgress, problemOf } from '../../core/api/api.service';
 import { ResponseContractError } from '../../core/api/response-contract';
 import { BrowserSession, InputTicket, ViewTicket } from '../../core/api/models';
 import { HelmTransport, StreamState } from './helm-transport';
@@ -40,6 +40,13 @@ const RENEW_FAILURE_CODES = new Set([
   'ACCESS_DENIED',
   'CSRF_REJECTED',
 ]);
+
+interface RenewalAttempt {
+  readonly startedAt: number;
+  readonly gapMs: number | null;
+  readonly visibleAtStart: boolean;
+  progress?: MutationProgress;
+}
 
 @Component({
   selector: 'hg-remote-browser',
@@ -249,18 +256,29 @@ export class RemoteBrowser {
           session.controllerRelation !== 'SELF'
         )
           return;
+        let attempt: RenewalAttempt | undefined;
         const renewal = timer(0, 5000)
           .pipe(
-            exhaustMap(() =>
-              this.api
+            exhaustMap(() => {
+              const startedAt = performance.now();
+              const current: RenewalAttempt = {
+                startedAt,
+                gapMs: attempt ? startedAt - attempt.startedAt : null,
+                visibleAtStart: !document.hidden,
+              };
+              attempt = current;
+              return this.api
                 .mutate<unknown>(
                   'POST',
                   `/browser-sessions/${session.id}/control/renew`,
                   { controllerInstanceId: instanceId, controlEpoch: session.controlEpoch },
                   crypto.randomUUID(),
+                  (progress) => {
+                    current.progress = progress;
+                  },
                 )
-                .pipe(timeout(4000)),
-            ),
+                .pipe(timeout(4000));
+            }),
           )
           .subscribe({
             error: (error: unknown) => {
@@ -268,7 +286,9 @@ export class RemoteBrowser {
                 'Не удалось продлить управление браузером. Обновляем его состояние.',
                 false,
               );
-              this.technicalDetails.set(renewalFailureDetails(error));
+              const details = renewalFailureDetails(error) + renewalAttemptDetails(attempt);
+              this.technicalDetails.set(details);
+              console.warn(details);
               this.refresh.emit();
             },
           });
@@ -750,6 +770,28 @@ export class RemoteBrowser {
     this.current = undefined;
     this.channelSession = undefined;
   }
+}
+
+function renewalAttemptDetails(attempt: RenewalAttempt | undefined): string {
+  const progress = attempt?.progress;
+  if (!attempt || !progress) return '';
+  const stages = ['SUBSCRIBED', 'SENT', 'RESPONSE_HEADERS', 'RESPONSE_RECEIVED', 'VALIDATED'];
+  const boundedMs = (value: number) =>
+    Number.isFinite(value) && value >= 0 ? String(Math.min(3_600_000, Math.round(value))) : '?';
+  const details = [
+    `stage=${stages.includes(progress.stage) ? progress.stage : 'UNKNOWN'}`,
+    `elapsedMs=${boundedMs(performance.now() - attempt.startedAt)}`,
+    `gapMs=${attempt.gapMs === null ? 'first' : boundedMs(attempt.gapMs)}`,
+    `visible=${attempt.visibleAtStart}/${!document.hidden}`,
+  ];
+  if (
+    progress.requestId.length === 36 &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(progress.requestId)
+  )
+    details.push(`requestId=${progress.requestId}`);
+  if (progress.serverRequestId?.length === 32 && /^[a-f0-9]{32}$/i.test(progress.serverRequestId))
+    details.push(`serverRequestId=${progress.serverRequestId}`);
+  return ` · ${details.join(' · ')}`;
 }
 
 function renewalFailureDetails(error: unknown): string {

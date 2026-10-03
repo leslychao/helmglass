@@ -177,6 +177,8 @@ public class CommandExecutionService {
         || request.path("pageEpoch").asLong(-1) != dispatch.pageEpoch()
         || request.path("privacyEpoch").asLong(-1) != dispatch.privacyEpoch()
         || request.path("policyVersion").asLong(-1) != dispatch.policyVersion()
+        || !request.path("instructionRevision").isIntegralNumber()
+        || request.path("instructionRevision").asLong(-1) != dispatch.instructionRevision()
         || !request.path("browserSessionId").asString().equals(dispatch.sessionId().toString())) {
       throw DomainException.conflict(
           "START_PERMIT_DENIED", "Execution authorization changed before start");

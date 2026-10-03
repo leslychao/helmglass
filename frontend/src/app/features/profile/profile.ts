@@ -150,8 +150,9 @@ import { protectUnsavedChanges } from '../../core/navigation/unsaved-changes';
 })
 export class Profile {
   readonly identity = inject(Identity);
-  readonly policy = new ServerResource<Policy>(['tasks']);
+  readonly policy = new ServerResource<Policy>(['policy']);
   readonly mutation = new Mutation();
+  private formVersion: number | null = null;
   private fb = inject(FormBuilder);
   readonly validation = signal('');
   readonly blocked = signal<string[]>([]);
@@ -191,6 +192,7 @@ export class Profile {
       if (policy && !this.form.dirty) {
         this.form.patchValue({ ...policy, origins: policy.origins.join('\n') });
         this.blocked.set(policy.blockedActions);
+        this.formVersion = policy.version;
       }
     });
   }
@@ -210,7 +212,7 @@ export class Profile {
   }
   save() {
     const policy = this.policy.data();
-    if (!policy) return;
+    if (!policy || this.formVersion === null) return;
     const invalidLimit = this.limits.some(({ key, minimum }) => {
       const value = this.form.controls[key].value;
       const maximum = this.assignedMaximum(key);
@@ -246,7 +248,7 @@ export class Profile {
     this.mutation.run(
       'PATCH',
       '/me/policy',
-      { ...value, origins, blockedActions: this.blocked(), expectedVersion: policy.version },
+      { ...value, origins, blockedActions: this.blocked(), expectedVersion: this.formVersion },
       () => {
         this.form.markAsPristine();
         this.policy.refresh();
