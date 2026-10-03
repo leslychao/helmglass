@@ -57,7 +57,8 @@ test('foreign ownership or weakened MCP OAuth contract fails before any mutation
   for (const change of [state => { state.realm.attributes['helm.installationId'] = 'foreign'; },
     state => { state.client.attributes['helm.installationId'] = 'foreign'; },
     state => { state.client.attributes['pkce.code.challenge.method'] = 'plain'; },
-    state => { state.client.directAccessGrantsEnabled = true; }]) {
+    state => { state.client.directAccessGrantsEnabled = true; },
+    state => { state.client.defaultClientScopes.push('offline_access'); }]) {
     const state = fixture();
     change(state);
     await assert.rejects(reconcileMcpOfflineAccess(state.admin, 'fixture'), { code: 'REALM_CONFIGURATION_INVALID' });

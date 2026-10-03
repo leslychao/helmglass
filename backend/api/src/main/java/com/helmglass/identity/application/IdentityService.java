@@ -2,10 +2,10 @@ package com.helmglass.identity.application;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.MutationContext;
-import com.helmglass.operation.domain.MutationReceipt;
-import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
+import com.helmglass.operation.domain.MutationReceipt;
+import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
@@ -35,8 +35,9 @@ public class IdentityService {
     if (subject == null || subject.isBlank()) {
       throw new DomainException(401, "INVALID_IDENTITY", "Token has no subject");
     }
-    var account = repository.resolve(issuer, subject, name == null ? subject : name,
-        email == null ? "" : email);
+    var account =
+        repository.resolve(
+            issuer, subject, name == null ? subject : name, email == null ? "" : email);
     if (!account.state().equals("ACTIVE")) {
       throw new DomainException(403, "ACCOUNT_UNAVAILABLE", "Account is unavailable");
     }
@@ -74,8 +75,16 @@ public class IdentityService {
     } else {
       loginId = repository.admitLogin(account, issuer, sid, authTime, jwt.getExpiresAt());
     }
-    return new AuthenticatedActor(account.id(), loginId, grantId, clientId, account.displayName(),
-        account.email(), account.accessEpoch(), Set.copyOf(permissions), mcp);
+    return new AuthenticatedActor(
+        account.id(),
+        loginId,
+        grantId,
+        clientId,
+        account.displayName(),
+        account.email(),
+        account.accessEpoch(),
+        Set.copyOf(permissions),
+        mcp);
   }
 
   @Transactional
@@ -89,7 +98,8 @@ public class IdentityService {
     if (replay.isPresent()) {
       return replay.get();
     }
-    var receipt = operations.save(actor, "auth.logout", context, input, "login", actor.loginId(), 1, false);
+    var receipt =
+        operations.save(actor, "auth.logout", context, input, "login", actor.loginId(), 1, false);
     repository.revokeLogin(actor.loginId());
     return receipt;
   }

@@ -2,6 +2,7 @@ package com.helmglass.identity.infrastructure.repository;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -80,9 +81,9 @@ public class IdentityRepository {
         .param("userId", account.id())
         .param("issuer", issuer)
         .param("sid", sid)
-        .param("authTime", java.sql.Timestamp.from(authTime))
+        .param("authTime", Timestamp.from(authTime))
         .param("epoch", account.accessEpoch())
-        .param("expiresAt", java.sql.Timestamp.from(expiresAt))
+        .param("expiresAt", Timestamp.from(expiresAt))
         .update();
     return jdbc.sql(
             """

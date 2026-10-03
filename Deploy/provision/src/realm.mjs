@@ -183,6 +183,9 @@ export async function reconcileMcpOfflineAccess(client, installationId) {
       || actual.serviceAccountsEnabled || actual.attributes?.['pkce.code.challenge.method'] !== 'S256') {
     reject('MCP OAuth security settings require explicit reconciliation.');
   }
+  if (actual.defaultClientScopes?.includes('offline_access')) {
+    reject('MCP offline_access must be optional; default scope assignment requires explicit reconciliation.');
+  }
   const scopes = await client.request('GET', `${REALM_PATH}/client-scopes`);
   const offline = scopes.find(scope => scope.name === 'offline_access' && scope.protocol === 'openid-connect');
   if (!offline) reject('The built-in offline_access client scope is missing.');
@@ -203,8 +206,7 @@ export async function reconcileMcpOfflineAccess(client, installationId) {
   if (Object.entries(attributes).some(([key, value]) => actual.attributes?.[key] !== value)) {
     await client.request('PUT', clientPath, { attributes });
   }
-  if (!actual.optionalClientScopes?.includes('offline_access')
-      && !actual.defaultClientScopes?.includes('offline_access')) {
+  if (!actual.optionalClientScopes?.includes('offline_access')) {
     const optionalPath = `${clientPath}/optional-client-scopes`;
     try {
       await client.request('PUT', `${optionalPath}/${encodeURIComponent(offline.id)}`);

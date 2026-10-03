@@ -24,7 +24,8 @@ async function tokenRequest(baseUrl, parameters) {
   return { status: response.status, body: await readKeycloakJson(response, 32_768) };
 }
 
-async function authorizeOffline(baseUrl, password) {
+async function authorizeMcp(baseUrl, password,
+  scope = 'openid email offline_access tasks:read tasks:write browser:view browser:execute results:write') {
   const verifier = randomBytes(32).toString('base64url');
   const state = randomUUID();
   const redirectUri = 'https://chatgpt.com/connector_platform_oauth_redirect';
@@ -39,7 +40,7 @@ async function authorizeOffline(baseUrl, password) {
   }
   const authorize = new URL(`${baseUrl}/realms/helm/protocol/openid-connect/auth`);
   authorize.search = new URLSearchParams({ client_id: 'helm-mcp', response_type: 'code', redirect_uri: redirectUri,
-    scope: 'openid email offline_access tasks:read tasks:write browser:view browser:execute results:write',
+    scope,
     state, nonce: randomUUID(), code_challenge_method: 'S256',
     code_challenge: createHash('sha256').update(verifier).digest('base64url') }).toString();
   const form = await fetch(authorize, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
@@ -184,7 +185,8 @@ test('real Keycloak provisioning, repeat run, role revocation and conflict handl
       .some(item => item.name === 'offline_access'));
     // The base Keycloak fixture has no application theme; the real browser fixture owns theme checks.
     await client.request('PUT', 'admin/realms/helm', { loginTheme: 'keycloak' });
-    const initialTokens = await authorizeOffline(baseUrl, data.admin.password);
+    const ssoTokens = await authorizeMcp(baseUrl, data.admin.password, 'openid email');
+    const initialTokens = await authorizeMcp(baseUrl, data.admin.password);
     const initialClaims = claims(initialTokens.access_token);
     assert.equal(initialClaims.exp - initialClaims.iat, 300);
     assert.equal(claims(initialTokens.refresh_token).typ, 'Offline');
@@ -193,7 +195,11 @@ test('real Keycloak provisioning, repeat run, role revocation and conflict handl
       'Each offline token covers the configured inactivity window');
     assert.equal(typeof initialClaims.sid, 'string');
     assert.equal(typeof initialClaims.auth_time, 'number');
-    await client.request('DELETE', `admin/realms/helm/sessions/${initialClaims.sid}`);
+    const onlineSessions = await client.request('GET', `${adminPath}/sessions`);
+    assert.ok(onlineSessions.some(session => session.id === claims(ssoTokens.access_token).sid),
+      'The ordinary code flow creates an online SSO session');
+    await client.request('DELETE', `admin/realms/helm/sessions/${claims(ssoTokens.access_token).sid}`);
+    assert.equal((await client.request('GET', `${adminPath}/sessions`)).length, 0);
     await delay(1100);
     const refreshed = await tokenRequest(baseUrl, { grant_type: 'refresh_token', refresh_token: initialTokens.refresh_token });
     assert.equal(refreshed.status, 200, 'Offline refresh survives ordinary SSO session logout');
@@ -213,7 +219,7 @@ test('real Keycloak provisioning, repeat run, role revocation and conflict handl
     assert.equal(revoked.status, 200);
     assert.equal((await tokenRequest(baseUrl, { grant_type: 'refresh_token',
       refresh_token: refreshed.body.refresh_token })).status, 400, 'Explicit revoke denies offline refresh');
-    const blockTokens = await authorizeOffline(baseUrl, data.admin.password);
+    const blockTokens = await authorizeMcp(baseUrl, data.admin.password);
     await client.request('PUT', adminPath, { enabled: false });
     assert.equal((await tokenRequest(baseUrl, { grant_type: 'refresh_token',
       refresh_token: blockTokens.refresh_token })).status, 400, 'Blocked user cannot refresh offline tokens');
