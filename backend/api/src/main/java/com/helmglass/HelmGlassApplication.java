@@ -2,7 +2,6 @@ package com.helmglass;
 
 import com.helmglass.bootstrap.MigrationApplication;
 import com.helmglass.bootstrap.WorkerRetirementApplication;
-import java.io.IOException;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -10,7 +9,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 @SpringBootApplication
 public class HelmGlassApplication {
-  public static void main(String[] args) throws IOException {
+  public static void main(String[] args) {
     if (args.length == 1 && args[0].equals("retire-workers")) {
       WorkerRetirementApplication.run();
       return;

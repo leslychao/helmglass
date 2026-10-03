@@ -8,8 +8,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { run } from '../process.mjs';
 import { deployWorkerRelease } from '../worker-release.mjs';
 
-test('redeployment replaces running and stopped old containers, preserves data and scales down',
-  { timeout: 120_000 }, async () => {
+test('redeployment stops the pool before retirement, recreates workers and preserves data',
+  { timeout: 180_000 }, async () => {
     const fixture = randomUUID();
     const project = `helm-worker-release-${fixture}`;
     const context = process.env.HELM_TEST_DOCKER_CONTEXT ?? 'desktop-linux';
@@ -36,15 +36,19 @@ test('redeployment replaces running and stopped old containers, preserves data a
       throw new Error('Fixture workers did not become healthy');
     };
     const service = {
-      image: '${WORKER_IMAGE}', entrypoint: ['node'], command: ['-e', `
+      image: '${WORKER_IMAGE}', entrypoint: ['node', '-e', `
         const fs = require('node:fs');
+        if (process.argv[1] === 'retire-workers') {
+          fs.appendFileSync('/data/retirements', 'retired\\n');
+          process.exit(0);
+        }
         if (!fs.existsSync('/data/marker')) fs.writeFileSync('/data/marker', 'preserved');
         process.on('SIGTERM', () => {
           fs.writeFileSync('/data/' + require('node:os').hostname() + '.stopped', 'SIGTERM');
           process.exit(0);
         });
         setInterval(() => {}, 1000);
-      `],
+      `], command: [],
       network_mode: 'none', read_only: true, user: '0:0', cap_drop: ['ALL'], pids_limit: 32,
       volumes: ['data:/data'], stop_grace_period: '5s',
       healthcheck: { test: ['CMD', 'node', '-e', 'process.exit(0)'], interval: '1s', timeout: '1s', retries: 1 },
@@ -57,7 +61,14 @@ test('redeployment replaces running and stopped old containers, preserves data a
         await docker(['commit', '--change', `LABEL helmglass.fixture.release=${release}`, seed, image]);
       }
       const expectedId = JSON.parse((await docker(['image', 'inspect', newImage])).stdout)[0].Id;
-      const release = { docker, compose: args => compose(newImage, args), identifiers, imageId: expectedId, count: 2 };
+      const release = { docker, compose: async args => {
+        if (args.includes('retire-workers')) {
+          for (const id of await identifiers()) {
+            assert.equal((await inspect(id)).State.Running, false, 'Retirement requires a stopped pool');
+          }
+        }
+        return compose(newImage, args);
+      }, identifiers, imageId: expectedId, count: 2 };
       await compose(oldImage, ['up', '-d', '--scale', 'browser-worker=2']);
       const original = await healthy(2);
       const apiId = (await compose(oldImage, ['ps', '-q', 'api'])).stdout.trim();
@@ -73,9 +84,10 @@ test('redeployment replaces running and stopped old containers, preserves data a
       const completed = await healthy(2);
       assert.ok(completed.every(state => state.Image === expectedId));
       assert.ok(completed.every(state => original.every(old => old.Id !== state.Id)));
-      const readData = name => docker(['exec', completed[0].Id, 'node', '-e',
+      const readData = async name => docker(['exec', (await identifiers())[0], 'node', '-e',
         'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8"))', `/data/${name}`]);
       assert.equal((await readData('marker')).stdout, 'preserved');
+      assert.equal((await readData('retirements')).stdout, 'retired\n');
       for (const old of [...original, originalApi]) {
         assert.equal((await readData(`${old.Config.Hostname}.stopped`)).stdout, 'SIGTERM');
       }
@@ -83,13 +95,19 @@ test('redeployment replaces running and stopped old containers, preserves data a
       await deployWorkerRelease(release);
       const repeated = await healthy(2);
       for (const state of repeated) {
-        const previous = completed.find(item => item.Id === state.Id);
-        assert.ok(previous, 'An unchanged release must preserve the container');
-        assert.equal(state.State.StartedAt, previous.State.StartedAt);
+        assert.ok(completed.every(item => item.Id !== state.Id), 'Retired identities need new containers');
       }
+      assert.equal((await readData('retirements')).stdout, 'retired\nretired\n');
+      await assert.rejects(deployWorkerRelease({ ...release, compose: async () => {} }), /must be stopped/);
+      assert.equal((await readData('retirements')).stdout, 'retired\nretired\n');
+      await assert.rejects(deployWorkerRelease({ ...release, compose: async args => {
+        if (args.includes('retire-workers')) throw new Error('Retirement unavailable');
+        return release.compose(args);
+      } }), /Retirement unavailable/);
+      for (const id of await identifiers()) assert.equal((await inspect(id)).State.Running, false);
       await deployWorkerRelease({ ...release, count: 1 });
       await healthy(1);
-      await assert.rejects(deployWorkerRelease({ ...release, compose: async () => {}, count: 2 }), /count does not match/);
+      assert.equal((await readData('marker')).stdout, 'preserved');
       await assert.rejects(deployWorkerRelease({ ...release, count: 1, imageId: original[0].Image }), /image does not match/);
     } finally {
       await compose(newImage, ['down', '--volumes', '--remove-orphans']);

@@ -76,7 +76,7 @@ public class TaskController {
   @ResponseStatus(HttpStatus.CREATED)
   MutationReceipt create(
       @Valid @RequestBody TaskContracts.Create input, HttpServletRequest request) {
-    return tasks.create(Actors.current(request), input, MutationContext.from(request));
+    return tasks.create(Actors.current(request), input, MutationContext.from(request), null);
   }
 
   @PatchMapping("/{id}")

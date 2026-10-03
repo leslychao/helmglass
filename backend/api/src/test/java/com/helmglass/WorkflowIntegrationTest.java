@@ -337,10 +337,26 @@ class WorkflowIntegrationTest {
   void onlyTheClaimedContinuationCanAcceptTheNextCommand() {
     var web = actor();
     var scopes = Set.of("tasks:read", "tasks:write", "browser:view", "browser:execute");
-    UUID grant = Objects.requireNonNull(transaction.execute(status -> identities.admitGrant(
-        web.userId(), "helm-mcp", UUID.randomUUID().toString(), List.copyOf(scopes))));
-    var actor = new AuthenticatedActor(web.userId(), null, grant, "helm-mcp", web.displayName(),
-        web.email(), web.accessEpoch(), scopes, true);
+    UUID grant =
+        Objects.requireNonNull(
+            transaction.execute(
+                status ->
+                    identities.admitGrant(
+                        web.userId(),
+                        "helm-mcp",
+                        UUID.randomUUID().toString(),
+                        List.copyOf(scopes))));
+    var actor =
+        new AuthenticatedActor(
+            web.userId(),
+            null,
+            grant,
+            "helm-mcp",
+            web.displayName(),
+            web.email(),
+            web.accessEpoch(),
+            scopes,
+            true);
     UUID taskId =
         tasks
             .create(

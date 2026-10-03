@@ -659,7 +659,7 @@ export class RemoteBrowser {
     clearTimeout(this.reconnect);
     this.reconnect = undefined;
     this.inputReady.set(false);
-    this.live.emit(false);
+    if (!this.destroy.destroyed) this.live.emit(false);
     const video = this.video()?.nativeElement;
     if (video) {
       video.pause();

@@ -111,7 +111,7 @@ public class McpOwnerController {
           tasks.create(
               actor,
               decode(args, TaskContracts.Create.class, Set.of("idempotencyKey", "title")),
-              required(context));
+              required(context), input.hostContext());
       case "tasks.get" -> presentations.get(actor, required(taskId), input.hostContext());
       case "tasks.context" ->
           contexts.get(

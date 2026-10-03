@@ -26,6 +26,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -34,6 +35,7 @@ import org.springframework.vault.VaultException;
 import org.springframework.vault.authentication.TokenAuthentication;
 import org.springframework.vault.client.VaultClient;
 import org.springframework.vault.client.VaultEndpoint;
+import org.springframework.vault.core.VaultOperations;
 import org.springframework.vault.core.VaultTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -370,6 +372,69 @@ class VaultIntegrationTest {
               2);
       assertThat(expanded.enroll(excess, null).workerId()).isEqualTo(excess.workerId());
       assertThat(expanded.enroll(request, null)).isEqualTo(issued);
+
+      UUID pendingIssuance = UUID.randomUUID();
+      repository.reserve(
+          "fixture",
+          UUID.randomUUID(),
+          UUID.randomUUID(),
+          1,
+          "0".repeat(64),
+          pendingIssuance,
+          false);
+      repository.reserve(
+          "other-installation",
+          UUID.randomUUID(),
+          UUID.randomUUID(),
+          1,
+          "0".repeat(64),
+          UUID.randomUUID(),
+          false);
+      new ApplicationContextRunner()
+          .withUserConfiguration(WorkerRetirementApplication.EnrollmentProcess.class)
+          .withBean(RuntimeSecrets.class, () -> runtime)
+          .withBean(VaultOperations.class, session::operations)
+          .withPropertyValues(
+              "spring.datasource.url=" + database.getJdbcUrl(),
+              "spring.datasource.username=" + database.getUsername(),
+              "spring.datasource.password=" + database.getPassword(),
+              "helm.worker-registration-limit=1")
+          .run(
+              context -> {
+                assertThat(context).hasNotFailed();
+                assertThat(context.getBean(WorkerEnrollmentService.class).retireStoppedPool())
+                    .isEqualTo(3);
+              });
+      assertThat(service.retireStoppedPool()).isZero();
+      assertThat(repository.activeCount("fixture")).isZero();
+      assertThat(repository.activeCount("other-installation")).isEqualTo(1);
+      assertThat(repository.find("fixture", request.workerId(), request.bootId()))
+          .hasValueSatisfying(enrollment -> assertThat(enrollment.state()).isEqualTo("REVOKED"));
+      assertThatThrownBy(
+              () -> service.authenticate(certificate, request.workerId(), request.bootId()))
+          .isInstanceOf(DomainException.class)
+          .hasMessageContaining("no longer active");
+      assertThatThrownBy(() -> service.enroll(request, certificate))
+          .isInstanceOf(DomainException.class)
+          .hasMessageContaining("new worker boot identity");
+      assertThat(
+              repository.complete(
+                  pendingIssuance,
+                  issued.certificatePem(),
+                  issued.caPem(),
+                  certificate.getSerialNumber().toString(16),
+                  issued.expiresAt()))
+          .isFalse();
+      var replacement =
+          new EnrollmentContracts.Request(
+              1,
+              "fixture",
+              UUID.randomUUID(),
+              UUID.randomUUID(),
+              1,
+              runtime.workerEnrollmentToken(),
+              Files.readString(csr));
+      assertThat(service.enroll(replacement, null).workerId()).isEqualTo(replacement.workerId());
     }
   }
 

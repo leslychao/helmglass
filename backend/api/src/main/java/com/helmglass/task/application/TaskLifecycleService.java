@@ -9,6 +9,7 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
+import com.helmglass.realtime.domain.HostConversationContext;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.task.api.TaskContracts;
 import com.helmglass.task.domain.TaskAggregate;
@@ -56,14 +57,17 @@ public class TaskLifecycleService {
 
   @Transactional
   public MutationReceipt create(
-      AuthenticatedActor actor, TaskContracts.Create input, MutationContext context) {
+      AuthenticatedActor actor, TaskContracts.Create input, MutationContext context,
+      HostConversationContext host) {
     actor.requireScope("tasks:write");
     identities.lockActive(actor.userId());
     var replay = operations.replay(actor, "tasks.create", context, input);
     if (replay.isPresent()) {
       return replay.get();
     }
-    return createTask(actor, input, context, "tasks.create", input);
+    MutationReceipt receipt = createTask(actor, input, context, "tasks.create", input);
+    continuations.registerOrigin(actor, host, receipt.resource().id());
+    return receipt;
   }
 
   private MutationReceipt createTask(

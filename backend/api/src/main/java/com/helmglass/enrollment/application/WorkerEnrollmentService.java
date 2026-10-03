@@ -30,14 +30,18 @@ import org.springframework.vault.support.VaultCertificateRequest;
 @Service
 public class WorkerEnrollmentService {
   private record Reservation(UUID issuanceId, Response existing) {}
+
   private final RuntimeSecrets secrets;
   private final EnrollmentRepository repository;
   private final VaultOperations vault;
   private final TransactionTemplate transaction;
   private final int registrationLimit;
 
-  public WorkerEnrollmentService(RuntimeSecrets secrets, EnrollmentRepository repository,
-      VaultOperations vault, PlatformTransactionManager transactions,
+  public WorkerEnrollmentService(
+      RuntimeSecrets secrets,
+      EnrollmentRepository repository,
+      VaultOperations vault,
+      PlatformTransactionManager transactions,
       @Value("${helm.worker-registration-limit}") int registrationLimit) {
     if (registrationLimit < 1 || registrationLimit > 1000) {
       throw new IllegalArgumentException("Worker registration limit must be between 1 and 1000");
@@ -52,7 +56,8 @@ public class WorkerEnrollmentService {
 
   public Response enroll(Request request, X509Certificate peer) {
     if (!secrets.installationId().equals(request.installationId())
-        || !MessageDigest.isEqual(secrets.workerEnrollmentToken().getBytes(StandardCharsets.UTF_8),
+        || !MessageDigest.isEqual(
+            secrets.workerEnrollmentToken().getBytes(StandardCharsets.UTF_8),
             request.enrollmentToken().getBytes(StandardCharsets.UTF_8))) {
       throw new DomainException(403, "ENROLLMENT_DENIED", "Enrollment scope is invalid");
     }
@@ -66,13 +71,18 @@ public class WorkerEnrollmentService {
     }
     Certificate certificate;
     try {
-      var options = VaultCertificateRequest.builder().commonName(commonName(request.workerId()))
-          .format("pem")
-          .excludeCommonNameFromSubjectAltNames()
-          .withUriSubjectAltName(identityUri(request.workerId(), request.bootId()))
-          .ttl(Duration.ofMinutes(15)).build();
-      var signed = vault.opsForPki("helm-pki")
-          .signCertificateRequest("browser-workers", request.csrPem(), options);
+      var options =
+          VaultCertificateRequest.builder()
+              .commonName(commonName(request.workerId()))
+              .format("pem")
+              .excludeCommonNameFromSubjectAltNames()
+              .withUriSubjectAltName(identityUri(request.workerId(), request.bootId()))
+              .ttl(Duration.ofMinutes(15))
+              .build();
+      var signed =
+          vault
+              .opsForPki("helm-pki")
+              .signCertificateRequest("browser-workers", request.csrPem(), options);
       certificate = signed.getRequiredData();
       checkCertificate(certificate.getX509Certificate(), request.workerId(), request.bootId());
     } catch (VaultException | CertificateException error) {
@@ -86,26 +96,35 @@ public class WorkerEnrollmentService {
       caPem = certificate.getIssuingCaCertificate();
     }
     String chain = caPem;
-    boolean saved = Boolean.TRUE.equals(transaction.execute(status -> repository.complete(
-        reservation.issuanceId(), certificate.getCertificate(), chain,
-        certificate.getX509Certificate().getSerialNumber().toString(16), expiresAt)));
+    boolean saved =
+        Boolean.TRUE.equals(
+            transaction.execute(
+                status ->
+                    repository.complete(
+                        reservation.issuanceId(),
+                        certificate.getCertificate(),
+                        chain,
+                        certificate.getX509Certificate().getSerialNumber().toString(16),
+                        expiresAt)));
     if (!saved) {
       vault.opsForPki("helm-pki").revoke(certificate.getSerialNumber());
       throw DomainException.conflict("ENROLLMENT_SUPERSEDED", "The issuance was superseded");
     }
-    return new Response(1, request.workerId(), request.bootId(), certificate.getCertificate(),
-        chain, expiresAt);
+    return new Response(
+        1, request.workerId(), request.bootId(), certificate.getCertificate(), chain, expiresAt);
   }
 
   /**
-   * Revokes this installation's enrollments after the operator has stopped every worker.
-   * Repeating the command before restarting the pool is safe; enrollment history is retained.
+   * Revokes this installation's enrollments after the operator has stopped every worker. Repeating
+   * the command before restarting the pool is safe; enrollment history is retained.
    */
   public int retireStoppedPool() {
-    Integer retired = transaction.execute(status -> {
-      repository.lockInstallation(secrets.installationId());
-      return repository.revokeInstallation(secrets.installationId());
-    });
+    Integer retired =
+        transaction.execute(
+            status -> {
+              repository.lockInstallation(secrets.installationId());
+              return repository.revokeInstallation(secrets.installationId());
+            });
     if (retired == null) {
       throw new IllegalStateException("Worker retirement was not completed");
     }
@@ -114,17 +133,21 @@ public class WorkerEnrollmentService {
 
   private Reservation reserve(Request request, String digest, X509Certificate peer) {
     repository.lockInstallation(secrets.installationId());
-    Enrollment existing = repository.find(secrets.installationId(), request.workerId(),
-        request.bootId()).orElse(null);
+    Enrollment existing =
+        repository
+            .find(secrets.installationId(), request.workerId(), request.bootId())
+            .orElse(null);
     Instant now = Instant.now();
     boolean renewal = false;
     if (existing != null) {
-      if (existing.state().equals("REVOKED") || !existing.expiresAt().isAfter(now)
+      if (existing.state().equals("REVOKED")
+          || !existing.expiresAt().isAfter(now)
           || existing.capacity() != request.capacity()) {
         throw new DomainException(
             403, "ENROLLMENT_REVOKED", "Start with a new worker boot identity");
       }
-      if (existing.state().equals("READY") && existing.csrDigest().equals(digest)
+      if (existing.state().equals("READY")
+          && existing.csrDigest().equals(digest)
           && existing.expiresAt().isAfter(now.plusSeconds(120))) {
         return new Reservation(existing.issuanceId(), response(existing));
       }
@@ -132,21 +155,28 @@ public class WorkerEnrollmentService {
         authenticate(peer, request.workerId(), request.bootId());
         renewal = true;
       } else if (!existing.csrDigest().equals(digest)
-          || existing.nextAttemptAt().isAfter(now) || existing.issuanceAttempts() >= 3) {
+          || existing.nextAttemptAt().isAfter(now)
+          || existing.issuanceAttempts() >= 3) {
         throw DomainException.conflict(
             "ENROLLMENT_PENDING", "Wait for identity issuance reconciliation");
       }
     } else {
       if (repository.activeCount(secrets.installationId()) >= registrationLimit
-          || repository.hasOtherLiveBoot(secrets.installationId(), request.workerId(),
-              request.bootId())) {
+          || repository.hasOtherLiveBoot(
+              secrets.installationId(), request.workerId(), request.bootId())) {
         throw DomainException.conflict(
             "ENROLLMENT_CAPACITY", "Worker registration capacity is occupied");
       }
     }
     UUID issuanceId = UUID.randomUUID();
-    repository.reserve(secrets.installationId(), request.workerId(), request.bootId(),
-        request.capacity(), digest, issuanceId, renewal);
+    repository.reserve(
+        secrets.installationId(),
+        request.workerId(),
+        request.bootId(),
+        request.capacity(),
+        digest,
+        issuanceId,
+        renewal);
     return new Reservation(issuanceId, null);
   }
 
@@ -160,10 +190,13 @@ public class WorkerEnrollmentService {
     } catch (CertificateException error) {
       throw new DomainException(403, "WORKER_IDENTITY_INVALID", "Worker certificate is invalid");
     }
-    Enrollment enrollment = repository.find(secrets.installationId(), workerId, bootId)
-        .orElseThrow(() -> new DomainException(
-            403, "WORKER_NOT_ENROLLED", "Worker is not enrolled"));
-    if (enrollment.state().equals("REVOKED") || !enrollment.expiresAt().isAfter(Instant.now())
+    Enrollment enrollment =
+        repository
+            .find(secrets.installationId(), workerId, bootId)
+            .orElseThrow(
+                () -> new DomainException(403, "WORKER_NOT_ENROLLED", "Worker is not enrolled"));
+    if (enrollment.state().equals("REVOKED")
+        || !enrollment.expiresAt().isAfter(Instant.now())
         || !certificate.getSerialNumber().toString(16).equals(enrollment.serialNumber())) {
       throw new DomainException(
           403, "WORKER_IDENTITY_REVOKED", "Worker identity is no longer active");
@@ -174,15 +207,22 @@ public class WorkerEnrollmentService {
   private void checkCertificate(X509Certificate certificate, UUID workerId, UUID bootId)
       throws CertificateException {
     certificate.checkValidity();
-    if (!certificate.getSubjectX500Principal().getName(X500Principal.RFC2253)
+    if (!certificate
+        .getSubjectX500Principal()
+        .getName(X500Principal.RFC2253)
         .equals("CN=" + commonName(workerId))) {
       throw new CertificateException("Worker certificate subject is outside its scope");
     }
     Collection<List<?>> alternatives = certificate.getSubjectAlternativeNames();
     String expected = identityUri(workerId, bootId);
-    if (alternatives == null || alternatives.size() != 1
-        || alternatives.stream().noneMatch(value -> value.size() == 2
-            && Integer.valueOf(6).equals(value.getFirst()) && expected.equals(value.get(1)))) {
+    if (alternatives == null
+        || alternatives.size() != 1
+        || alternatives.stream()
+            .noneMatch(
+                value ->
+                    value.size() == 2
+                        && Integer.valueOf(6).equals(value.getFirst())
+                        && expected.equals(value.get(1)))) {
       throw new CertificateException("Worker certificate SAN is outside its scope");
     }
   }
@@ -196,7 +236,12 @@ public class WorkerEnrollmentService {
   }
 
   private static Response response(Enrollment enrollment) {
-    return new Response(1, enrollment.workerId(), enrollment.bootId(),
-        enrollment.certificatePem(), enrollment.caPem(), enrollment.expiresAt());
+    return new Response(
+        1,
+        enrollment.workerId(),
+        enrollment.bootId(),
+        enrollment.certificatePem(),
+        enrollment.caPem(),
+        enrollment.expiresAt());
   }
 }

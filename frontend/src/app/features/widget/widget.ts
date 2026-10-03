@@ -493,52 +493,66 @@ export class Widget {
     if (!attempt) return;
     this.dispatching = true;
     try {
-      const prepared = await this.app.callServerTool(
-        {
-          name: 'continuations.prepare_message',
-          arguments: {
-            taskId: presentation.taskId,
-            continuationId: continuation.id,
-            viewScopeId: presentation.viewScopeId,
-            presentationRevision: presentation.presentationRevision,
-            viewerInstanceId: this.instanceId,
-            idempotencyKey: attempt.prepareKey,
+      if (!attempt.prepared) {
+        const prepared = await this.app.callServerTool(
+          {
+            name: 'continuations.prepare_message',
+            arguments: {
+              taskId: presentation.taskId,
+              continuationId: continuation.id,
+              viewScopeId: presentation.viewScopeId,
+              presentationRevision: presentation.presentationRevision,
+              viewerInstanceId: this.instanceId,
+              idempotencyKey: attempt.prepareKey,
+            },
           },
-        },
-        { timeout: 15000 },
-      );
-      if (prepared.isError) {
-        attempt.stopped = !unknownToolOutcome(prepared);
-        throw new Error();
-      }
-      if (!record(prepared.structuredContent)) throw new Error();
-      const dispatchId = string(prepared.structuredContent['dispatchId']),
-        text = string(prepared.structuredContent['text']),
-        expiresAt = Date.parse(string(prepared.structuredContent['expiresAt']));
-      if (!dispatchId || !text || text.length > 4096 || !Number.isFinite(expiresAt))
-        throw new Error();
-      attempt.prepared = { dispatchId, text };
-      attempt.outcome = 'REJECTED';
-      if (
-        generation === this.generation &&
-        !document.hidden &&
-        !this.inactive() &&
-        !this.disposed &&
-        !this.accessDenied() &&
-        this.eventsReady &&
-        expiresAt > Date.now()
-      ) {
-        // A timeout does not prove that ChatGPT rejected the message.
-        attempt.hostInvoked = true;
-        try {
-          const delivered = await this.app.sendMessage(
-            { role: 'user', content: [{ type: 'text', text }] },
-            { timeout: 15000 },
-          );
-          attempt.outcome = delivered.isError ? 'REJECTED' : 'DELIVERED';
-        } catch {
-          attempt.outcome = 'UNKNOWN';
+          { timeout: 15000 },
+        );
+        if (prepared.isError) {
+          attempt.stopped = !unknownToolOutcome(prepared);
+          throw new Error();
         }
+        if (!record(prepared.structuredContent)) throw new Error();
+        const dispatchId = string(prepared.structuredContent['dispatchId']),
+          text = string(prepared.structuredContent['text']),
+          expiresAt = Date.parse(string(prepared.structuredContent['expiresAt']));
+        if (!dispatchId || !text || text.length > 4096 || !Number.isFinite(expiresAt))
+          throw new Error();
+        attempt.prepared = { dispatchId, text, expiresAt };
+      }
+      // A temporary hide or invalidation defers the known-unsent message. Only a
+      // synchronized read may authorize its delivery; it is not a host rejection.
+      const current = this.snapshot();
+      if (
+        generation !== this.generation ||
+        document.hidden ||
+        this.inactive() ||
+        this.disposed ||
+        this.accessDenied() ||
+        !this.eventsReady ||
+        !this.snapshotFresh ||
+        current?.continuation?.id !== attempt.continuationId ||
+        !['READY', 'DISPATCHING'].includes(current.continuation.state) ||
+        current.presentation.taskId !== attempt.taskId ||
+        current.presentation.viewScopeId !== attempt.viewScopeId ||
+        current.presentation.presentationRevision !== attempt.presentationRevision
+      )
+        return;
+      if (attempt.prepared.expiresAt <= Date.now()) {
+        attempt.stopped = true;
+        this.manualText.set(attempt.prepared.text);
+        return;
+      }
+      // A timeout does not prove that ChatGPT rejected the message.
+      attempt.hostInvoked = true;
+      try {
+        const delivered = await this.app.sendMessage(
+          { role: 'user', content: [{ type: 'text', text: attempt.prepared.text }] },
+          { timeout: 15000 },
+        );
+        attempt.outcome = delivered.isError ? 'REJECTED' : 'DELIVERED';
+      } catch {
+        attempt.outcome = 'UNKNOWN';
       }
       await this.recordDelivery(attempt);
       this.showDelivery(attempt, generation);
@@ -546,6 +560,9 @@ export class Widget {
       this.deliveryFailed(attempt, generation);
     } finally {
       this.dispatching = false;
+      // Visibility may have returned while prepare was still pending in the old generation.
+      if (generation !== this.generation && !document.hidden && !this.disposed)
+        void this.attach();
     }
   }
   private async finishDelivery(attempt: DeliveryAttempt, generation: number) {
@@ -672,7 +689,7 @@ interface DeliveryAttempt {
   recorded: boolean;
   stopped: boolean;
   recovery: ReconnectWindow;
-  prepared?: { dispatchId: string; text: string };
+  prepared?: { dispatchId: string; text: string; expiresAt: number };
   outcome?: 'DELIVERED' | 'UNKNOWN' | 'REJECTED';
 }
 

@@ -65,13 +65,15 @@ public class ContinuationRepository {
       boolean mutationBarrier,
       boolean continuationConsent,
       UUID continuationViewScopeId,
-      long continuationBindingVersion) {}
+      long continuationBindingVersion, String originCorrelation, String originClientId,
+      UUID originGrantId) {}
 
   public TaskBinding lockTask(UUID taskId) {
     return jdbc.sql(
             """
             SELECT id,user_id,instruction_revision,state,mutation_barrier,continuation_consent,
-              continuation_view_scope_id,continuation_binding_version FROM tasks WHERE id=:id FOR UPDATE
+              continuation_view_scope_id,continuation_binding_version,origin_correlation,
+              origin_client_id,origin_grant_id FROM tasks WHERE id=:id FOR UPDATE
             """)
         .param("id", taskId)
         .query(TaskBinding.class)
@@ -127,7 +129,15 @@ public class ContinuationRepository {
         .orElseThrow(DomainException::notFound);
   }
 
-  public void bind(TaskBinding task, ChatPresentation slot, boolean messageVerified) {
+  public void registerOrigin(UUID taskId, String clientId, UUID grantId, String correlation) {
+    jdbc.sql("""
+        UPDATE tasks SET origin_correlation=:correlation,origin_client_id=:client,origin_grant_id=:grant
+        WHERE id=:task AND origin_correlation IS NULL
+        """).param("task", taskId).param("client", clientId).param("grant", grantId)
+        .param("correlation", correlation).update();
+  }
+
+  public Optional<Continuation> bind(TaskBinding task, ChatPresentation slot, boolean messageVerified) {
     jdbc.sql(
             """
             UPDATE tasks SET continuation_view_scope_id=:scope,
@@ -138,6 +148,18 @@ public class ContinuationRepository {
         .param("scope", slot.id())
         .param("verified", messageVerified)
         .update();
+    return jdbc.sql("""
+        UPDATE task_continuations SET view_scope_id=:scope,destination_client_id=:client,
+          destination_grant_id=:grant,destination_grant_version=:grantVersion,
+          destination_access_epoch=:epoch,mode=CASE WHEN :automatic THEN 'WIDGET_RETURN' ELSE 'MANUAL' END,
+          version=version+1
+        WHERE task_id=:task AND state IN ('WAITING_RESULT','READY') AND view_scope_id IS NULL
+          AND binding_version=:binding AND instruction_revision=:revision RETURNING *
+        """).param("task", task.id()).param("scope", slot.id()).param("client", slot.clientId())
+        .param("grant", slot.grantId()).param("grantVersion", slot.grantVersion())
+        .param("epoch", slot.accessEpoch()).param("automatic", messageVerified && task.continuationConsent())
+        .param("binding", task.continuationBindingVersion()).param("revision", task.instructionRevision())
+        .query(Continuation.class).optional();
   }
 
   public Continuation waitForResult(
@@ -301,11 +323,16 @@ public class ContinuationRepository {
   }
 
   public Continuation claimRecovered(UUID id, long epoch) {
-    return jdbc.sql("""
-        UPDATE task_continuations SET state='READY',block_reason=NULL,control_epoch=:epoch,
-          claim_id=NULL,claim_client_id=NULL,claim_grant_id=NULL,claim_control_epoch=NULL,
-          claim_expires_at=NULL,dispatch_not_before=now(),version=version+1 WHERE id=:id RETURNING *
-        """).param("id", id).param("epoch", epoch).query(Continuation.class).single();
+    return jdbc.sql(
+            """
+            UPDATE task_continuations SET state='READY',block_reason=NULL,control_epoch=:epoch,
+              claim_id=NULL,claim_client_id=NULL,claim_grant_id=NULL,claim_control_epoch=NULL,
+              claim_expires_at=NULL,dispatch_not_before=now(),version=version+1 WHERE id=:id RETURNING *
+            """)
+        .param("id", id)
+        .param("epoch", epoch)
+        .query(Continuation.class)
+        .single();
   }
 
   public List<Continuation> cancel(UUID taskId) {

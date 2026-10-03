@@ -292,7 +292,9 @@ class LoginLifecycleIntegrationTest {
     assertThat(after.state()).isEqualTo(before.state());
     assertThat(after.activeRequest()).isEqualTo(before.activeRequest());
     assertThat(
-            jdbc.sql("SELECT count(*) FROM task_continuations WHERE task_id=:id AND state='CANCELLED'")
+            jdbc.sql(
+                    "SELECT count(*) FROM task_continuations WHERE task_id=:id AND"
+                        + " state='CANCELLED'")
                 .param("id", taskId)
                 .query(Long.class)
                 .single())

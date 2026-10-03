@@ -85,16 +85,35 @@ public class TaskContinuationService {
   }
 
   /** Publication may establish the original destination, but cannot move an existing intent. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void registerOrigin(AuthenticatedActor actor, HostConversationContext host, UUID taskId) {
+    if (host == null || !host.supported()) {
+      return;
+    }
+    if (!actor.mcp() || actor.grantId() == null
+        || !identities.authorizationActive(actor.userId(), null, actor.grantId(), actor.accessEpoch())) {
+      throw new DomainException(403, "MCP_GRANT_REQUIRED", "A verified origin requires an active MCP grant");
+    }
+    continuations.registerOrigin(taskId, actor.clientId(), actor.grantId(), host.storageKey());
+  }
+
+  /** Showing a task in another conversation does not authorize automatic delivery there. */
   @Transactional
   public void bindDestination(AuthenticatedActor actor, HostConversationContext host, UUID taskId) {
     identities.lockActive(actor.userId());
     TaskBinding task = ownedTask(actor, taskId);
+    if (host == null || !host.supported() || !host.storageKey().equals(task.originCorrelation())
+        || !actor.clientId().equals(task.originClientId())
+        || !Objects.equals(actor.grantId(), task.originGrantId())) {
+      return;
+    }
     ChatPresentation slot =
         presentations.lockCurrentPresentation(actor, host).orElseThrow(DomainException::notFound);
     if (!slot.taskId().equals(taskId)) {
       throw DomainException.notFound();
     }
-    continuations.bind(task, slot, hostMessageVerified);
+    continuations.bind(task, slot, hostMessageVerified)
+        .ifPresent(intent -> changed(intent, Instant.now()));
   }
 
   @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
@@ -346,9 +365,12 @@ public class TaskContinuationService {
       MutationContext context) {
     actor.requireScope("tasks:write");
     identities.lockActive(actor.userId());
-    if (!actor.mcp() || actor.grantId() == null
-        || !identities.authorizationActive(actor.userId(), null, actor.grantId(), actor.accessEpoch())) {
-      throw new DomainException(403, "MCP_GRANT_REQUIRED", "Continuing agent work requires an active MCP grant");
+    if (!actor.mcp()
+        || actor.grantId() == null
+        || !identities.authorizationActive(
+            actor.userId(), null, actor.grantId(), actor.accessEpoch())) {
+      throw new DomainException(
+          403, "MCP_GRANT_REQUIRED", "Continuing agent work requires an active MCP grant");
     }
     TaskBinding task = ownedTask(actor, taskId);
     Continuation value = ownedContinuation(actor, taskId, input.continuationId());
@@ -410,7 +432,8 @@ public class TaskContinuationService {
         || !Objects.equals(actor.grantId(), value.claimGrantId())
         || instructionRevision != value.instructionRevision()
         || !value.expiresAt().isAfter(Instant.now())
-        || value.claimExpiresAt() == null || !value.claimExpiresAt().isAfter(Instant.now())) {
+        || value.claimExpiresAt() == null
+        || !value.claimExpiresAt().isAfter(Instant.now())) {
       throw DomainException.conflict(
           "CONTINUATION_CLAIM_REQUIRED", "Current continuation claim is required");
     }
@@ -440,25 +463,35 @@ public class TaskContinuationService {
       return;
     }
     Continuation value = current.get();
-    if (!value.state().equals("BLOCKED") || !"CLAIM_EXPIRED".equals(value.blockReason())
+    if (!value.state().equals("BLOCKED")
+        || !"CLAIM_EXPIRED".equals(value.blockReason())
         || !Objects.equals(value.claimId(), fence.claimId())
-        || !Objects.equals(value.claimControlEpoch(), fence.oldClaimEpoch()) || value.sessionId() == null) {
+        || !Objects.equals(value.claimControlEpoch(), fence.oldClaimEpoch())
+        || value.sessionId() == null) {
       return;
     }
     if (!value.expiresAt().isAfter(Instant.now())) {
-      changed(continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"), Instant.now());
+      changed(
+          continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"), Instant.now());
       return;
     }
     var session = browsers.owned(value.userId(), value.sessionId());
     var lease = controls.lock(value.sessionId());
-    if (!task.state().equals("WAITING_AGENT") || task.mutationBarrier() || tasks.outstanding(task.id())
+    if (!task.state().equals("WAITING_AGENT")
+        || task.mutationBarrier()
+        || tasks.outstanding(task.id())
         || task.instructionRevision() != value.instructionRevision()
         || task.continuationBindingVersion() != value.bindingVersion()
-        || !session.state().equals("ACTIVE") || !session.privacy().equals("NORMAL")
+        || !session.state().equals("ACTIVE")
+        || !session.privacy().equals("NORMAL")
         || !session.budgetDeadlineAt().isAfter(Instant.now())
-        || !lease.state().equals("ACTIVE") || !lease.ownerKind().equals("AGENT")
-        || lease.epoch() != fence.newEpoch() || !lease.expiresAt().isAfter(Instant.now())) {
-      changed(continuations.transition(value.id(), "BLOCKED", "RECONCILIATION_REQUIRED"), Instant.now());
+        || !lease.state().equals("ACTIVE")
+        || !lease.ownerKind().equals("AGENT")
+        || lease.epoch() != fence.newEpoch()
+        || !lease.expiresAt().isAfter(Instant.now())) {
+      changed(
+          continuations.transition(value.id(), "BLOCKED", "RECONCILIATION_REQUIRED"),
+          Instant.now());
       return;
     }
     changed(continuations.claimRecovered(value.id(), fence.newEpoch()), Instant.now());
@@ -475,20 +508,27 @@ public class TaskContinuationService {
             if (List.of("CONSUMED", "CANCELLED", "EXPIRED").contains(value.state())) {
               return;
             }
-            if (value.state().equals("CLAIMED") && value.claimExpiresAt() != null
+            if (value.state().equals("CLAIMED")
+                && value.claimExpiresAt() != null
                 && !value.claimExpiresAt().isAfter(Instant.now())) {
-              changed(continuations.transition(value.id(), "BLOCKED", "CLAIM_EXPIRED"), Instant.now());
+              changed(
+                  continuations.transition(value.id(), "BLOCKED", "CLAIM_EXPIRED"), Instant.now());
               if (value.sessionId() == null) {
                 if (value.expiresAt().isAfter(Instant.now())) {
                   changed(continuations.claimRecovered(value.id(), 0), Instant.now());
                 } else {
-                  changed(continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"), Instant.now());
+                  changed(
+                      continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"),
+                      Instant.now());
                 }
               } else if (value.claimId() != null && value.claimControlEpoch() != null) {
-                controlOwner.fenceExpiredClaim(value.userId(), value.sessionId(), value.claimId(), value.claimControlEpoch());
+                controlOwner.fenceExpiredClaim(
+                    value.userId(), value.sessionId(), value.claimId(), value.claimControlEpoch());
               }
             } else if (!value.expiresAt().isAfter(Instant.now())) {
-              changed(continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"), Instant.now());
+              changed(
+                  continuations.transition(value.id(), "EXPIRED", "CONTINUATION_EXPIRED"),
+                  Instant.now());
             } else if (value.state().equals("DISPATCHING")
                 && value.dispatchExpiresAt() != null
                 && !value.dispatchExpiresAt().isAfter(Instant.now())) {
@@ -545,9 +585,11 @@ public class TaskContinuationService {
   private void requireReadyControl(Continuation value) {
     var session = browsers.owned(value.userId(), value.sessionId());
     var lease = controls.lock(session.id());
-    if (!session.state().equals("ACTIVE") || !session.privacy().equals("NORMAL")
+    if (!session.state().equals("ACTIVE")
+        || !session.privacy().equals("NORMAL")
         || !session.budgetDeadlineAt().isAfter(Instant.now())
-        || !lease.ownerKind().equals("AGENT") || !lease.state().equals("ACTIVE")
+        || !lease.ownerKind().equals("AGENT")
+        || !lease.state().equals("ACTIVE")
         || !lease.expiresAt().isAfter(Instant.now())
         || !Objects.equals(value.controlEpoch(), lease.epoch())) {
       throw DomainException.conflict("CONTINUATION_BLOCKED", "Browser control is not ready");
