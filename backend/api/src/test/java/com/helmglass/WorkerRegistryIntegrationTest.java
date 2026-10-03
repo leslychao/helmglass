@@ -327,7 +327,8 @@ class WorkerRegistryIntegrationTest {
                 actor,
                 new TaskContracts.Create(
                     "Read page", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-                context(), null)
+                context(),
+                null)
             .resource()
             .id();
     var task = tasks.get(actor, taskId);
@@ -347,7 +348,8 @@ class WorkerRegistryIntegrationTest {
             null,
             null,
             json.read("{\"type\":\"NAVIGATE\",\"url\":\"https://example.com\"}")),
-        context());
+        context(),
+        null);
     UUID worker = UUID.randomUUID();
     UUID boot = UUID.randomUUID();
     register(worker, boot, List.of(), "READY");

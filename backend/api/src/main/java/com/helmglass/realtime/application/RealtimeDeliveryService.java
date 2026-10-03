@@ -423,6 +423,13 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
     presentations.requestWebFence(userId, fence);
   }
 
+  @Transactional
+  public void reconcileClosedViewers() {
+    for (ViewerFence fence : presentations.physicallyClosedFences()) {
+      confirmViewerFence(fence);
+    }
+  }
+
   private static boolean supportedHost(AuthenticatedActor actor, HostConversationContext host) {
     return actor.mcp() && host != null && host.supported();
   }

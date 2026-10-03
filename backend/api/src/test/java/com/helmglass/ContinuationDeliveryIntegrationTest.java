@@ -102,6 +102,10 @@ class ContinuationDeliveryIntegrationTest {
   }
 
   private Fixture fixture(boolean ready) {
+    return fixture(ready, true, true);
+  }
+
+  private Fixture fixture(boolean ready, boolean present, boolean withOrigin) {
     AuthenticatedActor actor =
         Objects.requireNonNull(
             transaction.execute(
@@ -149,22 +153,27 @@ class ContinuationDeliveryIntegrationTest {
                     false,
                     1800,
                     "PREPARE"),
-                context(), host)
+                context(),
+                withOrigin ? host : null)
             .resource()
             .id();
     var publication =
-        realtime.publishPresentation(
-            actor, task, null, 0, context(), host, Instant.now().plusSeconds(300));
-    owner.bindDestination(actor, host, task);
+        present
+            ? realtime.publishPresentation(
+                actor, task, null, 0, context(), host, Instant.now().plusSeconds(300))
+            : null;
     UUID viewer = UUID.randomUUID();
-    realtime.attachPresentation(
-        actor,
-        task,
-        publication.slot().id(),
-        publication.slot().presentationRevision(),
-        viewer,
-        host,
-        Instant.now().plusSeconds(300));
+    if (publication != null) {
+      owner.bindDestination(actor, host, task);
+      realtime.attachPresentation(
+          actor,
+          task,
+          publication.slot().id(),
+          publication.slot().presentationRevision(),
+          viewer,
+          host,
+          Instant.now().plusSeconds(300));
+    }
     UUID source =
         Objects.requireNonNull(
             transaction.execute(
@@ -182,8 +191,8 @@ class ContinuationDeliveryIntegrationTest {
             task,
             source,
             continuation,
-            publication.slot().id(),
-            publication.slot().presentationRevision(),
+            publication == null ? UUID.randomUUID() : publication.slot().id(),
+            publication == null ? 0 : publication.slot().presentationRevision(),
             viewer);
     if (ready) {
       finish(result, "SUCCEEDED");
@@ -447,8 +456,8 @@ class ContinuationDeliveryIntegrationTest {
     UUID commandId = UUID.randomUUID();
     var command = command(fixture, commandId, claim.resource().id(), "NAVIGATE");
     MutationContext key = context();
-    commands.accept(fixture.actor(), fixture.task(), command, key);
-    commands.accept(fixture.actor(), fixture.task(), command, key);
+    commands.accept(fixture.actor(), fixture.task(), command, key, null);
+    commands.accept(fixture.actor(), fixture.task(), command, key, null);
     assertThat(repository.get(fixture.continuation()).state()).isEqualTo("CONSUMED");
     assertThat(repository.snapshot(fixture.task())).containsEntry("state", "WAITING_RESULT");
     assertThat(
@@ -492,7 +501,8 @@ class ContinuationDeliveryIntegrationTest {
         observation.actor(),
         observation.task(),
         command(observation, observeId, observedClaim.resource().id(), "OBSERVE"),
-        context());
+        context(),
+        null);
     assertThat(
             count("SELECT count(*) FROM task_continuations WHERE source_command_id=:id", observeId))
         .isZero();
@@ -543,6 +553,147 @@ class ContinuationDeliveryIntegrationTest {
         null,
         null,
         action);
+  }
+
+  @Test
+  void firstForeignViewCannotStealCreationDestinationAndOriginalViewBindsPendingIntent() {
+    Fixture fixture = fixture(false, false, true);
+    HostConversationContext foreign = host();
+    var other =
+        realtime.publishPresentation(
+            fixture.actor(),
+            fixture.task(),
+            null,
+            0,
+            context(),
+            foreign,
+            Instant.now().plusSeconds(300));
+    owner.bindDestination(fixture.actor(), foreign, fixture.task());
+    assertThat(repository.get(fixture.continuation()).viewScopeId()).isNull();
+    assertThat(repository.get(fixture.continuation()).mode()).isEqualTo("MANUAL");
+    var original =
+        realtime.publishPresentation(
+            fixture.actor(),
+            fixture.task(),
+            null,
+            0,
+            context(),
+            fixture.host(),
+            Instant.now().plusSeconds(300));
+    owner.bindDestination(fixture.actor(), fixture.host(), fixture.task());
+    var bound = repository.get(fixture.continuation());
+    assertThat(bound.viewScopeId()).isEqualTo(original.slot().id()).isNotEqualTo(other.slot().id());
+    assertThat(bound.destinationGrantId()).isEqualTo(fixture.actor().grantId());
+    assertThat(bound.state()).isEqualTo("WAITING_RESULT");
+    assertThat(bound.dispatchId()).isNull();
+    assertThat(bound.mode()).isEqualTo("WIDGET_RETURN");
+    owner.bindDestination(fixture.actor(), fixture.host(), fixture.task());
+    owner.bindDestination(fixture.actor(), foreign, fixture.task());
+    assertThat(repository.get(fixture.continuation()).version()).isEqualTo(bound.version());
+    finish(fixture, "SUCCEEDED");
+    realtime.attachPresentation(
+        fixture.actor(),
+        fixture.task(),
+        original.slot().id(),
+        original.slot().presentationRevision(),
+        fixture.viewer(),
+        fixture.host(),
+        Instant.now().plusSeconds(300));
+    var dispatch =
+        owner.prepareMessage(
+            fixture.actor(),
+            fixture.host(),
+            fixture.task(),
+            new ContinuationContracts.PrepareMessage(
+                fixture.continuation(),
+                original.slot().id(),
+                original.slot().presentationRevision(),
+                fixture.viewer()),
+            context());
+    assertThat(dispatch.dispatchId()).isNotNull();
+  }
+
+  @Test
+  void viewingTaskWithoutVerifiedCreationContextNeverInventsAnAutomaticDestination() {
+    Fixture fixture = fixture(false, false, false);
+    realtime.publishPresentation(
+        fixture.actor(),
+        fixture.task(),
+        null,
+        0,
+        context(),
+        fixture.host(),
+        Instant.now().plusSeconds(300));
+    owner.bindDestination(fixture.actor(), fixture.host(), fixture.task());
+    assertThat(repository.get(fixture.continuation()).viewScopeId()).isNull();
+    assertThat(repository.get(fixture.continuation()).mode()).isEqualTo("MANUAL");
+  }
+
+  @Test
+  void explicitMcpCommandAdoptsWebTaskWhileARejectedCommandCannotChooseItsChat() {
+    Fixture fixture = fixture(false, false, false);
+    transaction.executeWithoutResult(status -> owner.cancel(fixture.task()));
+    jdbc.sql("UPDATE tasks SET origin='ANGULAR',continuation_consent=false WHERE id=:id")
+        .param("id", fixture.task())
+        .update();
+    var presentation =
+        realtime.publishPresentation(
+            fixture.actor(),
+            fixture.task(),
+            null,
+            0,
+            context(),
+            fixture.host(),
+            Instant.now().plusSeconds(300));
+    owner.bindDestination(fixture.actor(), fixture.host(), fixture.task());
+    assertThat(
+            jdbc.sql("SELECT origin_correlation IS NULL FROM tasks WHERE id=:id")
+                .param("id", fixture.task())
+                .query(Boolean.class)
+                .single())
+        .isTrue();
+    var invalid =
+        new CommandContracts.Submit(
+            UUID.randomUUID(),
+            -1L,
+            1L,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            JsonMapper.builder()
+                .build()
+                .createObjectNode()
+                .put("type", "NAVIGATE")
+                .put("url", "https://example.com"));
+    assertThatThrownBy(
+            () -> commands.accept(fixture.actor(), fixture.task(), invalid, context(), host()))
+        .isInstanceOf(DomainException.class);
+    assertThat(
+            jdbc.sql("SELECT origin_correlation IS NULL FROM tasks WHERE id=:id")
+                .param("id", fixture.task())
+                .query(Boolean.class)
+                .single())
+        .isTrue();
+    commands.accept(
+        fixture.actor(),
+        fixture.task(),
+        command(fixture, UUID.randomUUID(), null, "NAVIGATE"),
+        context(),
+        fixture.host());
+    var current = repository.current(fixture.task()).orElseThrow();
+    assertThat(current.state()).isEqualTo("WAITING_RESULT");
+    assertThat(current.mode()).isEqualTo("WIDGET_RETURN");
+    assertThat(current.viewScopeId()).isEqualTo(presentation.slot().id());
+    assertThat(
+            jdbc.sql("SELECT origin_correlation FROM tasks WHERE id=:id")
+                .param("id", fixture.task())
+                .query(String.class)
+                .single())
+        .isEqualTo(fixture.host().storageKey());
   }
 
   @Test
@@ -640,6 +791,28 @@ class ContinuationDeliveryIntegrationTest {
         .param("id", fixture.continuation())
         .update();
     var actor = fixture.actor();
+    var withoutExecution =
+        new AuthenticatedActor(
+            actor.userId(),
+            null,
+            actor.grantId(),
+            actor.clientId(),
+            actor.displayName(),
+            actor.email(),
+            actor.accessEpoch(),
+            Set.of("tasks:write", "tasks:read", "browser:view"),
+            true);
+    assertThatThrownBy(
+            () ->
+                owner.claim(
+                    withoutExecution,
+                    null,
+                    fixture.task(),
+                    new ContinuationContracts.Claim(fixture.continuation(), 1L),
+                    context()))
+        .isInstanceOf(DomainException.class)
+        .extracting("code")
+        .isEqualTo("SCOPE_REQUIRED");
     var web =
         new AuthenticatedActor(
             actor.userId(),

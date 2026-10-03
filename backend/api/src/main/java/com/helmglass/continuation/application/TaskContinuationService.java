@@ -84,17 +84,31 @@ public class TaskContinuationService {
     transaction.setTimeout(5);
   }
 
-  /** Publication may establish the original destination, but cannot move an existing intent. */
+  /** Creation or explicit execution establishes an origin once; a view cannot establish it. */
   @Transactional(propagation = Propagation.MANDATORY)
   public void registerOrigin(AuthenticatedActor actor, HostConversationContext host, UUID taskId) {
     if (host == null || !host.supported()) {
       return;
     }
-    if (!actor.mcp() || actor.grantId() == null
-        || !identities.authorizationActive(actor.userId(), null, actor.grantId(), actor.accessEpoch())) {
-      throw new DomainException(403, "MCP_GRANT_REQUIRED", "A verified origin requires an active MCP grant");
+    if (!actor.mcp()
+        || actor.grantId() == null
+        || !identities.authorizationActive(
+            actor.userId(), null, actor.grantId(), actor.accessEpoch())) {
+      throw new DomainException(
+          403, "MCP_GRANT_REQUIRED", "A verified origin requires an active MCP grant");
     }
     continuations.registerOrigin(taskId, actor.clientId(), actor.grantId(), host.storageKey());
+  }
+
+  /** Accepted MCP execution may adopt a WEB task into its first verified conversation. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void admitExecution(AuthenticatedActor actor, HostConversationContext host, UUID taskId) {
+    if (!actor.mcp() || host == null || !host.supported()) {
+      return;
+    }
+    registerOrigin(actor, host, taskId);
+    continuations.consent(taskId, true);
+    bindDestination(actor, host, taskId);
   }
 
   /** Showing a task in another conversation does not authorize automatic delivery there. */
@@ -102,17 +116,20 @@ public class TaskContinuationService {
   public void bindDestination(AuthenticatedActor actor, HostConversationContext host, UUID taskId) {
     identities.lockActive(actor.userId());
     TaskBinding task = ownedTask(actor, taskId);
-    if (host == null || !host.supported() || !host.storageKey().equals(task.originCorrelation())
+    if (host == null
+        || !host.supported()
+        || !host.storageKey().equals(task.originCorrelation())
         || !actor.clientId().equals(task.originClientId())
         || !Objects.equals(actor.grantId(), task.originGrantId())) {
       return;
     }
-    ChatPresentation slot =
-        presentations.lockCurrentPresentation(actor, host).orElseThrow(DomainException::notFound);
-    if (!slot.taskId().equals(taskId)) {
-      throw DomainException.notFound();
+    var current = presentations.lockCurrentPresentation(actor, host);
+    if (current.isEmpty() || !current.get().taskId().equals(taskId)) {
+      return;
     }
-    continuations.bind(task, slot, hostMessageVerified)
+    ChatPresentation slot = current.get();
+    continuations
+        .bind(task, slot, hostMessageVerified)
         .ifPresent(intent -> changed(intent, Instant.now()));
   }
 
@@ -364,6 +381,7 @@ public class TaskContinuationService {
       ContinuationContracts.Claim input,
       MutationContext context) {
     actor.requireScope("tasks:write");
+    actor.requireScope("browser:execute");
     identities.lockActive(actor.userId());
     if (!actor.mcp()
         || actor.grantId() == null
@@ -390,6 +408,8 @@ public class TaskContinuationService {
         && !(value.state().equals("BLOCKED") && "HOST_REJECTED".equals(value.blockReason()))) {
       throw DomainException.conflict("CONTINUATION_BLOCKED", "Continuation is not claimable");
     }
+    admitExecution(actor, host, taskId);
+    value = ownedContinuation(actor, taskId, input.continuationId());
     UUID claimId = UUID.randomUUID();
     var receipt =
         operations.save(

@@ -15,6 +15,7 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
+import com.helmglass.realtime.domain.HostConversationContext;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
 import com.helmglass.task.application.ReconciliationService;
 import com.helmglass.usage.application.UsageProjectionService;
@@ -80,7 +81,8 @@ public class CommandExecutionService {
       AuthenticatedActor actor,
       UUID taskId,
       CommandContracts.Submit input,
-      MutationContext context) {
+      MutationContext context,
+      HostConversationContext host) {
     actor.requireScope("browser:execute");
     identities.lockActive(actor.userId());
     var task = commands.lockTask(actor.userId(), taskId);
@@ -124,6 +126,7 @@ public class CommandExecutionService {
           422, "INVALID_DEADLINE", "Command deadline must be within five minutes");
     }
     continuations.consume(actor, taskId, task.instructionRevision(), input.continuationClaimId());
+    continuations.admitExecution(actor, host, taskId);
     commands.insert(actor, taskId, input, kind, digest, deadline);
     continuations.waitForResult(taskId, null, input.commandId(), "ASYNC_RESULT_READY");
     usage.refresh(actor.userId(), taskId);

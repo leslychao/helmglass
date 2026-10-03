@@ -72,6 +72,7 @@ export const supportedScopes = ['tasks:read', 'tasks:write', 'browser:view', 'br
 export function scopesForTool(name: ToolName): string[] {
   if (name === 'connections.resolve') return ['tasks:write'];
   if (name === 'browser.attach_view' || name === 'tasks.view') return ['tasks:read', 'browser:view'];
+  if (name === 'tasks.continue') return ['tasks:write', 'browser:execute'];
   if (name.startsWith('browser.') || name === 'media.capture') return ['browser:execute'];
   if (name === 'tasks.complete') return ['tasks:write', 'results:write'];
   if (name === 'results.publish') return ['results:write'];

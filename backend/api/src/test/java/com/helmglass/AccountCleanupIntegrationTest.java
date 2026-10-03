@@ -176,7 +176,8 @@ class AccountCleanupIntegrationTest {
             user,
             new TaskContracts.Create(
                 "Read", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-            context(), null);
+            context(),
+            null);
     UUID worker = UUID.randomUUID();
     UUID boot = UUID.randomUUID();
     jdbc.sql(
@@ -231,7 +232,8 @@ class AccountCleanupIntegrationTest {
         user,
         new TaskContracts.Create(
             "Private draft", "https://example.com", List.of(), "TEXT", false, 1800, "DRAFT"),
-        context(), null);
+        context(),
+        null);
     UUID request = delete(admin, user).resource().id();
     expire(request);
     finish(request);

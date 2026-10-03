@@ -65,7 +65,9 @@ public class ContinuationRepository {
       boolean mutationBarrier,
       boolean continuationConsent,
       UUID continuationViewScopeId,
-      long continuationBindingVersion, String originCorrelation, String originClientId,
+      long continuationBindingVersion,
+      String originCorrelation,
+      String originClientId,
       UUID originGrantId) {}
 
   public TaskBinding lockTask(UUID taskId) {
@@ -130,14 +132,20 @@ public class ContinuationRepository {
   }
 
   public void registerOrigin(UUID taskId, String clientId, UUID grantId, String correlation) {
-    jdbc.sql("""
-        UPDATE tasks SET origin_correlation=:correlation,origin_client_id=:client,origin_grant_id=:grant
-        WHERE id=:task AND origin_correlation IS NULL
-        """).param("task", taskId).param("client", clientId).param("grant", grantId)
-        .param("correlation", correlation).update();
+    jdbc.sql(
+            """
+            UPDATE tasks SET origin_correlation=:correlation,origin_client_id=:client,origin_grant_id=:grant
+            WHERE id=:task AND origin_correlation IS NULL
+            """)
+        .param("task", taskId)
+        .param("client", clientId)
+        .param("grant", grantId)
+        .param("correlation", correlation)
+        .update();
   }
 
-  public Optional<Continuation> bind(TaskBinding task, ChatPresentation slot, boolean messageVerified) {
+  public Optional<Continuation> bind(
+      TaskBinding task, ChatPresentation slot, boolean messageVerified) {
     jdbc.sql(
             """
             UPDATE tasks SET continuation_view_scope_id=:scope,
@@ -148,18 +156,26 @@ public class ContinuationRepository {
         .param("scope", slot.id())
         .param("verified", messageVerified)
         .update();
-    return jdbc.sql("""
-        UPDATE task_continuations SET view_scope_id=:scope,destination_client_id=:client,
-          destination_grant_id=:grant,destination_grant_version=:grantVersion,
-          destination_access_epoch=:epoch,mode=CASE WHEN :automatic THEN 'WIDGET_RETURN' ELSE 'MANUAL' END,
-          version=version+1
-        WHERE task_id=:task AND state IN ('WAITING_RESULT','READY') AND view_scope_id IS NULL
-          AND binding_version=:binding AND instruction_revision=:revision RETURNING *
-        """).param("task", task.id()).param("scope", slot.id()).param("client", slot.clientId())
-        .param("grant", slot.grantId()).param("grantVersion", slot.grantVersion())
-        .param("epoch", slot.accessEpoch()).param("automatic", messageVerified && task.continuationConsent())
-        .param("binding", task.continuationBindingVersion()).param("revision", task.instructionRevision())
-        .query(Continuation.class).optional();
+    return jdbc.sql(
+            """
+            UPDATE task_continuations SET view_scope_id=:scope,destination_client_id=:client,
+              destination_grant_id=:grant,destination_grant_version=:grantVersion,
+              destination_access_epoch=:epoch,mode=CASE WHEN :automatic THEN 'WIDGET_RETURN' ELSE 'MANUAL' END,
+              version=version+1
+            WHERE task_id=:task AND state IN ('WAITING_RESULT','READY') AND view_scope_id IS NULL
+              AND binding_version=:binding AND instruction_revision=:revision AND expires_at>now() RETURNING *
+            """)
+        .param("task", task.id())
+        .param("scope", slot.id())
+        .param("client", slot.clientId())
+        .param("grant", slot.grantId())
+        .param("grantVersion", slot.grantVersion())
+        .param("epoch", slot.accessEpoch())
+        .param("automatic", messageVerified && task.continuationConsent())
+        .param("binding", task.continuationBindingVersion())
+        .param("revision", task.instructionRevision())
+        .query(Continuation.class)
+        .optional();
   }
 
   public Continuation waitForResult(
@@ -364,7 +380,10 @@ public class ContinuationRepository {
                 SELECT id,state,reason,mode,version,instruction_revision AS "instructionRevision",
                   expires_at AS "expiresAt",session_id AS "observedSessionId",delivered_at AS "deliveredAt",
                   dispatch_not_before AS "dispatchNotBefore",dispatch_id AS "dispatchId",
-                  delivery_outcome AS "deliveryOutcome",block_reason AS "limitationReason",
+                  delivery_outcome AS "deliveryOutcome",
+                  CASE WHEN block_reason IS NOT NULL THEN block_reason
+                    WHEN mode='MANUAL' AND view_scope_id IS NULL THEN 'CHAT_BINDING_UNVERIFIED'
+                    WHEN mode='MANUAL' THEN 'HOST_MESSAGE_UNVERIFIED' ELSE NULL END AS "limitationReason",
                   CASE WHEN dispatch_id IS NOT NULL THEN dispatch_text ELSE NULL END AS "manualMessage"
                 FROM task_continuations WHERE task_id=:task ORDER BY created_at DESC,id DESC LIMIT 1
                 """)

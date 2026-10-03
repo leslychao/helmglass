@@ -198,7 +198,8 @@ class WorkflowIntegrationTest {
                     false,
                     1800,
                     "DRAFT"),
-                context(), null)
+                context(),
+                null)
             .resource()
             .id();
     var initial = tasks.get(actor, id);
@@ -253,7 +254,8 @@ class WorkflowIntegrationTest {
                     false,
                     1800,
                     "DRAFT"),
-                context(), null)
+                context(),
+                null)
             .resource()
             .id();
     var initial = tasks.get(actor, id);
@@ -310,7 +312,8 @@ class WorkflowIntegrationTest {
                 actor,
                 new TaskContracts.Create(
                     "List a task", "https://example.com", List.of(), "TEXT", false, 1800, "DRAFT"),
-                context(), null)
+                context(),
+                null)
             .resource()
             .id();
     for (String sort :
@@ -363,7 +366,8 @@ class WorkflowIntegrationTest {
                 actor,
                 new TaskContracts.Create(
                     "Read", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-                context(), null)
+                context(),
+                null)
             .resource()
             .id();
     tasks.pause(actor, taskId, context());
@@ -395,7 +399,7 @@ class WorkflowIntegrationTest {
             null,
             null,
             action);
-    assertThatThrownBy(() -> commands.accept(actor, taskId, missingClaim, context()))
+    assertThatThrownBy(() -> commands.accept(actor, taskId, missingClaim, context(), null))
         .isInstanceOf(DomainException.class);
     var accepted =
         new CommandContracts.Submit(
@@ -410,7 +414,7 @@ class WorkflowIntegrationTest {
             null,
             null,
             action);
-    commands.accept(actor, taskId, accepted, context());
+    commands.accept(actor, taskId, accepted, context(), null);
     assertThat(tasks.get(actor, taskId).continuation())
         .containsEntry("state", "WAITING_RESULT")
         .doesNotContainEntry("id", continuationId);

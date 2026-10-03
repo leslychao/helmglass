@@ -57,7 +57,9 @@ public class TaskLifecycleService {
 
   @Transactional
   public MutationReceipt create(
-      AuthenticatedActor actor, TaskContracts.Create input, MutationContext context,
+      AuthenticatedActor actor,
+      TaskContracts.Create input,
+      MutationContext context,
       HostConversationContext host) {
     actor.requireScope("tasks:write");
     identities.lockActive(actor.userId());

@@ -274,7 +274,8 @@ class LoginLifecycleIntegrationTest {
                     false,
                     1800,
                     "DRAFT"),
-                context(), null)
+                context(),
+                null)
             .resource()
             .id();
     var initial = tasks.get(actor, taskId);

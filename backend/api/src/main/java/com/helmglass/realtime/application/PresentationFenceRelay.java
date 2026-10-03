@@ -25,6 +25,7 @@ public class PresentationFenceRelay {
 
   @Scheduled(fixedDelay = 500)
   public void deliver() {
+    realtime.reconcileClosedViewers();
     for (var fence : presentations.dueFences()) {
       if (!workers.send(
           fence.workerId(),

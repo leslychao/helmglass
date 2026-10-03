@@ -133,6 +133,7 @@ test('tool discovery separates model execution from widget callbacks and keeps r
       assert.deepEqual(tools.get(name)?.securitySchemes, [{ type: 'oauth2', scopes: ['tasks:read', 'browser:view'] }]);
     }
     assert.deepEqual(tools.get('tasks.complete')?.securitySchemes, [{ type: 'oauth2', scopes: ['tasks:write', 'results:write'] }]);
+    assert.deepEqual(tools.get('tasks.continue')?.securitySchemes, [{ type: 'oauth2', scopes: ['tasks:write', 'browser:execute'] }]);
   } finally { await handler.close(); }
 });
 
@@ -152,6 +153,27 @@ test('modern stateless envelope preserves scopes and rejects a write with read-o
     } }, { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'tasks.stop' }));
     assert.match(await denied.text(), /INSUFFICIENT_SCOPE/);
     assert.equal(calls, 1);
+  } finally { await handler.close(); }
+});
+
+test('continuation requires task write and browser execution authorization before reaching the owner', async () => {
+  let calls = 0;
+  const handler = createAdapter({ call: async () => {
+    calls++;
+    return { content: [{ type: 'text', text: 'continuation-claimed' }] };
+  } }, widgetHtml, publicOrigin);
+  const args = { taskId: randomUUID(), continuationId: randomUUID(),
+    idempotencyKey: randomUUID(), expectedInstructionRevision: 1 };
+  try {
+    for (const scopes of [['tasks:write'], ['browser:execute'], ['tasks:write', 'browser:execute']]) {
+      const app = authenticatedAdapter(handler, async token => ({ token, clientId: 'fixture-client', scopes }),
+        publicOrigin, `${publicOrigin}/idp`);
+      const response = await app.fetch(request({ jsonrpc: '2.0', id: 39, method: 'tools/call',
+        params: { name: 'tasks.continue', arguments: args } }));
+      assert.equal(response.status, 200);
+      assert.match(await response.text(), scopes.length === 2 ? /continuation-claimed/ : /INSUFFICIENT_SCOPE/);
+    }
+    assert.equal(calls, 1, 'partial grants cannot reach the continuation owner');
   } finally { await handler.close(); }
 });
 

@@ -329,6 +329,24 @@ public class ChatPresentationRepository {
         .list();
   }
 
+  /** Only the browser lifecycle owner's persisted physical closure can replace a lost ACK. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public List<ViewerFence> physicallyClosedFences() {
+    return jdbc.sql("""
+        SELECT o.id request_id,s.worker_id,s.worker_boot_id,s.id browser_session_id,
+          s.allocation_epoch,(o.payload->>'viewerId')::uuid viewer_id,
+          (o.payload->>'viewGeneration')::bigint view_generation
+        FROM transactional_outbox o JOIN browser_sessions s
+          ON s.id=(o.payload->>'browserSessionId')::uuid
+        WHERE o.event_type='viewer.fence' AND o.published_at IS NULL
+          AND s.state='CLOSED' AND s.binding_released_at IS NOT NULL
+          AND o.payload->>'workerId'=s.worker_id::text
+          AND o.payload->>'workerBootId'=s.worker_boot_id::text
+          AND o.payload->>'allocationEpoch'=s.allocation_epoch::text
+        ORDER BY o.retry_at,o.id LIMIT 100 FOR UPDATE OF o SKIP LOCKED
+        """).query(ViewerFence.class).list();
+  }
+
   @Transactional(propagation = Propagation.MANDATORY)
   public Optional<UUID> confirmFence(ViewerFence fence) {
     // Match even a previously published exact receipt: the worker's confirmation may have been

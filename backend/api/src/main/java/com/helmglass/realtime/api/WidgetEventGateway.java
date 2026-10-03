@@ -90,7 +90,7 @@ public class WidgetEventGateway extends TextWebSocketHandler {
         UUID taskId = UUID.fromString(path.substring(path.lastIndexOf('/') + 1));
         TicketBinding binding = tickets.consumeTaskEvents(value.path("ticket").asString(), taskId, origin);
         if (!realtime.connectWidgetEvents(binding)) {
-          close(connection, 4412, "PRESENTATION_SUPERSEDED");
+          reject(connection, binding, "VIEW_ALREADY_ATTACHED");
           return;
         }
         Connection authenticated = new Connection(connection.socket(), Instant.now(), binding);
@@ -102,7 +102,7 @@ public class WidgetEventGateway extends TextWebSocketHandler {
         authenticated.socket().sendMessage(new TextMessage("{\"type\":\"ready\"}"));
       } else if (value.path("type").asString().equals("ping") && value.size() == 1) {
         if (!realtime.renewWidget(connection.binding())) {
-          close(connection, 4412, "PRESENTATION_SUPERSEDED");
+          reject(connection, connection.binding(), "VIEW_LEASE_EXPIRED");
           return;
         }
         connections.replace(socket.getId(), connection,
@@ -160,18 +160,22 @@ public class WidgetEventGateway extends TextWebSocketHandler {
       if (rejection.isEmpty()) {
         return true;
       }
-      String code = rejection.get();
-      int status = switch (code) {
-        case "AUTHORIZATION_EXPIRED" -> 4401;
-        case "VIEW_LEASE_EXPIRED", "VIEW_GENERATION_CHANGED" -> 4503;
-        case "GRANT_REVOKED" -> 4403;
-        default -> 4412;
-      };
-      close(connection, status, code);
+      reject(connection, connection.binding(), rejection.get());
     } catch (DataAccessException error) {
       close(connection, 4503, "AUTHORIZATION_UNAVAILABLE");
     }
     return false;
+  }
+
+  private void reject(Connection connection, TicketBinding binding, String fallback) {
+    String reason = realtime.widgetRejection(binding).orElse(fallback);
+    int status = switch (reason) {
+      case "AUTHORIZATION_EXPIRED" -> 4401;
+      case "GRANT_REVOKED" -> 4403;
+      case "PRESENTATION_SUPERSEDED" -> 4412;
+      default -> 4503;
+    };
+    close(connection, status, reason);
   }
 
   private void close(Connection connection, int code, String reason) {

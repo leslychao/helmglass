@@ -142,7 +142,8 @@ class CoreOwnersIntegrationTest {
             actor,
             new TaskContracts.Create(
                 "Read page", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-            context(), null);
+            context(),
+            null);
     var snapshot = tasks.get(actor, task.resource().id());
     UUID commandId = UUID.randomUUID();
     var input =
@@ -158,7 +159,7 @@ class CoreOwnersIntegrationTest {
             null,
             null,
             json.read("{\"type\":\"NAVIGATE\",\"url\":\"https://example.com\"}"));
-    commands.accept(actor, snapshot.id(), input, context());
+    commands.accept(actor, snapshot.id(), input, context(), null);
     UUID workerId = UUID.randomUUID();
     UUID bootId = UUID.randomUUID();
     register(workerId, bootId);
@@ -244,7 +245,8 @@ class CoreOwnersIntegrationTest {
             actor,
             new TaskContracts.Create(
                 "Measure", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-            context(), null);
+            context(),
+            null);
     UUID worker = UUID.randomUUID();
     UUID boot = UUID.randomUUID();
     register(worker, boot);

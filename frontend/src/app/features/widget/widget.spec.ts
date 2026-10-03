@@ -568,7 +568,7 @@ describe('widget presentation lifecycle', () => {
         );
       },
     );
-    return { prepare, recordDelivery, prepared };
+    return { prepare, recordDelivery, prepared, setState: (value: string) => (state = value) };
   }
 
   it('recovers a lost prepare response with the same key and sends only once', async () => {
@@ -648,32 +648,52 @@ describe('widget presentation lifecycle', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(bridge.sendMessage).not.toHaveBeenCalled();
-    expect(bridge.attach.mock.calls.every(([request]) => request.name === 'browser.attach_view')).toBe(
-      true,
-    );
+    expect(
+      bridge.attach.mock.calls.every(([request]) => request.name === 'browser.attach_view'),
+    ).toBe(true);
     expect(fixture.componentInstance.manualText()).toBe(continuation.manualMessage);
   });
 
-  it('rejects a prepared message if the widget becomes hidden before host invocation', async () => {
-    const protocol = deliveryScenario();
-    let resolve: ((value: ReturnType<typeof protocol.prepared>) => void) | undefined;
-    protocol.prepare.mockImplementationOnce(
-      () =>
-        new Promise((complete) => {
-          resolve = complete;
-        }),
-    );
-    await mount();
-    socket().open();
-    await vi.advanceTimersByTimeAsync(0);
-    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
-    document.dispatchEvent(new Event('visibilitychange'));
-    resolve?.(protocol.prepared());
-    await vi.advanceTimersByTimeAsync(0);
+  it.each([false, true])(
+    'defers an unsent prepared message across hide/show (early return %s)',
+    async (earlyReturn) => {
+      const protocol = deliveryScenario();
+      let resolve: ((value: ReturnType<typeof protocol.prepared>) => void) | undefined;
+      protocol.prepare.mockImplementationOnce(
+        () =>
+          new Promise((complete) => {
+            resolve = complete;
+          }),
+      );
+      await mount();
+      socket().open();
+      await vi.advanceTimersByTimeAsync(0);
+      vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+      document.dispatchEvent(new Event('visibilitychange'));
+      if (earlyReturn) {
+        vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+        document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(0);
+        socket().open();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      resolve?.(protocol.prepared());
+      await vi.advanceTimersByTimeAsync(0);
 
-    expect(bridge.sendMessage).not.toHaveBeenCalled();
-    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('REJECTED');
-  });
+      if (!earlyReturn) {
+        expect(bridge.sendMessage).not.toHaveBeenCalled();
+        expect(protocol.recordDelivery).not.toHaveBeenCalled();
+        vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+        document.dispatchEvent(new Event('visibilitychange'));
+        await vi.advanceTimersByTimeAsync(0);
+        socket().open();
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(bridge.sendMessage).toHaveBeenCalledOnce();
+      expect(protocol.prepare).toHaveBeenCalledOnce();
+      expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('DELIVERED');
+    },
+  );
 
   it('bounds receipt repair even while attach and heartbeat remain healthy', async () => {
     const protocol = deliveryScenario();
@@ -703,6 +723,54 @@ describe('widget presentation lifecycle', () => {
     expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('DELIVERED');
   });
 
+  it('waits for a fresh read after invalidation during prepare before invoking the host', async () => {
+    const protocol = deliveryScenario();
+    let resolveRead: ((value: ReturnType<typeof attached>) => void) | undefined;
+    protocol.prepare.mockImplementationOnce(async () => {
+      socket().receive('invalidate');
+      bridge.attach.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRead = resolve;
+          }),
+      );
+      return protocol.prepared();
+    });
+    await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    resolveRead?.(
+      attached({ id: 'continuation-1', state: 'DISPATCHING', mode: 'WIDGET_RETURN' }, true),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.sendMessage).toHaveBeenCalledOnce();
+    expect(protocol.prepare).toHaveBeenCalledOnce();
+  });
+
+  it.each(['CLAIMED', 'CONSUMED'])(
+    'does not send when invalidation reveals %s during prepare',
+    async (state) => {
+      const protocol = deliveryScenario();
+      let resolve: ((value: ReturnType<typeof protocol.prepared>) => void) | undefined;
+      protocol.prepare.mockImplementationOnce(
+        () =>
+          new Promise((complete) => {
+            resolve = complete;
+          }),
+      );
+      await mount();
+      socket().open();
+      await vi.advanceTimersByTimeAsync(0);
+      protocol.setState(state);
+      socket().receive('invalidate');
+      resolve?.(protocol.prepared());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bridge.sendMessage).not.toHaveBeenCalled();
+      expect(protocol.recordDelivery).not.toHaveBeenCalled();
+    },
+  );
+
   it('rejects an expired prepare receipt without invoking the host', async () => {
     const protocol = deliveryScenario();
     const expired = protocol.prepared();
@@ -713,7 +781,7 @@ describe('widget presentation lifecycle', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(bridge.sendMessage).not.toHaveBeenCalled();
-    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('REJECTED');
+    expect(protocol.recordDelivery).not.toHaveBeenCalled();
   });
 
   it('does not send a delayed prepare response after presentation supersession', async () => {
@@ -733,7 +801,7 @@ describe('widget presentation lifecycle', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(bridge.sendMessage).not.toHaveBeenCalled();
-    expect(protocol.recordDelivery.mock.calls[0]?.[0]['outcome']).toBe('REJECTED');
+    expect(protocol.recordDelivery).not.toHaveBeenCalled();
   });
 
   it('does not attach after destruction while the host handshake is pending', async () => {

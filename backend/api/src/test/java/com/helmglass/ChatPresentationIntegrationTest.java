@@ -13,6 +13,7 @@ import com.helmglass.realtime.application.ChannelTicketService;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
 import com.helmglass.realtime.domain.ChatPresentation;
+import com.helmglass.realtime.domain.BrowserMediaBinding;
 import com.helmglass.realtime.domain.HostConversationContext;
 import com.helmglass.realtime.domain.ViewerFence;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
@@ -96,6 +97,91 @@ class ChatPresentationIntegrationTest {
     }
     REDIS.stop();
     DATABASE.stop();
+  }
+
+  @Test
+  void videoReplacementWaitsForPhysicalFenceAndExpiryRecoversTheSameMount() {
+    Fixture fixture = fixture();
+    ChatPresentation published = publish(fixture, null, 0, mutation()).slot();
+    UUID viewer = UUID.randomUUID();
+    ChatPresentation slot = attach(fixture, published.id(), 1, viewer).slot();
+    BrowserMediaBinding media = media(fixture);
+    var admitted = prepare(fixture, slot, media);
+    assertThat(admitted.issueTicket()).isTrue();
+    var ticket = videoTicket(admitted.slot());
+    assertThat(ticket.purpose()).isEqualTo("NORMAL_VIDEO");
+    assertThat(tx(() -> realtime.connectWidgetMedia(ticket))).isTrue();
+    assertThat(tx(() -> realtime.connectWidgetMedia(ticket))).isFalse();
+    assertThat(prepare(fixture, admitted.slot(), media).issueTicket()).isFalse();
+
+    expire(slot.id());
+    assertThat(realtime.widgetRejection(ticket)).contains("VIEW_LEASE_EXPIRED");
+    var recovered = attach(fixture, slot.id(), 1, viewer).slot();
+    assertThat(realtime.widgetRejection(ticket)).contains("VIEW_GENERATION_CHANGED");
+    var waiting = prepare(fixture, recovered, media);
+    assertThat(waiting.issueTicket()).isFalse();
+    assertThat(waiting.unavailableReason()).isEqualTo("PRESENTATION_FENCING");
+    ViewerFence fence = tx(presentations::dueFences).stream()
+        .filter(value -> value.viewerId().equals(viewer)).findFirst().orElseThrow();
+    assertThat(tx(() -> realtime.confirmViewerFence(fence))).isTrue();
+    var replacement = prepare(fixture, waiting.slot(), media);
+    assertThat(replacement.issueTicket()).isTrue();
+    var newTicket = videoTicket(replacement.slot());
+    assertThat(tx(() -> realtime.connectWidgetMedia(newTicket))).isTrue();
+    transaction.executeWithoutResult(status -> realtime.disconnectWidgetMedia(ticket));
+    assertThat(realtime.widgetMediaAuthorized(newTicket)).isTrue();
+    publish(fixture, slot.id(), 1, mutation());
+    assertThat(realtime.widgetRejection(newTicket)).contains("PRESENTATION_SUPERSEDED");
+  }
+
+  @Test
+  void privateMediaNeverReceivesTicketAndConfirmedSessionClosureRecoversLostFenceAck() {
+    Fixture fixture = fixture();
+    ChatPresentation published = publish(fixture, null, 0, mutation()).slot();
+    ChatPresentation slot = attach(fixture, published.id(), 1, UUID.randomUUID()).slot();
+    BrowserMediaBinding media = media(fixture);
+    var admitted = prepare(fixture, slot, media);
+    var privateMedia = new BrowserMediaBinding(media.sessionId(), media.workerId(),
+        media.workerBootId(), media.allocationEpoch(), media.controlEpoch(), media.pageEpoch(),
+        media.privacyEpoch() + 1, media.mediaGeneration() + 1, "PRIVACY_HIDDEN");
+    var hidden = prepare(fixture, admitted.slot(), privateMedia);
+    assertThat(hidden.issueTicket()).isFalse();
+    assertThat(hidden.unavailableReason()).isEqualTo("PRIVACY_HIDDEN");
+    jdbc.sql("UPDATE transactional_outbox SET delivery_attempts=8 WHERE aggregate_id=:id AND event_type='viewer.fence'")
+        .param("id", slot.id()).update();
+    jdbc.sql("UPDATE browser_sessions SET state='RECOVERING' WHERE id=:id")
+        .param("id", media.sessionId()).update();
+    transaction.executeWithoutResult(status -> realtime.reconcileClosedViewers());
+    assertThat(presentations.find(slot.id()).orElseThrow().transferState()).isEqualTo("TRANSFERRING");
+    jdbc.sql("UPDATE browser_sessions SET state='CLOSED',closed_at=now(),binding_released_at=now() WHERE id=:id")
+        .param("id", media.sessionId()).update();
+    transaction.executeWithoutResult(status -> realtime.reconcileClosedViewers());
+    assertThat(presentations.find(slot.id()).orElseThrow().transferState()).isEqualTo("ACTIVE");
+    assertThat(prepare(fixture, hidden.slot(), privateMedia).issueTicket()).isFalse();
+    assertThat(prepare(fixture, hidden.slot(), null).unavailableReason()).isEqualTo("NO_BROWSER");
+  }
+
+  private static RealtimeDeliveryService.MediaAdmission prepare(Fixture fixture,
+      ChatPresentation slot, BrowserMediaBinding media) {
+    return tx(() -> realtime.prepareWidgetMedia(fixture.actor(), fixture.host(), slot, media));
+  }
+
+  private static ChannelTicketService.TicketBinding videoTicket(ChatPresentation slot) {
+    var issued = tx(() -> tickets.widgetVideoTicket(slot, "https://widget.test", "wss://helm.test/stream"));
+    return tickets.consume((String) issued.get("ticket"), "VIDEO", slot.browserSessionId());
+  }
+
+  private static BrowserMediaBinding media(Fixture fixture) {
+    UUID worker = UUID.randomUUID(), boot = UUID.randomUUID(), session = UUID.randomUUID();
+    jdbc.sql("INSERT INTO browser_workers(id,boot_id,capacity,image_version) VALUES(:id,:boot,1,'fixture')")
+        .param("id", worker).param("boot", boot).update();
+    jdbc.sql("""
+        INSERT INTO browser_sessions(id,user_id,task_id,worker_id,worker_boot_id,purpose,state,
+          idle_deadline_at,budget_deadline_at)
+        VALUES(:id,:user,:task,:worker,:boot,'TASK','ACTIVE',now()+interval '1 hour',now()+interval '1 hour')
+        """).param("id", session).param("user", fixture.actor().userId()).param("task", fixture.task())
+        .param("worker", worker).param("boot", boot).update();
+    return new BrowserMediaBinding(session, worker, boot, 1, 1, 1, 1, 1, null);
   }
 
   @Test

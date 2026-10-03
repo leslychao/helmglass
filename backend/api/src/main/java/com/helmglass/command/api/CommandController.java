@@ -26,9 +26,11 @@ public class CommandController {
 
   @PostMapping("/api/v1/tasks/{id}/commands")
   @ResponseStatus(HttpStatus.ACCEPTED)
-  MutationReceipt accept(@PathVariable UUID id, @Valid @RequestBody CommandContracts.Submit input,
+  MutationReceipt accept(
+      @PathVariable UUID id,
+      @Valid @RequestBody CommandContracts.Submit input,
       HttpServletRequest request) {
-    return commands.accept(Actors.current(request), id, input, MutationContext.from(request));
+    return commands.accept(Actors.current(request), id, input, MutationContext.from(request), null);
   }
 
   @GetMapping("/api/v1/commands/{id}")

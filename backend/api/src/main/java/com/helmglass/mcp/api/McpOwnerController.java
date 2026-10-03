@@ -111,7 +111,8 @@ public class McpOwnerController {
           tasks.create(
               actor,
               decode(args, TaskContracts.Create.class, Set.of("idempotencyKey", "title")),
-              required(context), input.hostContext());
+              required(context),
+              input.hostContext());
       case "tasks.get" -> presentations.get(actor, required(taskId), input.hostContext());
       case "tasks.context" ->
           contexts.get(
@@ -213,7 +214,8 @@ public class McpOwnerController {
             actor,
             required(taskId),
             decode(command, CommandContracts.Submit.class, Set.of()),
-            required(context));
+            required(context),
+            input.hostContext());
       }
       case "media.capture" -> {
         ObjectNode command =
@@ -248,7 +250,8 @@ public class McpOwnerController {
             actor,
             required(taskId),
             decode(command, CommandContracts.Submit.class, Set.of()),
-            required(context));
+            required(context),
+            input.hostContext());
       }
       case "audio.get" ->
           media.get(actor, UUID.fromString(args.path("artifactId").asString()), required(taskId));

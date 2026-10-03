@@ -171,7 +171,8 @@ class TaskLifecycleIntegrationTest {
     assertThat(replay).isEqualTo(first);
     assertThat(tasks.get(actor, first.resource().id()).state()).isEqualTo("WAITING_AGENT");
     assertThat(operations.lookup(actor, "tasks.create", context.key())).isEqualTo(first);
-    assertThatThrownBy(() -> tasks.create(actor, create("Different intent", "PREPARE"), context, null))
+    assertThatThrownBy(
+            () -> tasks.create(actor, create("Different intent", "PREPARE"), context, null))
         .isInstanceOf(DomainException.class)
         .hasMessageContaining("different request");
   }
