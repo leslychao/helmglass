@@ -41,8 +41,15 @@ class TaskPresentationServiceTest {
           "https://widget.test");
   private final AuthenticatedActor actor =
       new AuthenticatedActor(
-          UUID.randomUUID(), null, UUID.randomUUID(), "helm-mcp", "Test", "test@example.test",
-          1, Set.of("tasks:read", "browser:view"), true);
+          UUID.randomUUID(),
+          null,
+          UUID.randomUUID(),
+          "helm-mcp",
+          "Test",
+          "test@example.test",
+          1,
+          Set.of("tasks:read", "browser:view"),
+          true);
   private final HostConversationContext host =
       new HostConversationContext("CHATGPT_WEB", "2026-10-03", "a".repeat(64));
   private final UUID taskId = UUID.randomUUID();
@@ -69,7 +76,8 @@ class TaskPresentationServiceTest {
   @Test
   void thePublishedTaskRetainsItsActivePresentation() {
     task();
-    when(realtime.currentPresentation(actor, host)).thenReturn(Optional.of(slot(taskId)));
+    ChatPresentation slot = slot(taskId);
+    when(realtime.currentPresentation(actor, host)).thenReturn(Optional.of(slot));
     when(continuations.automaticContinuationAvailable(actor, host, taskId)).thenReturn(true);
 
     var reference = presentations.get(actor, taskId, host).path("presentation");
@@ -108,9 +116,34 @@ class TaskPresentationServiceTest {
     when(tasks.get(actor, taskId))
         .thenReturn(
             new TaskView(
-                taskId, 2, 7, 3, "Read public page", "Read public page", "https://example.test",
-                "TEXT", true, 1800, "WAITING_AGENT", null, "WEB", null, null, false,
-                created, created, List.of(), null, Map.of(), null, null, null, null, null,
-                Map.of(), Map.of(), null));
+                taskId,
+                2,
+                7,
+                3,
+                "Read public page",
+                "Read public page",
+                "https://example.test",
+                "TEXT",
+                true,
+                1800,
+                "WAITING_AGENT",
+                null,
+                "WEB",
+                null,
+                null,
+                false,
+                created,
+                created,
+                List.of(),
+                null,
+                Map.of(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                Map.of(),
+                Map.of(),
+                null));
   }
 }

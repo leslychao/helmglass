@@ -53,11 +53,9 @@ public class TaskPresentationService {
 
   public ObjectNode get(AuthenticatedActor actor, UUID taskId, HostConversationContext host) {
     TaskView task = tasks.get(actor, taskId);
-    ChatPresentation slot =
-        realtime
-            .currentPresentation(actor, host)
-            .filter(value -> value.taskId().equals(taskId))
-            .orElse(null);
+    ChatPresentation slot = realtime.currentPresentation(actor, host).orElse(null);
+    // The CAS revision belongs to the conversation, including when another task is displayed.
+    boolean published = slot != null && slot.taskId().equals(taskId);
     ObjectNode result = (ObjectNode) json.tree(task);
     result.set(
         "presentation",
@@ -67,8 +65,8 @@ public class TaskPresentationService {
                 host,
                 task,
                 slot,
-                slot == null ? "LINK_ONLY" : "ACTIVE",
-                slot == null ? "PRESENTATION_NOT_PUBLISHED" : null)));
+                published ? "ACTIVE" : "LINK_ONLY",
+                published ? null : "PRESENTATION_NOT_PUBLISHED")));
     return result;
   }
 
