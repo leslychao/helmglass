@@ -1,0 +1,322 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "OBSERVE"
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "CLICK"
+        },
+        "target": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(?:f\\d+)?e\\d+$"
+        },
+        "observationId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "type",
+        "target",
+        "observationId"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "FILL"
+        },
+        "target": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(?:f\\d+)?e\\d+$"
+        },
+        "observationId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "type",
+        "target",
+        "observationId",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "SELECT"
+        },
+        "target": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(?:f\\d+)?e\\d+$"
+        },
+        "observationId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "values": {
+          "minItems": 1,
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        }
+      },
+      "required": [
+        "type",
+        "target",
+        "observationId",
+        "values"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "PRESS"
+        },
+        "target": {
+          "type": "string",
+          "maxLength": 40,
+          "pattern": "^(?:f\\d+)?e\\d+$"
+        },
+        "observationId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      },
+      "required": [
+        "type",
+        "target",
+        "observationId",
+        "key"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "SCROLL"
+        },
+        "deltaX": {
+          "type": "number",
+          "minimum": -5000,
+          "maximum": 5000
+        },
+        "deltaY": {
+          "type": "number",
+          "minimum": -5000,
+          "maximum": 5000
+        }
+      },
+      "required": [
+        "type",
+        "deltaX",
+        "deltaY"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "NAVIGATE"
+        },
+        "url": {
+          "type": "string",
+          "maxLength": 8192,
+          "format": "uri"
+        }
+      },
+      "required": [
+        "type",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "BACK"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "FORWARD"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "RELOAD"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "SNAPSHOT"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "WAIT_FOR"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "VISIBLE",
+            "HIDDEN"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "text",
+        "state"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "READ_MEDIA"
+        },
+        "observationId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "mediaRef": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 268435456
+        },
+        "maxDurationSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1800
+        },
+        "coverage": {
+          "type": "string",
+          "enum": [
+            "FULL",
+            "RANGE"
+          ]
+        },
+        "startSeconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "observationId",
+        "mediaRef",
+        "maxBytes",
+        "maxDurationSeconds",
+        "coverage"
+      ],
+      "additionalProperties": false
+    }
+  ],
+  "$id": "urn:helmglass:worker:v1:action",
+  "$comment": "Generated by backend/worker-protocol/generate.mjs from the strict worker boundary schemas. Do not edit manually."
+}

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+# Authenticated allocation is an acceptance check; the liveness probe has no credentials.
+relay_ip=$(hostname -i | awk '{print $1}')
+exec /usr/bin/turnutils_stunclient -p 3478 "$relay_ip"

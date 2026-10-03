@@ -1,0 +1,187 @@
+<h1 class="sr-only" tabindex="-1">Задачи</h1>
+<div class="h-page-actions">
+  <a class="btn h-create" routerLink="/tasks/new"
+    ><span class="h-create-icon"><hg-icon name="plus" /></span>Новая задача</a
+  >
+</div>
+<div class="metrics h-task-metrics">
+  <hg-metric
+    label="Активные задачи"
+    [value]="summary.data()?.active"
+    caption="Выполняются или ожидают действия"
+  />
+  <hg-metric
+    label="Успешность"
+    [value]="successRate()"
+    [caption]="successCaption()"
+    icon="trend"
+    tone="green"
+  />
+  <hg-metric
+    label="Ожидают вас"
+    [value]="summary.data()?.waitingUser"
+    caption="Вход, ответ, подтверждение или проверка"
+    icon="user"
+    [interactive]="true"
+    [disabled]="!summary.data()"
+    (selected)="query.replace({ state: ['WAITING_USER', 'INTERRUPTED'], page: 1 })"
+  />
+  <hg-metric
+    label="Подключения"
+    [value]="summary.data()?.savedConnections"
+    [caption]="connectionCaption()"
+    icon="plug"
+    tone="violet"
+  />
+</div>
+<hg-feedback
+  [loading]="summary.loading() && !summary.data()"
+  [error]="summary.error()"
+  (retry)="summary.refresh()"
+/>
+<section class="panel list-panel h-list">
+  <div class="h-toolbar">
+    <div class="h-filters-left">
+      <label class="search h-search"
+        ><hg-icon name="search" /><input
+          type="search"
+          placeholder="Поиск задач"
+          aria-label="Поиск задач"
+          [formControl]="search"
+          maxlength="200"
+      /></label>
+      <details class="filter">
+        <summary>Состояние</summary>
+        <div class="filter-options">
+          @for (state of states; track state) {
+            <label
+              ><input
+                type="checkbox"
+                [checked]="selectedState(state)"
+                (change)="toggleState(state)"
+              />{{ state | label }}</label
+            >
+          }
+        </div>
+      </details>
+      <details class="filter">
+        <summary>Сайт</summary>
+        <div class="filter-options">
+          <hg-site-multiselect
+            [selectedIds]="query.values('siteId')"
+            (changed)="setSites($event)"
+          />
+        </div>
+      </details>
+      <label class="sr-only" for="task-source">Источник</label
+      ><select
+        class="h-filter"
+        id="task-source"
+        [value]="query.text('source')"
+        (change)="sourceFilter($event)"
+      >
+        <option value="">Источник</option>
+        <option value="MCP">Из ChatGPT</option>
+        <option value="ANGULAR">Из кабинета</option>
+      </select>
+      <details class="filter">
+        <summary>Период</summary>
+        <div class="filter-options">
+          <label
+            >С<input
+              type="date"
+              [value]="dateValue('createdFrom')"
+              (change)="dateFilter('createdFrom', $event)" /></label
+          ><label
+            >По<input
+              type="date"
+              [value]="dateValue('createdTo')"
+              (change)="dateFilter('createdTo', $event)"
+          /></label>
+        </div>
+      </details>
+    </div>
+    <div class="h-view-actions">
+      <button class="icon-btn" aria-label="Столбцы таблицы" (click)="columnsOpen.set(true)">
+        <hg-icon name="grid" />
+      </button>
+    </div>
+  </div>
+  @if (filtered()) {
+    <div class="h-filter-feedback">
+      <button class="h-reset" (click)="resetFilters()">
+        <hg-icon name="close" />Сбросить фильтры
+      </button>
+    </div>
+  }
+  <hg-feedback [loading]="tasks.loading()" [error]="tasks.error()" (retry)="tasks.refresh()" />
+  <hg-data-table
+    [columns]="columns()"
+    [rows]="rows()"
+    [page]="tasks.data()"
+    [actions]="true"
+    (changed)="query.change($event)"
+    (action)="openMenu($event)"
+    [emptyTitle]="filtered() ? 'Ничего не найдено' : 'Пока нет задач'"
+    [emptyText]="filtered() ? 'Измените запрос или сбросьте фильтры.' : 'Создайте первую задачу.'"
+    emptyIcon="tasks"
+  />
+</section>
+@if (selectedId()) {
+  <hg-dialog title="Действия задачи" [busy]="action.pending()" (closed)="selectedId.set(null)">
+    <hg-feedback
+      [loading]="selected.loading()"
+      [error]="selected.error()"
+      (retry)="selected.refresh()"
+    />
+    @if (selected.data(); as task) {
+      <p class="report-text">{{ task.title || task.goal }}</p>
+      <div class="action-list">
+        <a class="btn" [routerLink]="'/tasks/' + task.id">Открыть задачу</a>
+        @if (task.state === 'DRAFT') {
+          <a class="btn" [routerLink]="'/tasks/' + task.id + '/edit'">Редактировать</a
+          ><button
+            class="btn danger"
+            [disabled]="action.pending() || action.unknown()"
+            (click)="remove(task)"
+          >
+            Удалить черновик
+          </button>
+        }
+        <button class="btn" [disabled]="action.pending() || action.unknown()" (click)="copy(task)">
+          Создать похожую
+        </button>
+        @if (task.capabilities['stop']?.allowed) {
+          <button
+            class="btn danger"
+            [disabled]="action.pending() || action.unknown()"
+            (click)="stop(task)"
+          >
+            Остановить задачу
+          </button>
+        }
+      </div>
+    }
+    <hg-mutation [action]="action" />
+  </hg-dialog>
+}
+@if (columnsOpen()) {
+  <hg-dialog title="Столбцы задач" (closed)="columnsOpen.set(false)"
+    ><p>Задача и состояние отображаются всегда.</p>
+    <div class="h-column-list">
+      @for (column of optionalColumns; track column.key) {
+        <label class="h-option"
+          ><input
+            type="checkbox"
+            [checked]="visibleColumns().includes(column.key)"
+            (change)="toggleColumn(column.key)"
+          />{{ column.title }}</label
+        >
+      }
+    </div>
+    <div dialog-actions class="flex">
+      <button class="btn quiet" (click)="resetColumns()">Основные столбцы</button
+      ><button class="btn primary" (click)="columnsOpen.set(false)">Применить</button>
+    </div></hg-dialog
+  >
+}

@@ -1,0 +1,16 @@
+**/node_modules/
+**/.cache/
+**/target/
+**/dist/
+**/coverage/
+**/test-results/
+**/playwright-report/
+**/.angular/
+*.log
+Deploy/.env.dev
+Deploy/release.env
+Deploy/.runtime/
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store

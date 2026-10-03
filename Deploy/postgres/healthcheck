@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+PGPASSWORD=$(jq -er '.apiPassword' /run/secrets/postgres_identity)
+export PGPASSWORD PGCONNECT_TIMEOUT=2
+exec psql --no-psqlrc --host 127.0.0.1 --username helm_api --dbname helm \
+  --set ON_ERROR_STOP=1 --quiet --tuples-only --command 'SELECT 1' >/dev/null

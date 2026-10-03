@@ -1,0 +1,350 @@
+name: helm-glass
+
+x-runtime: &runtime
+  restart: unless-stopped
+  init: true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+      labels: "com.docker.compose.project"
+  healthcheck:
+    test: ["CMD", "/opt/helm/bin/healthcheck"]
+    interval: 10s
+    timeout: 3s
+    retries: 6
+    start_period: 40s
+
+x-stateless: &stateless
+  <<: *runtime
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:size=64m", "/run:size=32m"]
+  ulimits:
+    core: {soft: 0, hard: 0}
+
+services:
+  nginx:
+    <<: *stateless
+    user: "101:101"
+    tmpfs: ["/tmp:size=64m", "/run:size=32m,uid=101,gid=101,mode=0700"]
+    image: ${NGINX_IMAGE:?required release digest}
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
+      TRUSTED_EDGE_PROXY: ${TRUSTED_EDGE_PROXY:-}
+    ports: ["${BIND_ADDRESS:?required}:${HTTPS_PORT:?required}:8443"]
+    secrets: [edge_tls_identity]
+    networks:
+      edge:
+        ipv4_address: 172.30.242.3
+        aliases: [helmglass-edge]
+      application: {ipv4_address: 172.28.40.2}
+    depends_on:
+      api: {condition: service_healthy}
+      oauth2-proxy: {condition: service_healthy}
+      mcp-adapter: {condition: service_healthy}
+    cpus: 0.5
+    mem_limit: 256m
+
+  api:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=64m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    image: ${API_IMAGE:?required release digest}
+    environment:
+      HELM_PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
+      HELM_WORKER_REGISTRATION_LIMIT: ${WORKER_COUNT:?required}
+      HELM_ISSUER_URI: ${PUBLIC_ORIGIN:?required}/auth/realms/helm
+      HELM_JWK_SET_URI: http://keycloak:8080/auth/realms/helm/protocol/openid-connect/certs
+      HELM_TURN_INTERNAL_URL: ${TURN_INTERNAL_URL:?required}
+      HELM_TURN_PUBLIC_URLS: ${TURN_PUBLIC_URLS:?required}
+      HELM_DELETION_LEDGER_DIRECTORY: /recovery-ledger
+    secrets: [api_identity]
+    volumes:
+      - type: bind
+        source: ${DELETION_LEDGER_DIR:?required independent encrypted off-host ledger mount}
+        target: /recovery-ledger
+        bind: {create_host_path: false}
+    networks: [application, data, secrets, mcp-control, worker-control]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      provision: {condition: service_completed_successfully}
+    cpus: 2
+    mem_limit: 2g
+    memswap_limit: 2g
+    stop_grace_period: 60s
+
+  mcp-adapter:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=64m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    image: ${MCP_ADAPTER_IMAGE:?required release digest}
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
+      OIDC_ISSUER: ${PUBLIC_ORIGIN:?required}/auth/realms/helm
+      OIDC_JWKS_URL: http://keycloak:8080/auth/realms/helm/protocol/openid-connect/certs
+      API_MCP_ENDPOINT: https://api:8446/internal/mcp
+      WIDGET_HTML_PATH: /opt/helm/widget/index.html
+    secrets: [mcp_adapter_identity]
+    networks: [application, mcp-control]
+    depends_on:
+      api: {condition: service_healthy}
+    cpus: 0.5
+    mem_limit: 256m
+    stop_grace_period: 30s
+
+  browser-worker:
+    <<: *stateless
+    user: "10001:10001"
+    image: ${WORKER_IMAGE:?required release digest}
+    environment:
+      WORKER_CAPACITY: "1"
+      WORKER_CONTROL_URL: wss://api:8444/internal/worker/control
+      WORKER_IMAGE_DIGEST: ${WORKER_IMAGE:?required release digest}
+      EGRESS_PROXY_URL: http://egress-proxy:3128
+      STAGING_DIRECTORY: /runtime/staging
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    secrets: [worker_identity]
+    networks: [worker-control, browser-egress]
+    depends_on:
+      api: {condition: service_healthy}
+      egress-proxy: {condition: service_healthy}
+      coturn: {condition: service_healthy}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:?required}"]
+              capabilities: [gpu]
+    tmpfs: ["/tmp:size=128m", "/run:size=32m,uid=10001,gid=10001,mode=0700", "/runtime:size=512m,uid=10001,gid=10001,mode=0700"]
+    shm_size: 512m
+    security_opt: ["no-new-privileges:true", "seccomp=./security/chromium-seccomp.json"]
+    pids_limit: 512
+    cpus: 2
+    mem_limit: 2g
+    memswap_limit: 2g
+    stop_grace_period: 60s
+
+
+  egress-proxy:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=32m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    image: ${EGRESS_IMAGE:?required release digest}
+    environment:
+      TURN_INTERNAL_URL: ${TURN_INTERNAL_URL:?required}
+    secrets: [egress_identity]
+    networks: [browser-egress, internet-egress]
+    depends_on:
+      coturn: {condition: service_healthy}
+    cpus: 0.5
+    mem_limit: 256m
+
+  coturn:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=16m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    image: ${TURN_IMAGE:?required release digest}
+    environment:
+      TURN_REALM: ${TURN_REALM:?required}
+      TURN_ADVERTISED_IP: ${TURN_ADVERTISED_IP:?required}
+      TURN_RELAY_MIN: ${TURN_RELAY_MIN:?required}
+      TURN_RELAY_MAX: ${TURN_RELAY_MAX:?required}
+    secrets: [turn_identity]
+    networks: [internet-egress]
+    ports:
+      - "${TURN_BIND_ADDRESS:?required}:3478:3478/udp"
+      - "${TURN_BIND_ADDRESS:?required}:3478:3478/tcp"
+      - "${TURN_BIND_ADDRESS:?required}:5349:5349/tcp"
+      - "${TURN_BIND_ADDRESS:?required}:${TURN_RELAY_MIN:?required}-${TURN_RELAY_MAX:?required}:${TURN_RELAY_MIN:?required}-${TURN_RELAY_MAX:?required}/udp"
+    cpus: 0.5
+    mem_limit: 256m
+
+  postgres:
+    <<: *runtime
+    image: ${POSTGRES_IMAGE:?required release digest}
+    secrets: [postgres_identity, backup_recipient]
+    environment:
+      BACKUP_DIR: /backup
+      BACKUP_WORK_DIR: /backup-work
+      BACKUP_RECIPIENT_CERT: /run/secrets/backup_recipient
+    tmpfs: ["/run:size=32m", "/var/run/postgresql:size=16m"]
+    volumes:
+      - pg-data:/var/lib/postgresql
+      - type: bind
+        source: ${BACKUP_DIR:?required encrypted off-host backup mount}
+        target: /backup
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${BACKUP_WORK_DIR:?required encrypted scratch mount}
+        target: /backup-work
+        bind: {create_host_path: false}
+    networks: [data, secrets]
+    cpus: 2
+    mem_limit: 2g
+
+  redis:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=16m", "/run:size=16m,uid=10001,gid=10001,mode=0700"]
+    image: ${REDIS_IMAGE:?required release digest}
+    secrets: [redis_acl, redis_health_identity]
+    volumes: ["redis-data:/data"]
+    networks: [data]
+    cpus: 1
+    mem_limit: 768m
+
+  minio:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=16m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    image: ${MINIO_IMAGE:?required supported release digest}
+    secrets: [minio_identity, minio_license]
+    volumes:
+      - type: bind
+        source: ${MINIO_DISK_1_DIR:?required first encrypted disk mount}
+        target: /data1
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MINIO_DISK_2_DIR:?required second encrypted disk mount}
+        target: /data2
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MINIO_DISK_3_DIR:?required third encrypted disk mount}
+        target: /data3
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${MINIO_DISK_4_DIR:?required fourth encrypted disk mount}
+        target: /data4
+        bind: {create_host_path: false}
+    networks: [data]
+    cpus: 1
+    mem_limit: 2g
+
+  vault:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=16m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    image: ${VAULT_IMAGE:?required release digest}
+    secrets: [vault_tls_identity]
+    volumes: ["vault-data:/vault/data"]
+    networks: [secrets]
+    cpus: 0.5
+    mem_limit: 512m
+    memswap_limit: 512m
+
+  keycloak:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=64m,uid=10001,gid=10001,mode=0700", "/run:size=128m,uid=10001,gid=10001,mode=0700"]
+    image: ${KEYCLOAK_IMAGE:?required release digest}
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
+      NGINX_INTERNAL_ADDRESS: 172.28.40.2
+    secrets: [keycloak_identity]
+    networks: [application, data, secrets]
+    depends_on:
+      postgres: {condition: service_healthy}
+      vault: {condition: service_healthy}
+    cpus: 1
+    mem_limit: 1536m
+
+  provision:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=16m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    healthcheck: {disable: true}
+    image: ${PROVISION_IMAGE:?required release digest}
+    command: ["all"]
+    restart: "no"
+    cpus: 0.5
+    mem_limit: 512m
+    environment:
+      DEPLOY_ENVIRONMENT: dev
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
+    secrets: [provision_identity, predefined_users_input]
+    networks: [data, secrets, application]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+      vault: {condition: service_healthy}
+      keycloak: {condition: service_healthy}
+
+  migrate:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=64m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    healthcheck: {disable: true}
+    image: ${API_IMAGE:?required release digest}
+    command: ["migrate"]
+    restart: "no"
+    cpus: 0.5
+    mem_limit: 512m
+    secrets: [migration_identity]
+    networks: [data, secrets]
+    depends_on:
+      provision: {condition: service_completed_successfully}
+
+  oauth2-proxy:
+    <<: *stateless
+    user: "10001:10001"
+    tmpfs: ["/tmp:size=16m", "/run:size=32m,uid=10001,gid=10001,mode=0700"]
+    image: ${OAUTH_IMAGE:?required release digest}
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
+      NGINX_INTERNAL_ADDRESS: 172.28.40.2
+    secrets: [oauth_identity]
+    networks: [application, data, secrets]
+    depends_on:
+      provision: {condition: service_completed_successfully}
+    cpus: 0.5
+    mem_limit: 256m
+
+
+networks:
+  edge:
+    external: true
+    name: nginx-edge-helmglass
+  application:
+    internal: true
+    ipam:
+      config: [{subnet: 172.28.40.0/24}]
+  data: {internal: true}
+  mcp-control: {internal: true}
+  secrets: {internal: true}
+  worker-control: {internal: true}
+  browser-egress: {internal: true}
+  internet-egress: {}
+
+volumes:
+  pg-data:
+    name: ${PG_DATA_VOLUME:-helm-glass_pg-data}
+  redis-data:
+    name: ${REDIS_DATA_VOLUME:-helm-glass_redis-data}
+  vault-data:
+    name: ${VAULT_DATA_VOLUME:-helm-glass_vault-data}
+
+secrets:
+  backup_recipient: {file: "${SECRETS_DIR:?required}/backup-recipient"}
+  edge_tls_identity: {file: "${SECRETS_DIR:?required}/edge-tls"}
+  api_identity: {file: "${SECRETS_DIR:?required}/api-bootstrap"}
+  worker_identity: {file: "${SECRETS_DIR:?required}/worker-bootstrap"}
+  turn_identity: {file: "${SECRETS_DIR:?required}/turn-bootstrap"}
+  egress_identity: {file: "${SECRETS_DIR:?required}/egress-bootstrap"}
+  postgres_identity: {file: "${SECRETS_DIR:?required}/postgres-bootstrap"}
+  redis_acl: {file: "${SECRETS_DIR:?required}/redis-bootstrap.acl"}
+  redis_health_identity: {file: "${SECRETS_DIR:?required}/redis-health-bootstrap"}
+  minio_identity: {file: "${SECRETS_DIR:?required}/minio-bootstrap"}
+  minio_license: {file: "${SECRETS_DIR:?required}/minio-license"}
+  mcp_adapter_identity: {file: "${SECRETS_DIR:?required}/mcp-adapter-bootstrap"}
+  vault_tls_identity: {file: "${SECRETS_DIR:?required}/vault-tls"}
+  provision_identity: {file: "${SECRETS_DIR:?required}/provision-bootstrap"}
+  migration_identity: {file: "${SECRETS_DIR:?required}/migration-bootstrap"}
+  keycloak_identity: {file: "${SECRETS_DIR:?required}/keycloak-bootstrap"}
+  oauth_identity: {file: "${SECRETS_DIR:?required}/oauth-bootstrap"}
+  predefined_users_input: {file: "${SECRETS_DIR:?required}/predefined-users-input"}

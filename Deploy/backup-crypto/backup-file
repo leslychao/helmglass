@@ -1,0 +1,110 @@
+#!/bin/sh
+set -eu
+umask 077
+export LC_ALL=C
+
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+[ "$#" = 3 ] || [ "$#" = 4 ] || fail 'Usage: backup-file encrypt input-file new-directory | decrypt directory new-file [manifest-sha256]'
+operation=$1
+source=$2
+destination=$3
+expected_manifest=${4-}
+if [ -n "$expected_manifest" ]; then
+  [ "$operation" = decrypt ] && [ "${#expected_manifest}" = 64 ] || fail 'Invalid expected manifest checksum.'
+  case "$expected_manifest" in *[!0-9a-f]*) fail 'Invalid expected manifest checksum.' ;; esac
+fi
+case "$operation" in encrypt|decrypt) ;; *) fail 'Invalid backup file operation.' ;; esac
+[ ! -e "$destination" ] && [ ! -L "$destination" ] || fail 'Backup destination already exists.'
+parent=$(dirname -- "$destination")
+[ -d "$parent" ] && [ ! -L "$parent" ] || fail 'Backup destination parent is unavailable.'
+permissions=$(stat -c %a "$parent")
+[ "$((0$permissions & 077))" = 0 ] || fail 'Backup destination parent must be private.'
+work=$(mktemp -d "$parent/.backup-file.XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+chunk_bytes=67108864
+maximum_chunks=65536
+
+if [ "$operation" = encrypt ]; then
+  [ -f "$source" ] && [ ! -L "$source" ] || fail 'Backup source is not a regular file.'
+  bytes=$(stat -c %s "$source")
+  [ "$bytes" -gt 0 ] && [ "$bytes" -le "$((chunk_bytes * maximum_chunks))" ] || fail 'Backup source exceeds the supported size.'
+  count=$(((bytes + chunk_bytes - 1) / chunk_bytes))
+  mkdir "$work/archive"
+  index=0
+  while [ "$index" -lt "$count" ]; do
+    filename=$(printf '%08d.cms' "$index")
+    timeout --kill-after=5s 120 dd if="$source" of="$work/chunk" bs="$chunk_bytes" \
+      skip="$index" count=1 iflag=fullblock status=none
+    /opt/helm/bin/backup-crypto encrypt "$work/chunk" "$work/archive/$filename"
+    cipher_bytes=$(stat -c %s "$work/archive/$filename")
+    cipher_hash=$(sha256sum "$work/archive/$filename" | cut -d ' ' -f 1)
+    jq -cn --argjson index "$index" --arg file "$filename" --argjson byteLength "$cipher_bytes" \
+      --arg sha256 "$cipher_hash" '{index:$index,file:$file,byteLength:$byteLength,sha256:$sha256}' >> "$work/chunks.jsonl"
+    rm -- "$work/chunk"
+    index=$((index + 1))
+  done
+  checksum=$(sha256sum "$source" | cut -d ' ' -f 1)
+  jq -s --arg checksum "$checksum" --argjson bytes "$bytes" --argjson chunkBytes "$chunk_bytes" \
+    '{schemaVersion:1,format:"cms-aes256gcm-chunks-v1",chunkBytes:$chunkBytes,plaintextByteLength:$bytes,plaintextSha256:$checksum,chunks:.}' \
+    "$work/chunks.jsonl" > "$work/archive/manifest.json"
+  sync -f "$work/archive/manifest.json"
+  sync -f "$work/archive"
+  mv -T --no-clobber -- "$work/archive" "$destination"
+  [ ! -d "$work/archive" ] || fail 'Backup publication raced another owner.'
+else
+  [ -d "$source" ] && [ ! -L "$source" ] || fail 'Encrypted backup is unavailable.'
+  [ -f "$source/manifest.json" ] && [ ! -L "$source/manifest.json" ] \
+    && [ "$(stat -c %s "$source/manifest.json")" -le 67108864 ] || fail 'Invalid backup manifest size.'
+  # Parse exactly the private copy whose checksum is bound by the parent archive.
+  timeout --kill-after=5s 60 dd if="$source/manifest.json" of="$work/manifest.json" \
+    bs=65536 count=1025 iflag=fullblock status=none
+  [ "$(stat -c %s "$work/manifest.json")" -le 67108864 ] || fail 'Invalid backup manifest size.'
+  if [ -n "$expected_manifest" ]; then
+    [ "$(sha256sum "$work/manifest.json" | cut -d ' ' -f 1)" = "$expected_manifest" ] \
+      || fail 'Encrypted backup manifest checksum mismatch.'
+  fi
+  jq -er --argjson chunkBytes "$chunk_bytes" --argjson maximumChunks "$maximum_chunks" '
+    def integer: type == "number" and . == floor;
+    def checksum: type == "string" and test("^[0-9a-f]{64}$");
+    select(.schemaVersion == 1 and .format == "cms-aes256gcm-chunks-v1" and .chunkBytes == $chunkBytes)
+    | select((.plaintextByteLength | integer) and .plaintextByteLength > 0
+        and .plaintextByteLength <= ($chunkBytes * $maximumChunks) and (.plaintextSha256 | checksum))
+    | select((.chunks | type) == "array" and (.chunks | length) > 0
+        and (.chunks | length) <= $maximumChunks
+        and (.chunks | length) == ((.plaintextByteLength / $chunkBytes) | ceil))
+    | select(all(.chunks | to_entries[];
+        .value.index == .key and .value.file == (("00000000" + (.key | tostring))[-8:] + ".cms")
+        and (.value.byteLength | integer) and .value.byteLength > 0
+        and .value.byteLength <= ($chunkBytes + 1048576) and (.value.sha256 | checksum)))
+    | ([.plaintextByteLength,.plaintextSha256] | @tsv),
+      (.chunks[] | [.index,.file,.byteLength,.sha256] | @tsv)
+  ' "$work/manifest.json" > "$work/index" || fail 'Invalid encrypted backup manifest.'
+  [ -s "$work/index" ] || fail 'Invalid encrypted backup manifest.'
+  : > "$work/plaintext"
+  # A validated index avoids parsing the full manifest again for every chunk.
+  {
+    IFS="$(printf '\t')" read -r expected_bytes expected_checksum
+    total=0
+    while IFS="$(printf '\t')" read -r index filename cipher_bytes cipher_hash; do
+      [ -f "$source/$filename" ] && [ ! -L "$source/$filename" ] \
+        && [ "$(stat -c %s "$source/$filename")" = "$cipher_bytes" ] \
+        && [ "$(sha256sum "$source/$filename" | cut -d ' ' -f 1)" = "$cipher_hash" ] \
+        || fail 'Encrypted backup chunk checksum mismatch.'
+      /opt/helm/bin/backup-crypto decrypt "$source/$filename" "$work/chunk"
+      actual=$(stat -c %s "$work/chunk")
+      remaining=$((expected_bytes - total))
+      expected=$chunk_bytes
+      [ "$remaining" -ge "$chunk_bytes" ] || expected=$remaining
+      [ "$actual" = "$expected" ] || fail 'Decrypted backup chunk has the wrong size.'
+      cat -- "$work/chunk" >> "$work/plaintext"
+      total=$((total + actual))
+      rm -- "$work/chunk"
+    done
+    [ "$total" = "$expected_bytes" ] \
+      && [ "$(sha256sum "$work/plaintext" | cut -d ' ' -f 1)" = "$expected_checksum" ] \
+      || fail 'Decrypted backup has an inconsistent length or checksum.'
+  } < "$work/index"
+  sync -f "$work/plaintext"
+  ln -- "$work/plaintext" "$destination" || fail 'Backup output publication raced another owner.'
+fi
+sync -f "$parent"

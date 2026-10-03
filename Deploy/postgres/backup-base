@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+umask 077
+export LC_ALL=C PGCONNECT_TIMEOUT=5
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+[ "$#" = 1 ] || fail 'Usage: backup-base unique-backup-id'
+identifier=$1
+printf '%s\n' "$identifier" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$' || fail 'Invalid backup ID.'
+: "${BACKUP_DIR:?External protected backup directory is required}"
+: "${BACKUP_WORK_DIR:?Private workspace on an encrypted volume is required}"
+: "${PGDATA:?PostgreSQL data directory is required}"
+for directory in "$BACKUP_DIR" "$BACKUP_WORK_DIR"; do
+  [ -d "$directory" ] && [ ! -L "$directory" ] || fail 'Backup directory is unavailable.'
+  permissions=$(stat -c %a "$directory")
+  [ "$((0$permissions & 077))" = 0 ] || fail 'Backup directory must be private.'
+done
+work_root=$(realpath "$BACKUP_WORK_DIR")
+data_root=$(realpath "$PGDATA")
+case "$work_root/" in "$data_root/"*) fail 'Backup workspace must be outside PGDATA.' ;; esac
+system=$(pg_controldata "$PGDATA" | sed -n 's/^Database system identifier: *//p')
+case "$system" in ''|*[!0-9]*) fail 'Cannot identify PostgreSQL cluster.' ;; esac
+[ "$(psql --no-psqlrc --no-password --host /var/run/postgresql --username postgres --dbname postgres --tuples-only --no-align --command 'SHOW archive_mode')" = on ] \
+  || fail 'Continuous WAL archiving must be enabled before a base backup.'
+destination="$BACKUP_DIR/postgres/$system/base/$identifier"
+[ ! -e "$destination" ] && [ ! -L "$destination" ] || fail 'Backup ID already exists.'
+mkdir -p "$(dirname "$destination")"
+work=$(mktemp -d "$work_root/pg-backup.XXXXXXXX")
+temporary=$(mktemp -d "$(dirname "$destination")/.pending.XXXXXXXX")
+trap 'rm -rf -- "$work" "$temporary"' EXIT HUP INT TERM
+timeout --kill-after=10s 3600 pg_basebackup --host /var/run/postgresql --username postgres \
+  --no-password --pgdata "$work/data" --format plain --wal-method stream \
+  --checkpoint fast --manifest-checksums SHA256 --label "$identifier"
+[ -z "$(find "$work/data" -type l -print -quit)" ] || fail 'External tablespaces or WAL directories are unsupported by this backup owner.'
+timeout --kill-after=10s 3600 pg_verifybackup --exit-on-error --quiet "$work/data"
+timeout --kill-after=10s 3600 tar --directory "$work/data" --create --file "$work/base.tar" .
+/opt/helm/bin/backup-file encrypt "$work/base.tar" "$temporary/base"
+cipher=$(sha256sum "$temporary/base/manifest.json" | cut -d ' ' -f 1)
+jq -n --arg systemIdentifier "$system" --arg backupId "$identifier" --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg cipherSha256 "$cipher" '{schemaVersion:1,systemIdentifier:$systemIdentifier,backupId:$backupId,createdAt:$createdAt,cipherSha256:$cipherSha256,format:"postgresql-18-plain-tar-cms-chunks-v1"}' \
+  > "$temporary/manifest.json"
+sync -f "$temporary/manifest.json"
+sync -f "$temporary"
+mv -T --no-clobber -- "$temporary" "$destination"
+[ ! -d "$temporary" ] || fail 'Backup publication raced another owner.'
+sync -f "$(dirname "$destination")"
+printf '%s\n' "$destination"

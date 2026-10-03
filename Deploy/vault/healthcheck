@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+# Do not regard sealed/uninitialized (503/501) as ready; launcher handles that state explicitly.
+curl --silent --fail --max-time 2 --cacert /run/helm/ca.crt \
+  --resolve vault:8200:127.0.0.1 https://vault:8200/v1/sys/health >/dev/null

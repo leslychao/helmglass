@@ -1,0 +1,58 @@
+server:
+  port: 8080
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+spring:
+  application:
+    name: helmglass-api
+  datasource:
+    hikari:
+      maximum-pool-size: 16
+      connection-timeout: 3000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  liquibase:
+    enabled: ${HELM_MIGRATE:false}
+    change-log: classpath:db/changelog/master.xml
+  data:
+    redis:
+      host: ${HELM_REDIS_HOST:redis}
+      port: ${HELM_REDIS_PORT:6379}
+      timeout: 2s
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  servlet:
+    multipart:
+      max-file-size: 16MB
+      max-request-size: 17MB
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+logging:
+  structured:
+    format:
+      console: ecs
+helm:
+  deletion-ledger-directory: ${HELM_DELETION_LEDGER_DIRECTORY:}
+  process-role: ${HELM_PROCESS_ROLE:api}
+  issuer-uri: ${HELM_ISSUER_URI}
+  jwk-set-uri: ${HELM_JWK_SET_URI}
+  public-origin: ${HELM_PUBLIC_ORIGIN}
+  worker-registration-limit: ${HELM_WORKER_REGISTRATION_LIMIT}
+  mcp-clients: ${HELM_MCP_CLIENTS:helm-mcp}
+  internal-tls:
+    certificate: /run/helm/api.crt
+    private-key: /run/helm/api.key
+    trust-certificate: /run/helm/ca.crt
+  s3:
+    endpoint: ${HELM_S3_ENDPOINT:https://minio:9000}

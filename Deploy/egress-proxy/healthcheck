@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+node --input-type=module -e '
+import { request } from "node:http";
+const req = request({ host: "127.0.0.1", port: 3128, path: "http://127.0.0.1/", timeout: 1500 }, (res) => {
+  res.resume(); process.exit(res.statusCode === 403 ? 0 : 1);
+});
+req.on("timeout", () => req.destroy()); req.on("error", () => process.exit(1)); req.end();
+'

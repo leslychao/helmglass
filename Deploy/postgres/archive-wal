@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+umask 077
+export LC_ALL=C
+export BACKUP_CRYPTO_TIMEOUT_SECONDS=60
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+[ "$#" = 2 ] || fail 'Archive requires a WAL source and filename.'
+source=$1
+name=$2
+printf '%s\n' "$name" | grep -Eq '^([0-9A-F]{24}|[0-9A-F]{8}\.history|[0-9A-F]{24}\.[0-9A-F]{8}\.backup)$' \
+  || fail 'Invalid WAL filename.'
+[ -f "$source" ] && [ ! -L "$source" ] || fail 'Invalid WAL source.'
+: "${BACKUP_DIR:?External protected backup directory is required}"
+: "${PGDATA:?PostgreSQL data directory is required}"
+[ -d "$BACKUP_DIR" ] && [ ! -L "$BACKUP_DIR" ] || fail 'Backup directory is unavailable.'
+system=$(pg_controldata "$PGDATA" | sed -n 's/^Database system identifier: *//p')
+case "$system" in ''|*[!0-9]*) fail 'Cannot identify PostgreSQL cluster.' ;; esac
+archive="$BACKUP_DIR/postgres/$system/wal"
+mkdir -p "$archive"
+chmod 700 "$BACKUP_DIR/postgres" "$BACKUP_DIR/postgres/$system" "$archive"
+checksum=$(sha256sum "$source" | cut -d ' ' -f 1)
+destination="$archive/$name"
+if [ -d "$destination" ] && [ ! -L "$destination" ]; then
+  [ "$(jq -er '.sourceSha256' "$destination/manifest.json")" = "$checksum" ] \
+    && [ "$(sha256sum "$destination/wal.cms" | cut -d ' ' -f 1)" = "$(jq -er '.cipherSha256' "$destination/manifest.json")" ] \
+    || fail 'Existing WAL archive conflicts with its source.'
+  exit 0
+fi
+[ ! -e "$destination" ] && [ ! -L "$destination" ] || fail 'WAL destination is invalid.'
+temporary=$(mktemp -d "$archive/.pending.XXXXXXXX")
+trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+/opt/helm/bin/backup-crypto encrypt "$source" "$temporary/wal.cms"
+cipher=$(sha256sum "$temporary/wal.cms" | cut -d ' ' -f 1)
+jq -n --arg systemIdentifier "$system" --arg walFile "$name" --arg sourceSha256 "$checksum" \
+  --arg cipherSha256 "$cipher" '{schemaVersion:1,systemIdentifier:$systemIdentifier,walFile:$walFile,sourceSha256:$sourceSha256,cipherSha256:$cipherSha256}' \
+  > "$temporary/manifest.json"
+sync -f "$temporary/manifest.json"
+sync -f "$temporary"
+mv -T --no-clobber -- "$temporary" "$destination"
+[ ! -d "$temporary" ] || fail 'WAL archive publication raced another owner.'
+sync -f "$archive"

@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+try {
+  const response = await fetch(`http://127.0.0.1:${process.env.PORT ?? '8080'}/health`, { signal: AbortSignal.timeout(3000) });
+  await response.body?.cancel();
+  if (!response.ok) process.exitCode = 1;
+} catch { process.exitCode = 1; }

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+  <changeSet id="001-initial-domain" author="helmglass">
+    <sqlFile path="001-initial.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="002-worker-enrollment" author="helmglass">
+    <sqlFile path="002-worker-enrollment.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="003-profile-transfers" author="helmglass">
+    <sqlFile path="003-profile-transfers.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="004-session-runtime" author="helmglass">
+    <sqlFile path="004-session-runtime.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="005-artifact-transfers" author="helmglass">
+    <sqlFile path="005-artifact-transfers.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="006-control-continuation" author="helmglass"><sqlFile path="006-control-continuation.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="007-login-identity" author="helmglass"><sqlFile path="007-login-identity.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="008-artifact-start" author="helmglass">
+    <sqlFile path="008-artifact-start.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="009-worker-recovery" author="helmglass"><sqlFile path="009-worker-recovery.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="010-connection-resolution" author="helmglass"><sqlFile path="010-connection-resolution.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="011-browser-profile-startup" author="helmglass"><sqlFile path="011-browser-profile-startup.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="012-audit-append-only" author="helmglass"><sqlFile path="012-audit-append-only.sql" relativeToChangelogFile="true" splitStatements="false"/></changeSet>
+  <changeSet id="013-account-purge" author="helmglass"><sqlFile path="013-account-purge.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="014-result-presentation" author="helmglass"><sqlFile path="014-result-presentation.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="015-profile-upload-lease" author="helmglass"><sqlFile path="015-profile-upload-lease.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="016-result-artifact-membership" author="helmglass"><sqlFile path="016-result-artifact-membership.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="017-recovery-admission" author="helmglass"><sqlFile path="017-recovery-admission.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="018-recovery-startup-state" author="helmglass"><sqlFile path="018-recovery-startup-state.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="019-human-browser-commands" author="helmglass"><sqlFile path="019-human-browser-commands.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="020-profile-transfer-redelivery" author="helmglass"><sqlFile path="020-profile-transfer-redelivery.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="021-browser-session-operations" author="helmglass"><sqlFile path="021-browser-session-operations.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="022-usage-intervals" author="helmglass"><sqlFile path="022-usage-intervals.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="023-profile-save-transfer-owner" author="helmglass"><sqlFile path="023-profile-save-transfer-owner.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="024-explicit-browser-open" author="helmglass"><sqlFile path="024-explicit-browser-open.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="025-usage-calendar" author="helmglass"><sqlFile path="025-usage-calendar.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="026-browser-close-consent" author="helmglass"><sqlFile path="026-browser-close-consent.sql" relativeToChangelogFile="true"/></changeSet>
+  <changeSet id="027-screenshot-artifacts" author="helmglass"><sqlFile path="027-screenshot-artifacts.sql" relativeToChangelogFile="true"/></changeSet>
+</databaseChangeLog>

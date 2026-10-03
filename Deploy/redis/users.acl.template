@@ -1,0 +1,4 @@
+user default reset off
+user helm_health reset on #HEALTH_PASSWORD_SHA256 -@all +ping
+user helm_api reset on #API_PASSWORD_SHA256 ~helm:csrf:* ~helm:ticket:* ~helm:viewer-generation:* ~helm:user-state:* -@all +ping +info +hello +client|setinfo +client|setname +get +set +del +getdel +incr +incrby +expire +pexpire +ttl +pttl +sadd +sscan +srem +scard +sismember (+del +exists ~__Host-helm_session-*)
+user helm_oauth reset on #OAUTH_PASSWORD_SHA256 ~__Host-helm_session-* -@all +ping +hello +client|setinfo +client|setname +get +set +del +exists +pttl +pexpire +eval +evalsha +script|load

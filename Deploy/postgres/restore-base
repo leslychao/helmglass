@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+umask 077
+export LC_ALL=C
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+[ "$#" = 4 ] || fail 'Usage: restore-base base-backup-directory new-PGDATA time|name recovery-target'
+source=$1
+target=$2
+kind=$3
+point=$4
+[ -d "$source" ] && [ ! -L "$source" ] || fail 'Base backup is unavailable.'
+[ ! -e "$target" ] && [ ! -L "$target" ] || fail 'Restore requires a new target directory.'
+case "$kind" in
+  name) printf '%s\n' "$point" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$' || fail 'Invalid restore point name.' ;;
+  time) printf '%s\n' "$point" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?Z$' || fail 'Restore time must be an explicit UTC instant.' ;;
+  *) fail 'Unsupported recovery target.' ;;
+esac
+system=$(jq -er '.schemaVersion==1 and .format=="postgresql-18-plain-tar-cms-chunks-v1" | select(.)' "$source/manifest.json" >/dev/null && jq -er '.systemIdentifier' "$source/manifest.json")
+case "$system" in ''|*[!0-9]*) fail 'Invalid base backup cluster identity.' ;; esac
+[ "$(sha256sum "$source/base/manifest.json" | cut -d ' ' -f 1)" = "$(jq -er '.cipherSha256' "$source/manifest.json")" ] || fail 'Encrypted base backup checksum mismatch.'
+parent=$(dirname -- "$target")
+[ -d "$parent" ] && [ ! -L "$parent" ] || fail 'Restore parent directory is unavailable.'
+work=$(mktemp -d "$parent/.restore-base.XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+/opt/helm/bin/backup-file decrypt "$source/base" "$work/base.tar"
+tar --list --file "$work/base.tar" > "$work/files"
+if grep -Eq '(^/|(^|/)\.\.(/|$))' "$work/files"; then fail 'Unsafe path in base backup.'; fi
+tar --list --verbose --file "$work/base.tar" > "$work/entries"
+if grep -Ev '^[-d]' "$work/entries" >/dev/null; then fail 'Unsupported link or special file in base backup.'; fi
+mkdir "$work/data"
+timeout --kill-after=10s 3600 tar --extract --file "$work/base.tar" --directory "$work/data" \
+  --no-same-owner --no-same-permissions --keep-old-files
+timeout --kill-after=10s 3600 pg_verifybackup --exit-on-error --quiet "$work/data"
+actual=$(pg_controldata "$work/data" | sed -n 's/^Database system identifier: *//p')
+[ "$actual" = "$system" ] || fail 'Restored PostgreSQL cluster identity mismatch.'
+# Preserve the backed-up settings while the recovery-only configuration is active.
+[ ! -e "$work/data/postgresql.auto.conf.helm-original" ] || fail 'Backup contains unfinished recovery settings.'
+mv -- "$work/data/postgresql.auto.conf" "$work/data/postgresql.auto.conf.helm-original"
+# An earlier recovery receipt in the source cluster cannot authorize this new restore.
+rm -f -- "$work/data/.helm-pitr-receipt.json"
+# The restored instance stays local and paused. Deployment recovery owns fencing,
+# deletion-ledger application, promotion and reopening application admission.
+cat > "$work/data/postgresql.auto.conf" <<EOF
+listen_addresses = ''
+archive_mode = off
+restore_command = '/opt/helm/bin/restore-wal "%f" "%p"'
+recovery_target_$kind = '$point'
+recovery_target_action = 'pause'
+EOF
+touch "$work/data/recovery.signal"
+sync -f "$work/data"
+mv -T --no-clobber -- "$work/data" "$target"
+[ ! -d "$work/data" ] || fail 'Restore target publication raced another owner.'
+sync -f "$parent"
+printf 'Restored encrypted base; start isolated with BACKUP_SYSTEM_IDENTIFIER=%s.\n' "$system"

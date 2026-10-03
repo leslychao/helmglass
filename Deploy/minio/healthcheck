@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+const https = await import('node:https');
+const fs = await import('node:fs/promises');
+try {
+  const ca = await fs.readFile('/run/helm/certs/CAs/installation.crt');
+  const request = https.get({ hostname: '127.0.0.1', servername: 'minio', port: 9000,
+    path: '/minio/health/ready', ca, rejectUnauthorized: true, timeout: 3000 }, response => {
+    response.resume();
+    if (response.statusCode !== 200) process.exitCode = 1;
+  });
+  request.once('error', () => { process.exitCode = 1; });
+  request.once('timeout', () => request.destroy(new Error('HEALTH_TIMEOUT')));
+} catch { process.exitCode = 1; }

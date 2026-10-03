@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+umask 077
+fail() { printf '%s\n' "$1" >&2; exit 1; }
+[ "$#" = 2 ] || fail 'Restore requires a WAL filename and destination.'
+name=$1
+destination=$2
+printf '%s\n' "$name" | grep -Eq '^([0-9A-F]{24}|[0-9A-F]{8}\.history)$' || exit 1
+: "${BACKUP_DIR:?Backup directory is required}"
+: "${BACKUP_SYSTEM_IDENTIFIER:?Restored cluster identity is required}"
+case "$BACKUP_SYSTEM_IDENTIFIER" in ''|*[!0-9]*) fail 'Invalid restored cluster identity.' ;; esac
+source="$BACKUP_DIR/postgres/$BACKUP_SYSTEM_IDENTIFIER/wal/$name"
+[ -d "$source" ] && [ ! -L "$source" ] || exit 1
+[ "$(jq -er '.systemIdentifier' "$source/manifest.json")" = "$BACKUP_SYSTEM_IDENTIFIER" ] \
+  && [ "$(jq -er '.walFile' "$source/manifest.json")" = "$name" ] \
+  && [ "$(sha256sum "$source/wal.cms" | cut -d ' ' -f 1)" = "$(jq -er '.cipherSha256' "$source/manifest.json")" ] \
+  || fail 'Archived WAL metadata is inconsistent.'
+directory=$(dirname -- "$destination")
+temporary=$(mktemp -d "$directory/.restore-wal.XXXXXXXX")
+trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+/opt/helm/bin/backup-crypto decrypt "$source/wal.cms" "$temporary/wal"
+[ "$(sha256sum "$temporary/wal" | cut -d ' ' -f 1)" = "$(jq -er '.sourceSha256' "$source/manifest.json")" ] \
+  || fail 'Restored WAL checksum disagrees with the archived source.'
+mv -T -- "$temporary/wal" "$destination"
+sync -f "$destination"

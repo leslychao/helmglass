@@ -1,0 +1,9 @@
+* text=auto
+*.sh text eol=lf
+*.mjs text eol=lf
+*.yaml text eol=lf
+*.conf text eol=lf
+*.hcl text eol=lf
+Dockerfile text eol=lf
+mvnw text eol=lf
+*.cmd text eol=crlf

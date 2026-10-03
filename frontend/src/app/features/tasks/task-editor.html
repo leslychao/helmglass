@@ -1,0 +1,242 @@
+<div class="form-wrap-v">
+  <header class="heading">
+    <h1 tabindex="-1">{{ id ? 'Редактирование черновика' : 'Новая задача' }}</h1>
+  </header>
+  <hg-feedback [loading]="loading()" [error]="loadError()" [retryable]="false" />
+  <form [formGroup]="form" (ngSubmit)="save('PREPARE')">
+    <div class="form-grid-v">
+      <div class="form-column-v">
+        <hg-form-section
+          [number]="1"
+          title="Что нужно сделать"
+          hint="Опишите задачу и ожидаемый результат."
+        >
+          <div class="field">
+            <label class="sr-only" for="goal">Что нужно сделать</label>
+            <textarea
+              id="goal"
+              formControlName="goal"
+              aria-describedby="goal-help goal-error"
+              maxlength="16000"
+              placeholder="Например: Найти 10 увлажняющих шампуней на Ozon, сравнить цены и сохранить результат в таблицу."
+            ></textarea>
+            <span class="counter">{{ form.controls.goal.value.length }} символов</span>
+            <small class="hint-v" id="goal-help"
+              >Пароли и одноразовые коды сюда не вставляйте.</small
+            >
+            @if (submitted() && !form.controls.goal.value.trim()) {
+              <p id="goal-error" class="field-error" role="alert">Опишите, что нужно сделать.</p>
+            }
+          </div>
+        </hg-form-section>
+        <hg-form-section
+          [number]="2"
+          title="Сайт и стартовая страница"
+          hint="Укажите, с какого сайта начать выполнение."
+        >
+          <label class="url-input-v" for="start-url"
+            ><hg-icon name="plug" /><input
+              id="start-url"
+              type="url"
+              formControlName="startUrl"
+              placeholder="https://"
+              aria-label="Начальная страница"
+              aria-describedby="url-help url-error"
+          /></label>
+          <p class="hint-v" id="url-help">Например: https://www.ozon.ru</p>
+          @if (form.controls.startUrl.invalid && submitted()) {
+            <p id="url-error" class="field-error" role="alert">
+              Укажите полный адрес https:// или http://.
+            </p>
+          }
+        </hg-form-section>
+        <hg-form-section
+          [number]="3"
+          title="Предпочтительные подключения"
+          hint="Аккаунты для своих сайтов. Можно оставить автоматический подбор."
+        >
+          <hg-feedback
+            [loading]="connections.loading() && !connections.data()"
+            [error]="connections.error()"
+            (retry)="connections.refresh()"
+          />
+          <div class="service-grid-v">
+            @for (connection of connectionTiles(); track connection.id) {
+              <label
+                class="service-option-v"
+                [class.selected]="form.controls.connectionIds.value.includes(connection.id)"
+                ><hg-site-mark [host]="connection.host" /><span
+                  ><strong>{{ connection.displayName }}</strong
+                  ><small>{{ connection.accountLabel || connection.host }}</small></span
+                ><input
+                  type="checkbox"
+                  [checked]="form.controls.connectionIds.value.includes(connection.id)"
+                  (change)="toggleConnection(connection.id)"
+              /></label>
+            }
+            <a class="service-option-v" routerLink="/connections"
+              ><span class="site-mark supplier"><hg-icon name="plus" /></span
+              ><span><strong>Добавить</strong><small>подключение</small></span></a
+            >
+          </div>
+          @if ((connections.data()?.total ?? 0) > 5 || form.controls.connectionIds.value.length) {
+            <button type="button" class="link-button" (click)="picker.set(true)">
+              Все подключения · выбрано {{ form.controls.connectionIds.value.length }}
+            </button>
+          }
+          <p class="hint-v">
+            Аккаунт определяется после входа. Подключения не обязательны для публичных страниц.
+          </p>
+        </hg-form-section>
+        <hg-form-section
+          [number]="4"
+          title="В каком виде нужен результат"
+          hint="Выбранный вариант будет включён в поручение."
+        >
+          <div class="output-grid-v">
+            @for (format of formats; track format.value) {
+              <label class="output-option-v"
+                ><hg-icon [name]="format.icon" /><span
+                  ><strong>{{ format.label }}</strong
+                  ><small>{{ format.hint }}</small></span
+                ><input type="radio" formControlName="outputFormat" [value]="format.value"
+              /></label>
+            }
+          </div>
+        </hg-form-section>
+        <hg-form-section
+          [number]="5"
+          title="Параметры"
+          hint="Дополнительные условия для этого поручения."
+        >
+          <label class="setting-line-v"
+            ><hg-icon name="shield" /><span
+              >Подтверждать важные действия<small
+                >Запрашивать отдельное подтверждение отправки, покупки и удаления.</small
+              ></span
+            ><input
+              class="switch-v"
+              type="checkbox"
+              aria-label="Подтверждать важные действия"
+              formControlName="confirmImportantActions"
+          /></label>
+          <div class="setting-line-v">
+            <hg-icon name="clock" /><label for="browser-limit"
+              >Время работы браузера<small
+                >Суммарный предел всех сессий задачи, в секундах.</small
+              ></label
+            ><input
+              id="browser-limit"
+              class="browser-budget"
+              type="number"
+              min="60"
+              max="86400"
+              step="1"
+              formControlName="browserTimeLimitSeconds"
+            />
+          </div>
+          @if (form.controls.browserTimeLimitSeconds.invalid && submitted()) {
+            <p class="field-error" role="alert">Укажите от 60 до 86400 секунд.</p>
+          }
+          <p class="hint-v">
+            Общие ограничения доступа остаются в <a routerLink="/profile">профиле</a>.
+          </p>
+        </hg-form-section>
+        <hg-mutation [action]="action" />
+      </div>
+      <aside class="panel form-summary-v">
+        <h2>Краткая информация</h2>
+        <div class="summary-block-v">
+          <div class="service-cell">
+            <span class="site-mark gpt"><hg-icon name="chat" /></span
+            ><span
+              ><small>Исполнитель</small><strong>ChatGPT через MCP</strong
+              ><small>Действия в вашем браузере</small></span
+            >
+          </div>
+        </div>
+        <div class="summary-block-v">
+          <div class="summary-feature-v">
+            <hg-icon name="clock" />
+            <div>
+              <small>Продолжительность</small><strong>Зависит от задачи</strong
+              ><small>Измеряем фактическое время браузера.</small>
+            </div>
+          </div>
+        </div>
+        <div class="summary-block-v">
+          <div class="summary-feature-v">
+            <hg-icon name="tasks" />
+            <div>
+              <span>Что произойдёт дальше</span>
+              <div class="how-steps-v">
+                <div><i>1</i>Поручение сохранится в этой задаче</div>
+                <div><i>2</i>Вы передадите задачу в ChatGPT</div>
+                <div><i>3</i>ChatGPT выполнит действия в браузере</div>
+                <div><i>4</i>Результат появится в кабинете</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button class="btn primary" type="submit" [disabled]="disabled()">
+          <hg-icon name="play" />Подготовить для ChatGPT
+        </button>
+        <button class="btn" type="button" [disabled]="disabled()" (click)="save('DRAFT')">
+          <hg-icon name="save" />Сохранить как черновик
+        </button>
+        <p class="summary-foot-v">
+          <hg-icon name="info" /><span
+            >Подготовка сохраняет поручение. Выполнение начнётся после команды в ChatGPT.</span
+          >
+        </p>
+      </aside>
+    </div>
+  </form>
+</div>
+@if (picker()) {
+  <hg-dialog title="Предпочтительные подключения" (closed)="picker.set(false)">
+    <hg-feedback
+      [loading]="connections.loading()"
+      [error]="connections.error()"
+      (retry)="connections.refresh()"
+    />
+    @for (connection of connections.data()?.items ?? []; track connection.id) {
+      <label class="connection-option"
+        ><input
+          type="checkbox"
+          [checked]="form.controls.connectionIds.value.includes(connection.id)"
+          (change)="toggleConnection(connection.id)" /><hg-site-mark
+          [host]="connection.host" /><span
+          ><strong>{{ connection.displayName }}</strong
+          ><small>{{ connection.accountLabel || connection.host }}</small></span
+        ><hg-status [value]="connection.status"
+      /></label>
+    }
+    @if (connections.data(); as page) {
+      <div class="table-footer">
+        <span>Всего {{ page.total }}</span>
+        <nav class="pager" aria-label="Страницы подключений">
+          <button
+            type="button"
+            class="btn"
+            [disabled]="page.page === 1 || connections.loading()"
+            (click)="connectionPage(page.page - 1)"
+          >
+            Назад</button
+          ><span>{{ page.page }}</span
+          ><button
+            type="button"
+            class="btn"
+            [disabled]="page.page * page.pageSize >= page.total || connections.loading()"
+            (click)="connectionPage(page.page + 1)"
+          >
+            Далее
+          </button>
+        </nav>
+      </div>
+    }
+    <button dialog-actions type="button" class="btn primary" (click)="picker.set(false)">
+      Готово
+    </button>
+  </hg-dialog>
+}

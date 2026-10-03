@@ -1,0 +1,114 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import test from 'node:test';
+import { authenticatedAdapter, createAdapter } from '../src/server.js';
+import { toolSchemas, widgetResourceUri } from '../src/catalog.js';
+
+const publicOrigin = 'https://helm.example.test';
+const widgetHtml = '<html><script type="application/json" id="helm-runtime-config">{"publicOrigin":"__HELM_PUBLIC_ORIGIN__"}</script></html>';
+
+test('widget configuration rejects noncanonical origins and missing or repeated markers', () => {
+  const owner = { call: async () => ({ content: [] }) };
+  for (const origin of ['http://helm.example.test', 'https://helm.example.test/path', 'https://user:secret@helm.example.test']) {
+    assert.throws(() => createAdapter(owner, widgetHtml, origin));
+  }
+  assert.throws(() => createAdapter(owner, '<html></html>', publicOrigin));
+  assert.throws(() => createAdapter(owner, widgetHtml + '__HELM_PUBLIC_ORIGIN__', publicOrigin));
+});
+
+test('result presentation accepts safe sources and keeps older clients compatible', () => {
+  const input = { taskId: randomUUID(), idempotencyKey: randomUUID(), expectedTaskVersion: 1,
+    instructionRevision: 1, conclusion: 'Report', limitations: [], missing: [], columns: [], rows: [],
+    coverage: {}, artifactIds: [] };
+  assert.deepEqual(toolSchemas['results.publish'].parse(input).sections, []);
+  assert.deepEqual(toolSchemas['results.publish'].parse(input).sources, []);
+  assert.equal(toolSchemas['results.publish'].safeParse({ ...input,
+    sections: [{ title: 'Details', text: 'Observed values' }],
+    sources: [{ title: 'Source', url: 'https://example.com/report' }] }).success, true);
+  for (const url of ['javascript:alert(1)', 'https://user:secret@example.com/report', 'file:///tmp/a']) {
+    assert.equal(toolSchemas['results.publish'].safeParse({ ...input,
+      sources: [{ title: 'Invalid', url }] }).success, false);
+  }
+});
+
+function request(body: unknown, extra: Record<string, string> = {}): Request {
+  return new Request(`${publicOrigin}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json',
+    accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25', authorization: 'Bearer test', ...extra }, body: JSON.stringify(body) });
+}
+
+test('MCP rejects cookies as authorization and rejects cross-origin browser requests', async () => {
+  let calls = 0;
+  const handler = createAdapter({ call: async () => { calls++; return { content: [{ type: 'text', text: 'ok' }] }; } }, widgetHtml, publicOrigin);
+  const app = authenticatedAdapter(handler, async (token) => ({ token, clientId: 'test-client', scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
+  try {
+    const missing = await app.fetch(new Request(`${publicOrigin}/mcp`, { method: 'POST', headers: { cookie: 'session=example' } }));
+    assert.equal(missing.status, 401);
+    assert.match(missing.headers.get('www-authenticate') ?? '', /oauth-protected-resource/);
+    const crossOrigin = await app.fetch(request({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { origin: 'https://attacker.test' }));
+    assert.equal(crossOrigin.status, 403);
+    assert.equal(calls, 0);
+  } finally { await handler.close(); }
+});
+
+test('Widget HTML and CSP travel in resource contents without cookie-gated asset dependencies', async () => {
+  const html = widgetHtml.replace('</html>', '<style>body{margin:0}</style><script type="module">document.body.dataset.ready="true";</script></html>');
+  const handler = createAdapter({ call: async () => { throw new Error('Resource reads must not invoke application mutations'); } }, html, publicOrigin);
+  const app = authenticatedAdapter(handler, async (token) => ({ token, clientId: 'fixture-client', scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
+  try {
+    const response = await app.fetch(request({ jsonrpc: '2.0', id: 20, method: 'resources/read', params: { uri: widgetResourceUri } }));
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    const messages = response.headers.get('content-type')?.startsWith('text/event-stream')
+      ? body.split('\n').filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)))
+      : [JSON.parse(body)];
+    assert.equal(messages.length, 1);
+    const resource = messages[0].result.contents[0];
+    assert.equal(resource.text, html.replace('__HELM_PUBLIC_ORIGIN__', publicOrigin));
+    assert.equal(resource.mimeType, 'text/html;profile=mcp-app');
+    assert.deepEqual(resource._meta.ui.csp.resourceDomains, []);
+    assert.deepEqual(resource._meta.ui.csp.connectDomains, [publicOrigin, 'wss://helm.example.test']);
+    assert.deepEqual(resource._meta['openai/widgetCSP'].redirect_domains, [publicOrigin]);
+  } finally { await handler.close(); }
+});
+
+test('legacy MCP tool calls use official SDK and forward original Bearer without retries', async () => {
+  let calls = 0;
+  const handler = createAdapter({ call: async (name, args, token) => {
+    calls++; assert.equal(name, 'tasks.get'); assert.equal(token, 'test');
+    assert.deepEqual(args, { taskId });
+    throw new Error('Connection lost after owner acceptance');
+  } }, widgetHtml, publicOrigin);
+  const app = authenticatedAdapter(handler, async (token) => ({ token, clientId: 'test-client', scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
+  const taskId = randomUUID();
+  try {
+    const response = await app.fetch(request({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'tasks.get', arguments: { taskId } } }));
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /OWNER_RESPONSE_UNKNOWN/);
+    assert.equal(calls, 1);
+  } finally { await handler.close(); }
+});
+
+test('typed transport cannot expose arbitrary JS or accept missing mutation idempotency', () => {
+  assert.equal(toolSchemas['tasks.stop'].safeParse({ taskId: randomUUID() }).success, false);
+  assert.equal(toolSchemas['browser.execute'].safeParse({ action: { type: 'EVALUATE', script: 'document.cookie' } }).success, false);
+  assert.equal(toolSchemas['continuations.record_delivery'].safeParse({ dispatchId: randomUUID(), idempotencyKey: randomUUID(), outcome: 'UNKNOWN' }).success, true);
+});
+
+test('modern stateless envelope preserves scopes and rejects a write with read-only authorization', async () => {
+  let calls = 0;
+  const handler = createAdapter({ call: async () => { calls++; return { content: [{ type: 'text', text: 'owner-result' }] }; } }, widgetHtml, publicOrigin);
+  const app = authenticatedAdapter(handler, async (token) => ({ token, clientId: 'test-client', scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
+  const envelope = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} };
+  try {
+    const response = await app.fetch(request({ jsonrpc: '2.0', id: 10, method: 'tools/call', params: {
+      name: 'tasks.get', arguments: { taskId: randomUUID() }, _meta: envelope,
+    } }, { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'tasks.get' }));
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.match(await response.text(), /owner-result/);
+    const denied = await app.fetch(request({ jsonrpc: '2.0', id: 11, method: 'tools/call', params: {
+      name: 'tasks.stop', arguments: { taskId: randomUUID(), idempotencyKey: randomUUID() }, _meta: envelope,
+    } }, { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'tasks.stop' }));
+    assert.match(await denied.text(), /INSUFFICIENT_SCOPE/);
+    assert.equal(calls, 1);
+  } finally { await handler.close(); }
+});

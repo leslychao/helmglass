@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/.cache
+**/.angular
+**/target
+**/dist
+**/coverage
+**/test-results
+**/playwright-report
+Deploy/.env.dev
+Deploy/.runtime
+**/*.log

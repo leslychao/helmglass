@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+REDISCLI_AUTH=$(jq -er '.password' /run/secrets/redis_health_identity)
+export REDISCLI_AUTH
+result=$(timeout 2 redis-cli --no-auth-warning --user helm_health --raw ping)
+[ "$result" = PONG ]

@@ -1,0 +1,68 @@
+#!/bin/sh
+# Startup-only KV retrieval through the official Vault CLI. Runtime services get no Vault token.
+# Contract: helm_vault_read /run/secrets/<identity> <service>; result is private tmpfs JSON.
+helm_vault_read() (
+  set +x
+  set -eu
+  umask 077
+  helm_identity=$1
+  helm_service=$2
+  case "$helm_service" in
+    api|migration|keycloak|oauth2-proxy|coturn|egress-proxy|provision) ;;
+    *) printf '%s\n' 'Invalid service bootstrap scope' >&2; exit 1 ;;
+  esac
+  if [ ! -f "$helm_identity" ] || [ -L "$helm_identity" ]; then
+    printf '%s\n' 'Service bootstrap identity is missing or invalid' >&2
+    exit 1
+  fi
+  if [ "$(wc -c < "$helm_identity")" -gt 65536 ]; then
+    printf '%s\n' 'Service bootstrap identity exceeds its limit' >&2
+    exit 1
+  fi
+  mkdir -p /run/helm
+  chmod 700 /run/helm
+  helm_temporary=$(mktemp -d /run/helm/bootstrap.XXXXXX)
+  helm_cleanup() {
+    if [ -n "${VAULT_TOKEN:-}" ]; then
+      vault token revoke -self > /dev/null 2>&1 || :
+    fi
+    unset VAULT_TOKEN
+    rm -f "$helm_temporary/ca.pem" "$helm_temporary/role" "$helm_temporary/secret" \
+      "$helm_temporary/login.json" "$helm_temporary/kv.json" "$helm_temporary/error"
+    rmdir "$helm_temporary"
+  }
+  trap helm_cleanup EXIT
+  trap 'exit 1' HUP INT TERM
+  helm_fail() {
+    printf '%s\n' 'Service secret bootstrap failed; verify Vault availability and scoped identity' >&2
+    exit 1
+  }
+  jq -e '.schemaVersion == 1 and (.vault | type == "object")
+    and (.vault.address | type == "string" and test("^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?$"))
+    and (.vault.caPem | type == "string" and length > 100)
+    and (.vault.roleId | type == "string" and length > 0 and length <= 512)
+    and (.vault.secretId | type == "string" and length > 0 and length <= 512)' \
+    "$helm_identity" > /dev/null 2> "$helm_temporary/error" || helm_fail
+  VAULT_ADDR=$(jq -r '.vault.address' "$helm_identity")
+  VAULT_CACERT=$helm_temporary/ca.pem
+  VAULT_CLIENT_TIMEOUT=5s
+  VAULT_MAX_RETRIES=0
+  export VAULT_ADDR VAULT_CACERT VAULT_CLIENT_TIMEOUT VAULT_MAX_RETRIES
+  unset VAULT_TOKEN VAULT_NAMESPACE VAULT_SKIP_VERIFY VAULT_CLIENT_CERT VAULT_CLIENT_KEY
+  jq -r '.vault.caPem' "$helm_identity" > "$VAULT_CACERT"
+  jq -jr '.vault.roleId' "$helm_identity" > "$helm_temporary/role"
+  jq -jr '.vault.secretId' "$helm_identity" > "$helm_temporary/secret"
+  vault write -format=json auth/approle/login role_id=@"$helm_temporary/role" \
+    secret_id=@"$helm_temporary/secret" > "$helm_temporary/login.json" \
+    2> "$helm_temporary/error" || helm_fail
+  VAULT_TOKEN=$(jq -er '.auth.client_token | select(type == "string" and length > 0)' \
+    "$helm_temporary/login.json") || helm_fail
+  export VAULT_TOKEN
+  vault read -format=json "helm-kv/data/services/$helm_service" > "$helm_temporary/kv.json" \
+    2> "$helm_temporary/error" || helm_fail
+  jq -e '.data.data | select(type == "object")' "$helm_temporary/kv.json" \
+    > /run/helm/service-secrets.json || helm_fail
+  chmod 600 /run/helm/service-secrets.json
+  vault token revoke -self > /dev/null 2> "$helm_temporary/error" || helm_fail
+  unset VAULT_TOKEN
+)
