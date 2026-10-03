@@ -67,6 +67,8 @@ public class ControlDispatcher {
 
   @Scheduled(fixedDelay = 500)
   public void deliverControls() {
+    controls.reconcileClosedOperations();
+    outbox.retireClosedBindings();
     for (var delivery : outbox.due()) {
       try {
         if (outbox.deliverable(delivery.id())

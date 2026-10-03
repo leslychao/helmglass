@@ -1285,7 +1285,6 @@ export interface components {
         TaskResume: {
             expectedTaskVersion: number;
             resolutionId?: string | null;
-            consentNewBrowser: boolean;
         };
         TaskClarification: {
             /** Format: uuid */

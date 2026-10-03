@@ -3,7 +3,6 @@ package com.helmglass.mcp.api;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -213,12 +212,41 @@ class McpOwnerControllerTest {
 
   @Test
   void resumeAcceptsAdvertisedArgumentsWithoutAnUnrelatedBrowserConsent() {
-    ObjectNode args = arguments().put("expectedTaskVersion", 9).put("idempotencyKey", "resume-contract");
+    ObjectNode args =
+        arguments().put("expectedTaskVersion", 9).put("idempotencyKey", "resume-contract");
     controller.call("tasks.resume", payload(args, hostContext), request());
-    verify(tasks).resume(eq(actor), eq(taskId),
-        argThat(input -> input.expectedTaskVersion() == 9
-            && input.resolutionId() == null),
-        eq(new MutationContext("resume-contract", requestId)));
+    verify(tasks)
+        .resume(
+            actor,
+            taskId,
+            new TaskContracts.Resume(9L, null),
+            new MutationContext("resume-contract", requestId));
+
+    UUID resolutionId = UUID.randomUUID();
+    controller.call(
+        "tasks.resume",
+        payload(args.put("resolutionId", resolutionId.toString()), hostContext),
+        request());
+    verify(tasks)
+        .resume(
+            actor,
+            taskId,
+            new TaskContracts.Resume(9L, resolutionId),
+            new MutationContext("resume-contract", requestId));
+  }
+
+  @Test
+  void resumeRejectsUnownedBrowserConsentWithoutWeakeningStrictDecoding() {
+    ObjectNode args =
+        arguments()
+            .put("expectedTaskVersion", 9)
+            .put("idempotencyKey", "resume-contract")
+            .put("consentNewBrowser", true);
+    assertThatThrownBy(() -> controller.call("tasks.resume", payload(args, hostContext), request()))
+        .isInstanceOfSatisfying(
+            DomainException.class,
+            error -> assertThat(error.getCode()).isEqualTo("INVALID_TOOL_ARGUMENTS"));
+    verifyNoInteractions(tasks);
   }
 
   @Test

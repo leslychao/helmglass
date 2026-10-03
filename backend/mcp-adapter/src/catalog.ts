@@ -31,7 +31,7 @@ export const toolSchemas = {
   'tasks.context': z.strictObject({ ...task, section: z.enum(['INSTRUCTIONS', 'RESULTS', 'HISTORY', 'OPERATIONS']), contextRef: z.string().max(200).optional(), cursor: z.string().max(1024).optional(), limit: z.number().int().min(1).max(100).default(20) }),
   'tasks.list': z.strictObject({ ...page, status: z.string().max(40).optional(), snapshotToken: z.string().max(1024).optional() }),
   'tasks.clarify': z.strictObject({ ...versioned, clarificationId: uuid, expectedInstructionRevision: version, text: z.string().min(1).max(4096) }),
-  'tasks.resume': z.strictObject(versioned),
+  'tasks.resume': z.strictObject({ ...versioned, resolutionId: uuid.optional() }),
   'tasks.view': z.strictObject({ ...mutation, viewScopeId: uuid.optional(), expectedPresentationRevision: version }),
   'tasks.continue': z.strictObject({ ...mutation, continuationId: uuid, expectedInstructionRevision: version }),
   'continuations.prepare_message': z.strictObject({ ...mutation, continuationId: uuid,

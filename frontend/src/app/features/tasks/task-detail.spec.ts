@@ -86,7 +86,7 @@ describe('task browser confirmation', () => {
   );
 });
 
-describe('copy published conclusion', () => {
+describe('task result and actions', () => {
   const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
   const result: Result = {
     id: 'result-1',
@@ -175,6 +175,21 @@ describe('copy published conclusion', () => {
     if (!button) throw new Error('Copy conclusion button is missing');
     return button;
   }
+
+  it('resumes the same task without implicitly consenting to a new browser', async () => {
+    const { fixture, mutate, navigate } = await render();
+    const task = fixture.componentInstance.task.data();
+    if (!task) throw new Error('Task fixture is missing');
+    fixture.componentInstance.task.data.set({ ...task, state: 'PAUSED', version: 9 });
+    fixture.componentInstance.act('resume');
+    expect(mutate).toHaveBeenCalledExactlyOnceWith(
+      'POST',
+      '/tasks/task-1/resume',
+      { expectedTaskVersion: 9 },
+      expect.any(String),
+    );
+    expect(navigate).not.toHaveBeenCalled();
+  });
 
   it('copies only the exact published conclusion without requests, navigation or creating a task', async () => {
     let finish: () => void = () => {

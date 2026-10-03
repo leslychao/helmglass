@@ -27,8 +27,11 @@ import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.profile.application.BrowserProfileService;
 import com.helmglass.profile.infrastructure.ProfileKeyService;
 import com.helmglass.profile.infrastructure.repository.ProfileRepository;
+import com.helmglass.task.api.TaskContracts;
+import com.helmglass.task.application.TaskLifecycleService;
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -121,6 +124,7 @@ class ConnectionDeletionIntegrationTest {
   @Autowired private JdbcClient jdbc;
   @Autowired private S3Client s3;
   @Autowired private PlatformTransactionManager transactions;
+  @Autowired private TaskLifecycleService tasks;
 
   @Test
   void acceptedDeletePurgesOnlyItsPrefixAndRetainsHistoryTombstonesAcrossBatches() {
@@ -282,6 +286,58 @@ class ConnectionDeletionIntegrationTest {
   }
 
   @Test
+  void deletionTouchesCurrentAndPreferredConnectionsButNotClosedOrDeselectedHistory() {
+    var actor = actor();
+    UUID id = connection(actor);
+    UUID other = connection(actor);
+    UUID historicalSessionTask = task(actor, List.of(other));
+    UUID closed = session(actor, id);
+    jdbc.sql("UPDATE browser_sessions SET task_id=:task WHERE id=:id")
+        .param("task", historicalSessionTask)
+        .param("id", closed)
+        .update();
+    new TransactionTemplate(transactions).executeWithoutResult(status -> registry.closed(closed));
+
+    UUID historicalSelectionTask = task(actor, List.of(other));
+    UUID preferredTask = task(actor, List.of(id));
+    UUID selectedTask = task(actor, List.of());
+    jdbc.sql(
+            """
+            INSERT INTO task_connections(task_id,connection_id,user_id,site_id,selected)
+            SELECT :task,id,user_id,site_id,false FROM connections WHERE id=:id
+            """)
+        .param("task", historicalSelectionTask)
+        .param("id", id)
+        .update();
+    jdbc.sql(
+            """
+            INSERT INTO task_connections(task_id,connection_id,user_id,site_id,selected)
+            SELECT :task,id,user_id,site_id,true FROM connections WHERE id=:id
+            """)
+        .param("task", selectedTask)
+        .param("id", id)
+        .update();
+    UUID currentTask = task(actor, List.of());
+    UUID current = session(actor, id);
+    jdbc.sql("UPDATE browser_sessions SET task_id=:task WHERE id=:id")
+        .param("task", currentTask)
+        .param("id", current)
+        .update();
+
+    var receipt = connections.delete(actor, id, context());
+    advance(receipt.operationId());
+    assertThat(tasks.get(actor, historicalSessionTask).state()).isEqualTo("WAITING_AGENT");
+    assertThat(tasks.get(actor, historicalSelectionTask).state()).isEqualTo("WAITING_AGENT");
+    for (UUID affected : List.of(preferredTask, selectedTask, currentTask)) {
+      assertThat(tasks.get(actor, affected).state()).isEqualTo("WAITING_USER");
+      assertThat(tasks.get(actor, affected).waitReason()).isEqualTo("CONNECTION_REQUIRED");
+    }
+    new TransactionTemplate(transactions).executeWithoutResult(status -> registry.closed(current));
+    advance(receipt.operationId());
+    assertThat(connections.get(actor, id).status()).isEqualTo("DELETED");
+  }
+
+  @Test
   void failedStorageIsNotSuccessAndExplicitRetryKeepsTheAcceptedOperation() {
     var actor = actor();
     UUID id = connection(actor);
@@ -360,6 +416,24 @@ class ConnectionDeletionIntegrationTest {
         .param("connection", connection)
         .update();
     return id;
+  }
+
+  private UUID task(AuthenticatedActor actor, List<UUID> connectionIds) {
+    return tasks
+        .create(
+            actor,
+            new TaskContracts.Create(
+                "Use selected account",
+                "https://example.com",
+                connectionIds,
+                "TEXT",
+                true,
+                600,
+                "PREPARE"),
+            context(),
+            null)
+        .resource()
+        .id();
   }
 
   private UUID session(AuthenticatedActor actor, UUID connection) {

@@ -9,6 +9,15 @@ import type { HostConversationContext } from '../src/host-context.js';
 const publicOrigin = 'https://helm.example.test';
 const widgetHtml = '<html><script type="application/json" id="helm-runtime-config">{"publicOrigin":"__HELM_PUBLIC_ORIGIN__"}</script></html>';
 
+test('task resume accepts optional reconciliation without unrelated browser consent', () => {
+  const input = { taskId: randomUUID(), idempotencyKey: randomUUID(), expectedTaskVersion: 9 };
+  assert.deepEqual(toolSchemas['tasks.resume'].parse(input), input);
+  const reconciled = { ...input, resolutionId: randomUUID() };
+  assert.deepEqual(toolSchemas['tasks.resume'].parse(reconciled), reconciled);
+  assert.equal(toolSchemas['tasks.resume'].safeParse({ ...input, resolutionId: 'invalid' }).success, false);
+  assert.equal(toolSchemas['tasks.resume'].safeParse({ ...input, consentNewBrowser: true }).success, false);
+});
+
 test('widget configuration rejects noncanonical origins and missing or repeated markers', () => {
   const owner = { call: async () => ({ content: [] }) };
   for (const origin of ['http://helm.example.test', 'https://helm.example.test/path', 'https://user:secret@helm.example.test']) {

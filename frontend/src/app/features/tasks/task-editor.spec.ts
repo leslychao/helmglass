@@ -44,4 +44,42 @@ describe('task connection choices', () => {
     );
     expect(mutate).not.toHaveBeenCalled();
   });
+
+  it('lets the user remove a saved selection that is no longer selectable without saving implicitly', async () => {
+    const mutate = vi.fn();
+    TestBed.configureTestingModule({
+      providers: [
+        provideRouter([]),
+        { provide: ActivatedRoute, useValue: { snapshot: { paramMap: convertToParamMap({}) } } },
+        {
+          provide: Api,
+          useValue: {
+            get: () => of({ items: [], page: 1, pageSize: 10, total: 0, snapshot: 'empty' }),
+            mutate,
+          },
+        },
+        { provide: Realtime, useValue: { refresh: new Subject() } },
+      ],
+    });
+    const fixture = TestBed.createComponent(TaskEditor);
+    fixture.componentInstance.form.patchValue({
+      goal: 'Keep my draft',
+      connectionIds: ['deleted-connection'],
+    });
+    fixture.detectChanges();
+    await fixture.whenStable();
+    const root: HTMLElement = fixture.nativeElement;
+    const clear = [...root.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Снять выбор',
+    );
+    if (!clear) throw new Error('Explicit clear selection action is missing');
+    expect(fixture.componentInstance.form.controls.connectionIds.value).toEqual([
+      'deleted-connection',
+    ]);
+    clear.click();
+    expect(fixture.componentInstance.form.controls.connectionIds.value).toEqual([]);
+    expect(fixture.componentInstance.form.controls.goal.value).toBe('Keep my draft');
+    expect(fixture.componentInstance.form.dirty).toBe(true);
+    expect(mutate).not.toHaveBeenCalled();
+  });
 });

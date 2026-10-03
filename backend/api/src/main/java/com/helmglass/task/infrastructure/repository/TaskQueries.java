@@ -528,14 +528,15 @@ public class TaskQueries {
         .list();
   }
 
-  public void cancelActionRequests(UUID taskId) {
-    jdbc.sql(
-            """
-            UPDATE user_action_requests SET status='CANCELLED',resolved_at=now(),version=version+1
-            WHERE task_id=:task AND status='OPEN'
-            """)
-        .param("task", taskId)
-        .update();
+  public boolean cancelActionRequests(UUID taskId) {
+    return jdbc.sql(
+                """
+                UPDATE user_action_requests SET status='CANCELLED',resolved_at=now(),version=version+1
+                WHERE task_id=:task AND status='OPEN'
+                """)
+            .param("task", taskId)
+            .update()
+        > 0;
   }
 
   public UUID startedCommand(UUID taskId) {

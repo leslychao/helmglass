@@ -547,7 +547,7 @@ class WorkflowIntegrationTest {
     tasks.resume(
         actor,
         taskId,
-        new TaskContracts.Resume(tasks.get(actor, taskId).version(), null, false),
+        new TaskContracts.Resume(tasks.get(actor, taskId).version(), null),
         context());
     var snapshot = tasks.get(actor, taskId);
     UUID continuationId = (UUID) snapshot.continuation().get("id");

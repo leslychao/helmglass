@@ -4149,14 +4149,10 @@
                 "type": "null"
               }
             ]
-          },
-          "consentNewBrowser": {
-            "type": "boolean"
           }
         },
         "required": [
-          "expectedTaskVersion",
-          "consentNewBrowser"
+          "expectedTaskVersion"
         ]
       },
       "TaskClarification": {

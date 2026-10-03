@@ -109,6 +109,10 @@ export class TaskEditor {
     );
     this.form.markAsDirty();
   }
+  clearConnections() {
+    this.form.controls.connectionIds.setValue([]);
+    this.form.markAsDirty();
+  }
   save(intent: 'DRAFT' | 'PREPARE') {
     this.submitted.set(true);
     if (this.form.invalid || (intent === 'PREPARE' && !this.form.controls.goal.value.trim())) {

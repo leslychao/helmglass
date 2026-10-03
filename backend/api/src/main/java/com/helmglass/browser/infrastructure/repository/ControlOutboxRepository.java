@@ -69,6 +69,26 @@ public class ControlOutboxRepository {
 
   public record Receipt(UUID id, UUID userId) {}
 
+  /** Retains unsent intents as failed evidence; closure is not a control delivery ACK. */
+  @Transactional
+  public void retireClosedBindings() {
+    jdbc.sql(
+            """
+            WITH closed AS (
+              SELECT o.id FROM transactional_outbox o
+              JOIN browser_sessions s ON s.id=o.aggregate_id
+              WHERE o.event_type='worker.control' AND o.published_at IS NULL
+                AND o.last_failure_code IS DISTINCT FROM 'SESSION_CLOSED'
+                AND s.state='CLOSED' AND s.binding_released_at IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM browser_allocations a
+                  WHERE a.session_id=s.id AND a.state<>'RELEASED')
+              ORDER BY o.created_at,o.id LIMIT 100 FOR UPDATE OF o SKIP LOCKED)
+            UPDATE transactional_outbox o SET last_failure_code='SESSION_CLOSED'
+            FROM closed WHERE o.id=closed.id
+            """)
+        .update();
+  }
+
   @Transactional(propagation = Propagation.MANDATORY)
   public void enqueue(UUID workerId, Map<String, Object> message) {
     UUID sessionId = UUID.fromString(Objects.toString(message.get("browserSessionId")));

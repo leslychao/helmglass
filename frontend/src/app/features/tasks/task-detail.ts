@@ -627,7 +627,7 @@ export class TaskDetail {
     this.action.run(
       'POST',
       `/tasks/${task.id}/${action}`,
-      action === 'resume' ? { expectedTaskVersion: task.version, consentNewBrowser: true } : {},
+      action === 'resume' ? { expectedTaskVersion: task.version } : {},
       () => {
         this.resumeDialog.set(false);
         this.refresh();

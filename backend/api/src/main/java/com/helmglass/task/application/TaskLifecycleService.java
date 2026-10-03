@@ -346,15 +346,16 @@ public class TaskLifecycleService {
   public void connectionUnavailable(UUID userId, UUID taskId) {
     identities.lockState(userId);
     var task = tasks.lockOwned(taskId, userId).orElseThrow(DomainException::notFound);
-    if (task.getState() == TaskState.DRAFT || task.getState().terminal()) {
+    if (task.getState().terminal()) {
       return;
     }
-    for (UUID commandId : queries.cancelUnstarted(taskId, "CONNECTION_REQUIRED")) {
+    List<UUID> cancelledCommands = queries.cancelUnstarted(taskId, "CONNECTION_REQUIRED");
+    for (UUID commandId : cancelledCommands) {
       operations.completeCommandTarget(commandId, "commands.accept:" + taskId, "FAILED");
     }
-    queries.cancelActionRequests(taskId);
+    boolean requestCancelled = queries.cancelActionRequests(taskId);
     continuations.cancel(taskId);
-    if (task.connectionUnavailable()) {
+    if (task.connectionUnavailable(requestCancelled || !cancelledCommands.isEmpty())) {
       tasks.flush();
       queries.event(task, "SYSTEM", "CONNECTION_REQUIRED", "Task connection is unavailable");
       changes.changed(userId, "tasks", taskId, task.getVersion());

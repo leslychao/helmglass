@@ -144,12 +144,18 @@ public class TaskAggregate {
     updatedAt = Instant.now();
   }
 
-  public boolean connectionUnavailable() {
-    if (state == TaskState.DRAFT || state.terminal() || state == TaskState.STOPPING) {
+  public boolean connectionUnavailable(boolean pendingWorkCancelled) {
+    if (state.terminal()) {
       return false;
     }
+    if (state == TaskState.DRAFT || state == TaskState.STOPPING) {
+      if (pendingWorkCancelled) {
+        updatedAt = Instant.now();
+      }
+      return pendingWorkCancelled;
+    }
     TaskState next = mutationBarrier ? TaskState.INTERRUPTED : TaskState.WAITING_USER;
-    if (state == next && "CONNECTION_REQUIRED".equals(waitReason)) {
+    if (state == next && "CONNECTION_REQUIRED".equals(waitReason) && !pendingWorkCancelled) {
       return false;
     }
     state = next;

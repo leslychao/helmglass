@@ -212,6 +212,28 @@ public class OperationRepository {
 
   private record Transition(UUID id, UUID userId, long version) {}
 
+  public void failClosedControls() {
+    var failed =
+        jdbc.sql(
+                """
+                WITH closed AS (
+                  SELECT o.id FROM operations o JOIN browser_sessions s ON s.id=o.target_id
+                  WHERE o.target_type='browserSession' AND o.kind LIKE 'control.%'
+                    AND o.state IN ('PENDING','RUNNING')
+                    AND o.human_checkpoint IS DISTINCT FROM 'UNKNOWN'
+                    AND s.state='CLOSED' AND s.binding_released_at IS NOT NULL
+                    AND NOT EXISTS(SELECT 1 FROM browser_allocations a
+                      WHERE a.session_id=s.id AND a.state<>'RELEASED')
+                  ORDER BY o.created_at,o.id LIMIT 100 FOR UPDATE OF o SKIP LOCKED)
+                UPDATE operations o SET state='FAILED',failure_code='SESSION_CLOSED',
+                  finished_at=now(),updated_at=now(),progress=100,version=o.version+1
+                FROM closed WHERE o.id=closed.id RETURNING o.id,o.user_id,o.version
+                """)
+            .query(Transition.class)
+            .list();
+    failed.forEach(this::changed);
+  }
+
   public void completeControl(UUID operationId) {
     var changed =
         jdbc.sql(

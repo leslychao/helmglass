@@ -361,6 +361,44 @@ class TaskLifecycleIntegrationTest {
   }
 
   @Test
+  void unavailableConnectionCancelsDraftLoginRequestWithoutPreparingTheDraft() {
+    var actor = actor();
+    UUID taskId =
+        tasks.create(actor, create("Keep as a draft", "DRAFT"), context(), null).resource().id();
+    UUID requestId = UUID.randomUUID();
+    jdbc.sql(
+            """
+            INSERT INTO user_action_requests(id,task_id,kind,intent_hash,prompt,expires_at)
+            VALUES(:id,:task,'LOGIN','draft-login','Sign in',now()+interval '5 minutes')
+            """)
+        .param("id", requestId)
+        .param("task", taskId)
+        .update();
+    var before = tasks.get(actor, taskId);
+    assertThat(before.activeRequest()).isNotNull();
+    long priorOutbox =
+        count("SELECT count(*) FROM transactional_outbox WHERE user_id=:id", actor.userId());
+
+    tasks.connectionUnavailable(actor.userId(), taskId);
+
+    var after = tasks.get(actor, taskId);
+    assertThat(after.state()).isEqualTo("DRAFT");
+    assertThat(after.activeRequest()).isNull();
+    assertThat(after.version()).isEqualTo(before.version() + 1);
+    assertThat(after.goal()).isEqualTo(before.goal());
+    assertThat(
+            jdbc.sql("SELECT status FROM user_action_requests WHERE id=:id")
+                .param("id", requestId)
+                .query(String.class)
+                .single())
+        .isEqualTo("CANCELLED");
+    assertThat(count("SELECT count(*) FROM transactional_outbox WHERE user_id=:id", actor.userId()))
+        .isGreaterThan(priorOutbox);
+    tasks.connectionUnavailable(actor.userId(), taskId);
+    assertThat(tasks.get(actor, taskId).version()).isEqualTo(after.version());
+  }
+
+  @Test
   void unavailableConnectionPreservesUnknownEffectsAndCannotAffectAnotherOwner() {
     var actor = actor();
     UUID taskId =
