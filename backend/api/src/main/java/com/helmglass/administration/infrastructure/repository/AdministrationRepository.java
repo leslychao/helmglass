@@ -42,21 +42,22 @@ public class AdministrationRepository {
                 (SELECT count(*) FROM browser_workers WHERE heartbeat_at<now()-interval '15 seconds') AS "unavailableWorkers",
                 (SELECT count(*) FROM operations WHERE state IN ('PENDING','RUNNING','NEEDS_ATTENTION')) AS "pendingOperations",
                 (SELECT count(*) FROM application_users WHERE state='BLOCKED') AS "blockedUsers",
+                (SELECT count(*) FROM application_users WHERE state<>'DELETED') AS "totalUsers",
                 p.version,p.accepting_allocations AS "acceptingAllocations",p.standard_browser_limit AS "standardBrowserLimit",
-                (SELECT coalesce(sum(capacity),0) FROM browser_workers WHERE observed_state='READY'
-                AND heartbeat_at>now()-interval '15 seconds') AS capacity
+                (SELECT coalesce(sum(greatest(0,w.capacity-(SELECT count(*) FROM browser_allocations a
+                  WHERE a.worker_id=w.id AND a.state<>'RELEASED'))),0) FROM browser_workers w
+                  WHERE w.observed_state='READY' AND w.heartbeat_at>now()-interval '15 seconds') AS "physicalFree",
+                (SELECT coalesce(sum(greatest(0,w.capacity-(SELECT count(*) FROM browser_allocations a
+                  WHERE a.worker_id=w.id AND a.state<>'RELEASED'))),0) FROM browser_workers w
+                  WHERE w.desired_mode='ENABLED' AND w.observed_state='READY'
+                  AND w.heartbeat_at>now()-interval '15 seconds') AS "allocatableFree"
                 FROM platform_settings p
                 """)
             .query()
             .singleRow();
-    long capacity = ((Number) values.remove("capacity")).longValue();
-    long occupied =
-        ((Number) values.get("confirmedBusy")).longValue()
-            + ((Number) values.get("unconfirmedOccupied")).longValue();
-    long free = Math.max(0, capacity - occupied);
-    values.put("physicalFree", free);
-    values.put(
-        "allocatableFree", Boolean.TRUE.equals(values.get("acceptingAllocations")) ? free : 0);
+    if (!Boolean.TRUE.equals(values.get("acceptingAllocations"))) {
+      values.put("allocatableFree", 0L);
+    }
     values.put("observedAt", Instant.now());
     values.put("completeness", "COMPLETE");
     return values;
@@ -153,61 +154,60 @@ public class AdministrationRepository {
 
   public PageResult<Map<String, Object>> users(UUID actorId, PageQuery query) {
     String snapshot = changes.snapshot(actorId, "users", query);
-    String where = " WHERE (display_name ILIKE :q OR email ILIKE :q OR id::text=:exact)";
+    String population = """
+        WITH users AS (
+          SELECT u.id,u.display_name AS "displayName",u.email,u.state AS "accountState",u.version,
+            u.created_at AS "createdAt",u.last_activity_at AS "lastActivityAt",
+            (SELECT count(*) FROM browser_allocations a WHERE a.user_id=u.id AND a.state<>'RELEASED') AS "occupiedBrowsers",
+            (SELECT count(*) FROM tasks t WHERE t.user_id=u.id AND t.state IN ('WAITING_AGENT','WAITING_USER','QUEUED')) AS "queuedTasks",
+            (SELECT count(*) FROM operations o WHERE o.state IN ('PENDING','RUNNING','NEEDS_ATTENTION')
+              AND EXISTS(SELECT 1 FROM admin_audit_log a WHERE a.operation_id=o.id AND a.target_user_id=u.id)) AS "pendingOperations"
+          FROM application_users u
+        )
+        """;
+    String where = " WHERE (u.\"displayName\" ILIKE :q OR u.email ILIKE :q OR u.id::text=:exact)";
     Map<String, Object> parameters = new HashMap<>();
     parameters.put("q", query.escapedQuery());
     parameters.put("exact", query.query());
     List<String> states = query.filters().get("accountState");
     if (states != null && !states.isEmpty()) {
-      where += " AND state IN (:states)";
+      if (states.size() > 5 || !List.of("ACTIVE", "BLOCKED", "DELETING", "PURGING", "DELETED").containsAll(states)) {
+        throw new DomainException(400, "INVALID_FILTER", "Unsupported account state filter");
+      }
+      where += " AND u.\"accountState\" IN (:states)";
       parameters.put("states", states);
     }
-    long total =
-        jdbc.sql("SELECT count(*) FROM application_users" + where)
-            .params(parameters)
-            .query(Long.class)
-            .single();
-    var users =
-        jdbc.sql(
-                """
-                SELECT id,display_name AS "displayName",email,state AS "accountState",application_users.version,
-                created_at AS "createdAt",last_activity_at AS "lastActivityAt",
-                l.version AS "limitVersion",l.browser_mode AS "browserMode",l.browser_custom AS "browserCustom",
-                l.queued_mode AS "queuedMode",l.queued_custom AS "queuedCustom",
-                p.browser_limit AS "personalBrowserLimit",p.queued_limit AS "personalQueuedLimit",
-                s.standard_browser_limit AS "standardBrowserLimit",
-                (SELECT count(*) FROM browser_allocations a WHERE a.user_id=application_users.id AND a.state<>'RELEASED') AS "occupiedBrowsers",
-                (SELECT count(*) FROM tasks t WHERE t.user_id=application_users.id AND t.state IN ('WAITING_AGENT','WAITING_USER','QUEUED')) AS "queuedTasks"
-                FROM application_users LEFT JOIN admin_user_limits l ON l.user_id=application_users.id
-                LEFT JOIN user_policies p ON p.user_id=application_users.id CROSS JOIN platform_settings s
-                """
-                    + where
-                    + " ORDER BY "
-                    + query.sqlOrder(
-                        Map.of(
-                            "displayName",
-                            "display_name",
-                            "email",
-                            "email",
-                            "createdAt",
-                            "created_at",
-                            "lastActiveAt",
-                            "last_activity_at",
-                            "lastActivityAt",
-                            "last_activity_at"),
-                        "last_activity_at DESC,id")
-                    + " LIMIT :limit OFFSET :offset")
-            .params(parameters)
-            .param("limit", query.pageSize())
-            .param("offset", query.offset())
-            .query()
-            .listOfRows();
+    if (enabledFilter(query, "pending")) { where += " AND u.\"pendingOperations\">0"; }
+    if (enabledFilter(query, "waiting")) { where += " AND u.\"queuedTasks\">0"; }
+    long total = jdbc.sql(population + "SELECT count(*) FROM users u" + where)
+        .params(parameters).query(Long.class).single();
+    var users = jdbc.sql(population + """
+        SELECT u.*,l.version AS "limitVersion",l.browser_mode AS "browserMode",l.browser_custom AS "browserCustom",
+          l.queued_mode AS "queuedMode",l.queued_custom AS "queuedCustom",
+          p.browser_limit AS "personalBrowserLimit",p.queued_limit AS "personalQueuedLimit",
+          s.standard_browser_limit AS "standardBrowserLimit"
+        FROM users u LEFT JOIN admin_user_limits l ON l.user_id=u.id
+          LEFT JOIN user_policies p ON p.user_id=u.id CROSS JOIN platform_settings s
+        """ + where + " ORDER BY " + query.sqlOrder(Map.of(
+          "displayName", "\"displayName\"", "email", "email", "accountState", "\"accountState\"",
+          "occupiedBrowsers", "\"occupiedBrowsers\"", "queuedTasks", "\"queuedTasks\"",
+          "createdAt", "\"createdAt\"", "lastActiveAt", "\"lastActivityAt\"", "lastActivityAt", "\"lastActivityAt\""),
+          "\"lastActivityAt\" DESC,id") + " LIMIT :limit OFFSET :offset")
+        .params(parameters).param("limit", query.pageSize()).param("offset", query.offset()).query().listOfRows();
     for (var user : users) {
       Map<String, Object> limits = limitsFromRow(user);
       user.put("limits", "DELETED".equals(user.get("accountState")) ? null : limits);
     }
-    return new PageResult<>(
-        users, total, query.page(), query.pageSize(), query.sortDescriptor(), snapshot);
+    return new PageResult<>(users, total, query.page(), query.pageSize(), query.sortDescriptor(), snapshot);
+  }
+
+  private static boolean enabledFilter(PageQuery query, String name) {
+    List<String> values = query.filters().get(name);
+    if (values == null) { return false; }
+    if (values.size() != 1 || !List.of("true", "false").contains(values.getFirst())) {
+      throw new DomainException(400, "INVALID_FILTER", "Expected one boolean filter");
+    }
+    return values.getFirst().equals("true");
   }
 
   public PageResult<Map<String, Object>> safeTasks(UUID actorId, UUID userId, PageQuery query) {

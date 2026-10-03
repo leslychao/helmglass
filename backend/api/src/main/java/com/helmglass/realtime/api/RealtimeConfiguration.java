@@ -22,10 +22,16 @@ public class RealtimeConfiguration implements WebSocketConfigurer {
   private final String widgetOrigin;
   private final WidgetEventGateway widgetEvents;
 
-  public RealtimeConfiguration(WorkerGateway workers, WorkerSignalingGateway workerSignaling,
-      ViewerSignalingGateway viewers, HumanInputGateway input, RealtimeDeliveryService realtime, ActorHandshakeInterceptor actor,
+  public RealtimeConfiguration(
+      WorkerGateway workers,
+      WorkerSignalingGateway workerSignaling,
+      ViewerSignalingGateway viewers,
+      HumanInputGateway input,
+      RealtimeDeliveryService realtime,
+      ActorHandshakeInterceptor actor,
       @Value("${helm.public-origin}") String origin,
-      @Value("${helm.widget-origin:}") String widgetOrigin, WidgetEventGateway widgetEvents) {
+      @Value("${helm.widget-origin:}") String widgetOrigin,
+      WidgetEventGateway widgetEvents) {
     this.workers = workers;
     this.workerSignaling = workerSignaling;
     this.viewers = viewers;
@@ -41,12 +47,19 @@ public class RealtimeConfiguration implements WebSocketConfigurer {
   public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
     registry.addHandler(workers, "/internal/worker/control").addInterceptors(actor);
     registry.addHandler(workerSignaling, "/internal/worker/signaling").addInterceptors(actor);
-    registry.addHandler(realtime, "/events/v1/user").addInterceptors(actor).setAllowedOrigins(origin);
+    registry
+        .addHandler(realtime, "/events/v1/user")
+        .addInterceptors(actor)
+        .setAllowedOrigins(origin);
     registry.addHandler(input, "/stream/v1/input/*").setAllowedOrigins(origin);
-    registry.addHandler(viewers, "/stream/v1/signaling/*")
-        .addInterceptors(actor).setAllowedOrigins(origin);
+    registry
+        .addHandler(viewers, "/stream/v1/signaling/*")
+        .addInterceptors(actor)
+        .setAllowedOrigins(origin);
     if (!widgetOrigin.isBlank()) {
-      registry.addHandler(widgetEvents, "/events/v1/widget/tasks/*").setAllowedOrigins(widgetOrigin);
+      registry
+          .addHandler(widgetEvents, "/events/v1/widget/tasks/*")
+          .setAllowedOrigins(widgetOrigin);
       registry.addHandler(viewers, "/stream/v1/widget/signaling/*").setAllowedOrigins(widgetOrigin);
     }
   }

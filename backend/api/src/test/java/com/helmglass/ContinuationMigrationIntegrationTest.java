@@ -63,6 +63,26 @@ class ContinuationMigrationIntegrationTest {
             .param("claim", id.equals(claim) ? claim : null)
             .update();
       }
+      UUID scope = UUID.randomUUID();
+      jdbc.sql(
+              """
+              INSERT INTO chat_view_slots(id,user_id,task_id,client_id,verified_correlation,
+                presentation_revision,view_generation)
+              VALUES(:scope,:user,:task,'helm-mcp','legacy-correlation',17,23)
+              """)
+          .param("scope", scope)
+          .param("user", user)
+          .param("task", ready)
+          .update();
+      jdbc.sql(
+              "UPDATE task_continuations SET mode='WIDGET_RETURN',view_scope_id=:scope WHERE"
+                  + " id=:id")
+          .param("scope", scope)
+          .param("id", ready)
+          .update();
+      jdbc.sql("UPDATE tasks SET continuation_preference='WIDGET_RETURN' WHERE id=:id")
+          .param("id", ready)
+          .update();
       Instant deadline =
           jdbc.sql("SELECT expires_at FROM task_continuations WHERE id=:id")
               .param("id", claim)
@@ -70,6 +90,37 @@ class ContinuationMigrationIntegrationTest {
               .single();
       migrate(database, null);
       migrate(database, null);
+      assertThat(
+              jdbc.sql(
+                      "SELECT"
+                          + " user_id,task_id,presentation_revision,view_generation,media_connected,control_epoch,page_epoch,privacy_epoch,media_generation"
+                          + " FROM chat_view_slots WHERE id=:id")
+                  .param("id", scope)
+                  .query()
+                  .singleRow())
+          .containsEntry("user_id", user)
+          .containsEntry("task_id", ready)
+          .containsEntry("presentation_revision", 17L)
+          .containsEntry("view_generation", 23L)
+          .containsEntry("media_connected", false)
+          .containsEntry("control_epoch", 0L)
+          .containsEntry("page_epoch", 0L)
+          .containsEntry("privacy_epoch", 0L)
+          .containsEntry("media_generation", 0L);
+      assertThat(
+              jdbc.sql("SELECT mode,view_scope_id FROM task_continuations WHERE id=:id")
+                  .param("id", ready)
+                  .query()
+                  .singleRow())
+          .containsEntry("mode", "MANUAL")
+          .containsEntry("view_scope_id", scope);
+      assertThat(
+              jdbc.sql("SELECT continuation_preference,origin_correlation FROM tasks WHERE id=:id")
+                  .param("id", ready)
+                  .query()
+                  .singleRow())
+          .containsEntry("continuation_preference", "MANUAL")
+          .containsEntry("origin_correlation", null);
       assertThat(
               jdbc.sql("SELECT count(*) FROM task_continuations WHERE id IN (:claim,:ready)")
                   .param("claim", claim)

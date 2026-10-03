@@ -47,6 +47,8 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.orm.jpa.JpaTransactionManager;
@@ -57,6 +59,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.LinkedMultiValueMap;
+import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
@@ -64,9 +67,12 @@ import tools.jackson.databind.json.JsonMapper;
 @SpringJUnitConfig(TaskLifecycleIntegrationTest.DatabaseConfiguration.class)
 class TaskLifecycleIntegrationTest {
   static final PostgreSQLContainer DATABASE = new PostgreSQLContainer("postgres:18.3-bookworm");
+  static final GenericContainer<?> REDIS =
+      new GenericContainer<>("redis:8.4.6-alpine").withExposedPorts(6379);
 
   static {
     DATABASE.start();
+    REDIS.start();
   }
 
   @Configuration
@@ -98,6 +104,16 @@ class TaskLifecycleIntegrationTest {
     UsageRepository.class
   })
   static class DatabaseConfiguration {
+    @Bean
+    LettuceConnectionFactory redisConnectionFactory() {
+      return new LettuceConnectionFactory(REDIS.getHost(), REDIS.getMappedPort(6379));
+    }
+
+    @Bean
+    StringRedisTemplate redisTemplate(LettuceConnectionFactory connection) {
+      return new StringRedisTemplate(connection);
+    }
+
     @Bean
     DataSource dataSource() {
       return new DriverManagerDataSource(

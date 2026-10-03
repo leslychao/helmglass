@@ -61,7 +61,7 @@ function fixture() {
     'browserActionsH', 'widgetTaskLink8', 'renderBrowserActionH', 'connectionTaskH',
     'connectionBrowserActionH', 'connectionBadgeV', 'manualState', 'manualEntryH',
     'demoContinuityH', 'reopenDemoBrowserH', 'unknownEffectNoticeH', 'reviewUnknownEffectH',
-    'handleHelmAction', 'renderWidget', 'userAction']) {
+    'handleHelmAction', 'renderWidget', 'taskChatUrl', 'taskChatLink', 'taskChatText', 'userAction']) {
     vm.runInContext(declaration(name), context);
   }
   const task = {id: 101, version: 1, status: 'RUNNING', browser: 'available', mode: 'EXTERNAL_MCP',
@@ -76,6 +76,34 @@ function fixture() {
 
 test('all inline scripts remain valid JavaScript', () => {
   for (const [, script] of source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(script);
+});
+
+test('task continuation links open the bound ChatGPT conversation in a new tab', () => {
+  const {context, task} = fixture();
+  task.status = 'WAITING_AGENT';
+  task.steps = [];
+  task.chatgptConversationId = '00000000-0000-4000-8000-000000000101';
+  const before = JSON.stringify(task);
+  const markup = context.userAction(task);
+  assert.match(markup, /href="https:\/\/chatgpt\.com\/c\/00000000-0000-4000-8000-000000000101"/);
+  assert.match(markup, /target="_blank" rel="noopener noreferrer"/);
+  assert.doesNotMatch(markup, /href="https:\/\/chatgpt\.com\/"/);
+  assert.equal(JSON.stringify(task), before);
+  task.chatgptConversationId = '00000000-0000-4000-8000-000000000102';
+  assert.match(context.taskChatText(task, 'Ожидает ChatGPT'), /000000000102"/);
+});
+
+test('missing or malformed conversation IDs leave mentions as plain text', () => {
+  const {context, task} = fixture();
+  for (const id of [undefined, null, '', '101', '../another-chat', 'https://example.com']) {
+    task.chatgptConversationId = id;
+    assert.equal(context.taskChatText(task, 'Из ChatGPT'), 'Из ChatGPT');
+  }
+  task.status = 'WAITING_AGENT';
+  task.steps = [];
+  const markup = context.userAction(task);
+  assert.match(markup, /href="https:\/\/chatgpt\.com\/"/);
+  assert.doesNotMatch(markup, /chatgpt\.com\/c\//);
 });
 
 test('healthy and session-only access offer takeover, with no redundant login', () => {

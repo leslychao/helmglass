@@ -38,8 +38,12 @@ import tools.jackson.databind.JsonNode;
 @Slf4j
 @Component
 public class ViewerSignalingGateway extends TextWebSocketHandler {
-  private record Viewer(UUID workerId, UUID workerBootId, long allocationEpoch,
-      TicketBinding binding, WebSocketSession socket) {}
+  private record Viewer(
+      UUID workerId,
+      UUID workerBootId,
+      long allocationEpoch,
+      TicketBinding binding,
+      WebSocketSession socket) {}
 
   private record Pending(WebSocketSession socket, Instant expiresAt, boolean widget) {}
 
@@ -58,9 +62,15 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
   private final String origin;
   private final String widgetOrigin;
 
-  public ViewerSignalingGateway(ChannelTicketService tickets, IdentityRepository identities,
-      BrowserRepository browsers, ControlRepository controls, WorkerSignalingGateway workers,
-      RealtimeDeliveryService realtime, JsonSupport json, IceServerService ice,
+  public ViewerSignalingGateway(
+      ChannelTicketService tickets,
+      IdentityRepository identities,
+      BrowserRepository browsers,
+      ControlRepository controls,
+      WorkerSignalingGateway workers,
+      RealtimeDeliveryService realtime,
+      JsonSupport json,
+      IceServerService ice,
       @Value("${helm.public-origin}") String origin,
       @Value("${helm.widget-origin:}") String widgetOrigin) {
     this.tickets = tickets;
@@ -80,7 +90,9 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
     var uri = socket.getUri();
     boolean widget = uri != null && uri.getPath().startsWith("/stream/v1/widget/signaling/");
     String expectedOrigin = widget ? widgetOrigin : origin;
-    if (uri == null || uri.getRawQuery() != null || expectedOrigin.isBlank()
+    if (uri == null
+        || uri.getRawQuery() != null
+        || expectedOrigin.isBlank()
         || !expectedOrigin.equals(socket.getHandshakeHeaders().getOrigin())
         || socket.getHandshakeHeaders().getFirst("Authorization") != null) {
       socket.close(new CloseStatus(4403, "CHANNEL_ORIGIN_REJECTED"));
@@ -96,9 +108,12 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
       return;
     }
     socket.setTextMessageSizeLimit(65536);
-    pending.put(socket.getId(), new Pending(
-        new ConcurrentWebSocketSessionDecorator(socket, 3000, 262144),
-        Instant.now().plusSeconds(5), widget));
+    pending.put(
+        socket.getId(),
+        new Pending(
+            new ConcurrentWebSocketSessionDecorator(socket, 3000, 262144),
+            Instant.now().plusSeconds(5),
+            widget));
   }
 
   @Override
@@ -114,14 +129,20 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
         authenticate(admission, payload);
         return;
       }
-      Viewer viewer = viewers.values().stream()
-          .filter(value -> value.socket().getId().equals(socket.getId())).findFirst().orElse(null);
-      if (viewer == null || !authorized(viewer)) {
+      Viewer viewer =
+          viewers.values().stream()
+              .filter(value -> value.socket().getId().equals(socket.getId()))
+              .findFirst()
+              .orElse(null);
+      if (viewer == null
+          || !authorized(
+              viewer, browsers.owned(viewer.binding().userId(), viewer.binding().sessionId()))) {
         return;
       }
       Map<String, Object> signal = new HashMap<>(binding(viewer, UUID.randomUUID()).binding());
       signal.put("payload", payload);
-      if (!workers.send(viewer.workerId(), WorkerGateway.envelope("signal", UUID.randomUUID(), signal))) {
+      if (!workers.send(
+          viewer.workerId(), WorkerGateway.envelope("signal", UUID.randomUUID(), signal))) {
         close(socket, 4503, "STREAM_UNAVAILABLE");
       }
     } catch (DomainException error) {
@@ -140,30 +161,41 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
       close(socket, 4401, "TICKET_TIMEOUT");
       return;
     }
-    if (!payload.isObject() || payload.size() != 2
+    if (!payload.isObject()
+        || payload.size() != 2
         || !payload.path("type").asString().equals("authenticate")
-        || !payload.path("ticket").isString() || uri == null) {
+        || !payload.path("ticket").isString()
+        || uri == null) {
       close(socket, 4401, "TICKET_REQUIRED");
       return;
     }
     String path = uri.getPath();
     UUID sessionId = UUID.fromString(path.substring(path.lastIndexOf('/') + 1));
     TicketBinding ticket = tickets.consume(payload.path("ticket").asString(), "VIDEO", sessionId);
-    boolean widgetTicket = ticket.viewScopeId() != null && ticket.grantId() != null
-        && ticket.loginId() == null && ticket.purpose().equals("NORMAL_VIDEO");
-    boolean webTicket = ticket.viewScopeId() == null && ticket.grantId() == null && ticket.loginId() != null;
+    boolean widgetTicket =
+        ticket.viewScopeId() != null
+            && ticket.grantId() != null
+            && ticket.loginId() == null
+            && ticket.purpose().equals("NORMAL_VIDEO");
+    boolean webTicket =
+        ticket.viewScopeId() == null && ticket.grantId() == null && ticket.loginId() != null;
     if (!(admission.widget() ? widgetTicket : webTicket)
         || !Objects.equals(ticket.origin(), admission.widget() ? widgetOrigin : origin)) {
       close(socket, 4403, "TICKET_BINDING_MISMATCH");
       return;
     }
     var session = browsers.owned(ticket.userId(), sessionId);
-    var viewer = new Viewer(session.workerId(), session.workerBootId(), session.allocationEpoch(), ticket, socket);
-    if (!authorized(viewer)) {
+    var viewer =
+        new Viewer(
+            session.workerId(), session.workerBootId(), session.allocationEpoch(), ticket, socket);
+    if (!authorized(viewer, session)) {
       return;
     }
     synchronized (viewers) {
-      long count = viewers.values().stream().filter(value -> value.binding().sessionId().equals(sessionId)).count();
+      long count =
+          viewers.values().stream()
+              .filter(value -> value.binding().sessionId().equals(sessionId))
+              .count();
       if (count >= 2 || viewers.containsKey(ticket.viewerInstanceId())) {
         close(socket, 4503, "VIEWER_LIMIT");
         return;
@@ -181,12 +213,12 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
       pendingLimit.release();
       viewers.put(ticket.viewerInstanceId(), viewer);
     }
-    if (!workers.send(viewer.workerId(), leaseMessage(viewer, "viewOpen"))) {
+    if (!workers.send(viewer.workerId(), leaseMessage(viewer, "viewOpen", session.pageEpoch()))) {
       close(socket, 4503, "STREAM_UNAVAILABLE");
     }
   }
 
-  private boolean authorized(Viewer viewer) {
+  private boolean authorized(Viewer viewer, BrowserRepository.Session session) {
     TicketBinding ticket = viewer.binding();
     if (!ticket.viewerAuthorizationExpiresAt().isAfter(Instant.now())) {
       close(viewer.socket(), 4401, "AUTHORIZATION_EXPIRED");
@@ -197,23 +229,29 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
         rejectWidget(viewer, "MEDIA_BINDING_CHANGED");
         return false;
       }
-    } else if (!identities.authorizationActive(ticket.userId(), ticket.loginId(), null, ticket.accessEpoch())) {
+    } else if (!identities.authorizationActive(
+        ticket.userId(), ticket.loginId(), null, ticket.accessEpoch())) {
       close(viewer.socket(), 4403, "VIEW_REVOKED");
       return false;
     }
-    var session = browsers.owned(ticket.userId(), ticket.sessionId());
     var control = controls.get(ticket.sessionId());
-    boolean privateAuthorized = ticket.purpose().equals("PRIVATE_VIDEO") && ticket.loginId() != null
-        && ticket.controllerInstanceId() != null
-        && ticket.controllerInstanceId().equals(control.controllerInstanceId())
-        && control.ownerKind().equals("HUMAN") && control.expiresAt().isAfter(Instant.now());
-    boolean current = Objects.equals(viewer.workerId(), session.workerId())
-        && Objects.equals(viewer.workerBootId(), session.workerBootId())
-        && viewer.allocationEpoch() == session.allocationEpoch()
-        && session.state().equals("ACTIVE")
-        && (session.privacy().equals("NORMAL") || privateAuthorized)
-        && session.privacyEpoch() == ticket.privacyEpoch() && control.state().equals("ACTIVE")
-        && session.mediaGeneration() == ticket.mediaGeneration() && control.epoch() == ticket.controlEpoch();
+    boolean privateAuthorized =
+        ticket.purpose().equals("PRIVATE_VIDEO")
+            && ticket.loginId() != null
+            && ticket.controllerInstanceId() != null
+            && ticket.controllerInstanceId().equals(control.controllerInstanceId())
+            && control.ownerKind().equals("HUMAN")
+            && control.expiresAt().isAfter(Instant.now());
+    boolean current =
+        Objects.equals(viewer.workerId(), session.workerId())
+            && Objects.equals(viewer.workerBootId(), session.workerBootId())
+            && viewer.allocationEpoch() == session.allocationEpoch()
+            && session.state().equals("ACTIVE")
+            && (session.privacy().equals("NORMAL") || privateAuthorized)
+            && session.privacyEpoch() == ticket.privacyEpoch()
+            && control.state().equals("ACTIVE")
+            && session.mediaGeneration() == ticket.mediaGeneration()
+            && control.epoch() == ticket.controlEpoch();
     if (!current) {
       close(viewer.socket(), 4503, "MEDIA_BINDING_CHANGED");
     }
@@ -222,32 +260,42 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
 
   private void rejectWidget(Viewer viewer, String fallback) {
     String reason = realtime.widgetRejection(viewer.binding()).orElse(fallback);
-    int status = switch (reason) {
-      case "AUTHORIZATION_EXPIRED" -> 4401;
-      case "GRANT_REVOKED" -> 4403;
-      case "PRESENTATION_SUPERSEDED" -> 4412;
-      default -> 4503;
-    };
+    int status =
+        switch (reason) {
+          case "AUTHORIZATION_EXPIRED" -> 4401;
+          case "GRANT_REVOKED" -> 4403;
+          case "PRESENTATION_SUPERSEDED" -> 4412;
+          default -> 4503;
+        };
     close(viewer.socket(), status, reason);
   }
 
-  private Map<String, Object> leaseMessage(Viewer viewer, String type) {
+  private Map<String, Object> leaseMessage(Viewer viewer, String type, long pageEpoch) {
     TicketBinding ticket = viewer.binding();
     Map<String, Object> message = new HashMap<>(binding(viewer, UUID.randomUUID()).binding());
     message.put("controlEpoch", ticket.controlEpoch());
-    message.put("pageEpoch", browsers.owned(ticket.userId(), ticket.sessionId()).pageEpoch());
+    message.put("pageEpoch", pageEpoch);
     message.put("privacyEpoch", ticket.privacyEpoch());
     message.put("mediaGeneration", ticket.mediaGeneration());
     Instant deadline = Instant.now().plusSeconds(5);
-    message.put("leaseExpiresAt", deadline.isBefore(ticket.viewerAuthorizationExpiresAt())
-        ? deadline : ticket.viewerAuthorizationExpiresAt());
+    message.put(
+        "leaseExpiresAt",
+        deadline.isBefore(ticket.viewerAuthorizationExpiresAt())
+            ? deadline
+            : ticket.viewerAuthorizationExpiresAt());
     if (type.equals("viewOpen")) {
       message.put("surface", ticket.viewScopeId() == null ? "WEB" : "WIDGET");
       if (ticket.controllerInstanceId() != null) {
         message.put("controllerInstance", ticket.controllerInstanceId());
       }
-      message.put("iceServers", ice.forViewer(ticket.userId(), ticket.viewerInstanceId(), ticket.viewerAuthorizationExpiresAt()));
-      message.put("producerIceServer", ice.forProducer(ticket.userId(), ticket.viewerInstanceId(), ticket.viewerAuthorizationExpiresAt()));
+      message.put(
+          "iceServers",
+          ice.forViewer(
+              ticket.userId(), ticket.viewerInstanceId(), ticket.viewerAuthorizationExpiresAt()));
+      message.put(
+          "producerIceServer",
+          ice.forProducer(
+              ticket.userId(), ticket.viewerInstanceId(), ticket.viewerAuthorizationExpiresAt()));
       message.put("mediaProxy", ice.mediaProxy());
     }
     return WorkerGateway.envelope(type, UUID.randomUUID(), message);
@@ -262,7 +310,10 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
     }
     for (Viewer viewer : viewers.values()) {
       try {
-        if (authorized(viewer) && !workers.send(viewer.workerId(), leaseMessage(viewer, "viewRenew"))) {
+        var session = browsers.owned(viewer.binding().userId(), viewer.binding().sessionId());
+        if (authorized(viewer, session)
+            && !workers.send(
+                viewer.workerId(), leaseMessage(viewer, "viewRenew", session.pageEpoch()))) {
           close(viewer.socket(), 4503, "STREAM_UNAVAILABLE");
         }
       } catch (DomainException | DataAccessException error) {
@@ -278,7 +329,8 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
       return;
     }
     try {
-      if (!authorized(viewer)) {
+      if (!authorized(
+          viewer, browsers.owned(viewer.binding().userId(), viewer.binding().sessionId()))) {
         return;
       }
       if (event.payload() != null) {
@@ -332,7 +384,8 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
         if (viewer.binding().viewScopeId() != null) {
           realtime.disconnectWidgetMedia(viewer.binding());
         } else {
-          realtime.requestViewerFence(viewer.binding().userId(), binding(viewer, UUID.randomUUID()));
+          realtime.requestViewerFence(
+              viewer.binding().userId(), binding(viewer, UUID.randomUUID()));
         }
       } catch (DataAccessException error) {
         // No further lease is sent. Native consumers independently expire within five seconds.
@@ -342,8 +395,13 @@ public class ViewerSignalingGateway extends TextWebSocketHandler {
   }
 
   private static ViewerFence binding(Viewer viewer, UUID requestId) {
-    return new ViewerFence(requestId, viewer.workerId(), viewer.workerBootId(),
-        viewer.binding().sessionId(), viewer.allocationEpoch(), viewer.binding().viewerInstanceId(),
+    return new ViewerFence(
+        requestId,
+        viewer.workerId(),
+        viewer.workerBootId(),
+        viewer.binding().sessionId(),
+        viewer.allocationEpoch(),
+        viewer.binding().viewerInstanceId(),
         viewer.binding().viewGeneration());
   }
 

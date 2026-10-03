@@ -91,25 +91,65 @@ public class ChannelTicketService {
     if (slot.viewerAuthorizationExpiresAt().isBefore(expires)) {
       expires = slot.viewerAuthorizationExpiresAt();
     }
-    return issue(new TicketBinding(slot.userId(), null, slot.grantId(), slot.accessEpoch(),
-        slot.taskId(), null, slot.activeViewerInstanceId(), null, 0, 0, 0, 0,
-        slot.viewGeneration(), "TASK_EVENTS", expires, slot.viewerAuthorizationExpiresAt(),
-        slot.id(), slot.presentationRevision(), slot.grantVersion(), origin), "url", url);
+    return issue(
+        new TicketBinding(
+            slot.userId(),
+            null,
+            slot.grantId(),
+            slot.accessEpoch(),
+            slot.taskId(),
+            null,
+            slot.activeViewerInstanceId(),
+            null,
+            0,
+            0,
+            0,
+            0,
+            slot.viewGeneration(),
+            "TASK_EVENTS",
+            expires,
+            slot.viewerAuthorizationExpiresAt(),
+            slot.id(),
+            slot.presentationRevision(),
+            slot.grantVersion(),
+            origin),
+        "url",
+        url);
   }
 
   public Map<String, Object> widgetVideoTicket(ChatPresentation slot, String origin, String url) {
-    return issue(new TicketBinding(slot.userId(), null, slot.grantId(), slot.accessEpoch(),
-        slot.taskId(), slot.browserSessionId(), slot.activeViewerInstanceId(), null,
-        slot.controlEpoch(), slot.pageEpoch(), slot.privacyEpoch(), slot.mediaGeneration(),
-        slot.viewGeneration(), "NORMAL_VIDEO", slot.mediaTicketExpiresAt(),
-        slot.viewerAuthorizationExpiresAt(), slot.id(), slot.presentationRevision(),
-        slot.grantVersion(), origin), "signalingUrl", url);
+    return issue(
+        new TicketBinding(
+            slot.userId(),
+            null,
+            slot.grantId(),
+            slot.accessEpoch(),
+            slot.taskId(),
+            slot.browserSessionId(),
+            slot.activeViewerInstanceId(),
+            null,
+            slot.controlEpoch(),
+            slot.pageEpoch(),
+            slot.privacyEpoch(),
+            slot.mediaGeneration(),
+            slot.viewGeneration(),
+            "NORMAL_VIDEO",
+            slot.mediaTicketExpiresAt(),
+            slot.viewerAuthorizationExpiresAt(),
+            slot.id(),
+            slot.presentationRevision(),
+            slot.grantVersion(),
+            origin),
+        "signalingUrl",
+        url);
   }
 
   public TicketBinding consumeTaskEvents(String token, UUID taskId, String origin) {
     TicketBinding binding = consume(token, "TASK_EVENTS");
-    if (binding.viewScopeId() == null || binding.grantId() == null
-        || !Objects.equals(binding.taskId(), taskId) || !Objects.equals(binding.origin(), origin)) {
+    if (binding.viewScopeId() == null
+        || binding.grantId() == null
+        || !Objects.equals(binding.taskId(), taskId)
+        || !Objects.equals(binding.origin(), origin)) {
       throw bindingMismatch();
     }
     return binding;
@@ -128,14 +168,14 @@ public class ChannelTicketService {
         purpose.equals("VIDEO")
             ? binding.purpose().equals("NORMAL_VIDEO") || binding.purpose().equals("PRIVATE_VIDEO")
             : binding.purpose().equals(purpose);
-    if (!matchingPurpose
-        || !binding.expiresAt().isAfter(Instant.now())) {
+    if (!matchingPurpose || !binding.expiresAt().isAfter(Instant.now())) {
       throw bindingMismatch();
     }
     return binding;
   }
 
   private static DomainException bindingMismatch() {
-    return new DomainException(403, "TICKET_BINDING_MISMATCH", "Ticket does not authorize this channel");
+    return new DomainException(
+        403, "TICKET_BINDING_MISMATCH", "Ticket does not authorize this channel");
   }
 }

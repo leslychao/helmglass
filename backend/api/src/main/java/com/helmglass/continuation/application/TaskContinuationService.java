@@ -133,6 +133,38 @@ public class TaskContinuationService {
         .ifPresent(intent -> changed(intent, Instant.now()));
   }
 
+  /** Reports host delivery eligibility independently of whether a result is ready to dispatch. */
+  @Transactional(readOnly = true)
+  public boolean automaticContinuationAvailable(
+      AuthenticatedActor actor, HostConversationContext host, UUID taskId) {
+    TaskBinding task = continuations.task(taskId);
+    if (!task.userId().equals(actor.userId())) {
+      throw DomainException.notFound();
+    }
+    if (!hostMessageVerified
+        || !actor.mcp()
+        || !actor.permissions().containsAll(List.of("tasks:write", "browser:execute"))
+        || host == null
+        || !host.supported()
+        || !task.continuationConsent()
+        || !host.storageKey().equals(task.originCorrelation())
+        || !actor.clientId().equals(task.originClientId())
+        || !Objects.equals(actor.grantId(), task.originGrantId())) {
+      return false;
+    }
+    return presentations
+        .currentPresentation(actor, host)
+        .filter(slot -> slot.taskId().equals(taskId))
+        .filter(slot -> slot.id().equals(task.continuationViewScopeId()))
+        .filter(slot -> Objects.equals(slot.grantId(), actor.grantId()))
+        .filter(slot -> slot.accessEpoch() == actor.accessEpoch())
+        .filter(
+            slot ->
+                identities.grantAuthorizationActive(
+                    actor.userId(), actor.grantId(), slot.grantVersion(), actor.accessEpoch()))
+        .isPresent();
+  }
+
   @TransactionalEventListener(phase = TransactionPhase.BEFORE_COMMIT)
   public void consent(Consent value) {
     if (value.taskId() == null) {

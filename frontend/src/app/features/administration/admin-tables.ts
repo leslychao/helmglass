@@ -3,9 +3,9 @@ import { Column, TableItem } from '../../shared/data-table/data-table';
 
 export const userColumns: Column[] = [
   { key: 'name', title: 'Пользователь', kind: 'person', sort: 'displayName' },
-  { key: 'state', title: 'Состояние', kind: 'status' },
-  { key: 'browser', title: 'Браузеры' },
-  { key: 'queue', title: 'Ожидают' },
+  { key: 'state', title: 'Состояние', kind: 'status', sort: 'accountState' },
+  { key: 'browser', title: 'Браузеры', sort: 'occupiedBrowsers' },
+  { key: 'queue', title: 'Ожидающие задачи', sort: 'queuedTasks' },
   { key: 'activity', title: 'Последнее обращение', sort: 'lastActivityAt' },
 ];
 
@@ -44,10 +44,25 @@ export function browserAssignment(limits: UserLimits): string {
 
 export const auditColumns: Column[] = [
   { key: 'time', title: 'Время', sort: 'occurredAt' },
-  { key: 'actor', title: 'Кто изменил' },
-  { key: 'target', title: 'Пользователь / объект' },
-  { key: 'action', title: 'Действие и причина' },
+  { key: 'actor', title: 'Кто изменил', sort: 'actorName' },
+  { key: 'target', title: 'Что изменили', sort: 'targetName' },
+  { key: 'action', title: 'Действие', sort: 'action' },
+  { key: 'reason', title: 'Причина', sort: 'reason' },
 ];
+
+export const adminActions: Readonly<Record<string, string>> = {
+  LIMITS_CHANGED: 'Изменение квот',
+  STOP_TASK_REQUESTED: 'Остановка задачи',
+  STOP_ALL_REQUESTED: 'Остановка всех задач',
+  ACCOUNT_BLOCKED: 'Блокировка',
+  ACCOUNT_UNBLOCKED: 'Разблокировка',
+  DELETION_REQUESTED: 'Удаление аккаунта',
+  DELETION_CANCELLED: 'Отмена удаления',
+  ADMISSION_CHANGED: 'Новые запуски',
+  WORKER_MODE_CHANGED: 'Назначения узла',
+  PURGE_STARTED: 'Начало очистки',
+  CLEANUP_RETRY: 'Повтор очистки',
+};
 
 export function auditRows(items: readonly AuditEntry[]): TableItem[] {
   return items.map((item) => ({
@@ -55,9 +70,13 @@ export function auditRows(items: readonly AuditEntry[]): TableItem[] {
     values: {
       time: new Date(item.occurredAt).toLocaleString('ru-RU'),
       actor: item.actorName,
-      action: item.action,
-      target: item.targetId,
+      action: adminActions[item.action] ?? 'Административное изменение',
+      target: item.targetName,
+      reason: item.reason,
     },
-    metadata: { action: item.reason, target: item.targetType },
+    metadata: {
+      action: item.changeSummary,
+      target: item.targetType === 'user' ? 'Пользователь' : item.targetType === 'worker' ? 'Узел исполнения' : item.targetType === 'platform' ? 'Настройка системы' : 'Задача',
+    },
   }));
 }

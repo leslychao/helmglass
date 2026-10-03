@@ -88,6 +88,10 @@ input,textarea,select,.search,.url-input-v,.browser-url-v{transition:border-colo
 .h-execution-duration{display:inline-flex;align-items:center;gap:6px;font-variant-numeric:tabular-nums;white-space:nowrap;color:#425b7c}
 .h-execution-duration time{font-weight:550;font-size:12px}
 .task-meta-v .h-duration-top{padding:5px 9px;border-radius:6px;background:#edf4fe;color:#456694;gap:7px;font-size:11px}
+.task-chat-link{display:inline-flex;align-items:baseline;gap:3px;color:var(--blue);white-space:nowrap;text-decoration:underline;text-decoration-color:transparent;text-underline-offset:3px;border-radius:2px}
+.task-chat-link:hover{text-decoration-color:currentColor}
+.task-chat-link:focus-visible{outline:2px solid var(--blue);outline-offset:3px;text-decoration-color:currentColor}
+.task-chat-link>.icon{width:11px!important;height:11px!important;flex:none;align-self:center;color:inherit!important}
 .h-duration-top .icon{width:14px;height:14px}.h-duration-top .h-execution-duration{color:inherit}
 .h-duration-top time{font-size:12px}.h-task-table .h-duration-header{white-space:normal;line-height:1.4}
 .h-task-table td[data-task-time]{white-space:nowrap}
@@ -490,7 +494,7 @@ function compareValue6(a,b,direction){
   return value*(direction==='desc'?-1:1);
 }
 function userDto6(u,pendingOperations=0){return {...clone(u),counts:taskCountsA(u.id),pendingOperations,browserCap:effectiveCapA(u,'browser'),waitingCap:effectiveCapA(u,'waiting'),browserLabel:browserLimitLabelA(u)};}
-function taskListDto6(t){return {id:t.id,title:runTitle(t),startUrl:t.startUrl,origin:t.origin,status:t.status,outcome:t.outcome,request:t.request?{type:t.request.type}:null,cancelRequestedAt:t.cancelRequestedAt||null,created:t.created,updated:t.updated,activeSec:t.activeSec,humanSec:t.humanSec,mediaSec:t.mediaSec,mediaBytes:t.mediaBytes,summary:runSummary(t)};}
+function taskListDto6(t){return {id:t.id,title:runTitle(t),startUrl:t.startUrl,origin:t.origin,chatgptConversationId:t.chatgptConversationId,chatgptConversationDemo:t.chatgptConversationDemo,status:t.status,outcome:t.outcome,request:t.request?{type:t.request.type}:null,cancelRequestedAt:t.cancelRequestedAt||null,created:t.created,updated:t.updated,activeSec:t.activeSec,humanSec:t.humanSec,mediaSec:t.mediaSec,mediaBytes:t.mediaBytes,summary:runSummary(t)};}
 function demoDataset6(request){
   const {resource,filters:f,context:c}=request,q=(f.query||'').trim().toLocaleLowerCase('ru');
   const matches=(values)=>!q||values.join(' ').toLocaleLowerCase('ru').includes(q);
@@ -652,7 +656,18 @@ const findRun=id=>S.runs.find(t=>t.id===Number(id));
 const runTitle=t=>t.title||t.goal?.trim().slice(0,70)||'Новая задача';
 function statusInfo(t){if(t.cancelRequestedAt&&!isFinal(t))return ['Останавливается','','clock'];if(t.status==='COMPLETED')return {SUCCESS:['Готово','success','check'],PARTIAL:['Частично выполнено','warning','alert'],NOT_ACHIEVED:['Цель не достигнута','warning','info']}[t.outcome]||['Итог не подтверждён','warning','info'];if(t.status==='WAITING_USER')return t.request?.type==='LOGIN'?['Требуется вход','warning','lock']:t.request?.type==='CONFIRMATION'?['Нужно подтверждение','warning','shield']:['Нужен ответ','warning','chat'];return {DRAFT:['Черновик','','edit'],QUEUED:['В очереди','','clock'],RUNNING:['Выполняется','blue','play'],WAITING_AGENT:['Ожидает ChatGPT','','chat'],FAILED:['Ошибка','error','alert'],CANCELLED:['Остановлено','','stop'],INTERRUPTED:['Прервано','error','alert']}[t.status]||['Неизвестно','','info'];}
 const statusBadge=t=>badge(...statusInfo(t));
-const sourceLabel=t=>`<span class="source">${icon(t.origin==='MCP'?'chat':'browser')}${t.origin==='MCP'?'Из ChatGPT':'С сайта'}</span>`;
+function taskChatUrl(t){
+  const id=t?.chatgptConversationId;
+  return typeof id==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)?'https://chatgpt.com/c/'+id:'';
+}
+function taskChatLink(t,label='ChatGPT',classes='task-chat-link'){
+  const url=taskChatUrl(t);
+  if(!url)return esc(label);
+  const title=t.chatgptConversationDemo?'Демонстрационная ссылка на чат задачи · новая вкладка':'Открыть чат этой задачи в ChatGPT · новая вкладка';
+  return `<a class="${esc(classes)}" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${title}" aria-label="${esc(label)} — чат задачи №${esc(t.id)}, новая вкладка">${esc(label)}${icon('external')}</a>`;
+}
+function taskChatText(t,text){return esc(text).replaceAll('ChatGPT',taskChatLink(t));}
+const sourceLabel=t=>`<span class="source">${icon(t.origin==='MCP'?'chat':'browser')}${t.origin==='MCP'?'Из '+taskChatLink(t):'С сайта'}</span>`;
 const executorName = () => 'ChatGPT через MCP';
 const usageLabel = t => t.mediaSec == null ? 'Нет измерения' : duration(t.mediaSec);
 function runSummary(t){if(t.status==='DRAFT')return 'Не запущена';if(t.status==='WAITING_AGENT')return t.steps.length?'Сохранённые шаги доступны':'Готова к запуску из чата';if(t.status==='WAITING_USER')return t.request?.type==='LOGIN'?'Нужна авторизация сайта':t.request?.text||'Нужно участие пользователя';if(t.status==='QUEUED')return 'Ожидает свободный ресурс';if(t.status==='RUNNING')return 'Проверяет артикулы в каталоге';return t.result?.conclusion||t.error||'Новые действия остановлены';}
@@ -775,10 +790,10 @@ async function saveTask(form,button,intent){if(intent!=='draft'){const error=pre
 // Task detail uses three tabs. Parameters are a disclosure, not another editor.
 
 
-function userAction(t){if(t.status==='WAITING_AGENT')return notice(t.steps.length?'Задача ожидает продолжения из ChatGPT':'Подготовлено для ChatGPT','Модель сервиса не запускается. Откройте чат с подключённым Helm Glass Service и отправьте поручение.','neutral',`<div class="code-box full" id="chat-command">Через Helm Glass Service ${t.steps.length?'продолжи':'возьми'} мою задачу ${t.id}${t.steps.length?'': ' и выполни её'}.</div>${btn('Скопировать поручение','copy-command','copy','',`data-id="${t.id}"`)}<a class="btn quiet" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">Открыть ChatGPT ${icon('external')}</a>`);
+function userAction(t){if(t.status==='WAITING_AGENT')return notice(t.steps.length?'Задача ожидает продолжения':'Задача подготовлена',taskChatUrl(t)?'Продолжите эту задачу в '+taskChatLink(t)+'. Сохранённые шаги и результаты останутся доступны.':'Откройте чат ChatGPT с подключённым Helm Glass Service и отправьте поручение.','neutral',`<div class="code-box full" id="chat-command">Через Helm Glass Service ${t.steps.length?'продолжи':'возьми'} мою задачу ${t.id}${t.steps.length?'': ' и выполни её'}.</div>${btn('Скопировать поручение','copy-command','copy','',`data-id="${t.id}"`)}${taskChatUrl(t)?'':'<a class="btn quiet" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">Открыть ChatGPT '+icon('external')+'</a>'}`);
  if(t.status==='WAITING_USER'){const q=t.request;if(q?.type==='LOGIN')return notice('Для продолжения требуется вход','Войдите в тот же серверный браузер. Пароль и код не нужно отправлять агенту.','warning');
  if(q?.type==='CONFIRMATION'){const expired=route.query.get('case')==='request-expired'||q.expiresAt<Date.now();return notice(expired?'Подтверждение устарело':'Нужно ваше подтверждение',expired?'Срок этого запроса закончился. Нельзя применить его к новому действию. Актуальное состояние поступит автоматически.':esc(q.text)+'<br>Аккаунт: '+esc(q.account)+'. Действие: '+esc(q.action)+'.','warning',expired?'':btn('Посмотреть и подтвердить','confirm-request','shield','primary',`data-id="${t.id}" data-request="${esc(q.id)}"`))}
- if(q?.type==='QUESTION'){const expired=route.query.get('case')==='request-expired';return `<section class="notice warning">${icon('chat')}<div><strong>${esc(q.text)}</strong><p>Ответ продолжит эту же задачу. ${isExternal(t)?'После сохранения вернитесь в ChatGPT.':''}</p><form id="answer-form" data-id="${t.id}" data-request="${esc(q.id)}" data-version="${q.version}" class="mt"><div class="field">${q.choices?.length?`<label for="answer">Ваш ответ</label><select id="answer" name="answer"><option value="">Выберите период</option>${q.choices.map(c=>`<option>${esc(c)}</option>`).join('')}</select>`:`<label for="answer">Ваш ответ</label><textarea id="answer" name="answer"></textarea>`}</div>${expired?'<div class="inline-error" role="alert">Вопрос уже изменился. Ожидаем актуальный вопрос. Старый ответ не будет отправлен.</div>':''}<div id="answer-error" class="inline-error" role="alert" hidden></div><button type="submit" class="btn primary" ${expired?'disabled':''}>Отправить ответ</button></form></div></section>`}
+ if(q?.type==='QUESTION'){const expired=route.query.get('case')==='request-expired';return `<section class="notice warning">${icon('chat')}<div><strong>${esc(q.text)}</strong><p>Ответ продолжит эту же задачу. ${isExternal(t)?taskChatText(t,'После сохранения вернитесь в ChatGPT.'):''}</p><form id="answer-form" data-id="${t.id}" data-request="${esc(q.id)}" data-version="${q.version}" class="mt"><div class="field">${q.choices?.length?`<label for="answer">Ваш ответ</label><select id="answer" name="answer"><option value="">Выберите период</option>${q.choices.map(c=>`<option>${esc(c)}</option>`).join('')}</select>`:`<label for="answer">Ваш ответ</label><textarea id="answer" name="answer"></textarea>`}</div>${expired?'<div class="inline-error" role="alert">Вопрос уже изменился. Ожидаем актуальный вопрос. Старый ответ не будет отправлен.</div>':''}<div id="answer-error" class="inline-error" role="alert" hidden></div><button type="submit" class="btn primary" ${expired?'disabled':''}>Отправить ответ</button></form></div></section>`}
  return notice('Нужно участие пользователя',esc(t.error||'Выбранное подключение недоступно. История и результат сохранены.'),'warning',link('Открыть подключения','/connections','plug'));}
   if(t.status==='QUEUED')return notice('Задача в очереди','Запуск принят. Принятая команда ожидает свободного браузерного слота или подключения. Точное время старта пока неизвестно.','neutral');if(t.status==='FAILED')return notice('Выполнение завершилось ошибкой',esc(t.error),'error');if(t.status==='INTERRUPTED')return unknownEffectNoticeH(t);if(t.status==='CANCELLED')return notice('Задача остановлена','Новые действия прекращены. Уже полученные данные и фактический расход сохранены.','neutral');return '';}
 
@@ -805,7 +820,7 @@ function reviewUnknownEffectH(t){
 }
 
 function resultPreview(t){if(t.result)return `${t.status==='COMPLETED'?`<div class="mb">${statusBadge(t)}</div>`:'<p class="small muted mb">Предварительные данные</p>'}<p class="result-conclusion">${esc(t.result.conclusion)}</p>${t.result.rows.length?`<div class="result-meta"><span>Позиций: ${t.result.rows.length}</span><span>Цены получены: ${t.result.rows.filter(r=>r.price!==null).length}</span></div>`:''}${t.result.report?renderReport(t):''}${t.status==='COMPLETED'&&t.outcome!=='SUCCESS'?`<p class="small muted">${esc(t.result.missing)}</p>`:''}`;
- if(t.status==='COMPLETED')return '<p class="result-conclusion">Выполнение завершено, но подтверждённый результат отсутствует.</p><p class="small muted">Это не успешный сбор данных. Требуется проверка результата.</p>';if(t.status==='WAITING_AGENT'&&!t.steps.length)return '<p class="muted small">Результат появится после выполнения из ChatGPT.</p>';if(isFinal(t))return '<p class="muted small">Итоговые данные не получены. Причина и подтверждённые действия доступны в истории.</p>';return '<p class="muted small">Здесь появятся сохранённые данные. Задача не считается успешной только потому, что завершился последний шаг.</p>';}
+ if(t.status==='COMPLETED')return '<p class="result-conclusion">Выполнение завершено, но подтверждённый результат отсутствует.</p><p class="small muted">Это не успешный сбор данных. Требуется проверка результата.</p>';if(t.status==='WAITING_AGENT'&&!t.steps.length)return '<p class="muted small">'+taskChatText(t,'Результат появится после выполнения из ChatGPT.')+'</p>';if(isFinal(t))return '<p class="muted small">Итоговые данные не получены. Причина и подтверждённые действия доступны в истории.</p>';return '<p class="muted small">Здесь появятся сохранённые данные. Задача не считается успешной только потому, что завершился последний шаг.</p>';}
 function renderReport(t){
   const report=t.result.report;
   return `<details class="g6-report"><summary>${icon('file')}<span><strong>${esc(report.name)}</strong><small>Отчёт внутри задачи</small></span>${icon('down')}</summary><pre>${esc(report.body||'Содержимое отчёта не получено.')}</pre></details>`;
@@ -1119,6 +1134,13 @@ const PRODUCT_ROWS_V=[
  {sku:'PRD-004',name:'Шампунь «Роскошь 6 масел»',price:689,oldPrice:820,available:'В наличии',rating:'4,8',reviews:312,color:'#ddad67',cap:'#87572b',label:'OIL CARE'}
 ].map(r=>({...r,currency:'RUB',site:'ozon.ru',url:'https://www.ozon.ru/product/'+r.sku,checked:'2026-09-30T13:24:00Z'}));
 function enrichV(state){
+ // These explicit fixture bindings illustrate deep links, not existing ChatGPT conversations.
+ for(const task of state.runs){
+   if(task.origin==='MCP'&&task.status!=='DRAFT'&&task.id>=101&&task.id<=116&&!Object.hasOwn(task,'chatgptConversationId')){
+     task.chatgptConversationId='00000000-0000-4000-8000-'+String(task.id).padStart(12,'0');
+     task.chatgptConversationDemo=true;
+   }
+ }
  if(state.redesigned)return state;
  const meta={
  101:{title:'Мониторинг цен на товары',goal:'Проверить цены и наличие выбранных товаров. Сохранить таблицу со ссылками. Не оформлять заказы.',description:'Проверять цены на выбранные товары и сохранять в таблицу',startUrl:'https://www.ozon.ru/search/?text=шампунь',connections:['ozon'],connectionNames:['Ozon · основной'],browser:'available',updated:'2026-09-30T13:24:00Z'},
@@ -1158,7 +1180,7 @@ function markV(k,extra=''){const text={ozon:'OZON',wb:'WB',hh:'hh',telegram:'',y
 function serviceV(url){const s=siteV(url);return `<span class="service-cell">${markV(s.mark)}<span><strong>${esc(s.name)}</strong><small>${esc(s.domain)}</small></span></span>`;}
 const sourceStatusV=statusInfo;
 statusInfo=function(t){if(t.status==='PAUSED')return ['На паузе','','pause'];return sourceStatusV(t)};
-function sbV(t){const [text,tone]=statusInfo(t);return `<span class="badge ${t.outcome==='PARTIAL'?'violet':t.status==='QUEUED'?'orange':tone}"><i class="status-point"></i>${esc(text)}</span>`;}
+function sbV(t){const [text,tone]=statusInfo(t);return `<span class="badge ${t.outcome==='PARTIAL'?'violet':t.status==='QUEUED'?'orange':tone}"><i class="status-point"></i>${taskChatText(t,text)}</span>`;}
 function connectionBadgeV(c){
   const task=connectionTaskH(c);
   const active=task?.siteAccess?.state==='AUTHENTICATED'&&task.siteAccess.connectionId===c.id&&task.request?.type!=='LOGIN';
@@ -1212,7 +1234,7 @@ function renderBrowser(t,large=false,widget=false){
       <div class="browser-stage-v b5-viewport ${manual?'manual':''}" id="stage-${t.id}">${page}</div>
       ${executionFeedH(t)}
     </div>
-    <footer class="browser-footer-v"><span class="browser-state-v ${manual||pause?'warning':''}"><i class="status-point"></i>${!available?'Просмотр недоступен':manual?'Вы управляете':pause?'Задача на паузе':t.status==='WAITING_AGENT'?'Ожидает ChatGPT':readonly?'Только просмотр':'Агент работает'}</span><span class="step-text">${!available?'Состояние задачи сохранено отдельно':manual?'Мышь и клавиатура переданы вам':pause?'Новые действия приостановлены':t.status==='WAITING_AGENT'?'Следующая команда ещё не принята':'Считывает цену и наличие товара'}</span><span class="session-time-v">01:24</span><select data-v-scale="${t.id}" aria-label="Масштаб просмотра"><option value="fit" ${v.scale==='fit'?'selected':''}>По размеру</option><option value="100" ${v.scale==='100'?'selected':''}>100%</option><option value="125" ${v.scale==='125'?'selected':''}>125%</option></select><button type="button" class="b5-steps-toggle" id="execution-trigger-${t.id}" data-action="h-toggle-events" data-id="${t.id}" aria-expanded="${open}" aria-controls="execution-events" aria-label="${open?'Свернуть':'Показать'} ход выполнения" title="${open?'Свернуть':'Показать'} ход выполнения">${icon('panelright')}<span>Шаги</span><b>${number(t.steps.length)}</b></button></footer>
+    <footer class="browser-footer-v"><span class="browser-state-v ${manual||pause?'warning':''}"><i class="status-point"></i>${!available?'Просмотр недоступен':manual?'Вы управляете':pause?'Задача на паузе':t.status==='WAITING_AGENT'?taskChatText(t,'Ожидает ChatGPT'):readonly?'Только просмотр':'Агент работает'}</span><span class="step-text">${!available?'Состояние задачи сохранено отдельно':manual?'Мышь и клавиатура переданы вам':pause?'Новые действия приостановлены':t.status==='WAITING_AGENT'?'Следующая команда ещё не принята':'Считывает цену и наличие товара'}</span><span class="session-time-v">01:24</span><select data-v-scale="${t.id}" aria-label="Масштаб просмотра"><option value="fit" ${v.scale==='fit'?'selected':''}>По размеру</option><option value="100" ${v.scale==='100'?'selected':''}>100%</option><option value="125" ${v.scale==='125'?'selected':''}>125%</option></select><button type="button" class="b5-steps-toggle" id="execution-trigger-${t.id}" data-action="h-toggle-events" data-id="${t.id}" aria-expanded="${open}" aria-controls="execution-events" aria-label="${open?'Свернуть':'Показать'} ход выполнения" title="${open?'Свернуть':'Показать'} ход выполнения">${icon('panelright')}<span>Шаги</span><b>${number(t.steps.length)}</b></button></footer>
   </section>`;
 };
 
@@ -1892,7 +1914,7 @@ function taskResourcePanelH(t){
 function currentStepH(t){
   const step=t.steps.find(s=>s.state==='running')||t.steps.at(-1),done=t.steps.filter(s=>s.state==='done').length;
   const label=isFinal(t)?'Выполнение завершено':t.status==='INTERRUPTED'?'Выполнение прервано':t.status==='PAUSED'?'Выполнение на паузе':step?.title||statusInfo(t)[0];
-  return `<section class="panel"><div class="aside-title-v"><h2>${isFinal(t)?'Выполнение':'Текущий шаг'}</h2>${icon(isFinal(t)?'check':'clock')}</div><div class="step-caption-v"><span>${icon(isFinal(t)?'check':'browser')}</span><div><h3>${esc(label)}</h3><p>${esc(isFinal(t)?statusInfo(t)[0]:step?.detail||runSummary(t))}</p></div></div><div class="h-step-total"><strong>${done}</strong> подтверждено · ${t.steps.length} событий</div></section>`;
+  return `<section class="panel"><div class="aside-title-v"><h2>${isFinal(t)?'Выполнение':'Текущий шаг'}</h2>${icon(isFinal(t)?'check':'clock')}</div><div class="step-caption-v"><span>${icon(isFinal(t)?'check':'browser')}</span><div><h3>${taskChatText(t,label)}</h3><p>${taskChatText(t,isFinal(t)?statusInfo(t)[0]:step?.detail||runSummary(t))}</p></div></div><div class="h-step-total"><strong>${done}</strong> подтверждено · ${t.steps.length} событий</div></section>`;
 }
 
 const H_EVENT_PAGE_SIZE=10;

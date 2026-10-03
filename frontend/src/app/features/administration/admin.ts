@@ -1,7 +1,6 @@
 import {
   ChangeDetectionStrategy,
   Component,
-  DestroyRef,
   computed,
   effect,
   inject,
@@ -9,14 +8,11 @@ import {
 } from '@angular/core';
 import { ActivatedRoute, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { DatePipe } from '@angular/common';
-import { FormControl, FormsModule, ReactiveFormsModule } from '@angular/forms';
-import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { debounceTime, distinctUntilChanged } from 'rxjs';
+import { FormsModule } from '@angular/forms';
 import {
   AdminOverview as OverviewDto,
   AdminTask,
   AdminUser as UserDto,
-  AdminUserListItem,
   AuditEntry,
   BrowserPool,
   Page,
@@ -34,302 +30,25 @@ import { Status, LabelPipe } from '../../shared/status/status';
 import { AsyncOperation } from '../../shared/async-operation/async-operation';
 import { Metric } from '../../shared/metric/metric';
 import { AdminCleanup } from './admin-cleanup';
-import { auditColumns, auditRows, browserAssignment, userColumns, userRows } from './admin-tables';
+import { auditColumns, auditRows, browserAssignment } from './admin-tables';
 import { AdminUsage } from './admin-usage';
+import { AdminUsers } from './admin-users';
+import { AdminAudit } from './admin-audit';
 
 @Component({
   selector: 'hg-admin-shell',
   imports: [RouterLink, RouterLinkActive, RouterOutlet, Icon],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `<nav class="a-admin-nav" aria-label="Администрирование">
-      <div class="a-admin-tabs">
-        @for (tab of tabs; track tab.path) {
-          <a
-            class="a-admin-tab"
-            [routerLink]="tab.path"
-            routerLinkActive="active"
-            [routerLinkActiveOptions]="{ exact: tab.path === '/admin' }"
-            ariaCurrentWhenActive="page"
-            ><hg-icon [name]="tab.icon" />{{ tab.label }}</a
-          >
-        }
-      </div>
-    </nav>
-    <section class="a-admin-page"><router-outlet /></section>`,
+    <div class="a-admin-tabs">
+      <a class="a-admin-tab" routerLink="/admin" [class.active]="!browsers.isActive"
+        [attr.aria-current]="!browsers.isActive ? 'page' : null"><hg-icon name="user" />Пользователи и журнал</a>
+      <a class="a-admin-tab" routerLink="/admin/browsers" routerLinkActive="active"
+        #browsers="routerLinkActive" ariaCurrentWhenActive="page"><hg-icon name="browser" />Браузеры</a>
+    </div>
+  </nav><section class="a-admin-page"><router-outlet /></section>`,
 })
-export class AdminShell {
-  readonly tabs = [
-    { path: '/admin', label: 'Обзор', icon: 'chart' },
-    { path: '/admin/users', label: 'Пользователи', icon: 'user' },
-    { path: '/admin/browsers', label: 'Браузеры', icon: 'browser' },
-    { path: '/admin/audit', label: 'Журнал', icon: 'history' },
-  ];
-}
-
-@Component({
-  selector: 'hg-admin-overview',
-  styles: `
-    .a-platform-flags {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 20px;
-    }
-    .a-platform-flags .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      font-weight: 400;
-    }
-    .a-platform-flags .small {
-      margin-left: auto;
-    }
-  `,
-  imports: [
-    RouterLink,
-    DatePipe,
-    Feedback,
-    Dialog,
-    FormsModule,
-    MutationFeedback,
-    AsyncOperation,
-    Metric,
-    DataTable,
-    Icon,
-  ],
-  changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `<header class="heading">
-      <h1 tabindex="-1">Обзор платформы</h1>
-      @if (overview.data(); as overview) {
-        <button
-          class="btn"
-          [disabled]="action.pending() || action.unknown()"
-          (click)="reasonOpen.set(true)"
-        >
-          <hg-icon [name]="overview.acceptingAllocations ? 'pause' : 'play'" />
-          {{
-            overview.acceptingAllocations
-              ? 'Приостановить новые запуски'
-              : 'Разрешить новые запуски'
-          }}
-        </button>
-      }
-    </header>
-    <hg-feedback
-      [loading]="overview.loading()"
-      [error]="overview.error()"
-      (retry)="overview.refresh()"
-    />
-    @if (overview.data(); as overview) {
-      <div class="metrics a-admin-summary">
-        <hg-metric
-          label="Занято браузеров"
-          [value]="overview.confirmedBusy"
-          icon="browser"
-          [caption]="
-            overview.unconfirmedOccupied
-              ? 'Ещё ' + overview.unconfirmedOccupied + ': состояние уточняется'
-              : 'Подтверждённые сессии'
-          "
-        />
-        <hg-metric
-          label="Свободно браузеров"
-          [value]="overview.allocatableFree"
-          icon="server"
-          tone="green"
-          [caption]="
-            overview.acceptingAllocations
-              ? 'На узлах, принимающих задачи'
-              : 'Новые назначения приостановлены'
-          "
-        />
-        <hg-metric
-          label="Ожидают задачи"
-          [value]="overview.waitingTasks"
-          icon="clock"
-          [caption]="'Из них в очереди за браузером: ' + overview.queuedForBrowser"
-        />
-        <hg-metric
-          label="Заблокировано"
-          [value]="overview.blockedUsers"
-          icon="lock"
-          caption="Пользователи без доступа"
-        />
-      </div>
-      <div class="a-platform-flags">
-        <a class="badge" routerLink="/admin/browsers"
-          ><hg-icon name="server" />Недоступно узлов: {{ overview.unavailableWorkers }}</a
-        >
-        <span class="badge"
-          ><hg-icon name="clock" />Незавершённых операций: {{ overview.pendingOperations }}</span
-        >
-        <span class="small muted"
-          >Данные на {{ overview.observedAt | date: 'dd.MM HH:mm:ss' }}</span
-        >
-      </div>
-    }
-    <section class="panel a-section">
-      <header class="a-section-header">
-        <h2>Нагрузка по пользователям</h2>
-        <a class="btn quiet" routerLink="/admin/users">Все пользователи</a>
-      </header>
-      <hg-feedback [loading]="users.loading()" [error]="users.error()" (retry)="users.refresh()" />
-      <hg-data-table
-        [columns]="userColumns"
-        [rows]="userRows()"
-        [page]="users.data()"
-        [sizes]="[5, 10, 20, 50]"
-        (changed)="usersQuery.change($event)"
-      />
-    </section>
-    <section class="panel a-section">
-      <header class="a-section-header">
-        <h2>Последние действия</h2>
-        <a class="btn quiet" routerLink="/admin/audit">Весь журнал</a>
-      </header>
-      <hg-feedback [loading]="audit.loading()" [error]="audit.error()" (retry)="audit.refresh()" />
-      <hg-data-table
-        [columns]="auditColumns"
-        [rows]="auditRows()"
-        [page]="audit.data()"
-        [sizes]="[3, 10, 20, 50]"
-        (changed)="auditQuery.change($event)"
-        emptyTitle="Записей нет"
-        emptyText="Административные действия появятся здесь."
-      />
-    </section>
-    <p class="privacy-note">
-      <hg-icon name="lock" />Только служебные сведения. Содержимое задач, результаты, документы и
-      секреты пользователей здесь недоступны.
-    </p>
-    @if (action.receipt()?.operationId; as operation) {
-      <hg-operation [id]="operation" />
-    }
-    @if (reasonOpen()) {
-      <hg-dialog
-        title="Изменить приём браузеров"
-        [busy]="action.pending()"
-        (closed)="reasonOpen.set(false)"
-        ><p>Изменение не завершает работающие браузеры.</p>
-        <label class="field"
-          >Причина<textarea [(ngModel)]="reason" maxlength="1000" required></textarea></label
-        ><hg-mutation [action]="action" /><button
-          dialog-actions
-          class="btn primary"
-          [disabled]="!reason.trim() || action.pending() || action.unknown()"
-          (click)="save()"
-        >
-          Применить
-        </button></hg-dialog
-      >
-    }`,
-})
-export class AdminOverview {
-  readonly usersQuery = new TableQuery({ prefix: 'users', pageSize: 5 });
-  readonly auditQuery = new TableQuery({ prefix: 'audit', pageSize: 3 });
-  readonly users = new ServerResource<Page<AdminUserListItem>>(['users', 'sessions', 'tasks']);
-  readonly audit = new ServerResource<Page<AuditEntry>>(['audit']);
-  readonly userColumns = userColumns;
-  readonly auditColumns = auditColumns;
-  readonly userRows = computed(() => userRows(this.users.data()?.items ?? []));
-  readonly auditRows = computed(() => auditRows(this.audit.data()?.items ?? []));
-  readonly overview = new ServerResource<OverviewDto>([
-    'nodes',
-    'sessions',
-    'users',
-    'tasks',
-    'operations',
-  ]);
-  readonly action = new Mutation();
-  readonly reasonOpen = signal(false);
-  reason = '';
-  constructor() {
-    this.overview.load('/admin/overview');
-    effect(() => this.users.load('/admin/users', this.usersQuery.value()));
-    effect(() => this.audit.load('/admin/audit', this.auditQuery.value()));
-  }
-  save() {
-    const overview = this.overview.data();
-    if (!overview) return;
-    this.action.run(
-      'PATCH',
-      '/admin/platform/admission',
-      {
-        acceptingAllocations: !overview.acceptingAllocations,
-        expectedVersion: overview.version,
-        reason: this.reason.trim(),
-      },
-      () => {
-        this.reasonOpen.set(false);
-        this.reason = '';
-        this.overview.refresh();
-      },
-    );
-  }
-}
-
-@Component({
-  selector: 'hg-admin-users',
-  imports: [DataTable, Feedback, Icon, ReactiveFormsModule, LabelPipe],
-  changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `<header class="heading"><h1 tabindex="-1">Пользователи</h1></header>
-    <section class="panel a-section">
-      <div class="h-toolbar">
-        <label class="search h-search"
-          ><hg-icon name="search" /><input
-            type="search"
-            [formControl]="search"
-            placeholder="Имя, email или ID"
-            aria-label="Поиск пользователей" /></label
-        ><select
-          aria-label="Состояние аккаунта"
-          [value]="query.text('accountState')"
-          (change)="filter($event)"
-        >
-          <option value="">Все состояния</option>
-          @for (state of states; track state) {
-            <option [value]="state">{{ state | label }}</option>
-          }</select
-        ><button class="btn quiet" (click)="query.clear()">Сбросить фильтры</button>
-      </div>
-      <hg-feedback
-        [loading]="users.loading()"
-        [error]="users.error()"
-        (retry)="users.refresh()"
-      /><hg-data-table
-        [columns]="columns"
-        [rows]="rows()"
-        [page]="users.data()"
-        (changed)="query.change($event)"
-      />
-    </section>
-    <p class="privacy-note">
-      <hg-icon name="lock" />Администратору доступны служебные сведения, без содержания задач и
-      секретов пользователей.
-    </p>`,
-})
-export class AdminUsers {
-  readonly query = new TableQuery();
-  readonly users = new ServerResource<Page<AdminUserListItem>>(['users']);
-  readonly search = new FormControl(this.query.text('q'), { nonNullable: true });
-  readonly states = ['ACTIVE', 'BLOCKED', 'DELETING'];
-  readonly columns = userColumns;
-  readonly rows = computed(() => userRows(this.users.data()?.items ?? []));
-  constructor() {
-    effect(() => {
-      this.users.load('/admin/users', this.query.value());
-      this.search.setValue(this.query.text('q'), { emitEvent: false });
-    });
-    this.search.valueChanges
-      .pipe(debounceTime(250), distinctUntilChanged(), takeUntilDestroyed(inject(DestroyRef)))
-      .subscribe((q) => this.query.filter({ q: q || null }));
-  }
-  filter(event: Event) {
-    if (event.target instanceof HTMLSelectElement)
-      this.query.filter({ accountState: event.target.value || null });
-  }
-}
+export class AdminShell {}
 
 interface AdminIntent {
   title: string;
@@ -836,54 +555,27 @@ export class AdminBrowsers {
   }
 }
 
+
+export { AdminUsers } from './admin-users';
+export { AdminAudit } from './admin-audit';
+
 @Component({
-  selector: 'hg-admin-audit',
-  imports: [ReactiveFormsModule, DataTable, Feedback, Icon],
+  selector: 'hg-admin-overview',
+  imports: [AdminUsers, AdminAudit, Feedback, Metric, Icon],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  template: `<header class="heading">
-      <h1 tabindex="-1">{{ userId ? 'Журнал пользователя' : 'Журнал действий' }}</h1>
-    </header>
-    <section class="panel">
-      <div class="table-toolbar">
-        <label class="search"
-          ><hg-icon name="search" /><input
-            type="search"
-            [formControl]="search"
-            placeholder="Поиск по журналу"
-            aria-label="Поиск по журналу" /></label
-        ><button class="btn quiet" (click)="query.clear()">Сбросить фильтры</button>
+  template: `<h1 class="sr-only" tabindex="-1">Администрирование</h1>
+    <hg-feedback [loading]="overview.loading()" [error]="overview.error()" (retry)="overview.refresh()" />
+    @if (overview.data(); as overview) {
+      <div class="metrics a-user-summary">
+        <hg-metric label="Пользователей" [value]="overview.totalUsers" icon="user" caption="Без удалённых аккаунтов" />
+        <hg-metric label="Заблокировано" [value]="overview.blockedUsers" icon="lock" caption="Пользователи с закрытым доступом" />
+        <hg-metric label="Ожидающих задач" [value]="overview.waitingTasks" icon="clock" caption="Очередь, ChatGPT или участие пользователя" />
       </div>
-      <hg-feedback
-        [loading]="audit.loading()"
-        [error]="audit.error()"
-        (retry)="audit.refresh()"
-      /><hg-data-table
-        [columns]="columns"
-        [rows]="rows()"
-        [page]="audit.data()"
-        (changed)="query.change($event)"
-        emptyTitle="Записей нет"
-        emptyText="Изменения администраторов фиксируются с причиной и временем."
-      />
-    </section>`,
+    }
+    <hg-admin-users /><hg-admin-audit />
+    <p class="privacy-note"><hg-icon name="lock" />Только служебные сведения. Содержимое задач, результаты, документы и секреты пользователей здесь недоступны.</p>`,
 })
-export class AdminAudit {
-  readonly userId = inject(ActivatedRoute).snapshot.paramMap.get('id');
-  readonly query = new TableQuery();
-  readonly audit = new ServerResource<Page<AuditEntry>>(['audit']);
-  readonly search = new FormControl(this.query.text('q'), { nonNullable: true });
-  readonly columns = auditColumns;
-  readonly rows = computed(() => auditRows(this.audit.data()?.items ?? []));
-  constructor() {
-    effect(() => {
-      this.audit.load(
-        this.userId ? `/admin/users/${this.userId}/audit` : '/admin/audit',
-        this.query.value(),
-      );
-      this.search.setValue(this.query.text('q'), { emitEvent: false });
-    });
-    this.search.valueChanges
-      .pipe(debounceTime(250), distinctUntilChanged(), takeUntilDestroyed(inject(DestroyRef)))
-      .subscribe((q) => this.query.filter({ q: q || null }));
-  }
+export class AdminOverview {
+  readonly overview = new ServerResource<OverviewDto>(['nodes', 'sessions', 'users', 'tasks', 'operations']);
+  constructor() { this.overview.load('/admin/overview'); }
 }

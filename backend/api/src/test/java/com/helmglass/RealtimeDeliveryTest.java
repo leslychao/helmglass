@@ -13,9 +13,10 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
-import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
+import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
 import com.helmglass.realtime.infrastructure.repository.OutboxRepository;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -24,12 +25,15 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.redis.connection.DefaultMessage;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import tools.jackson.databind.json.JsonMapper;
 
 class RealtimeDeliveryTest {
+  private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
   private final IdentityRepository identities = mock(IdentityRepository.class);
   private final OutboxRepository outbox = mock(OutboxRepository.class);
   private final JsonSupport json = new JsonSupport(JsonMapper.builder().build());
@@ -39,7 +43,27 @@ class RealtimeDeliveryTest {
           identities,
           json,
           mock(ChatPresentationRepository.class),
-          mock(OperationRepository.class), mock(ApplicationEventPublisher.class), mock(ChangeRepository.class));
+          mock(OperationRepository.class),
+          mock(ApplicationEventPublisher.class),
+          mock(ChangeRepository.class),
+          redis);
+
+  RealtimeDeliveryTest() {
+    realtime.onChannelSubscribed(
+        RealtimeDeliveryService.FANOUT_CHANNEL.getBytes(StandardCharsets.UTF_8), 1);
+    when(redis.convertAndSend(any(String.class), any()))
+        .thenAnswer(
+            invocation -> {
+              String channel = invocation.getArgument(0);
+              String payload = invocation.getArgument(1);
+              realtime.onMessage(
+                  new DefaultMessage(
+                      channel.getBytes(StandardCharsets.UTF_8),
+                      payload.getBytes(StandardCharsets.UTF_8)),
+                  null);
+              return 1L;
+            });
+  }
 
   @Test
   void subscribesBeforeReadyAndOnlyReceivesOwnSafeResources() throws Exception {

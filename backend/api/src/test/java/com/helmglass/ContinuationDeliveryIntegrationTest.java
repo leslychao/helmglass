@@ -556,6 +556,34 @@ class ContinuationDeliveryIntegrationTest {
   }
 
   @Test
+  void automaticAvailabilityDoesNotRequireAPendingIntentAndRechecksConsentAndGrant() {
+    Fixture fixture = fixture(false);
+    assertThat(
+            owner.automaticContinuationAvailable(fixture.actor(), fixture.host(), fixture.task()))
+        .isTrue();
+    assertThat(owner.automaticContinuationAvailable(fixture.actor(), host(), fixture.task()))
+        .isFalse();
+    transaction.executeWithoutResult(status -> owner.cancel(fixture.task()));
+    assertThat(repository.current(fixture.task())).isEmpty();
+    assertThat(
+            owner.automaticContinuationAvailable(fixture.actor(), fixture.host(), fixture.task()))
+        .isTrue();
+    transaction.executeWithoutResult(
+        status -> events.publishEvent(new TaskContinuationService.Consent(fixture.task(), false)));
+    assertThat(
+            owner.automaticContinuationAvailable(fixture.actor(), fixture.host(), fixture.task()))
+        .isFalse();
+    transaction.executeWithoutResult(
+        status -> events.publishEvent(new TaskContinuationService.Consent(fixture.task(), true)));
+    jdbc.sql("UPDATE client_grants SET status='REVOKED',version=version+1 WHERE id=:id")
+        .param("id", fixture.actor().grantId())
+        .update();
+    assertThat(
+            owner.automaticContinuationAvailable(fixture.actor(), fixture.host(), fixture.task()))
+        .isFalse();
+  }
+
+  @Test
   void firstForeignViewCannotStealCreationDestinationAndOriginalViewBindsPendingIntent() {
     Fixture fixture = fixture(false, false, true);
     HostConversationContext foreign = host();
@@ -645,6 +673,19 @@ class ContinuationDeliveryIntegrationTest {
             context(),
             fixture.host(),
             Instant.now().plusSeconds(300));
+    var historical =
+        realtime.publishPresentation(
+            fixture.actor(),
+            fixture.task(),
+            null,
+            0,
+            context(),
+            host(),
+            Instant.now().plusSeconds(300));
+    jdbc.sql("UPDATE tasks SET continuation_view_scope_id=:scope WHERE id=:id")
+        .param("scope", historical.slot().id())
+        .param("id", fixture.task())
+        .update();
     owner.bindDestination(fixture.actor(), fixture.host(), fixture.task());
     assertThat(
             jdbc.sql("SELECT origin_correlation IS NULL FROM tasks WHERE id=:id")

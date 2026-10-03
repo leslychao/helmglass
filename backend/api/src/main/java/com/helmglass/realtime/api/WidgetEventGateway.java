@@ -39,8 +39,11 @@ public class WidgetEventGateway extends TextWebSocketHandler {
   private final JsonSupport json;
   private final String origin;
 
-  public WidgetEventGateway(ChannelTicketService tickets, RealtimeDeliveryService realtime,
-      JsonSupport json, @Value("${helm.widget-origin:}") String origin) {
+  public WidgetEventGateway(
+      ChannelTicketService tickets,
+      RealtimeDeliveryService realtime,
+      JsonSupport json,
+      @Value("${helm.widget-origin:}") String origin) {
     this.tickets = tickets;
     this.realtime = realtime;
     this.json = json;
@@ -49,10 +52,16 @@ public class WidgetEventGateway extends TextWebSocketHandler {
 
   @Override
   public void afterConnectionEstablished(WebSocketSession socket) throws IOException {
-    if (origin.isBlank() || !origin.equals(socket.getHandshakeHeaders().getOrigin())
-        || socket.getUri() == null || socket.getUri().getRawQuery() != null
+    if (origin.isBlank()
+        || !origin.equals(socket.getHandshakeHeaders().getOrigin())
+        || socket.getUri() == null
+        || socket.getUri().getRawQuery() != null
         || socket.getHandshakeHeaders().getFirst("Authorization") != null) {
       socket.close(new CloseStatus(4403, "CHANNEL_ORIGIN_REJECTED"));
+      return;
+    }
+    if (!realtime.fanoutAvailable()) {
+      socket.close(new CloseStatus(4503, "EVENTS_UNAVAILABLE"));
       return;
     }
     if (!connectionLimit.tryAcquire()) {
@@ -65,12 +74,15 @@ public class WidgetEventGateway extends TextWebSocketHandler {
       return;
     }
     socket.setTextMessageSizeLimit(4096);
-    connections.put(socket.getId(), new Connection(
-        new ConcurrentWebSocketSessionDecorator(socket, 3000, 65536), Instant.now(), null));
+    connections.put(
+        socket.getId(),
+        new Connection(
+            new ConcurrentWebSocketSessionDecorator(socket, 3000, 65536), Instant.now(), null));
   }
 
   @Override
-  protected void handleTextMessage(WebSocketSession socket, TextMessage message) throws IOException {
+  protected void handleTextMessage(WebSocketSession socket, TextMessage message)
+      throws IOException {
     Connection connection = connections.get(socket.getId());
     if (connection == null) {
       return;
@@ -81,14 +93,17 @@ public class WidgetEventGateway extends TextWebSocketHandler {
         throw new IllegalArgumentException("Invalid widget event message");
       }
       if (connection.binding() == null) {
-        if (!value.path("type").asString().equals("authenticate") || value.size() != 2
-            || socket.getUri() == null || !value.path("ticket").isString()) {
+        if (!value.path("type").asString().equals("authenticate")
+            || value.size() != 2
+            || socket.getUri() == null
+            || !value.path("ticket").isString()) {
           close(connection, 4401, "TICKET_REQUIRED");
           return;
         }
         String path = socket.getUri().getPath();
         UUID taskId = UUID.fromString(path.substring(path.lastIndexOf('/') + 1));
-        TicketBinding binding = tickets.consumeTaskEvents(value.path("ticket").asString(), taskId, origin);
+        TicketBinding binding =
+            tickets.consumeTaskEvents(value.path("ticket").asString(), taskId, origin);
         if (!realtime.connectWidgetEvents(binding)) {
           reject(connection, binding, "VIEW_ALREADY_ATTACHED");
           return;
@@ -105,7 +120,9 @@ public class WidgetEventGateway extends TextWebSocketHandler {
           reject(connection, connection.binding(), "VIEW_LEASE_EXPIRED");
           return;
         }
-        connections.replace(socket.getId(), connection,
+        connections.replace(
+            socket.getId(),
+            connection,
             new Connection(connection.socket(), Instant.now(), connection.binding()));
         connection.socket().sendMessage(new TextMessage("{\"type\":\"pong\"}"));
       } else {
@@ -137,17 +154,29 @@ public class WidgetEventGateway extends TextWebSocketHandler {
   }
 
   @EventListener
+  public void resynchronize(RealtimeDeliveryService.ResynchronizationRequired event) {
+    for (Connection connection : connections.values()) {
+      close(connection, 4503, "EVENTS_RESYNCHRONIZE");
+    }
+  }
+
+  @EventListener
   public void invalidate(RealtimeDeliveryService.TaskInvalidation event) {
     for (Connection connection : connections.values()) {
       TicketBinding binding = connection.binding();
-      if (binding == null || !binding.userId().equals(event.userId())
-          || !binding.taskId().equals(event.resourceId()) || !event.resources().contains("tasks")
+      if (binding == null
+          || !binding.userId().equals(event.userId())
+          || !binding.taskId().equals(event.resourceId())
+          || !event.resources().contains("tasks")
           || !authorized(connection)) {
         continue;
       }
       try {
-        connection.socket().sendMessage(new TextMessage(json.write(
-            Map.of("type", "invalidate", "resources", List.of("task")))));
+        connection
+            .socket()
+            .sendMessage(
+                new TextMessage(
+                    json.write(Map.of("type", "invalidate", "resources", List.of("task")))));
       } catch (IOException error) {
         close(connection, 4503, "DELIVERY_FAILED");
       }
@@ -169,12 +198,13 @@ public class WidgetEventGateway extends TextWebSocketHandler {
 
   private void reject(Connection connection, TicketBinding binding, String fallback) {
     String reason = realtime.widgetRejection(binding).orElse(fallback);
-    int status = switch (reason) {
-      case "AUTHORIZATION_EXPIRED" -> 4401;
-      case "GRANT_REVOKED" -> 4403;
-      case "PRESENTATION_SUPERSEDED" -> 4412;
-      default -> 4503;
-    };
+    int status =
+        switch (reason) {
+          case "AUTHORIZATION_EXPIRED" -> 4401;
+          case "GRANT_REVOKED" -> 4403;
+          case "PRESENTATION_SUPERSEDED" -> 4412;
+          default -> 4503;
+        };
     close(connection, status, reason);
   }
 

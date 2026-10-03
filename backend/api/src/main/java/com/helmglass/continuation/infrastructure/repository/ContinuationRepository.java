@@ -15,6 +15,12 @@ import org.springframework.stereotype.Repository;
 public class ContinuationRepository {
   private static final String CURRENT =
       "'WAITING_RESULT','READY','DISPATCHING','DELIVERED','DELIVERY_UNKNOWN','CLAIMED','BLOCKED'";
+  private static final String TASK_BINDING =
+      """
+      SELECT id,user_id,instruction_revision,state,mutation_barrier,continuation_consent,
+        continuation_view_scope_id,continuation_binding_version,origin_correlation,
+        origin_client_id,origin_grant_id FROM tasks WHERE id=:id
+      """;
   private final JdbcClient jdbc;
 
   public ContinuationRepository(JdbcClient jdbc) {
@@ -71,12 +77,15 @@ public class ContinuationRepository {
       UUID originGrantId) {}
 
   public TaskBinding lockTask(UUID taskId) {
-    return jdbc.sql(
-            """
-            SELECT id,user_id,instruction_revision,state,mutation_barrier,continuation_consent,
-              continuation_view_scope_id,continuation_binding_version,origin_correlation,
-              origin_client_id,origin_grant_id FROM tasks WHERE id=:id FOR UPDATE
-            """)
+    return jdbc.sql(TASK_BINDING + " FOR UPDATE")
+        .param("id", taskId)
+        .query(TaskBinding.class)
+        .optional()
+        .orElseThrow(DomainException::notFound);
+  }
+
+  public TaskBinding task(UUID taskId) {
+    return jdbc.sql(TASK_BINDING)
         .param("id", taskId)
         .query(TaskBinding.class)
         .optional()
@@ -135,6 +144,7 @@ public class ContinuationRepository {
     jdbc.sql(
             """
             UPDATE tasks SET origin_correlation=:correlation,origin_client_id=:client,origin_grant_id=:grant
+              ,continuation_view_scope_id=NULL
             WHERE id=:task AND origin_correlation IS NULL
             """)
         .param("task", taskId)
@@ -192,7 +202,8 @@ public class ContinuationRepository {
               least(now()+interval '2 hours',coalesce(s.budget_deadline_at,now()+interval '2 hours')),
               v.client_id,v.grant_id,v.grant_version,v.access_epoch,l.epoch,s.page_epoch,'WAITING_RESULT'
             FROM tasks t LEFT JOIN chat_view_slots v ON v.id=t.continuation_view_scope_id
-              AND v.retired_at IS NULL
+              AND v.retired_at IS NULL AND v.verified_correlation=t.origin_correlation
+              AND v.client_id=t.origin_client_id AND v.grant_id=t.origin_grant_id
             LEFT JOIN browser_sessions s ON s.task_id=t.id AND s.binding_released_at IS NULL
             LEFT JOIN browser_control_leases l ON l.session_id=s.id WHERE t.id=:task RETURNING *
             """)

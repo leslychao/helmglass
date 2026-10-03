@@ -74,6 +74,13 @@ public class WorkerSignalingGateway extends TextWebSocketHandler {
               positive(value, "allocationEpoch"),
               uuid(value, "viewerId"),
               positive(value, "viewGeneration"));
+      if (!binding
+          .workerBootId()
+          .toString()
+          .equals(socket.getHandshakeHeaders().getFirst("x-worker-boot-id"))) {
+        throw new IllegalArgumentException(
+            "Signaling boot does not match the authenticated worker");
+      }
       if (type.equals("viewerClosed")) {
         if (!value.path("code").asString().equals("VIEW_CLOSED")) {
           throw new IllegalArgumentException("Invalid physical fence receipt");

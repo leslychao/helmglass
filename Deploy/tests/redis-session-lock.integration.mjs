@@ -62,7 +62,7 @@ redis.call("del", unpack(KEYS))
 return redis.status_reply("OK")
 `;
 
-test('OAuth session ACL supports the pinned Redis lock lifecycle within its ticket namespace',
+test('Redis ACL confines OAuth locks and API realtime delivery to their namespaces',
   { timeout: 120_000 }, async t => {
     const fixture = randomUUID();
     const context = process.env.HELM_TEST_DOCKER_CONTEXT ?? 'desktop-linux';
@@ -81,11 +81,14 @@ test('OAuth session ACL supports the pinned Redis lock lifecycle within its tick
     assert.match(await readFile(new URL('../oauth2-proxy/Dockerfile', import.meta.url), 'utf8'),
       /oauth2-proxy:v7\.15\.5@/, 'Update the lock fixture when the pinned OAuth2 Proxy changes');
     const legacyAcl = acl.replace(/^user helm_oauth .+$/m,
-      line => line.replace(/ \+(?:msetnx|mset|mget|getrange)(?= |$)/g, ''));
-    const command = 'REDISCLI_AUTH=$(jq -er ".password" /run/secrets/redis_oauth_identity); '
-      + 'export REDISCLI_AUTH; exec redis-cli -e --no-auth-warning --raw --user helm_oauth "$@"';
-    const redis = (container, args, allowedExitCodes = [0]) => docker([
-      'exec', container, 'sh', '-c', command, 'redis-cli', ...args], { allowedExitCodes });
+      line => line.replace(/ \+(?:msetnx|mset|mget|getrange)(?= |$)/g, ''))
+      .replace(' &helm:realtime:invalidations:v1 +publish +subscribe +unsubscribe', '');
+    const command = 'identity="$1"; shift; '
+      + 'REDISCLI_AUTH=$(jq -er ".password" "/run/secrets/redis_${identity}_identity"); '
+      + 'export REDISCLI_AUTH; exec timeout 2 redis-cli -e --no-auth-warning --raw '
+      + '--user "helm_${identity}" "$@"';
+    const redis = (container, args, allowedExitCodes = [0], identity = 'oauth') => docker([
+      'exec', container, 'sh', '-c', command, 'redis-cli', identity, ...args], { allowedExitCodes });
     const value = async (container, args) => (await redis(container, args)).stdout.trim();
     const stage = `set -eu
 umask 077
@@ -93,6 +96,7 @@ IFS= read -r fixture
 printf '%s' "$fixture" | jq -er '.acl' > /secrets/redis_acl
 printf '%s' "$fixture" | jq -c '.health' > /secrets/redis_health_identity
 printf '%s' "$fixture" | jq -c '.oauth' > /secrets/redis_oauth_identity
+printf '%s' "$fixture" | jq -c '.api' > /secrets/redis_api_identity
 chown -R 10001:10001 /secrets
 chmod 700 /secrets
 chmod 400 /secrets/*
@@ -111,7 +115,7 @@ chmod 400 /secrets/*
           '--log-driver', 'none', '--volume', `${volume}:/secrets`, '--entrypoint', 'sh', image,
           '-c', stage], { input: JSON.stringify({ acl: policy,
           health: { schemaVersion: 1, username: 'helm_health', password: passwords.health },
-          oauth: { password: passwords.oauth } }) + '\n' });
+          oauth: { password: passwords.oauth }, api: { password: passwords.api } }) + '\n' });
         containers.delete(helper);
         containers.add(container);
         await docker(['run', '-d', '--name', container, '--label', label, '--network', 'none',
@@ -134,6 +138,7 @@ chmod 400 /secrets/*
         const owner = 'first-owner';
         const other = 'other-owner';
         const acquire = token => ['EVAL', obtain, '1', key, token, String(token.length), '30000'];
+        const channel = 'helm:realtime:invalidations:v1';
         if (mode === 'legacy') {
           await t.test('legacy ACL reproduces the denied refresh lock acquisition', async () => {
             const denied = await redis(container, acquire(owner), [0, 1]);
@@ -141,8 +146,37 @@ chmod 400 /secrets/*
             assert.match(denied.stdout + denied.stderr, /ACL failure in script:.*no permissions.*msetnx/i);
             assert.equal(await value(container, ['EXISTS', key]), '0');
           });
+          await t.test('legacy API policy reproduces denied realtime publication', async () => {
+            const denied = await redis(container, ['PUBLISH', channel, '{}'], [0, 1], 'api');
+            assert.equal(denied.code, 1);
+            assert.match(denied.stdout + denied.stderr, /NOPERM/);
+          });
           continue;
         }
+        await t.test('API can publish, subscribe and unsubscribe on the exact realtime channel', async () => {
+          const published = await redis(container, ['PUBLISH', channel, '{}'], [0], 'api');
+          assert.equal(published.stdout.trim(), '0');
+          const subscribed = await redis(container, ['SUBSCRIBE', channel], [0, 1, 124, 143], 'api');
+          assert.ok([124, 143].includes(subscribed.code),
+            'Successful subscription stays open until timeout sends SIGTERM');
+          assert.equal(subscribed.stdout.trim(), `subscribe\n${channel}\n1`);
+          const unsubscribed = await redis(container, ['UNSUBSCRIBE', channel], [0], 'api');
+          assert.equal(unsubscribed.stdout.trim(), `unsubscribe\n${channel}\n0`);
+        });
+        await t.test('unrelated channels and other identities cannot use realtime transport', async () => {
+          for (const [identity, args] of [
+            ['api', ['PUBLISH', 'helm:realtime:invalidations:foreign', '{}']],
+            ['api', ['SUBSCRIBE', 'helm:realtime:invalidations:foreign']],
+            ['api', ['PSUBSCRIBE', 'helm:realtime:*']],
+            ['oauth', ['PUBLISH', channel, '{}']],
+            ['oauth', ['SUBSCRIBE', channel]],
+            ['health', ['PUBLISH', channel, '{}']],
+          ]) {
+            const denied = await redis(container, args, [0, 1, 124, 143], identity);
+            assert.equal(denied.code, 1, `${identity} ${args[0]} must reject unrelated access`);
+            assert.match(denied.stdout + denied.stderr, /NOPERM/);
+          }
+        });
         await t.test('acquire, competing owner, renewal, expiry and release', async () => {
           assert.equal(await value(container, acquire(owner)), 'OK');
           assert.equal(await value(container, ['EXISTS', key]), '1');

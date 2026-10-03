@@ -4,8 +4,8 @@ import com.helmglass.api.JsonSupport;
 import com.helmglass.api.MutationContext;
 import com.helmglass.browser.application.BrowserSessionService;
 import com.helmglass.identity.domain.AuthenticatedActor;
-import com.helmglass.realtime.application.RealtimeDeliveryService;
 import com.helmglass.realtime.application.ChannelTicketService;
+import com.helmglass.realtime.application.RealtimeDeliveryService;
 import com.helmglass.realtime.domain.ChatPresentation;
 import com.helmglass.realtime.domain.HostConversationContext;
 import com.helmglass.task.api.TaskContracts.TaskView;
@@ -63,6 +63,8 @@ public class TaskPresentationService {
         "presentation",
         json.tree(
             presentation(
+                actor,
+                host,
                 task,
                 slot,
                 slot == null ? "LINK_ONLY" : "ACTIVE",
@@ -92,6 +94,8 @@ public class TaskPresentationService {
             : publication.slot() == null ? "LINK_ONLY" : "ACTIVE";
     Map<String, Object> value =
         presentation(
+            actor,
+            host,
             task,
             publication.slot(),
             state,
@@ -121,33 +125,52 @@ public class TaskPresentationService {
     ChatPresentation slot = attachment.slot();
     RealtimeDeliveryService.MediaAdmission media = null;
     if (attachment.state().equals("ACTIVE") && slot != null && !widgetOrigin.isBlank()) {
-      media = realtime.prepareWidgetMedia(actor, host, slot,
-          browser.map(BrowserSessionService.TaskBrowserView::media).orElse(null));
+      media =
+          realtime.prepareWidgetMedia(
+              actor,
+              host,
+              slot,
+              browser.map(BrowserSessionService.TaskBrowserView::media).orElse(null));
       slot = media.slot();
     }
     Map<String, Object> snapshot = new HashMap<>();
-    Map<String, Object> reference = presentation(task, attachment.slot(), attachment.state(), attachment.reason());
+    Map<String, Object> reference =
+        presentation(actor, host, task, attachment.slot(), attachment.state(), attachment.reason());
     reference.put("viewScopeId", scope);
     reference.put("presentationRevision", revision);
     snapshot.put("presentation", reference);
-    snapshot.put("session", browser.map(BrowserSessionService.TaskBrowserView::snapshot).orElse(null));
+    snapshot.put(
+        "session", browser.map(BrowserSessionService.TaskBrowserView::snapshot).orElse(null));
     snapshot.put("continuation", task.continuation());
     snapshot.put(
         "browserContextChanged",
         observedSessionId != null && !Objects.equals(observedSessionId, sessionId(task)));
     String unavailable = media == null ? "PRESENTATION_UNAVAILABLE" : media.unavailableReason();
-    snapshot.put("videoState", unavailable == null || "PRESENTATION_FENCING".equals(unavailable)
-        ? "CONNECTING" : unavailable.equals("PRIVACY_HIDDEN") ? "PRIVACY_HIDDEN" : "UNAVAILABLE");
+    snapshot.put(
+        "videoState",
+        unavailable == null || "PRESENTATION_FENCING".equals(unavailable)
+            ? "CONNECTING"
+            : unavailable.equals("PRIVACY_HIDDEN") ? "PRIVACY_HIDDEN" : "UNAVAILABLE");
     snapshot.put("videoUnavailableReason", unavailable);
     Map<String, Object> metadata = new HashMap<>();
     if (attachment.state().equals("ACTIVE") && slot != null && !widgetOrigin.isBlank()) {
       if (!slot.eventsConnected()) {
-        metadata.put("eventTicket", tickets.eventTicket(slot, widgetOrigin,
-            origin.replaceFirst("^http", "ws") + "/events/v1/widget/tasks/" + taskId));
+        metadata.put(
+            "eventTicket",
+            tickets.eventTicket(
+                slot,
+                widgetOrigin,
+                origin.replaceFirst("^http", "ws") + "/events/v1/widget/tasks/" + taskId));
       }
       if (media != null && media.issueTicket()) {
-        metadata.put("viewTicket", tickets.widgetVideoTicket(slot, widgetOrigin,
-            origin.replaceFirst("^http", "ws") + "/stream/v1/widget/signaling/" + slot.browserSessionId()));
+        metadata.put(
+            "viewTicket",
+            tickets.widgetVideoTicket(
+                slot,
+                widgetOrigin,
+                origin.replaceFirst("^http", "ws")
+                    + "/stream/v1/widget/signaling/"
+                    + slot.browserSessionId()));
       }
     }
     if (!metadata.isEmpty()) {
@@ -157,7 +180,12 @@ public class TaskPresentationService {
   }
 
   private Map<String, Object> presentation(
-      TaskView task, ChatPresentation slot, String state, String reason) {
+      AuthenticatedActor actor,
+      HostConversationContext host,
+      TaskView task,
+      ChatPresentation slot,
+      String state,
+      String reason) {
     Map<String, Object> result = new HashMap<>();
     result.put("taskId", task.id());
     result.put("taskVersion", task.version());
@@ -169,7 +197,10 @@ public class TaskPresentationService {
     result.put("presentationRevision", slot == null ? 0 : slot.presentationRevision());
     result.put("presentationState", state);
     result.put("reason", reason);
-    result.put("automaticContinuationAvailable", false);
+    result.put(
+        "automaticContinuationAvailable",
+        state.equals("ACTIVE")
+            && continuations.automaticContinuationAvailable(actor, host, task.id()));
     return result;
   }
 
@@ -180,5 +211,4 @@ public class TaskPresentationService {
     Object id = task.currentSession().get("id");
     return id instanceof UUID value ? value : null;
   }
-
 }

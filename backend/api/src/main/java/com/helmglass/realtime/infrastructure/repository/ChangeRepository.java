@@ -57,7 +57,7 @@ public class ChangeRepository {
             .param("version", version)
             .param("resource", resource)
             .param("payload", json.write(Map.of("resources", resources, "resourceId", resourceId)))
-        .param("notBefore", Timestamp.from(notBefore))
+            .param("notBefore", Timestamp.from(notBefore))
             .update();
     if (inserted != 0) {
       for (String changedResource : resources) {

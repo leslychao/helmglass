@@ -5,7 +5,14 @@ interface Destination {
   url: string;
   label: string;
 }
-const roots = new Set(['/tasks', '/connections', '/usage', '/admin', '/profile']);
+const roots = new Set([
+  '/tasks',
+  '/connections',
+  '/usage',
+  '/admin',
+  '/admin/browsers',
+  '/profile',
+]);
 export function safePath(value: unknown): value is string {
   if (
     typeof value !== 'string' ||
