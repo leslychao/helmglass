@@ -65,7 +65,8 @@ runtime.on('message', (raw: unknown) => {
     return;
   }
   if (raw.type === 'fatal') { safeLog('runtime_fenced', 'RUNTIME_FATAL'); process.exit(1); }
-  if (raw.type === 'viewerMessage' || raw.type === 'viewerClosed' || (typeof raw.type === 'string' && /^(viewOpen|viewRenew|viewClose|signal)Ack$/.test(raw.type))) {
+  if (raw.type === 'viewerMessage' || raw.type === 'viewerClosed' || raw.type === 'viewerEnded'
+    || (typeof raw.type === 'string' && /^(viewOpen|viewRenew|signal)Ack$/.test(raw.type))) {
     if (signalingSocket?.readyState === WebSocket.OPEN && signalingSocket.bufferedAmount <= 1_048_576) signalingSocket.send(JSON.stringify(raw));
     else runtime.send({ type: 'signalingDisconnected' });
     return;
@@ -141,6 +142,7 @@ async function connectSignaling(): Promise<void> {
   const connection = new WebSocket(endpoint, { cert, key, ca, rejectUnauthorized: true, maxPayload: 1_048_576,
     perMessageDeflate: false, handshakeTimeout: 10_000, headers: { 'x-worker-id': workerId, 'x-worker-boot-id': bootId } });
   signalingSocket = connection;
+  connection.on('open', () => runtime.send({ type: 'signalingConnected' }));
   connection.on('message', (data) => {
     try {
       const message = signalingMessageSchema.parse(JSON.parse(data.toString()));

@@ -58,7 +58,7 @@ import {
         @if (error()) {
           <div class="notice warning" role="status">
             {{ error() }}
-            @if (!inactive()) {
+            @if (!inactive() && !accessDenied()) {
               <button class="btn" (click)="retry()">Восстановить просмотр</button>
             }
           </div>
@@ -94,6 +94,7 @@ export class Widget {
   readonly error = signal('');
   readonly message = signal('');
   readonly inactive = signal(false);
+  readonly accessDenied = signal(false);
   readonly manualText = signal('');
   private readonly app = new App(
     { name: 'Helm Glass', version: '1.0.0' },
@@ -109,6 +110,10 @@ export class Widget {
   private attention?: ReturnType<typeof setTimeout>;
   private generation = 0;
   private connected = false;
+  private disposed = false;
+  private eventsReady = false;
+  private snapshotFresh = false;
+  private recoveryExhausted = false;
   private dirty = false;
   private readonly recovery = new ReconnectWindow();
   private dispatching = false;
@@ -116,6 +121,7 @@ export class Widget {
   private openingTask = false;
   constructor() {
     this.app.addEventListener('toolresult', (event) => {
+      if (this.disposed) return;
       try {
         const presentation = presentationOf(
           event._meta?.['presentation'] ?? event.structuredContent,
@@ -134,11 +140,13 @@ export class Widget {
           previous.viewScopeId === presentation.viewScopeId &&
           previous.presentationRevision === presentation.presentationRevision &&
           previous.presentationState === presentation.presentationState &&
-          previous.observedSessionId === presentation.observedSessionId &&
-          this.snapshot()
+          previous.observedSessionId === presentation.observedSessionId
         )
           return;
         this.clear();
+        this.accessDenied.set(false);
+        this.recovery.reset();
+        this.recoveryExhausted = false;
         this.inactive.set(presentation.presentationState === 'SUPERSEDED');
         this.error.set('');
         this.message.set('');
@@ -151,6 +159,7 @@ export class Widget {
       }
     });
     this.app.onteardown = async () => {
+      this.disposed = true;
       this.clear();
       this.inactive.set(true);
       return {};
@@ -158,10 +167,7 @@ export class Widget {
     const visible = () => {
       if (document.hidden) {
         this.clear();
-      } else if (!this.inactive()) {
-        this.recovery.reset();
-        void this.attach();
-      }
+      } else this.retry();
     };
     const pagehide = () => this.clear();
     const online = () => {
@@ -171,6 +177,7 @@ export class Widget {
     window.addEventListener('pagehide', pagehide);
     window.addEventListener('online', online);
     this.destroy.onDestroy(() => {
+      this.disposed = true;
       document.removeEventListener('visibilitychange', visible);
       window.removeEventListener('pagehide', pagehide);
       window.removeEventListener('online', online);
@@ -180,14 +187,16 @@ export class Widget {
     void this.app
       .connect()
       .then(() => {
+        if (this.disposed) return;
         this.connected = true;
         if (this.presentation()) void this.attach();
       })
-      .catch(() =>
-        this.error.set(
-          'Этот клиент не предоставляет подключение Apps. Откройте задачу в кабинете.',
-        ),
-      );
+      .catch(() => {
+        if (!this.disposed)
+          this.error.set(
+            'Этот клиент не предоставляет подключение Apps. Откройте задачу в кабинете.',
+          );
+      });
   }
   async attach() {
     const presentation = this.presentation();
@@ -197,7 +206,17 @@ export class Widget {
       );
       return;
     }
-    if (!this.connected || !presentation || this.inactive() || document.hidden) return;
+    if (
+      !this.connected ||
+      !presentation ||
+      this.disposed ||
+      this.inactive() ||
+      this.accessDenied() ||
+      document.hidden ||
+      this.recoveryExhausted ||
+      this.reconnect !== undefined
+    )
+      return;
     if (this.loading()) {
       this.dirty = true;
       return;
@@ -220,7 +239,14 @@ export class Widget {
         { timeout: 15000 },
       );
       if (generation !== this.generation) return;
-      if (result.isError) throw new Error('Доступ к просмотру не подтверждён');
+      if (result.isError) {
+        const denied = accessFailure(result);
+        if (denied) {
+          this.stopForAccess(denied);
+          return;
+        }
+        throw new Error('Доступ к просмотру не подтверждён');
+      }
       const previous = this.snapshot(),
         snapshot = retainActiveTicket(
           previous,
@@ -232,7 +258,11 @@ export class Widget {
         this.snapshot.set(null);
         return;
       }
+      clearTimeout(this.reconnect);
+      this.reconnect = undefined;
       this.snapshot.set(snapshot);
+      this.snapshotFresh = this.eventsReady && !this.dirty;
+      if (this.snapshotFresh) this.recovery.reset();
       if (snapshot.presentation.presentationState === 'LINK_ONLY') {
         this.message.set(
           'Этот клиент не поддерживает защищённый просмотр. Откройте задачу в кабинете.',
@@ -254,48 +284,97 @@ export class Widget {
           Math.max(1000, Math.min(240000, remaining)),
         );
       }
-      clearTimeout(this.attention);
-      if (
-        !snapshot.continuation ||
-        ['CLAIMED', 'CONSUMED', 'CANCELLED', 'EXPIRED'].includes(snapshot.continuation.state)
-      )
-        this.manualText.set('');
-      else if (
-        snapshot.continuation.deliveredAt &&
-        Date.now() - Date.parse(snapshot.continuation.deliveredAt) >= 60000
-      )
-        this.manualText.set(
-          snapshot.continuation.manualMessage ||
-            `Продолжи задачу ${presentation.taskId} после моего участия. Не создавай новую задачу.`,
-        );
-      if (snapshot.continuation?.deliveredAt && !this.manualText()) {
-        const delay = Date.parse(snapshot.continuation.deliveredAt) + 60000 - Date.now();
-        if (Number.isFinite(delay) && delay > 0)
-          this.attention = setTimeout(() => void this.attach(), Math.min(delay, 60000));
-      }
+      this.updateAttention();
       await this.continueIfReady(snapshot, generation);
     } catch {
       if (generation === this.generation) {
+        this.snapshotFresh = false;
+        this.updateAttention();
         this.error.set('Не удалось обновить просмотр. Действия задачи не повторялись.');
+        this.scheduleRecovery();
       }
     } finally {
       if (generation === this.generation) {
         this.loading.set(false);
         if (this.dirty) {
           this.dirty = false;
-          void this.attach();
+          if (this.reconnect === undefined && !this.recoveryExhausted) void this.attach();
         }
       }
     }
+  }
+  private scheduleRecovery() {
+    if (
+      this.disposed ||
+      this.inactive() ||
+      this.accessDenied() ||
+      document.hidden ||
+      this.reconnect !== undefined ||
+      this.recoveryExhausted
+    )
+      return;
+    const delay = this.recovery.nextDelay();
+    if (delay === null) {
+      this.recoveryExhausted = true;
+      this.error.set('Связь не восстановлена. Откройте ту же задачу в кабинете.');
+      return;
+    }
+    this.reconnect = setTimeout(() => {
+      this.reconnect = undefined;
+      void this.attach();
+    }, delay);
+  }
+  private stopForAccess(reason: 'authentication' | 'authorization') {
+    this.clear();
+    this.accessDenied.set(true);
+    this.error.set(
+      reason === 'authentication'
+        ? 'Авторизуйте Helm Glass в ChatGPT заново.'
+        : 'Доступ к просмотру больше не разрешён. Откройте задачу в кабинете.',
+    );
+  }
+  private updateAttention() {
+    clearTimeout(this.attention);
+    const snapshot = this.snapshot(),
+      continuation = snapshot?.continuation;
+    if (
+      !continuation ||
+      ['CLAIMED', 'CONSUMED', 'CANCELLED', 'EXPIRED'].includes(continuation.state)
+    ) {
+      this.manualText.set('');
+      return;
+    }
+    if (!continuation.deliveredAt) return;
+    this.manualText.set('');
+    // The deadline is durable; only a synchronized channel can establish absence of a claim.
+    if (!this.eventsReady || !this.snapshotFresh) return;
+    const remaining = Date.parse(continuation.deliveredAt) + 60000 - Date.now();
+    if (!Number.isFinite(remaining)) return;
+    if (remaining > 0) {
+      this.attention = setTimeout(() => this.updateAttention(), remaining);
+      return;
+    }
+    this.manualText.set(
+      continuation.manualMessage ||
+        `Продолжи задачу ${snapshot.presentation.taskId} после моего участия. Не создавай новую задачу.`,
+    );
   }
   private connectEvents(ticket: { ticket: string; url: string }, generation: number) {
     const socket = new WebSocket(ticket.url);
     this.events = socket;
     let lastPong = Date.now();
-    socket.onopen = () =>
-      socket.send(JSON.stringify({ type: 'authenticate', ticket: ticket.ticket }));
+    socket.onopen = () => {
+      if (this.events === socket)
+        socket.send(JSON.stringify({ type: 'authenticate', ticket: ticket.ticket }));
+    };
     socket.onmessage = ({ data }: MessageEvent<unknown>) => {
-      if (generation !== this.generation || typeof data !== 'string' || data.length > 8192) return;
+      if (
+        generation !== this.generation ||
+        this.events !== socket ||
+        typeof data !== 'string' ||
+        data.length > 8192
+      )
+        return;
       let value: unknown;
       try {
         value = JSON.parse(data);
@@ -306,33 +385,32 @@ export class Widget {
       if (!record(value)) return;
       if (value['type'] === 'pong') {
         lastPong = Date.now();
-        this.recovery.reset();
       }
-      if (value['type'] === 'ready' || value['type'] === 'invalidate') void this.attach();
+      if (value['type'] === 'ready') this.eventsReady = true;
+      if (value['type'] === 'ready' || value['type'] === 'invalidate') {
+        this.snapshotFresh = false;
+        this.updateAttention();
+        void this.attach();
+      }
     };
     this.heartbeat = setInterval(() => {
-      if (socket.readyState === WebSocket.OPEN) {
-        if (Date.now() - lastPong > 45000) socket.close();
-        else socket.send(JSON.stringify({ type: 'ping' }));
-      }
+      if (Date.now() - lastPong > 45000) socket.close();
+      else if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
     }, 15000);
     socket.onclose = (event) => {
-      if (generation !== this.generation) return;
+      if (generation !== this.generation || this.events !== socket) return;
       this.disconnectEvents();
       this.snapshot.set(null);
-      if (event.code === 4412 || event.code === 4403) {
+      if (event.code === 4412) {
         this.clear();
         this.inactive.set(true);
         return;
       }
-      if (event.code === 4401) {
-        this.error.set('Авторизуйте Helm Glass в ChatGPT заново.');
+      if (event.code === 4401 || event.code === 4403) {
+        this.stopForAccess(event.code === 4401 ? 'authentication' : 'authorization');
         return;
       }
-      const delay = this.recovery.nextDelay();
-      if (!document.hidden && delay !== null)
-        this.reconnect = setTimeout(() => void this.attach(), delay);
-      else this.error.set('Связь не восстановлена. Откройте ту же задачу в кабинете.');
+      this.scheduleRecovery();
     };
   }
   private async continueIfReady(snapshot: WidgetSnapshot, generation: number) {
@@ -347,7 +425,7 @@ export class Widget {
       document.hidden
     )
       return;
-    if (!this.app.getHostCapabilities()?.message) {
+    if (!this.app.getHostCapabilities()?.message?.text) {
       this.manualText.set(
         `Продолжи задачу ${presentation.taskId} после моего участия. Не создавай новую задачу.`,
       );
@@ -412,6 +490,8 @@ export class Widget {
   }
   refreshView() {
     this.snapshot.set(null);
+    this.snapshotFresh = false;
+    this.updateAttention();
     void this.attach();
   }
   async openTask() {
@@ -428,7 +508,11 @@ export class Widget {
     }
   }
   retry() {
+    if (this.disposed || this.inactive() || this.accessDenied() || document.hidden) return;
+    clearTimeout(this.reconnect);
+    this.reconnect = undefined;
     this.recovery.reset();
+    this.recoveryExhausted = false;
     this.refreshView();
   }
   copy() {
@@ -438,7 +522,13 @@ export class Widget {
   }
   private disconnectEvents() {
     clearInterval(this.heartbeat);
+    clearTimeout(this.attention);
+    this.eventsReady = false;
+    this.snapshotFresh = false;
+    this.updateAttention();
     if (this.events) {
+      this.events.onopen = null;
+      this.events.onmessage = null;
       this.events.onclose = null;
       this.events.close();
       this.events = undefined;
@@ -449,10 +539,33 @@ export class Widget {
     this.disconnectEvents();
     clearTimeout(this.renewal);
     clearTimeout(this.reconnect);
+    this.reconnect = undefined;
     clearTimeout(this.attention);
     this.snapshot.set(null);
     this.manualText.set('');
     this.loading.set(false);
     this.dirty = false;
   }
+}
+
+function accessFailure(result: unknown): 'authentication' | 'authorization' | null {
+  if (!record(result) || !Array.isArray(result['content'])) return null;
+  for (const item of result['content']) {
+    if (!record(item) || item['type'] !== 'text' || typeof item['text'] !== 'string') continue;
+    let problem: unknown;
+    try {
+      problem = JSON.parse(item['text']);
+    } catch {
+      problem = { code: item['text'] };
+    }
+    if (!record(problem)) continue;
+    if (problem['status'] === 401 || problem['code'] === 'UNAUTHENTICATED') return 'authentication';
+    if (
+      problem['status'] === 403 ||
+      problem['status'] === 404 ||
+      ['FORBIDDEN', 'INSUFFICIENT_SCOPE', 'NOT_FOUND'].includes(String(problem['code']))
+    )
+      return 'authorization';
+  }
+  return null;
 }

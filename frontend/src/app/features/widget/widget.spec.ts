@@ -1,11 +1,14 @@
 import { TestBed } from '@angular/core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Widget } from './widget';
-import { Presentation } from './widget-contracts';
+import { Presentation, WidgetSnapshot } from './widget-contracts';
 
 const bridge = vi.hoisted(() => ({
   listener: undefined as ((event: { structuredContent: unknown }) => void) | undefined,
   attach: vi.fn(),
+  connect: vi.fn(),
+  capabilities: vi.fn(),
+  sendMessage: vi.fn(),
 }));
 
 vi.mock('@modelcontextprotocol/ext-apps', () => ({
@@ -13,15 +16,45 @@ vi.mock('@modelcontextprotocol/ext-apps', () => ({
     addEventListener(_name: string, listener: typeof bridge.listener) {
       bridge.listener = listener;
     }
-    connect() {
-      return Promise.resolve();
-    }
+    connect = bridge.connect;
     close() {
       return Promise.resolve();
     }
     callServerTool = bridge.attach;
+    getHostCapabilities = bridge.capabilities;
+    sendMessage = bridge.sendMessage;
   },
 }));
+
+class EventSocket {
+  static readonly OPEN = 1;
+  static instances: EventSocket[] = [];
+  readyState = 0;
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+  constructor(readonly url: string) {
+    EventSocket.instances.push(this);
+  }
+  send(data: string) {
+    if (data === '{"type":"ping"}') this.receive('pong');
+  }
+  close() {
+    this.fail(1006);
+  }
+  open() {
+    this.readyState = EventSocket.OPEN;
+    this.onopen?.(new Event('open'));
+    this.receive('ready');
+  }
+  receive(type: string) {
+    this.onmessage?.(new MessageEvent('message', { data: JSON.stringify({ type }) }));
+  }
+  fail(code: number) {
+    this.readyState = 3;
+    this.onclose?.(new CloseEvent('close', { code }));
+  }
+}
 
 describe('widget presentation lifecycle', () => {
   const presentation: Presentation = {
@@ -34,9 +67,59 @@ describe('widget presentation lifecycle', () => {
   };
   let config: HTMLScriptElement;
 
+  function attached(continuation: WidgetSnapshot['continuation'] = null, events = false) {
+    return {
+      structuredContent: { presentation, session: null, continuation },
+      ...(events
+        ? {
+            _meta: {
+              eventTicket: {
+                ticket: 'event-ticket',
+                url: `wss://helm.example.test/events/v1/widget/tasks/${presentation.taskId}`,
+              },
+            },
+          }
+        : {}),
+    };
+  }
+
+  async function mount() {
+    const fixture = TestBed.createComponent(Widget);
+    await Promise.resolve();
+    bridge.listener?.({ structuredContent: presentation });
+    await vi.advanceTimersByTimeAsync(0);
+    return fixture;
+  }
+
+  function socket() {
+    const socket = EventSocket.instances.at(-1);
+    if (!socket) throw new Error('Expected an event channel');
+    return socket;
+  }
+
+  function delivered(secondsAgo = 0): WidgetSnapshot['continuation'] {
+    return {
+      id: 'continuation-1',
+      state: 'DELIVERED',
+      mode: 'WIDGET_RETURN',
+      deliveredAt: new Date(Date.now() - secondsAgo * 1000).toISOString(),
+      manualMessage: 'Продолжи ту же задачу.',
+    };
+  }
+
   beforeEach(() => {
     bridge.attach.mockReset();
+    bridge.attach.mockResolvedValue(attached());
+    bridge.connect.mockReset().mockResolvedValue(undefined);
+    bridge.capabilities.mockReset().mockReturnValue({ message: { text: {} } });
+    bridge.sendMessage.mockReset().mockResolvedValue({});
     bridge.listener = undefined;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-03T12:00:00Z'));
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    EventSocket.instances = [];
+    vi.stubGlobal('WebSocket', EventSocket);
     config = document.createElement('script');
     config.id = 'helm-runtime-config';
     config.type = 'application/json';
@@ -45,7 +128,13 @@ describe('widget presentation lifecycle', () => {
     TestBed.overrideComponent(Widget, { set: { template: '', imports: [] } });
   });
 
-  afterEach(() => config.remove());
+  afterEach(() => {
+    TestBed.resetTestingModule();
+    config.remove();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
 
   it('reactivates for a new scoped presentation and clears the old error', async () => {
     const fixture = TestBed.createComponent(Widget);
@@ -77,6 +166,280 @@ describe('widget presentation lifecycle', () => {
 
     expect(widget.inactive()).toBe(true);
     expect(widget.presentation()?.presentationRevision).toBe(3);
+    expect(bridge.attach).not.toHaveBeenCalled();
+  });
+
+  it('recovers the first transient attach failure without another host event', async () => {
+    bridge.attach.mockRejectedValueOnce(new Error('Connection lost'));
+    const fixture = await mount();
+    expect(fixture.componentInstance.snapshot()).toBeNull();
+    expect(bridge.attach).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(bridge.attach).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(bridge.attach).toHaveBeenCalledTimes(2);
+    expect(fixture.componentInstance.snapshot()?.presentation).toEqual(presentation);
+    expect(fixture.componentInstance.error()).toBe('');
+    expect(bridge.attach.mock.calls[1]?.[0]).toEqual(bridge.attach.mock.calls[0]?.[0]);
+  });
+
+  it('coalesces duplicate host events and updates into the pending recovery', async () => {
+    bridge.attach.mockRejectedValueOnce(new Error('Unavailable'));
+    const fixture = await mount();
+    bridge.listener?.({ structuredContent: presentation });
+    fixture.componentInstance.refreshView();
+    fixture.componentInstance.refreshView();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(bridge.attach).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bridge.attach).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces in-flight invalidations without bypassing backoff after failure', async () => {
+    let rejectAttach: ((reason: Error) => void) | undefined;
+    bridge.attach.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectAttach = reject;
+        }),
+    );
+    const fixture = await mount();
+    fixture.componentInstance.refreshView();
+    fixture.componentInstance.refreshView();
+    rejectAttach?.(new Error('Lost response'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.attach).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(bridge.attach).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops automatic retries at the bounded deadline and allows explicit recovery', async () => {
+    bridge.attach.mockRejectedValue(new Error('Offline'));
+    const fixture = await mount();
+    await vi.advanceTimersByTimeAsync(120000);
+    const attempts = bridge.attach.mock.calls.length;
+    expect(attempts).toBeGreaterThan(2);
+    expect(attempts).toBeLessThan(15);
+    expect(fixture.componentInstance.error()).toContain('Связь не восстановлена');
+    await vi.advanceTimersByTimeAsync(300000);
+    fixture.componentInstance.refreshView();
+    bridge.listener?.({ structuredContent: presentation });
+    expect(bridge.attach).toHaveBeenCalledTimes(attempts);
+
+    bridge.attach.mockResolvedValue(attached());
+    fixture.componentInstance.retry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.attach).toHaveBeenCalledTimes(attempts + 1);
+    expect(fixture.componentInstance.snapshot()).not.toBeNull();
+  });
+
+  it.each(['hidden', 'destroyed', 'superseded'])(
+    'cancels pending recovery when %s',
+    async (reason) => {
+      bridge.attach.mockRejectedValue(new Error('Offline'));
+      const fixture = await mount();
+      if (reason === 'hidden') {
+        vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+        document.dispatchEvent(new Event('visibilitychange'));
+      } else if (reason === 'destroyed') fixture.destroy();
+      else
+        bridge.listener?.({
+          structuredContent: { ...presentation, presentationState: 'SUPERSEDED' },
+        });
+      window.dispatchEvent(new Event('online'));
+      await vi.advanceTimersByTimeAsync(180000);
+      expect(bridge.attach).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('starts one fresh cycle on return to visibility and ignores a stale attach response', async () => {
+    let resolveOld: ((value: ReturnType<typeof attached>) => void) | undefined;
+    bridge.attach.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const fixture = await mount();
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0);
+    resolveOld?.(attached(delivered(90)));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.attach).toHaveBeenCalledTimes(2);
+    expect(fixture.componentInstance.snapshot()?.continuation).toBeNull();
+    expect(fixture.componentInstance.manualText()).toBe('');
+  });
+
+  it.each([401, 403, 404])(
+    'does not retry a terminal MCP response with status %s',
+    async (status) => {
+      bridge.attach.mockResolvedValue({
+        isError: true,
+        content: [{ type: 'text', text: JSON.stringify({ code: 'ACCESS_REJECTED', status }) }],
+      });
+      const fixture = await mount();
+      fixture.componentInstance.retry();
+      window.dispatchEvent(new Event('online'));
+      document.dispatchEvent(new Event('visibilitychange'));
+      bridge.listener?.({ structuredContent: presentation });
+      await vi.advanceTimersByTimeAsync(180000);
+      expect(bridge.attach).toHaveBeenCalledOnce();
+      expect(fixture.componentInstance.error()).not.toBe('');
+    },
+  );
+
+  it.each([4401, 4403, 4412])(
+    'stops recovery after terminal event-channel close %s',
+    async (code) => {
+      bridge.attach.mockResolvedValue(attached(null, true));
+      const fixture = await mount();
+      socket().open();
+      await vi.advanceTimersByTimeAsync(0);
+      const attempts = bridge.attach.mock.calls.length;
+      socket().fail(code);
+      fixture.componentInstance.retry();
+      window.dispatchEvent(new Event('online'));
+      await vi.advanceTimersByTimeAsync(180000);
+      expect(bridge.attach).toHaveBeenCalledTimes(attempts);
+      expect(fixture.componentInstance.snapshot()).toBeNull();
+    },
+  );
+
+  it('shares one recovery cycle across channel close and subsequent attach failures', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
+    const fixture = await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    bridge.attach.mockRejectedValueOnce(new Error('Bridge unavailable'));
+    socket().fail(1006);
+    fixture.componentInstance.refreshView();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(bridge.attach).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(bridge.attach).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bridge.attach).toHaveBeenCalledTimes(4);
+    expect(EventSocket.instances).toHaveLength(2);
+  });
+
+  it('shows attention from the durable deadline without polling or sending a message', async () => {
+    bridge.attach.mockResolvedValue(attached(delivered(30), true));
+    const fixture = await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.attach).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(fixture.componentInstance.manualText()).toBe('');
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fixture.componentInstance.manualText()).toBe('Продолжи ту же задачу.');
+    expect(bridge.attach).toHaveBeenCalledTimes(2);
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('waits for recovered push and its fresh snapshot before showing overdue attention', async () => {
+    bridge.attach.mockResolvedValue(attached(delivered(59), true));
+    const fixture = await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    socket().fail(1006);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fixture.componentInstance.manualText()).toBe('');
+    bridge.attach.mockResolvedValue(
+      attached({ id: 'continuation-1', state: 'CLAIMED', mode: 'WIDGET_RETURN' }, true),
+    );
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.componentInstance.snapshot()?.continuation?.state).toBe('CLAIMED');
+    expect(fixture.componentInstance.manualText()).toBe('');
+  });
+
+  it('cancels local attention when a pushed claim arrives before its deadline', async () => {
+    bridge.attach.mockResolvedValue(attached(delivered(59), true));
+    const fixture = await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    bridge.attach.mockResolvedValue(
+      attached({ id: 'continuation-1', state: 'CLAIMED', mode: 'WIDGET_RETURN' }, true),
+    );
+    socket().receive('invalidate');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fixture.componentInstance.manualText()).toBe('');
+    expect(bridge.attach).toHaveBeenCalledTimes(3);
+  });
+
+  it('waits for a coalesced read when invalidation arrives during the current snapshot request', async () => {
+    bridge.attach.mockResolvedValue(attached(delivered(90), true));
+    const fixture = await mount();
+    let resolveRead: ((value: ReturnType<typeof attached>) => void) | undefined;
+    bridge.attach.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    socket().open();
+    socket().receive('invalidate');
+    let resolveFresh: ((value: ReturnType<typeof attached>) => void) | undefined;
+    bridge.attach.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFresh = resolve;
+        }),
+    );
+    resolveRead?.(attached(delivered(90), true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.componentInstance.manualText()).toBe('');
+    expect(bridge.attach).toHaveBeenCalledTimes(3);
+    resolveFresh?.(
+      attached({ id: 'continuation-1', state: 'CLAIMED', mode: 'WIDGET_RETURN' }, true),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.componentInstance.manualText()).toBe('');
+    expect(fixture.componentInstance.snapshot()?.continuation?.state).toBe('CLAIMED');
+  });
+
+  it('does not let successful channel pongs reset an unsuccessful snapshot recovery window', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
+    const fixture = await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    bridge.attach.mockRejectedValue(new Error('Read unavailable'));
+    socket().receive('invalidate');
+    await vi.advanceTimersByTimeAsync(120000);
+    const attempts = bridge.attach.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(180000);
+    expect(bridge.attach).toHaveBeenCalledTimes(attempts);
+    expect(fixture.componentInstance.error()).toContain('Связь не восстановлена');
+  });
+
+  it('requires host message.text capability before preparing automatic continuation', async () => {
+    bridge.capabilities.mockReturnValue({ message: { image: {} } });
+    bridge.attach.mockResolvedValue(
+      attached({ id: 'continuation-1', state: 'READY', mode: 'WIDGET_RETURN' }),
+    );
+    const fixture = await mount();
+    expect(bridge.attach).toHaveBeenCalledOnce();
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+    expect(fixture.componentInstance.manualText()).toContain(presentation.taskId);
+  });
+
+  it('does not attach after destruction while the host handshake is pending', async () => {
+    let connect: (() => void) | undefined;
+    bridge.connect.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          connect = resolve;
+        }),
+    );
+    const fixture = await mount();
+    fixture.destroy();
+    connect?.();
+    await vi.advanceTimersByTimeAsync(0);
     expect(bridge.attach).not.toHaveBeenCalled();
   });
 });

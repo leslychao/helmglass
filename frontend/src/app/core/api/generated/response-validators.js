@@ -7913,13 +7913,13 @@ function validate100(data, { instancePath = "", parentData, parentDataProperty, 
   if (errors === 0) {
     if (data && typeof data == "object" && !Array.isArray(data)) {
       let missing0;
-      if (data.controlEpoch === void 0 && (missing0 = "controlEpoch") || data.controllerInstanceId === void 0 && (missing0 = "controllerInstanceId")) {
+      if (data.controlEpoch === void 0 && (missing0 = "controlEpoch") || data.expiresAt === void 0 && (missing0 = "expiresAt")) {
         validate100.errors = [{ instancePath, schemaPath: "#/required", keyword: "required", params: { missingProperty: missing0 }, message: "must have required property '" + missing0 + "'" }];
         return false;
       } else {
         const _errs1 = errors;
         for (const key0 in data) {
-          if (!(key0 === "controlEpoch" || key0 === "controllerInstanceId")) {
+          if (!(key0 === "controlEpoch" || key0 === "expiresAt")) {
             validate100.errors = [{ instancePath, schemaPath: "#/additionalProperties", keyword: "additionalProperties", params: { additionalProperty: key0 }, message: "must NOT have additional properties" }];
             return false;
             break;
@@ -7938,18 +7938,18 @@ function validate100(data, { instancePath = "", parentData, parentDataProperty, 
             var valid0 = true;
           }
           if (valid0) {
-            if (data.controllerInstanceId !== void 0) {
-              let data1 = data.controllerInstanceId;
+            if (data.expiresAt !== void 0) {
+              let data1 = data.expiresAt;
               const _errs4 = errors;
               if (errors === _errs4) {
                 if (errors === _errs4) {
                   if (typeof data1 === "string") {
-                    if (!formats0.test(data1)) {
-                      validate100.errors = [{ instancePath: instancePath + "/controllerInstanceId", schemaPath: "#/properties/controllerInstanceId/format", keyword: "format", params: { format: "uuid" }, message: 'must match format "uuid"' }];
+                    if (!formats2.validate(data1)) {
+                      validate100.errors = [{ instancePath: instancePath + "/expiresAt", schemaPath: "#/properties/expiresAt/format", keyword: "format", params: { format: "date-time" }, message: 'must match format "date-time"' }];
                       return false;
                     }
                   } else {
-                    validate100.errors = [{ instancePath: instancePath + "/controllerInstanceId", schemaPath: "#/properties/controllerInstanceId/type", keyword: "type", params: { type: "string" }, message: "must be string" }];
+                    validate100.errors = [{ instancePath: instancePath + "/expiresAt", schemaPath: "#/properties/expiresAt/type", keyword: "type", params: { type: "string" }, message: "must be string" }];
                     return false;
                   }
                 }

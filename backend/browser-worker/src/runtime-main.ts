@@ -22,7 +22,9 @@ const supervisor: SessionSupervisor<BrowserSession> = new SessionSupervisor(boot
 }));
 const media: MediaSession = new MediaSession(() => supervisor.session,
   (viewerId, payload) => send({ schemaVersion: 1, type: 'viewerMessage', requestId: randomUUID(), viewerId, payload }),
-  (viewerId, code) => send({ schemaVersion: 1, type: 'viewerClosed', requestId: randomUUID(), viewerId, code }));
+  (binding, code) => send({ schemaVersion: 1, type: 'viewerEnded', requestId: randomUUID(), ...binding, code }),
+  send,
+  { onFailure: () => send({ type: 'fatal', code: 'FENCING_FAILED' }) });
 let capabilities: Record<string, unknown> = { encoder: null, captureState: 'STREAM_UNAVAILABLE' };
 void media.capabilities.then((value) => { capabilities = { ...value, captureState: value.encoder ? 'IDLE' : 'STREAM_UNAVAILABLE' }; })
   .catch(() => { capabilities = { encoder: null, captureState: 'STREAM_UNAVAILABLE' }; });
@@ -46,6 +48,9 @@ async function reportClosed(browserSessionId: string, allocationEpoch: number, r
 }
 setInterval(inventory, 1000).unref();
 process.on('message', (raw: unknown) => {
+  if (typeof raw === 'object' && raw !== null && 'type' in raw && raw.type === 'signalingConnected') {
+    media.replayClosures(); return;
+  }
   if (typeof raw === 'object' && raw !== null && 'type' in raw && raw.type === 'snapshotRequest' && 'requestId' in raw) {
     void supervisor.snapshot().then((snapshot) => send({ type: 'runtimeSnapshot', requestId: raw.requestId, inventory: snapshot, draining, capabilities }))
       .catch(() => send({ type: 'fatal', code: 'FENCING_FAILED' })); return;
@@ -64,8 +69,13 @@ process.on('message', (raw: unknown) => {
   const signaling = signalingMessageSchema.safeParse(raw);
   if (signaling.success) {
     const message = signaling.data;
-    void media.accept(message).then(() => send({ schemaVersion: 1, type: message.type + 'Ack', requestId: message.requestId, viewerId: message.viewerId }))
-      .catch((error: unknown) => send({ schemaVersion: 1, type: 'viewerClosed', requestId: message.requestId, viewerId: message.viewerId, code: safeCode(error) }));
+    void media.accept(message).then(() => {
+      if (message.type !== 'viewClose' && message.type !== 'viewerClosedAck') {
+        send({ schemaVersion: 1, type: message.type + 'Ack', requestId: message.requestId, viewerId: message.viewerId });
+      }
+    })
+      .catch((error: unknown) => send({ schemaVersion: 1, type: 'viewerMessage', requestId: message.requestId,
+        viewerId: message.viewerId, payload: { type: 'error', details: safeCode(error) } }));
     return;
   }
   const decoded = apiMessageSchema.safeParse(raw);

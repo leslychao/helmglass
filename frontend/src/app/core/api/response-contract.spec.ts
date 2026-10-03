@@ -2,6 +2,22 @@ import { describe, expect, it } from 'vitest';
 import { validateResponse } from './response-contract';
 
 describe('canonical API response validation', () => {
+  it('accepts the control renewal receipt instead of expecting its request fields', async () => {
+    const path = '/browser-sessions/58781913-ec66-4f0e-a093-15d191709ea6/control/renew';
+    await expect(
+      validateResponse('POST', path, {
+        controlEpoch: 2,
+        expiresAt: '2026-10-03T11:00:15Z',
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      validateResponse('POST', path, {
+        controlEpoch: 2,
+        controllerInstanceId: '2f873b32-4fb4-43b1-8201-3b62babacb37',
+      }),
+    ).rejects.toMatchObject({ code: 'API_RESPONSE_INVALID' });
+  });
+
   it('matches a static summary endpoint before the task-id route', async () => {
     await expect(
       validateResponse('GET', '/tasks/summary', {

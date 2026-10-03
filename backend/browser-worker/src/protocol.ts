@@ -107,8 +107,10 @@ const profileTransfer = { browserSessionId: id, allocationEpoch: epoch, privacyE
   transferId: id, transferToken: z.string().min(32).max(512), dek: z.string().regex(/^[A-Za-z0-9+/]{43}=$/),
   binding: profileBindingSchema,
 };
-const viewerBinding = { viewerId: id, browserSessionId: id, allocationEpoch: epoch,
-  controlEpoch: epoch, pageEpoch: epoch, privacyEpoch: epoch, mediaGeneration: epoch, viewGeneration: epoch };
+const viewerFence = { workerBootId: id, browserSessionId: id, allocationEpoch: epoch,
+  viewerId: id, viewGeneration: epoch };
+const viewerBinding = { ...viewerFence,
+  controlEpoch: epoch, pageEpoch: epoch, privacyEpoch: epoch, mediaGeneration: epoch };
 export const iceServerSchema = z.strictObject({
   urls: z.array(z.string().regex(/^turns?:[^\s]+$/).max(2048)).min(1).max(4),
   username: z.string().min(1).max(256), credential: z.string().min(1).max(512),
@@ -120,12 +122,22 @@ export const signalingMessageSchema = z.discriminatedUnion('type', [
     producerIceServer: iceServerSchema,
     mediaProxy: z.strictObject({ url: z.literal('http://egress-proxy:3128'), username: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), password: z.string().min(32).max(256) }) }),
   z.strictObject({ ...base, type: z.literal('viewRenew'), ...viewerBinding, leaseExpiresAt: timestamp }),
-  z.strictObject({ ...base, type: z.literal('viewClose'), viewerId: id }),
+  z.strictObject({ ...base, type: z.literal('viewClose'), ...viewerFence }),
+  z.strictObject({ ...base, type: z.literal('viewerClosedAck'), ...viewerFence }),
   z.strictObject({ ...base, type: z.literal('signal'), viewerId: id, payload: z.record(z.string(), z.json()) }),
 ]);
 export type SignalingMessage = z.infer<typeof signalingMessageSchema>;
 export type ViewOpen = Extract<SignalingMessage, { type: 'viewOpen' }>;
 export type ViewRenew = Extract<SignalingMessage, { type: 'viewRenew' }>;
+export type ViewClose = Extract<SignalingMessage, { type: 'viewClose' }>;
+export type ViewerClosedAck = Extract<SignalingMessage, { type: 'viewerClosedAck' }>;
+export type ViewerFence = Pick<ViewClose, keyof typeof viewerFence>;
+export const viewerClosedSchema = z.strictObject({ ...base, type: z.literal('viewerClosed'),
+  ...viewerFence, code: z.literal('VIEW_CLOSED') });
+export const viewerEndedSchema = z.strictObject({ ...base, type: z.literal('viewerEnded'),
+  ...viewerFence, code: z.string().regex(/^[A-Z_]+$/).max(128) });
+export type ViewerClosed = z.infer<typeof viewerClosedSchema>;
+export type ViewerEnded = z.infer<typeof viewerEndedSchema>;
 export const apiMessageSchema = z.discriminatedUnion('type', [
   z.strictObject({ ...base, type: z.literal('registered'), workerId: id, bootId: id }),
   z.strictObject({ ...base, type: z.literal('assign'), assignment: assignmentSchema }),

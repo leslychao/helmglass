@@ -1,8 +1,15 @@
 package com.helmglass.realtime.application;
 
 import com.helmglass.api.JsonSupport;
+import com.helmglass.api.DomainException;
+import com.helmglass.api.MutationContext;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
+import com.helmglass.operation.domain.MutationReceipt;
+import com.helmglass.operation.infrastructure.repository.OperationRepository;
+import com.helmglass.realtime.domain.ChatPresentation;
+import com.helmglass.realtime.domain.HostConversationContext;
+import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
 import com.helmglass.realtime.infrastructure.repository.OutboxRepository;
 import java.io.IOException;
 import java.time.Instant;
@@ -10,13 +17,18 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataAccessException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
@@ -51,6 +63,8 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
   private final OutboxRepository outbox;
   private final IdentityRepository identities;
   private final JsonSupport json;
+  private final ChatPresentationRepository presentations;
+  private final OperationRepository operations;
 
   private record Viewer(
       AuthenticatedActor actor,
@@ -64,10 +78,158 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
   }
 
   public RealtimeDeliveryService(
-      OutboxRepository outbox, IdentityRepository identities, JsonSupport json) {
+      OutboxRepository outbox, IdentityRepository identities, JsonSupport json,
+      ChatPresentationRepository presentations, OperationRepository operations) {
     this.outbox = outbox;
     this.identities = identities;
     this.json = json;
+    this.presentations = presentations;
+    this.operations = operations;
+  }
+
+  public record Publication(MutationReceipt receipt, ChatPresentation slot, boolean superseded) {}
+
+  public record Attachment(ChatPresentation slot, String state, String reason) {}
+
+  /** Reads the current reference without publishing, extending a lease, or changing a revision. */
+  public Optional<ChatPresentation> currentPresentation(
+      AuthenticatedActor actor, HostConversationContext host) {
+    if (!supportedHost(actor, host)) {
+      return Optional.empty();
+    }
+    return presentations.find(actor, host.storageKey()).filter(slot -> slot.retiredAt() == null);
+  }
+
+  @Transactional
+  public Publication publishPresentation(AuthenticatedActor actor, UUID taskId, UUID scope,
+      long expectedRevision, MutationContext context, HostConversationContext host,
+      Instant authorizationExpiresAt) {
+    actor.requireScope("tasks:read");
+    actor.requireScope("browser:view");
+    identities.lockActive(actor.userId());
+    Map<String, Object> input = new HashMap<>();
+    input.put("taskId", taskId);
+    input.put("viewScopeId", scope);
+    input.put("expectedPresentationRevision", expectedRevision);
+    input.put("hostCorrelation", supportedHost(actor, host) ? host.storageKey() : null);
+    String operation = "tasks.view:" + taskId;
+    Optional<MutationReceipt> replay = operations.replay(actor, operation, context, input);
+    if (!supportedHost(actor, host)) {
+      MutationReceipt receipt = replay.orElseGet(() -> operations.save(
+          actor, operation, context, input, "task", taskId, 0, true));
+      return new Publication(receipt, null, false);
+    }
+    requireAuthorizationExpiry(authorizationExpiresAt);
+    long grantVersion = identities.activeGrantVersion(actor);
+    Optional<ChatPresentation> current = presentations.lock(actor, host.storageKey());
+    if (replay.isPresent()) {
+      MutationReceipt receipt = replay.get();
+      ChatPresentation slot = current.orElse(null);
+      boolean superseded = slot == null || slot.retiredAt() != null
+          || !slot.id().equals(receipt.resource().id())
+          || !slot.current(taskId, receipt.resource().version());
+      return new Publication(receipt, slot, superseded);
+    }
+    ChatPresentation slot;
+    if (current.isEmpty()) {
+      if (scope != null || expectedRevision != 0) {
+        throw stalePresentation();
+      }
+      slot = presentations.create(actor, host.storageKey(), taskId, grantVersion);
+    } else {
+      ChatPresentation previous = current.get();
+      if (previous.retiredAt() != null || !previous.id().equals(scope)
+          || previous.presentationRevision() != expectedRevision) {
+        throw stalePresentation();
+      }
+      presentations.retireViewer(previous);
+      slot = presentations.publish(previous, actor, taskId, grantVersion);
+    }
+    MutationReceipt receipt = operations.save(actor, operation, context, input,
+        "chatViewSlot", slot.id(), slot.presentationRevision(), true);
+    return new Publication(receipt, slot, false);
+  }
+
+  @Transactional
+  public Attachment attachPresentation(AuthenticatedActor actor, UUID taskId, UUID scope,
+      long revision, UUID viewer, HostConversationContext host, Instant authorizationExpiresAt) {
+    actor.requireScope("tasks:read");
+    actor.requireScope("browser:view");
+    if (!supportedHost(actor, host)) {
+      return new Attachment(null, "LINK_ONLY", "HOST_CORRELATION_NOT_VERIFIED");
+    }
+    identities.lockActive(actor.userId());
+    requireAuthorizationExpiry(authorizationExpiresAt);
+    long grantVersion = identities.activeGrantVersion(actor);
+    ChatPresentation slot = presentations.lock(actor, host.storageKey()).orElse(null);
+    if (slot == null || !slot.id().equals(scope)) {
+      return new Attachment(null, "LINK_ONLY", "PRESENTATION_NOT_FOUND");
+    }
+    if (!slot.current(taskId, revision) || viewer == null
+        || presentations.retiredInstance(scope, viewer)) {
+      return new Attachment(slot, "SUPERSEDED", "PRESENTATION_SUPERSEDED");
+    }
+    Instant now = Instant.now();
+    if (slot.activeViewerInstanceId() != null) {
+      boolean sameGrant = actor.grantId().equals(slot.grantId())
+          && grantVersion == slot.grantVersion() && actor.accessEpoch() == slot.accessEpoch();
+      if (slot.viewerLeaseActive(now) && sameGrant) {
+        if (!slot.activeViewerInstanceId().equals(viewer)) {
+          throw DomainException.conflict("VIEW_ALREADY_ATTACHED", "This presentation is already open");
+        }
+        return new Attachment(slot, "ACTIVE", null);
+      }
+      presentations.retireViewer(slot);
+      if (slot.activeViewerInstanceId().equals(viewer)) {
+        return new Attachment(slot, "SUPERSEDED", "VIEWER_INSTANCE_RETIRED");
+      }
+      slot = presentations.lock(actor, host.storageKey()).orElseThrow();
+    }
+    Instant maximum = now.plusSeconds(300);
+    Instant expiresAt = authorizationExpiresAt.isBefore(maximum)
+        ? authorizationExpiresAt : maximum;
+    Instant leaseExpiresAt = now.plusSeconds(45);
+    if (expiresAt.isBefore(leaseExpiresAt)) {
+      leaseExpiresAt = expiresAt;
+    }
+    return new Attachment(presentations.admit(slot, actor, viewer, grantVersion,
+        expiresAt, leaseExpiresAt), "ACTIVE", null);
+  }
+
+  /** Shared authority for widget delivery and continuation; callers cannot assert a verified scope. */
+  public ChatPresentation requireCurrentViewer(AuthenticatedActor actor,
+      HostConversationContext host, UUID scope, long revision, UUID viewer) {
+    long grantVersion = identities.activeGrantVersion(actor);
+    ChatPresentation slot = currentPresentation(actor, host).orElseThrow(RealtimeDeliveryService::stalePresentation);
+    if (!slot.id().equals(scope) || slot.presentationRevision() != revision
+        || !Objects.equals(slot.activeViewerInstanceId(), viewer)
+        || !slot.viewerLeaseActive(Instant.now()) || !actor.grantId().equals(slot.grantId())
+        || grantVersion != slot.grantVersion() || actor.accessEpoch() != slot.accessEpoch()) {
+      throw stalePresentation();
+    }
+    return slot;
+  }
+
+  @Scheduled(fixedDelay = 1000)
+  @Transactional
+  public void expirePresentations() {
+    for (ChatPresentation slot : presentations.expiredViewers()) {
+      presentations.retireViewer(slot);
+    }
+  }
+
+  private static boolean supportedHost(AuthenticatedActor actor, HostConversationContext host) {
+    return actor.mcp() && host != null && host.supported();
+  }
+
+  private static void requireAuthorizationExpiry(Instant expiry) {
+    if (expiry == null || !expiry.isAfter(Instant.now())) {
+      throw new DomainException(401, "AUTHORIZATION_EXPIRED", "MCP authorization has expired");
+    }
+  }
+
+  private static DomainException stalePresentation() {
+    return DomainException.conflict("STALE_PRESENTATION", "The current presentation has changed");
   }
 
   @Override

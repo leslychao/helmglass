@@ -5,6 +5,7 @@ import type { z } from 'zod';
 import { appOnlyTools, readOnlyTools, scopesForTool, supportedScopes, toolSchemas, widgetResourceUri, widgetTools } from './catalog.js';
 import type { ToolName } from './catalog.js';
 import type { OwnerClient } from './owner-client.js';
+import { hostConversationContext } from './host-context.js';
 
 export function createAdapter(owner: Pick<OwnerClient, 'call'>, widgetHtml: string, publicOrigin: string) {
   const address = new URL(publicOrigin);
@@ -38,13 +39,14 @@ export function createAdapter(owner: Pick<OwnerClient, 'call'>, widgetHtml: stri
           ...(widgetTools.has(name) ? { 'openai/outputTemplate': widgetResourceUri } : {}),
           ...(appOnlyTools.has(name) ? { 'openai/widgetAccessible': true } : {}),
         },
-      }, async (args: unknown): Promise<CallToolResult> => {
+      }, async (args: unknown, requestContext): Promise<CallToolResult> => {
         if (!bearer) return { isError: true, content: [{ type: 'text', text: 'UNAUTHENTICATED' }] };
         if (!scopesForTool(name).every((scope) => context.authInfo?.scopes.includes(scope))) {
           return { isError: true, content: [{ type: 'text', text: 'INSUFFICIENT_SCOPE' }] };
         }
         const requestId = randomUUID();
-        try { return await owner.call(name, args, bearer, requestId); }
+        const hostContext = hostConversationContext(requestContext.mcpReq._meta);
+        try { return await owner.call(name, args, bearer, requestId, hostContext); }
         catch { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'OWNER_RESPONSE_UNKNOWN', requestId,
           recovery: 'Read the original task, command or idempotency receipt. This transport failure does not prove rejection and does not authorize a repeated external action.' }) }] }; }
       });

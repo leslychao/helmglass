@@ -4,6 +4,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -60,26 +61,32 @@ static void error(const char *request_id, const char *code) {
   emit(builder);
 }
 
+static void stop_pipeline(GstElement *element, GstClockTime timeout) {
+  GstStateChangeReturn requested = gst_element_set_state(element, GST_STATE_NULL);
+  GstState state = GST_STATE_VOID_PENDING;
+  GstStateChangeReturn completed = gst_element_get_state(element, &state, NULL, timeout);
+  if (requested == GST_STATE_CHANGE_FAILURE || completed == GST_STATE_CHANGE_FAILURE || state != GST_STATE_NULL) {
+    error(NULL, "TEARDOWN_UNCONFIRMED");
+    /* Do not acknowledge an unconfirmed peer or allow a later retry to forget it. */
+    _exit(EXIT_FAILURE);
+  }
+}
+
 static void destroy_consumer(gpointer raw) {
   Consumer *consumer = raw;
   if (consumer->pipeline) {
-    gst_element_set_state(consumer->pipeline, GST_STATE_NULL);
-    gst_element_get_state(consumer->pipeline, NULL, NULL, GST_SECOND);
+    stop_pipeline(consumer->pipeline, GST_SECOND);
     gst_object_unref(consumer->pipeline);
   }
   g_free(consumer);
 }
 
-static gboolean teardown(void) {
+static void teardown(void) {
   GstElement *old = pipeline;
   pipeline = NULL;
   sink = NULL;
-  gboolean stopped = TRUE;
   if (old) {
-    gst_element_set_state(old, GST_STATE_NULL);
-    GstState state = GST_STATE_VOID_PENDING;
-    GstStateChangeReturn result = gst_element_get_state(old, &state, NULL, 3 * GST_SECOND);
-    stopped = result != GST_STATE_CHANGE_FAILURE && state == GST_STATE_NULL;
+    stop_pipeline(old, GST_SECOND);
     gst_object_unref(old);
   }
   g_mutex_lock(&mutex);
@@ -88,7 +95,6 @@ static gboolean teardown(void) {
   last_raw_capture = 0;
   g_mutex_unlock(&mutex);
   g_hash_table_destroy(old_consumers);
-  return stopped;
 }
 
 static gboolean smoke_encoder(const char *factory) {
@@ -156,7 +162,7 @@ static void consumer_created(GstElement *element, const gchar *peer_id, GstEleme
   Consumer *consumer = g_hash_table_lookup(consumers, peer_id);
   if (!consumer) {
     g_mutex_unlock(&mutex);
-    gst_element_set_state(peer_pipeline, GST_STATE_NULL);
+    stop_pipeline(peer_pipeline, GST_SECOND);
     return;
   }
   if (consumer->pipeline) gst_object_unref(consumer->pipeline);
@@ -316,7 +322,7 @@ static void handle(JsonObject *request) {
     json_builder_end_array(builder); json_builder_end_object(builder); emit(builder); return;
   }
   if (!strcmp(type, "stop")) {
-    if (!teardown()) { error(request_id, "TEARDOWN_UNCONFIRMED"); return; }
+    teardown();
     JsonBuilder *builder = message("teardownAck", request_id); json_builder_end_object(builder); emit(builder); return;
   }
   if (!strcmp(type, "lease")) {

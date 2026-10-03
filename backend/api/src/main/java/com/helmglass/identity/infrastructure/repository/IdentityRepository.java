@@ -2,6 +2,7 @@ package com.helmglass.identity.infrastructure.repository;
 
 import com.helmglass.api.DomainException;
 import com.helmglass.api.JsonSupport;
+import com.helmglass.identity.domain.AuthenticatedActor;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -194,6 +195,23 @@ public class IdentityRepository {
                 .query(Long.class)
                 .single()
             == 1;
+  }
+
+  /** Returns the current version only for the exact admitted, still-authorized MCP grant. */
+  public long activeGrantVersion(AuthenticatedActor actor) {
+    if (!actor.mcp() || actor.grantId() == null) {
+      throw new DomainException(403, "MCP_GRANT_REQUIRED", "An active MCP grant is required");
+    }
+    return jdbc.sql("""
+        SELECT g.version FROM client_grants g JOIN application_users u ON u.id=g.user_id
+        WHERE g.id=:grant AND g.user_id=:user AND g.client_id=:client AND g.status='ACTIVE'
+          AND u.state='ACTIVE' AND u.access_epoch=:epoch
+          AND g.scopes @> '["tasks:read","browser:view"]'::jsonb
+        """)
+        .param("grant", actor.grantId()).param("user", actor.userId())
+        .param("client", actor.clientId()).param("epoch", actor.accessEpoch())
+        .query(Long.class).optional()
+        .orElseThrow(() -> new DomainException(403, "GRANT_REVOKED", "Client access has changed"));
   }
 
   public void revokeLogin(UUID id) {

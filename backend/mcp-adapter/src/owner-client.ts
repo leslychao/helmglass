@@ -2,6 +2,7 @@ import { request, Agent } from 'node:https';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { ToolName } from './catalog.js';
+import type { HostConversationContext } from './host-context.js';
 
 const safeEnvelope = z.object({
   content: z.array(z.discriminatedUnion('type', [
@@ -21,9 +22,10 @@ export class OwnerClient {
     this.agent = new Agent({ cert, key, ca, rejectUnauthorized: true, keepAlive: true, maxSockets: 32, maxFreeSockets: 4 });
   }
 
-  async call(name: ToolName, args: unknown, bearer: string, requestId: string): Promise<CallToolResult> {
+  async call(name: ToolName, args: unknown, bearer: string, requestId: string,
+    hostContext?: HostConversationContext): Promise<CallToolResult> {
     const url = new URL(`${this.endpoint.pathname.replace(/\/$/, '')}/tools/${encodeURIComponent(name)}`, this.endpoint);
-    const body = Buffer.from(JSON.stringify({ arguments: args, requestId }));
+    const body = Buffer.from(JSON.stringify({ arguments: args, requestId, hostContext }));
     return new Promise<CallToolResult>((resolve, reject) => {
       const req = request(url, { method: 'POST', agent: this.agent, timeout: 25_000,
         headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'content-length': body.byteLength, 'x-request-id': requestId } }, (res) => {

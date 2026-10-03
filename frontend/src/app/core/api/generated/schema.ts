@@ -1480,6 +1480,11 @@ export interface components {
             /** Format: uuid */
             controllerInstanceId: string;
         };
+        ControlRenewResponse: {
+            controlEpoch: number;
+            /** Format: date-time */
+            expiresAt: string;
+        };
         ViewRequest: {
             taskId?: string | null;
             expectedVersion: number;
@@ -3126,7 +3131,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ControlRenew"];
+                    "application/json": components["schemas"]["ControlRenewResponse"];
                 };
             };
         };

@@ -4,6 +4,7 @@ import test from 'node:test';
 import { z } from 'zod';
 import { authenticatedAdapter, createAdapter } from '../src/server.js';
 import { toolSchemas, widgetResourceUri } from '../src/catalog.js';
+import type { HostConversationContext } from '../src/host-context.js';
 
 const publicOrigin = 'https://helm.example.test';
 const widgetHtml = '<html><script type="application/json" id="helm-runtime-config">{"publicOrigin":"__HELM_PUBLIC_ORIGIN__"}</script></html>';
@@ -151,5 +152,68 @@ test('modern stateless envelope preserves scopes and rejects a write with read-o
     } }, { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'tasks.stop' }));
     assert.match(await denied.text(), /INSUFFICIENT_SCOPE/);
     assert.equal(calls, 1);
+  } finally { await handler.close(); }
+});
+
+test('verified host metadata stays separate from tool arguments in model and app calls', async () => {
+  const received: (HostConversationContext | undefined)[] = [];
+  const handler = createAdapter({ call: async (_name, _args, _token, _requestId, hostContext) => {
+    received.push(hostContext);
+    return { content: [{ type: 'text', text: 'accepted' }] };
+  } }, widgetHtml, publicOrigin);
+  const app = authenticatedAdapter(handler, async token => ({ token, clientId: 'fixture-client',
+    scopes: ['tasks:read', 'browser:view'] }), publicOrigin, `${publicOrigin}/idp`);
+  const taskId = randomUUID();
+  const metadata = { 'openai/session': 'fixture-conversation-a', unrelated: 'must-not-be-delegated' };
+  try {
+    for (const [id, name, args, meta] of [
+      [40, 'tasks.get', { taskId }, metadata],
+      [41, 'browser.attach_view', { taskId, viewScopeId: randomUUID(), presentationRevision: 0,
+        viewerInstanceId: randomUUID(), observedSessionId: null }, metadata],
+      [42, 'tasks.get', { taskId }, { 'openai/session': 'fixture-conversation-b' }],
+    ] as const) {
+      const response = await app.fetch(request({ jsonrpc: '2.0', id, method: 'tools/call',
+        params: { name, arguments: args, _meta: meta } }));
+      assert.match(await response.text(), /accepted/);
+    }
+    assert.deepEqual(received[0], received[1], 'model and app calls bind to the same conversation');
+    assert.notEqual(received[0]?.conversationKey, received[2]?.conversationKey);
+    assert.deepEqual(Object.keys(received[0] ?? {}).sort(), ['contractVersion', 'conversationKey', 'provider']);
+    assert.equal(received[0]?.provider, 'CHATGPT_WEB');
+    assert.equal(received[0]?.contractVersion, '2026-10-03');
+    assert.match(received[0]?.conversationKey ?? '', /^[a-f0-9]{64}$/);
+    assert.ok(!JSON.stringify(received).includes('fixture-conversation'));
+    assert.ok(!JSON.stringify(received).includes('must-not-be-delegated'));
+
+    const forged = await app.fetch(request({ jsonrpc: '2.0', id: 43, method: 'tools/call', params: {
+      name: 'tasks.get', arguments: { taskId, hostContext: received[0] },
+    } }));
+    assert.ok(!JSON.stringify(await resultEnvelope(forged)).includes('accepted'));
+    assert.equal(received.length, 3, 'model arguments cannot inject a host context');
+  } finally { await handler.close(); }
+});
+
+test('absent, malformed and oversized host metadata does not prevent ordinary authorized reads', async () => {
+  const received: (HostConversationContext | undefined)[] = [];
+  const handler = createAdapter({ call: async (_name, _args, _token, _requestId, hostContext) => {
+    received.push(hostContext);
+    return { content: [{ type: 'text', text: 'accepted' }] };
+  } }, widgetHtml, publicOrigin);
+  const app = authenticatedAdapter(handler, async token => ({ token, clientId: 'fixture-client',
+    scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
+  const envelope = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+    'io.modelcontextprotocol/clientCapabilities': {} };
+  try {
+    for (const [index, value] of [undefined, null, '', 123, {}, [], 'a'.repeat(4097), 'é'.repeat(2049),
+      'fixture-modern-conversation'].entries()) {
+      const response = await app.fetch(request({ jsonrpc: '2.0', id: index + 50, method: 'tools/call',
+        params: { name: 'tasks.get', arguments: { taskId: randomUUID() },
+          _meta: { ...envelope, 'openai/session': value } } },
+      { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/call', 'mcp-name': 'tasks.get' }));
+      assert.match(await response.text(), /accepted/);
+    }
+    assert.equal(received.length, 9);
+    assert.ok(received.slice(0, 8).every(context => context === undefined));
+    assert.match(received[8]?.conversationKey ?? '', /^[a-f0-9]{64}$/);
   } finally { await handler.close(); }
 });

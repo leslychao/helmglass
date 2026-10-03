@@ -859,7 +859,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ControlRenew"
+                  "$ref": "#/components/schemas/ControlRenewResponse"
                 }
               }
             }
@@ -4758,6 +4758,23 @@
         "required": [
           "controlEpoch",
           "controllerInstanceId"
+        ]
+      },
+      "ControlRenewResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "controlEpoch": {
+            "type": "integer"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "controlEpoch",
+          "expiresAt"
         ]
       },
       "ViewRequest": {
