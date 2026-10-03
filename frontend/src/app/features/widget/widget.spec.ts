@@ -329,6 +329,85 @@ describe('widget presentation lifecycle', () => {
     expect(EventSocket.instances).toHaveLength(2);
   });
 
+  it('renews an event-only view at its active authorization deadline despite later snapshots', async () => {
+    const initial = attached(null, true);
+    if (!initial._meta) throw new Error('Expected event ticket');
+    initial._meta.eventTicket.viewerAuthorizationExpiresAt = new Date(Date.now() + 5000).toISOString();
+    bridge.attach.mockResolvedValue(initial);
+    await mount();
+    const original = socket();
+    original.open();
+    await vi.advanceTimersByTimeAsync(4000);
+    const fresh = attached(null, true);
+    bridge.attach.mockResolvedValue(fresh);
+    original.receive('invalidate');
+    await vi.advanceTimersByTimeAsync(999);
+    expect(bridge.attach).toHaveBeenCalledTimes(3);
+    expect(EventSocket.instances).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bridge.attach).toHaveBeenCalledTimes(4);
+    expect(original.readyState).toBe(3);
+    expect(EventSocket.instances).toHaveLength(2);
+    socket().open();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(bridge.attach).toHaveBeenCalledTimes(5);
+  });
+
+  it('replaces the event channel when the server renews the viewer generation', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
+    await mount();
+    const original = socket();
+    original.open();
+    await vi.advanceTimersByTimeAsync(0);
+    const renewed = attached(null, true);
+    if (!renewed._meta) throw new Error('Expected event ticket');
+    renewed._meta.eventTicket.viewGeneration = 2;
+    bridge.attach.mockResolvedValue(renewed);
+    original.receive('invalidate');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(original.readyState).toBe(3);
+    expect(EventSocket.instances).toHaveLength(2);
+  });
+
+  it.each(['AUTHORIZATION_EXPIRED', 'TICKET_EXPIRED', 'TICKET_TIMEOUT'])(
+    'requests a fresh host authorization after %s without requiring a new login',
+    async (reason) => {
+      bridge.attach.mockResolvedValue(attached(null, true));
+      const fixture = await mount();
+      socket().open();
+      await vi.advanceTimersByTimeAsync(0);
+      socket().fail(4401, reason);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(bridge.attach).toHaveBeenCalledTimes(3);
+      expect(EventSocket.instances).toHaveLength(2);
+      expect(fixture.componentInstance.accessDenied()).toBe(false);
+
+      bridge.attach.mockResolvedValue({
+        isError: true,
+        content: [{ type: 'text', text: JSON.stringify({ status: 401 }) }],
+      });
+      socket().open();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fixture.componentInstance.accessDenied()).toBe(true);
+    },
+  );
+
+  it('recovers an expired lease without reviving a superseded presentation', async () => {
+    bridge.attach.mockResolvedValue(attached(null, true));
+    const fixture = await mount();
+    socket().open();
+    await vi.advanceTimersByTimeAsync(0);
+    socket().fail(4503, 'VIEW_LEASE_EXPIRED');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(bridge.attach).toHaveBeenCalledTimes(3);
+    expect(fixture.componentInstance.inactive()).toBe(false);
+    socket().fail(4412, 'PRESENTATION_SUPERSEDED');
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(bridge.attach).toHaveBeenCalledTimes(3);
+    expect(fixture.componentInstance.inactive()).toBe(true);
+  });
+
   it('shows attention from the durable deadline without polling or sending a message', async () => {
     bridge.attach.mockResolvedValue(attached(delivered(30), true));
     const fixture = await mount();

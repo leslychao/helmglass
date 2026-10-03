@@ -315,6 +315,10 @@ public class TaskContinuationService {
       MutationContext context) {
     actor.requireScope("tasks:write");
     identities.lockActive(actor.userId());
+    if (!actor.mcp() || actor.grantId() == null
+        || !identities.authorizationActive(actor.userId(), null, actor.grantId(), actor.accessEpoch())) {
+      throw new DomainException(403, "MCP_GRANT_REQUIRED", "Continuing agent work requires an active MCP grant");
+    }
     TaskBinding task = ownedTask(actor, taskId);
     Continuation value = ownedContinuation(actor, taskId, input.continuationId());
     if (value.mode().equals("WIDGET_RETURN")) requireDestination(actor, host, value);

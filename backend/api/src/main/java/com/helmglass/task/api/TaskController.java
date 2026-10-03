@@ -5,8 +5,6 @@ import com.helmglass.api.PageQuery;
 import com.helmglass.api.PageResult;
 import com.helmglass.browser.api.BrowserContracts;
 import com.helmglass.browser.application.BrowserOpenService;
-import com.helmglass.continuation.api.ContinuationContracts;
-import com.helmglass.continuation.application.TaskContinuationService;
 import com.helmglass.identity.api.Actors;
 import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.task.application.ReconciliationService;
@@ -33,17 +31,14 @@ import org.springframework.web.bind.annotation.RestController;
 public class TaskController {
   private final TaskLifecycleService tasks;
   private final ReconciliationService reconciliation;
-  private final TaskContinuationService continuations;
   private final BrowserOpenService browsers;
 
   public TaskController(
       TaskLifecycleService tasks,
       ReconciliationService reconciliation,
-      TaskContinuationService continuations,
       BrowserOpenService browsers) {
     this.tasks = tasks;
     this.reconciliation = reconciliation;
-    this.continuations = continuations;
     this.browsers = browsers;
   }
 
@@ -123,15 +118,6 @@ public class TaskController {
       HttpServletRequest request) {
     return reconciliation.reconcile(
         Actors.current(request), id, input, MutationContext.from(request));
-  }
-
-  @PostMapping("/{id}/continue")
-  MutationReceipt continueTask(
-      @PathVariable UUID id,
-      @Valid @RequestBody ContinuationContracts.Claim input,
-      HttpServletRequest request) {
-    return continuations.claim(
-        Actors.current(request), null, id, input, MutationContext.from(request));
   }
 
   @PostMapping("/{id}/completion")
