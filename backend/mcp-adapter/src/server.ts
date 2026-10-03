@@ -34,8 +34,9 @@ export function createAdapter(owner: Pick<OwnerClient, 'call'>, widgetHtml: stri
         annotations: { readOnlyHint: readOnlyTools.has(name), destructiveHint: !readOnlyTools.has(name), openWorldHint: name.startsWith('browser.') || name.startsWith('media.') },
         _meta: {
           securitySchemes: [{ type: 'oauth2', scopes: scopesForTool(name) }],
-          ui: { ...(widgetTools.has(name) ? { resourceUri: widgetResourceUri } : {}), visibility: appOnlyTools.has(name) ? ['app'] : ['model', 'app'] },
-          ...(widgetTools.has(name) ? { 'openai/outputTemplate': widgetResourceUri, 'openai/widgetAccessible': true } : {}),
+          ui: { ...(widgetTools.has(name) ? { resourceUri: widgetResourceUri } : {}), visibility: appOnlyTools.has(name) ? ['app'] : ['model'] },
+          ...(widgetTools.has(name) ? { 'openai/outputTemplate': widgetResourceUri } : {}),
+          ...(appOnlyTools.has(name) ? { 'openai/widgetAccessible': true } : {}),
         },
       }, async (args: unknown): Promise<CallToolResult> => {
         if (!bearer) return { isError: true, content: [{ type: 'text', text: 'UNAUTHENTICATED' }] };

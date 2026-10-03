@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { z } from 'zod';
 import { authenticatedAdapter, createAdapter } from '../src/server.js';
 import { toolSchemas, widgetResourceUri } from '../src/catalog.js';
 
@@ -34,6 +35,15 @@ test('result presentation accepts safe sources and keeps older clients compatibl
 function request(body: unknown, extra: Record<string, string> = {}): Request {
   return new Request(`${publicOrigin}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json',
     accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25', authorization: 'Bearer test', ...extra }, body: JSON.stringify(body) });
+}
+
+async function resultEnvelope(response: Response): Promise<unknown> {
+  const body = await response.text();
+  const messages: unknown[] = response.headers.get('content-type')?.startsWith('text/event-stream')
+    ? body.split('\n').filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)))
+    : [JSON.parse(body)];
+  assert.equal(messages.length, 1);
+  return messages[0];
 }
 
 test('MCP rejects cookies as authorization and rejects cross-origin browser requests', async () => {
@@ -92,6 +102,33 @@ test('typed transport cannot expose arbitrary JS or accept missing mutation idem
   assert.equal(toolSchemas['tasks.stop'].safeParse({ taskId: randomUUID() }).success, false);
   assert.equal(toolSchemas['browser.execute'].safeParse({ action: { type: 'EVALUATE', script: 'document.cookie' } }).success, false);
   assert.equal(toolSchemas['continuations.record_delivery'].safeParse({ dispatchId: randomUUID(), idempotencyKey: randomUUID(), outcome: 'UNKNOWN' }).success, true);
+});
+
+test('tool discovery separates model execution from widget callbacks and keeps reads non-rendering', async () => {
+  const handler = createAdapter({ call: async () => ({ content: [] }) }, widgetHtml, publicOrigin);
+  const app = authenticatedAdapter(handler, async (token) => ({ token, clientId: 'fixture-client', scopes: ['tasks:read'] }), publicOrigin, `${publicOrigin}/idp`);
+  try {
+    const response = await app.fetch(request({ jsonrpc: '2.0', id: 30, method: 'tools/list' }));
+    assert.equal(response.status, 200);
+    const body = z.object({ result: z.object({ tools: z.array(z.object({
+      name: z.string(), _meta: z.record(z.string(), z.unknown()),
+    })) }) }).parse(await resultEnvelope(response));
+    const tools = new Map(body.result.tools.map(tool => [tool.name, tool._meta]));
+    for (const name of ['tasks.view', 'tasks.continue', 'browser.execute', 'browser.observe', 'media.capture']) {
+      assert.deepEqual(tools.get(name)?.ui, {
+        ...(name === 'tasks.view' || name === 'tasks.continue' ? { resourceUri: widgetResourceUri } : {}),
+        visibility: ['model'],
+      }, name);
+    }
+    for (const name of ['browser.attach_view', 'continuations.prepare_message', 'continuations.record_delivery']) {
+      assert.deepEqual(tools.get(name)?.ui, { visibility: ['app'] }, name);
+      assert.equal(tools.get(name)?.['openai/widgetAccessible'], true, name);
+      assert.equal(tools.get(name)?.['openai/outputTemplate'], undefined, name);
+    }
+    assert.equal(tools.get('tasks.get')?.['openai/outputTemplate'], undefined);
+    assert.deepEqual(tools.get('tasks.get')?.ui, { visibility: ['model'] });
+    assert.equal(tools.get('browser.execute')?.['openai/widgetAccessible'], undefined);
+  } finally { await handler.close(); }
 });
 
 test('modern stateless envelope preserves scopes and rejects a write with read-only authorization', async () => {

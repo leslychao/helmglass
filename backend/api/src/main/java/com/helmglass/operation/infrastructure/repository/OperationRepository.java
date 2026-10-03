@@ -258,6 +258,25 @@ public class OperationRepository {
     completed.forEach(this::changed);
   }
 
+  public void finishLogin(UUID userId, UUID loginId, String state, String failureCode) {
+    var completed =
+        jdbc.sql(
+                """
+                UPDATE operations SET state=:state,failure_code=:code,progress=100,
+                  finished_at=now(),updated_at=now(),version=version+1
+                WHERE user_id=:user AND target_type='loginOperation' AND target_id=:id
+                  AND state IN ('PENDING','RUNNING') AND kind NOT LIKE 'login.cancel:%'
+                RETURNING id,user_id,version
+                """)
+            .param("user", userId)
+            .param("id", loginId)
+            .param("state", state)
+            .param("code", failureCode)
+            .query(Transition.class)
+            .list();
+    completed.forEach(this::changed);
+  }
+
   private void changed(Transition transition) {
     changes.changed(transition.userId(), "operations", transition.id(), transition.version());
   }

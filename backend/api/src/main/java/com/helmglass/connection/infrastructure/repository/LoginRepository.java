@@ -186,20 +186,28 @@ public class LoginRepository {
         .update();
   }
 
-  public void fail(UUID id, String code) {
-    state(id, "FAILED");
-    jdbc.sql(
+  public List<Login> reconciliationCandidates() {
+    return jdbc.sql(
             """
-            UPDATE operations SET state='FAILED',failure_code=:code,finished_at=now(),updated_at=now(),
-            version=version+1 WHERE id=:id AND state IN ('PENDING','RUNNING')
+            SELECT l.* FROM connection_login_operations l
+            JOIN application_users u ON u.id=l.user_id
+            LEFT JOIN browser_sessions s ON s.id=l.session_id
+            LEFT JOIN application_logins a ON a.id=l.login_id
+            WHERE (l.state NOT IN ('SUCCEEDED','FAILED','CANCELLED') AND
+              (l.expires_at<=now() OR s.state='CLOSED' OR u.state<>'ACTIVE'
+                OR a.id IS NULL OR a.state<>'ACTIVE' OR a.revoked_at IS NOT NULL OR a.expires_at<=now()))
+              OR (l.state IN ('FAILED','CANCELLED') AND (l.session_id IS NULL OR s.state='CLOSED')
+                AND EXISTS(SELECT 1 FROM operations o WHERE o.user_id=l.user_id
+                  AND o.target_type='loginOperation' AND o.target_id=l.id AND o.state IN ('PENDING','RUNNING')))
+            ORDER BY l.expires_at,l.id LIMIT 20
             """)
-        .param("id", id)
-        .param("code", code)
-        .update();
+        .query(Login.class)
+        .list();
   }
 
-  public SessionCommand command(UUID id) {
-    return jdbc.sql("SELECT * FROM session_operation_commands WHERE id=:id FOR UPDATE")
+  public SessionCommand command(UUID id, boolean lock) {
+    return jdbc.sql(
+            "SELECT * FROM session_operation_commands WHERE id=:id" + (lock ? " FOR UPDATE" : ""))
         .param("id", id)
         .query(SessionCommand.class)
         .optional()
@@ -217,6 +225,10 @@ public class LoginRepository {
   public SessionCommand navigation(Login login, String url) {
     UUID id = UUID.randomUUID();
     var action = json.read(json.write(Map.of("type", "NAVIGATE", "url", url)));
+    Instant deadline = Instant.now().plusSeconds(60);
+    if (login.expiresAt().isBefore(deadline)) {
+      deadline = login.expiresAt();
+    }
     jdbc.sql(
             """
             INSERT INTO session_operation_commands(id,operation_id,session_id,user_id,attempt_id,action,
@@ -229,9 +241,9 @@ public class LoginRepository {
         .param("attempt", UUID.randomUUID())
         .param("action", json.write(action))
         .param("digest", json.workerDigest(action))
-        .param("deadline", Timestamp.from(Instant.now().plusSeconds(60)))
+        .param("deadline", Timestamp.from(deadline))
         .update();
-    return command(id);
+    return command(id, false);
   }
 
   public void started(UUID id, UUID permitId) {
@@ -345,14 +357,6 @@ public class LoginRepository {
             """)
         .param("task", login.taskId())
         .param("connection", login.connectionId())
-        .update();
-    jdbc.sql(
-            """
-            UPDATE operations SET state='SUCCEEDED',progress=100,finished_at=now(),updated_at=now(),version=version+1
-            WHERE id IN (:id,:complete)
-            """)
-        .param("id", login.id())
-        .param("complete", login.completeOperationId())
         .update();
   }
 }

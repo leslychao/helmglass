@@ -79,5 +79,5 @@ export function scopesForTool(name: ToolName): string[] {
 export const readOnlyTools = new Set<ToolName>(['tasks.get', 'tasks.context', 'tasks.list', 'audio.get', 'audio.segments',
   'commands.get', 'operations.get', 'operations.lookup', 'connections.list']);
 export const appOnlyTools = new Set<ToolName>(['browser.attach_view', 'continuations.prepare_message', 'continuations.record_delivery']);
-export const widgetTools = new Set<ToolName>(['tasks.create', 'tasks.get', 'tasks.view', 'tasks.continue', 'browser.attach_view']);
+export const widgetTools = new Set<ToolName>(['tasks.view', 'tasks.continue']);
 export const widgetResourceUri = 'ui://helm-glass/browser.html';

@@ -22,6 +22,7 @@ import com.helmglass.operation.domain.MutationReceipt;
 import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.profile.application.BrowserProfileService;
 import com.helmglass.realtime.infrastructure.repository.ChangeRepository;
+import com.helmglass.task.api.TaskContracts.Capability;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -145,6 +146,14 @@ public class ConnectionLoginService {
 
   public Map<String, Object> get(AuthenticatedActor actor, UUID id) {
     Login login = logins.owned(actor.userId(), id, false);
+    var session =
+        login.sessionId() == null ? null : browsers.owned(login.userId(), login.sessionId());
+    boolean complete =
+        login.state().equals("WAITING_USER")
+            && login.expiresAt().isAfter(Instant.now())
+            && session != null
+            && session.state().equals("ACTIVE");
+    boolean cancel = !terminal(login);
     Map<String, Object> view = new HashMap<>();
     view.put("id", id);
     view.put("connectionId", login.connectionId());
@@ -159,10 +168,9 @@ public class ConnectionLoginService {
         "capabilities",
         Map.of(
             "complete",
-            Map.of("allowed", login.state().equals("WAITING_USER")),
+            new Capability(complete, true, complete ? null : "Login is not ready to complete"),
             "cancel",
-            Map.of(
-                "allowed", !List.of("SUCCEEDED", "FAILED", "CANCELLED").contains(login.state()))));
+            new Capability(cancel, true, cancel ? null : "Login has already ended")));
     return view;
   }
 
@@ -181,7 +189,7 @@ public class ConnectionLoginService {
     }
     if (!identities.loginActive(login.userId(), login.loginId())
         || !login.expiresAt().isAfter(Instant.now())) {
-      logins.fail(login.id(), "LOGIN_AUTHORIZATION_EXPIRED");
+      failLogin(login, "LOGIN_AUTHORIZATION_EXPIRED");
       return Optional.empty();
     }
     browsers.checkBrowserLimit(login.userId());
@@ -224,8 +232,16 @@ public class ConnectionLoginService {
       return;
     }
     Login login = found.get();
+    identities.lockState(login.userId());
+    login = logins.owned(login.userId(), login.id(), true);
     var session = requireWorker(login, workerId, bootId);
     if (!login.state().equals("STARTING")) {
+      return;
+    }
+    if (!identities.isActive(login.userId())
+        || !login.expiresAt().isAfter(Instant.now())
+        || !identities.loginActive(login.userId(), login.loginId())) {
+      failLogin(login, "LOGIN_AUTHORIZATION_EXPIRED");
       return;
     }
     var connection = connections.owned(login.userId(), login.connectionId(), false);
@@ -245,9 +261,10 @@ public class ConnectionLoginService {
 
   @Transactional
   public Map<String, Object> permit(UUID workerId, UUID bootId, JsonNode request) {
-    var command = logins.command(UUID.fromString(request.path("commandId").asString()));
+    var command = logins.command(UUID.fromString(request.path("commandId").asString()), false);
     identities.lockActive(command.userId());
     Login login = logins.owned(command.userId(), command.operationId(), true);
+    command = logins.command(command.id(), true);
     var session = requireWorker(login, workerId, bootId);
     var currentScope = scope(session);
     for (String field :
@@ -265,6 +282,7 @@ public class ConnectionLoginService {
       }
     }
     if (!login.state().equals("STARTING")
+        || !login.expiresAt().isAfter(Instant.now())
         || !session.state().equals("ACTIVE")
         || !identities.loginActive(login.userId(), login.loginId())
         || !command.deadline().isAfter(Instant.now())
@@ -289,8 +307,10 @@ public class ConnectionLoginService {
 
   @Transactional
   public void result(UUID workerId, UUID bootId, JsonNode result) {
-    var command = logins.command(UUID.fromString(result.path("commandId").asString()));
+    var command = logins.command(UUID.fromString(result.path("commandId").asString()), false);
+    identities.lockState(command.userId());
     Login login = logins.owned(command.userId(), command.operationId(), true);
+    command = logins.command(command.id(), true);
     var session = requireWorker(login, workerId, bootId);
     if (!result.path("attemptId").asString().equals(command.attemptId().toString())) {
       throw new DomainException(403, "ATTEMPT_MISMATCH", "Receipt does not match login navigation");
@@ -307,9 +327,21 @@ public class ConnectionLoginService {
     String status = result.path("status").asString();
     browsers.runtimeEpochs(workerId, bootId, session.id(), result);
     logins.result(command.id(), digest, status, result.path("effectState").asString());
+    if (terminal(login)) {
+      return;
+    }
+    if (!identities.isActive(login.userId())
+        || !login.expiresAt().isAfter(Instant.now())
+        || !identities.loginActive(login.userId(), login.loginId())) {
+      failLogin(login, "LOGIN_AUTHORIZATION_EXPIRED");
+      return;
+    }
+    if (session.state().equals("CLOSED")) {
+      failLogin(login, "LOGIN_BROWSER_CLOSED");
+      return;
+    }
     if (!status.equals("SUCCEEDED")) {
-      logins.state(login.id(), "FAILED");
-      controls.closeRequested(session.id());
+      failLogin(login, "LOGIN_NAVIGATION_FAILED");
       return;
     }
     controls.transfer(session.id(), login.controllerInstanceId(), "HUMAN", true, login.id());
@@ -328,12 +360,17 @@ public class ConnectionLoginService {
       return replay.get();
     }
     DomainException.requireVersion(login.version(), input.expectedVersion());
+    if (!login.state().equals("WAITING_USER")
+        || !login.expiresAt().isAfter(Instant.now())
+        || login.sessionId() == null) {
+      throw DomainException.conflict(
+          "LOGIN_NOT_READY", "Login has expired or is not ready to complete");
+    }
     var session = browsers.owned(actor.userId(), login.sessionId());
     var control = controls.lock(session.id());
     DomainException.requireVersion(control.epoch(), input.controlEpoch());
     DomainException.requireVersion(session.pageEpoch(), input.pageEpoch());
-    if (!login.state().equals("WAITING_USER")
-        || !control.state().equals("ACTIVE")
+    if (!control.state().equals("ACTIVE")
         || !control.ownerKind().equals("HUMAN")
         || !control.expiresAt().isAfter(Instant.now())
         || !actor.loginId().equals(control.loginId())
@@ -390,6 +427,12 @@ public class ConnectionLoginService {
             throw DomainException.conflict(
                 "LOGIN_OPERATION_STALE", "Login is no longer being verified");
           }
+          if (!current.expiresAt().isAfter(Instant.now())
+              || !identities.loginActive(current.userId(), current.loginId())
+              || !session.state().equals("ACTIVE")) {
+            failLogin(current, "LOGIN_AUTHORIZATION_EXPIRED");
+            return;
+          }
           if (!session.privacy().equals("LOGIN_PRIVATE")
               || !control.state().equals("QUIESCED")
               || response.path("allocationEpoch").asLong(-1) != session.allocationEpoch()
@@ -445,13 +488,18 @@ public class ConnectionLoginService {
     if (!login.state().equals("SAVING")) {
       return;
     }
-    requireWorker(login, workerId, bootId);
+    var session = requireWorker(login, workerId, bootId);
+    if (!login.expiresAt().isAfter(Instant.now())
+        || !identities.loginActive(login.userId(), login.loginId())
+        || !session.state().equals("ACTIVE")) {
+      failLogin(login, "LOGIN_AUTHORIZATION_EXPIRED");
+      return;
+    }
     if (!connections.profileReady(login.connectionId(), login.profileVersionId())) {
       throw DomainException.conflict(
           "PROFILE_NOT_PUBLISHED", "Encrypted profile publication is not confirmed");
     }
     logins.state(login.id(), "SAVED_VERIFYING");
-    var session = browsers.owned(login.userId(), sessionId);
     Map<String, Object> check = new HashMap<>();
     check.put("browserSessionId", sessionId);
     check.put("allocationEpoch", session.allocationEpoch());
@@ -461,6 +509,70 @@ public class ConnectionLoginService {
     check.put("expectedOrigin", login.expectedOrigin());
     check.put("userAsserted", login.userAsserted());
     send(session.workerId(), "profileCheck", check);
+  }
+
+  @Scheduled(fixedDelay = 5000)
+  public void reconcileLogins() {
+    for (Login candidate : logins.reconciliationCandidates()) {
+      try {
+        transaction.executeWithoutResult(
+            status -> {
+              identities.lockState(candidate.userId());
+              Login current = logins.owned(candidate.userId(), candidate.id(), true);
+              connections.owned(current.userId(), current.connectionId(), true);
+              reconcileLogin(current);
+            });
+      } catch (RuntimeException error) {
+        log.warn(
+            "Login reconciliation deferred; operationId={}, errorType={}",
+            candidate.id(),
+            error.getClass().getSimpleName());
+      }
+    }
+  }
+
+  private void reconcileLogin(Login login) {
+    var session =
+        login.sessionId() == null ? null : browsers.owned(login.userId(), login.sessionId());
+    boolean closed = session == null || session.state().equals("CLOSED");
+    if (terminal(login)) {
+      if (closed && !login.state().equals("SUCCEEDED")) {
+        operations.finishLogin(login.userId(), login.id(), login.state(), "LOGIN_ENDED");
+        operations.completeForTarget(login.id(), "login.cancel:" + login.id());
+      }
+      return;
+    }
+    if (!identities.isActive(login.userId())
+        || !identities.loginActive(login.userId(), login.loginId())) {
+      failLogin(login, "LOGIN_AUTHORIZATION_EXPIRED");
+    } else if (session != null && closed && login.state().equals("CLOSING")) {
+      succeed(login);
+    } else if (!login.expiresAt().isAfter(Instant.now())) {
+      failLogin(login, "LOGIN_EXPIRED");
+    } else if (session != null && closed) {
+      failLogin(login, "LOGIN_BROWSER_CLOSED");
+    }
+  }
+
+  private void failLogin(Login login, String code) {
+    logins.state(login.id(), "FAILED");
+    operations.finishLogin(login.userId(), login.id(), "FAILED", code);
+    closeLoginBrowser(login);
+    changes.changed(login.userId(), "connections", login.connectionId(), login.version() + 1);
+  }
+
+  private void closeLoginBrowser(Login login) {
+    if (login.sessionId() == null) {
+      return;
+    }
+    var session = browsers.owned(login.userId(), login.sessionId());
+    if (!List.of("CLOSED", "STOPPING").contains(session.state())) {
+      controls.closeRequested(session.id());
+    }
+  }
+
+  private static boolean terminal(Login login) {
+    return List.of("SUCCEEDED", "FAILED", "CANCELLED").contains(login.state());
   }
 
   @Scheduled(fixedDelay = 5000)
@@ -476,7 +588,7 @@ public class ConnectionLoginService {
               }
               var session = browsers.owned(current.userId(), current.sessionId());
               if (!current.expiresAt().isAfter(Instant.now())) {
-                saveFailed(current, "PROFILE_SAVE_EXPIRED");
+                failLogin(current, "LOGIN_EXPIRED");
               } else if (connections.profileReady(
                   current.connectionId(), current.profileVersionId())) {
                 saved(session.workerId(), session.workerBootId(), session.id());
@@ -549,12 +661,32 @@ public class ConnectionLoginService {
       return;
     }
     Login login = found.get();
+    identities.lockState(login.userId());
+    login = logins.owned(login.userId(), login.id(), true);
     requireWorker(login, workerId, bootId);
+    if (closed && !login.state().equals("CLOSING")) {
+      reconcileLogin(login);
+      return;
+    }
     if (!(closed && login.state().equals("CLOSING"))
         && !(!closed && login.state().equals("EXITING_PRIVATE"))) {
       return;
     }
+    if (!identities.isActive(login.userId())
+        || !identities.loginActive(login.userId(), login.loginId())) {
+      failLogin(login, "LOGIN_AUTHORIZATION_EXPIRED");
+      return;
+    }
+    if (!closed && !login.expiresAt().isAfter(Instant.now())) {
+      failLogin(login, "LOGIN_EXPIRED");
+      return;
+    }
+    succeed(login);
+  }
+
+  private void succeed(Login login) {
     logins.successful(login);
+    operations.finishLogin(login.userId(), login.id(), "SUCCEEDED", null);
     connections.resumeTask(login.taskId(), login.continuationIntent());
     if (login.taskId() != null) {
       events.publishEvent(
@@ -573,10 +705,16 @@ public class ConnectionLoginService {
     if (replay.isPresent()) {
       return replay.get();
     }
-    if (login.sessionId() != null) {
-      controls.closeRequested(login.sessionId());
+    if (terminal(login)) {
+      throw DomainException.conflict("LOGIN_ALREADY_ENDED", "Login has already ended");
     }
+    closeLoginBrowser(login);
     logins.state(id, "CANCELLED");
+    operations.finishLogin(login.userId(), id, "CANCELLED", "LOGIN_CANCELLED");
+    changes.changed(login.userId(), "connections", login.connectionId(), login.version() + 1);
+    boolean closed =
+        login.sessionId() == null
+            || browsers.owned(login.userId(), login.sessionId()).state().equals("CLOSED");
     return operations.save(
         actor,
         "login.cancel:" + id,
@@ -585,7 +723,7 @@ public class ConnectionLoginService {
         "loginOperation",
         id,
         login.version() + 1,
-        login.sessionId() == null);
+        closed);
   }
 
   private BrowserRepository.Session requireWorker(Login login, UUID workerId, UUID bootId) {

@@ -42,6 +42,10 @@ import com.helmglass.task.infrastructure.repository.ActionRequestRepository;
 import com.helmglass.usage.application.UsageCheckpointService;
 import com.helmglass.usage.application.UsageService;
 import com.helmglass.usage.infrastructure.repository.UsageRepository;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SpecificationVersion;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -55,6 +59,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.event.EventListener;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -386,6 +391,48 @@ class WorkflowIntegrationTest {
             action);
     commands.accept(actor, taskId, accepted, context());
     assertThat(tasks.get(actor, taskId).continuation()).containsEntry("state", "CONSUMED");
+  }
+
+  @Test
+  void standaloneLoginReadMatchesThePublicContractInPendingAndTerminalStates() throws IOException {
+    var actor = actor();
+    UUID connectionId =
+        connections
+            .create(
+                actor,
+                new ConnectionContracts.Create("Example", "https://example.com/login", "ASK"),
+                context())
+            .resource()
+            .id();
+    UUID id =
+        logins
+            .begin(
+                actor, connectionId, new LoginContracts.Begin(null, UUID.randomUUID()), context())
+            .resource()
+            .id();
+    JsonNode definitions =
+        json.read(new ClassPathResource("openapi.json").getContentAsString(StandardCharsets.UTF_8))
+            .path("components")
+            .path("schemas");
+    ObjectNode responseSchema = (ObjectNode) definitions.path("LoginOperation").deepCopy();
+    ObjectNode capabilities = (ObjectNode) responseSchema.path("properties").path("capabilities");
+    assertThat(capabilities.path("additionalProperties").path("$ref").asString())
+        .isEqualTo("#/components/schemas/Capability");
+    capabilities.set("additionalProperties", definitions.path("Capability"));
+    var schema =
+        SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12)
+            .getSchema(responseSchema);
+    for (String state :
+        List.of("WAITING_RESOURCE", "WAITING_USER", "SUCCEEDED", "FAILED", "CANCELLED")) {
+      transaction.executeWithoutResult(status -> loginRepository.state(id, state));
+      JsonNode response = json.read(json.write(logins.get(actor, id)));
+      assertThat(schema.validate(response)).as("LoginOperation response in %s", state).isEmpty();
+      assertThat(response.path("taskId").isNull()).isTrue();
+      assertThat(response.path("sessionId").isNull()).isTrue();
+      assertThat(response.path("capabilities").path("complete").path("allowed").asBoolean())
+          .isFalse();
+    }
+    assertThatThrownBy(() -> logins.get(actor(), id)).isInstanceOf(DomainException.class);
   }
 
   @Test
