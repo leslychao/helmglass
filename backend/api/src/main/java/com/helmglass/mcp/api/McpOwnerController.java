@@ -42,6 +42,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
@@ -189,7 +190,7 @@ public class McpOwnerController {
       case "tasks.create" ->
           tasks.create(
               actor,
-              decode(args, TaskContracts.Create.class, Set.of("idempotencyKey", "title")),
+              decode(args, TaskContracts.Create.class, Set.of("idempotencyKey")),
               required(context),
               input.hostContext());
       case "tasks.get" -> presentations.get(actor, required(taskId), input.hostContext());
@@ -367,7 +368,16 @@ public class McpOwnerController {
   }
 
   private <T> T decode(JsonNode node, Class<T> type, Set<String> removed) {
-    T value = json.convert(copy(node, removed), type);
+    T value;
+    try {
+      value = json.convert(copy(node, removed), type);
+    } catch (JacksonException error) {
+      var invalid =
+          new DomainException(
+              422, "INVALID_TOOL_ARGUMENTS", "Tool arguments do not match the contract");
+      invalid.initCause(error);
+      throw invalid;
+    }
     if (!validator.validate(value).isEmpty()) {
       throw new DomainException(422, "INVALID_TOOL_ARGUMENTS", "Tool arguments fail validation");
     }

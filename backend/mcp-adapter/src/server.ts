@@ -95,6 +95,11 @@ export function createAdapter(owner: Pick<OwnerClient, 'call'>, widgetHtml: stri
         let audio: AudioDelivery | undefined;
         let stopOwnerCancellation: (() => void) | undefined;
         if (name === 'audio.get') {
+          const expiresAt = context.authInfo?.expiresAt;
+          const remaining = expiresAt === undefined ? 20_000 : Math.min(20_000, expiresAt * 1000 - Date.now());
+          if (remaining <= 0) {
+            return { isError: true, content: [{ type: 'text', text: 'TOKEN_EXPIRED' }] };
+          }
           const state = requests.getStore();
           const request = state?.request;
           if (!request || activeAudio >= 2) {
@@ -103,7 +108,7 @@ export function createAdapter(owner: Pick<OwnerClient, 'call'>, widgetHtml: stri
           const controller = new AbortController();
           const cancel = () => { controller.abort(); state?.cancelTransport?.(); };
           let released = false;
-          const timeout = setTimeout(cancel, 20_000);
+          const timeout = setTimeout(cancel, remaining);
           activeAudio++;
           audio = { controller, release: () => {
             if (released) return;

@@ -64,6 +64,7 @@ test('audio deadline closes the native response while the pinned Node SDK waits 
   const first = new BackpressuredResponse();
   const second = new BackpressuredResponse();
   let completed = 0;
+  const completedCount = () => completed;
   const pending = [first, second].map(response => {
     const request = Object.assign(Readable.from([]), { method: 'POST', url: '/mcp', headers });
     const serve = toNodeHandler({ fetch: request => app.fetch(request, () => response.destroy()) });
@@ -87,7 +88,7 @@ test('audio deadline closes the native response while the pinned Node SDK waits 
     assert.equal(first.destroyed, false);
     assert.equal(second.destroyed, false);
     context.mock.timers.tick(1);
-    for (let attempt = 0; attempt < 20 && completed !== 2; attempt++) await setImmediate();
+    for (let attempt = 0; attempt < 20 && completedCount() !== 2; attempt++) await setImmediate();
     assert.equal(first.destroyed, true);
     assert.equal(second.destroyed, true);
     assert.equal(completed, 2, 'deadline must wake the SDK drain wait, not only cancel its body');

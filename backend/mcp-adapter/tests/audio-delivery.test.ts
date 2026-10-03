@@ -24,9 +24,9 @@ function request(name = 'audio.get', signal?: AbortSignal) {
     ...(signal ? { signal } : {}) });
 }
 
-function fixture(call: OwnerClient['call']) {
+function fixture(call: OwnerClient['call'], expiresAt?: number) {
   const handler = createAdapter({ call }, widget, origin);
-  return { handler, app: authenticatedAdapter(handler, async token => ({ token, clientId: 'fixture', scopes: ['tasks:read'] }),
+  return { handler, app: authenticatedAdapter(handler, async token => ({ token, clientId: 'fixture', scopes: ['tasks:read'], ...(expiresAt === undefined ? {} : { expiresAt }) }),
     origin, `${origin}/idp`) };
 }
 
@@ -46,6 +46,23 @@ test('a complete PCM WAV survives the real MCP SDK envelope without claiming hos
     assert.deepEqual(Buffer.from(first.data, 'base64'), wav);
     assert.deepEqual(value.result.structuredContent, audio.structuredContent);
   } finally { await handler.close(); }
+});
+
+test('audio delivery stops at token expiry and rejects an already expired token before owner admission', async context => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1_000_000 });
+  let calls = 0;
+  let closed = false;
+  const { handler, app } = fixture(async () => { calls++; return audio; }, 1005);
+  try {
+    const response = await app.fetch(request(), () => { closed = true; });
+    context.mock.timers.tick(4999);
+    assert.equal(closed, false);
+    context.mock.timers.tick(1);
+    assert.equal(closed, true);
+    await assert.rejects(response.text(), /AUDIO_DELIVERY_CANCELLED/);
+    assert.match(await (await app.fetch(request())).text(), /TOKEN_EXPIRED/);
+    assert.equal(calls, 1);
+  } finally { context.mock.timers.reset(); await handler.close(); }
 });
 
 test('audio admission remains bounded until responses are consumed or cancelled and does not block other tools', async () => {

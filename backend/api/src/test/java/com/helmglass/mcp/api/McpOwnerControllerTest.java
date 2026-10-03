@@ -24,6 +24,7 @@ import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.media.application.MediaAnalysisService;
 import com.helmglass.operation.application.OperationService;
 import com.helmglass.realtime.domain.HostConversationContext;
+import com.helmglass.task.api.TaskContracts;
 import com.helmglass.task.application.ActionRequestService;
 import com.helmglass.task.application.ReconciliationService;
 import com.helmglass.task.application.ResultService;
@@ -37,6 +38,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -45,11 +47,13 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 class McpOwnerControllerTest {
-  private final JsonMapper mapper = JsonMapper.builder().build();
+  private final JsonMapper mapper =
+      JsonMapper.builder().enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
   private final TaskLifecycleService tasks = mock(TaskLifecycleService.class);
   private final TaskPresentationService presentations = mock(TaskPresentationService.class);
   private final TaskContinuationService continuations = mock(TaskContinuationService.class);
@@ -111,10 +115,12 @@ class McpOwnerControllerTest {
             "delivery",
             Map.of("status", "UNVERIFIED", "reason", "HOST_AUDIO_ACCESS_NOT_VERIFIED"));
     var audio = new MediaAnalysisService.InlineAudio(source, metadata);
+    Instant tokenDeadline = Instant.now().plusSeconds(5);
     when(media.inline(actor, artifactId, taskId)).thenReturn(audio);
     doAnswer(
             invocation -> {
               OutputStream output = invocation.getArgument(2);
+              assertThat(invocation.<Instant>getArgument(3)).isEqualTo(tokenDeadline);
               output.write(wav);
               return null;
             })
@@ -127,7 +133,7 @@ class McpOwnerControllerTest {
             .perform(
                 post("/internal/mcp/tools/audio.get")
                     .requestAttr(AuthenticatedActor.class.getName(), actor)
-                .requestAttr("helm.authorizationExpiresAt", Instant.now().plusSeconds(300))
+                    .requestAttr("helm.authorizationExpiresAt", tokenDeadline)
                     .contentType(MediaType.APPLICATION_JSON)
                     .content(mapper.writeValueAsBytes(input)))
             .andReturn()
@@ -160,8 +166,48 @@ class McpOwnerControllerTest {
     var expired = request();
     expired.setAttribute("helm.authorizationExpiresAt", Instant.now().minusSeconds(1));
     assertThatThrownBy(() -> controller.audio(input, expired, new MockHttpServletResponse()))
-        .isInstanceOfSatisfying(DomainException.class,
-            error -> assertThat(error.getCode()).isEqualTo("TOKEN_EXPIRED"));
+        .isInstanceOfSatisfying(
+            DomainException.class, error -> assertThat(error.getCode()).isEqualTo("TOKEN_EXPIRED"));
+  }
+
+  @Test
+  void createRejectsUnknownTitleAndPassesCanonicalGoalAndHostToOwner() {
+    ObjectNode args =
+        mapper
+            .createObjectNode()
+            .put("goal", "Read public documentation")
+            .put("startUrl", "https://example.test")
+            .put("outputFormat", "TEXT")
+            .put("confirmImportantActions", true)
+            .put("browserTimeLimitSeconds", 300)
+            .put("intent", "PREPARE")
+            .put("idempotencyKey", "create-contract");
+    args.putArray("connectionIds");
+    ObjectNode unknown = args.deepCopy().put("title", "Unowned title");
+    assertThatThrownBy(
+            () -> controller.call("tasks.create", payload(unknown, hostContext), request()))
+        .isInstanceOfSatisfying(
+            DomainException.class,
+            error -> {
+              assertThat(error.getStatus()).isEqualTo(422);
+              assertThat(error.getCode()).isEqualTo("INVALID_TOOL_ARGUMENTS");
+            });
+    verifyNoInteractions(tasks);
+
+    controller.call("tasks.create", payload(args, hostContext), request());
+    verify(tasks)
+        .create(
+            actor,
+            new TaskContracts.Create(
+                "Read public documentation",
+                "https://example.test",
+                List.of(),
+                "TEXT",
+                true,
+                300,
+                "PREPARE"),
+            new MutationContext("create-contract", requestId),
+            hostContext);
   }
 
   @Test
