@@ -187,7 +187,7 @@ class TaskUsageProjectionIntegrationTest {
             actor,
             new TaskContracts.Create(
                 "Measure task", null, List.of(), "TEXT", false, 1800, "PREPARE"),
-            new MutationContext(UUID.randomUUID().toString(), UUID.randomUUID()))
+            new MutationContext(UUID.randomUUID().toString(), UUID.randomUUID()), null)
         .resource()
         .id();
   }

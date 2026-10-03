@@ -63,4 +63,7 @@
   <changeSet id="034-chat-presentation-media" author="helmglass">
     <sqlFile path="034-chat-presentation-media.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="035-continuation-origin" author="helmglass">
+    <sqlFile path="035-continuation-origin.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

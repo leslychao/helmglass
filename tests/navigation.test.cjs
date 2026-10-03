@@ -44,7 +44,7 @@ function fixture(url = '/tasks', savedHistory = null) {
   });
   context.findRun = id => context.S.runs.find(task => task.id === Number(id));
   context.confirmAction = (_title, _description, _button, confirm) => { context.confirmLeave = confirm; };
-  for (const name of ['cabinetRoute8', 'navigationKey8', 'navigationTrail8', 'storeNavigation8',
+  for (const name of ['cabinetRoute8', 'navigationKey8', 'isSectionRoute8', 'navigationTrail8', 'storeNavigation8',
     'syncNavigation8', 'syncListFilters8', 'restoreListFilters8', 'loadTaskFiltersH',
     'availableReturn8', 'returnPath8', 'returnLabel8', 'pageReturn8',
     'rememberBreadcrumbList8', 'breadcrumbListPath8', 'manualContext', 'parseHash', 'go']) {
@@ -66,15 +66,50 @@ test('direct links have safe parents throughout the cabinet', () => {
     ['/connection/supplier', '/connections'], ['/connection/missing', '/connections'],
     ['/manual?run=101', '/tasks/101'], ['/manual?connection=supplier', '/connection/supplier'],
     ['/manual?run=999', '/tasks'], ['/manual?connection=missing', '/connections'],
-    ['/admin/users', '/admin'], ['/admin/users/usr-001', '/admin/users'],
-    ['/admin/browsers', '/admin'], ['/admin/audit', '/admin'],
+    ['/admin/users/usr-001', '/admin/users'],
     ['/admin/audit?user=usr-001', '/admin/users/usr-001'],
     ['/profile', '/tasks'], ['/unavailable', '/tasks'], ['/not-found', '/tasks']
   ];
   for (const [url, parent] of cases) assert.equal(fixture(url).context.returnPath8(), parent, url);
-  for (const url of ['/tasks', '/connections', '/usage', '/admin', '/screens']) {
+  for (const url of ['/tasks', '/connections', '/usage', '/admin', '/admin/users', '/admin/browsers', '/admin/audit', '/screens']) {
     assert.equal(fixture(url).context.pageReturn8(), '', url);
   }
+});
+
+test('switching section tabs never creates a back button or a nested return trail', () => {
+  const {context, navigate} = fixture('/admin');
+  for (const tab of ['/admin/browsers', '/admin', '/admin/browsers', '/tasks', '/connections', '/usage']) {
+    navigate(tab);
+    assert.equal(context.pageReturn8(), '', tab);
+    assert.equal(context.NAVIGATION8.trail.length, 0, tab);
+    const reload = fixture(tab, structuredClone(context.history.state));
+    assert.equal(reload.context.pageReturn8(), '', tab + ' after reload');
+  }
+});
+
+test('drilling into a user returns through the user journal to the originating browser tab', () => {
+  const {context, navigate} = fixture('/admin');
+  navigate('/admin/browsers');
+  navigate('/admin/users/usr-001');
+  assert.equal(context.returnPath8(), '/admin/browsers');
+  assert.match(context.pageReturn8(), /К браузерам/);
+  navigate('/admin/audit?user=usr-001');
+  assert.equal(context.returnPath8(), '/admin/users/usr-001');
+  navigate(context.returnPath8());
+  assert.equal(context.returnPath8(), '/admin/browsers');
+  navigate(context.returnPath8());
+  assert.equal(context.pageReturn8(), '');
+});
+
+test('old section history cannot restore a back button after reloading a tab', () => {
+  const {context, navigate} = fixture('/admin/browsers', {
+    helmNavigation8: {key: '/admin/browsers', trail: ['/admin', '/admin/users/usr-001'], lists: []}
+  });
+  assert.equal(context.pageReturn8(), '');
+  navigate('/admin/users/usr-001');
+  assert.equal(context.returnPath8(), '/admin/browsers');
+  navigate(context.returnPath8());
+  assert.equal(context.NAVIGATION8.trail.length, 0);
 });
 
 test('task tabs and manual login return to the originating filtered and sorted list', () => {
@@ -194,7 +229,7 @@ test('saving a form does not offer a return that creates another new task', () =
 test('return context is bounded and excludes an external page on a direct entry', () => {
   const {context} = fixture('/tasks/101');
   const trail = Array.from({length: 40}, (_, id) => '/tasks/' + id);
-  assert.equal(context.navigationTrail8('/profile', trail, '/usage').length, 16);
+  assert.equal(context.navigationTrail8('/usage', trail, '/profile').length, 16);
   assert.deepEqual(Array.from(context.navigationTrail8('https://example.com', [], '/profile')), []);
 });
 

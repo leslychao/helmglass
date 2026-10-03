@@ -266,7 +266,7 @@ class BrowserOpenIntegrationTest {
                     false,
                     1800,
                     "PREPARE"),
-                context())
+                context(), null)
             .resource()
             .id();
     tasks.pause(actor, id, context());

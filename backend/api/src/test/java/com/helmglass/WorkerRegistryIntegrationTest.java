@@ -327,7 +327,7 @@ class WorkerRegistryIntegrationTest {
                 actor,
                 new TaskContracts.Create(
                     "Read page", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-                context())
+                context(), null)
             .resource()
             .id();
     var task = tasks.get(actor, taskId);

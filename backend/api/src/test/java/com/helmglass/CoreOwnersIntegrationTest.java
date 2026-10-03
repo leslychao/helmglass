@@ -142,7 +142,7 @@ class CoreOwnersIntegrationTest {
             actor,
             new TaskContracts.Create(
                 "Read page", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-            context());
+            context(), null);
     var snapshot = tasks.get(actor, task.resource().id());
     UUID commandId = UUID.randomUUID();
     var input =
@@ -244,7 +244,7 @@ class CoreOwnersIntegrationTest {
             actor,
             new TaskContracts.Create(
                 "Measure", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-            context());
+            context(), null);
     UUID worker = UUID.randomUUID();
     UUID boot = UUID.randomUUID();
     register(worker, boot);

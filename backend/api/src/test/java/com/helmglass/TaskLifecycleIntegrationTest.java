@@ -166,12 +166,12 @@ class TaskLifecycleIntegrationTest {
     var actor = actor();
     var context = context();
     var input = create("Observe the public page", "PREPARE");
-    var first = tasks.create(actor, input, context);
-    var replay = tasks.create(actor, input, context);
+    var first = tasks.create(actor, input, context, null);
+    var replay = tasks.create(actor, input, context, null);
     assertThat(replay).isEqualTo(first);
     assertThat(tasks.get(actor, first.resource().id()).state()).isEqualTo("WAITING_AGENT");
     assertThat(operations.lookup(actor, "tasks.create", context.key())).isEqualTo(first);
-    assertThatThrownBy(() -> tasks.create(actor, create("Different intent", "PREPARE"), context))
+    assertThatThrownBy(() -> tasks.create(actor, create("Different intent", "PREPARE"), context, null))
         .isInstanceOf(DomainException.class)
         .hasMessageContaining("different request");
   }
@@ -179,7 +179,7 @@ class TaskLifecycleIntegrationTest {
   @Test
   void ownershipIsEnforcedEvenWhenCallerHasAdministratorRole() {
     var owner = actor();
-    var task = tasks.create(owner, create("Private task", "DRAFT"), context());
+    var task = tasks.create(owner, create("Private task", "DRAFT"), context(), null);
     var other = actor();
     var admin =
         new AuthenticatedActor(
@@ -200,7 +200,7 @@ class TaskLifecycleIntegrationTest {
   @Test
   void clarificationPreservesTaskAndIncrementsIntentWithoutRestartingBrowser() {
     var actor = actor();
-    var created = tasks.create(actor, create("Original goal", "PREPARE"), context());
+    var created = tasks.create(actor, create("Original goal", "PREPARE"), context(), null);
     var before = tasks.get(actor, created.resource().id());
     var request =
         new TaskContracts.Clarification(
@@ -222,10 +222,10 @@ class TaskLifecycleIntegrationTest {
   @Test
   void staleListSnapshotCannotMixPagesAfterMutation() {
     var actor = actor();
-    tasks.create(actor, create("First", "DRAFT"), context());
+    tasks.create(actor, create("First", "DRAFT"), context(), null);
     var parameters = new LinkedMultiValueMap<String, String>();
     var first = tasks.list(actor, PageQuery.from(parameters));
-    tasks.create(actor, create("Second", "DRAFT"), context());
+    tasks.create(actor, create("Second", "DRAFT"), context(), null);
     parameters.add("snapshot", first.snapshot());
     assertThatThrownBy(() -> tasks.list(actor, PageQuery.from(parameters)))
         .isInstanceOf(DomainException.class)
@@ -235,7 +235,7 @@ class TaskLifecycleIntegrationTest {
   @Test
   void pauseAndStopDoNotRequireAnUnrelatedProgressVersion() {
     var actor = actor();
-    var created = tasks.create(actor, create("Pause safely", "PREPARE"), context());
+    var created = tasks.create(actor, create("Pause safely", "PREPARE"), context(), null);
     tasks.pause(actor, created.resource().id(), context());
     assertThat(tasks.get(actor, created.resource().id()).state()).isEqualTo("PAUSED");
     tasks.stop(actor, created.resource().id(), context());

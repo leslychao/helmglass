@@ -1607,9 +1607,17 @@ function navigationKey8(url) {
   return path;
 }
 
+function isSectionRoute8(url) {
+  const parsed = cabinetRoute8(url);
+  if (!parsed) return false;
+  const {path, query} = parsed;
+  return ['/tasks', '/connections', '/usage', '/screens', '/admin', '/admin/users', '/admin/browsers'].includes(path)
+    || (path === '/admin/audit' && !query.has('user'));
+}
+
 function navigationTrail8(from, trail, target, mode = 'forward') {
   const key = navigationKey8(target);
-  if (!key || mode === 'section') return [];
+  if (!key || mode === 'section' || isSectionRoute8(target)) return [];
   const entries = Array.isArray(trail) ? trail.filter(url => cabinetRoute8(url) && !url.startsWith('/tasks/new')).slice(-16) : [];
   if (navigationKey8(from) === key) return entries;
   const ancestor = entries.findIndex(url => navigationKey8(url) === key);
@@ -1703,6 +1711,7 @@ function availableReturn8(url) {
 
 function returnPath8() {
   const current = route.path + (route.query.size ? '?' + route.query : '');
+  if (isSectionRoute8(current)) return '';
   for (const url of [...NAVIGATION8.trail].reverse()) {
     if (navigationKey8(url) !== navigationKey8(current) && availableReturn8(url)) return url;
   }

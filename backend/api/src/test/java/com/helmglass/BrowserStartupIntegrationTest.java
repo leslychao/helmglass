@@ -414,7 +414,7 @@ class BrowserStartupIntegrationTest {
                     false,
                     1800,
                     "PREPARE"),
-                context())
+                context(), null)
             .resource()
             .id();
     var task = tasks.get(actor, taskId);

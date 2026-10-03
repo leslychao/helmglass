@@ -136,6 +136,7 @@ class ContinuationDeliveryIntegrationTest {
                       scopes,
                       true);
                 }));
+    HostConversationContext host = host();
     UUID task =
         tasks
             .create(
@@ -148,10 +149,9 @@ class ContinuationDeliveryIntegrationTest {
                     false,
                     1800,
                     "PREPARE"),
-                context())
+                context(), host)
             .resource()
             .id();
-    HostConversationContext host = host();
     var publication =
         realtime.publishPresentation(
             actor, task, null, 0, context(), host, Instant.now().plusSeconds(300));

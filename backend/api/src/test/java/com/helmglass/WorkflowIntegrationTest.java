@@ -198,7 +198,7 @@ class WorkflowIntegrationTest {
                     false,
                     1800,
                     "DRAFT"),
-                context())
+                context(), null)
             .resource()
             .id();
     var initial = tasks.get(actor, id);
@@ -253,7 +253,7 @@ class WorkflowIntegrationTest {
                     false,
                     1800,
                     "DRAFT"),
-                context())
+                context(), null)
             .resource()
             .id();
     var initial = tasks.get(actor, id);
@@ -310,7 +310,7 @@ class WorkflowIntegrationTest {
                 actor,
                 new TaskContracts.Create(
                     "List a task", "https://example.com", List.of(), "TEXT", false, 1800, "DRAFT"),
-                context())
+                context(), null)
             .resource()
             .id();
     for (String sort :
@@ -363,7 +363,7 @@ class WorkflowIntegrationTest {
                 actor,
                 new TaskContracts.Create(
                     "Read", "https://example.com", List.of(), "TEXT", false, 1800, "PREPARE"),
-                context())
+                context(), null)
             .resource()
             .id();
     tasks.pause(actor, taskId, context());
