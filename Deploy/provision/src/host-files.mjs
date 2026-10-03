@@ -34,6 +34,9 @@ async function main() {
     }
     file.bytes = Buffer.from(file.content, 'base64');
     if (!file.bytes.length || file.bytes.length > 1_048_576 || checksum(file.bytes) !== file.sha256) throw new Error('Invalid content');
+    if (file.name === 'turn-bootstrap' && !upgradeTurnBootstrap(file.bytes).equals(file.bytes)) {
+      throw new Error('TURN bootstrap must use the current schema');
+    }
   }
   const metadata = await lstat(directory);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error('Invalid mount');
@@ -51,7 +54,8 @@ async function main() {
   const legacyEdgePath = join(directory, 'edge-tls');
   if (entries.includes('edge-tls')) {
     const legacyEdge = await lstat(legacyEdgePath);
-    if (input.mode === 'verify' || !legacyEdge.isFile() || legacyEdge.isSymbolicLink()) {
+    if (input.mode === 'verify' || !legacyEdge.isFile() || legacyEdge.isSymbolicLink()
+        || legacyEdge.uid !== 101 || legacyEdge.gid !== 101) {
       throw new Error('Legacy edge TLS must be retired safely');
     }
   }
@@ -109,7 +113,8 @@ async function main() {
   }
   if (input.mode === 'stage' && entries.includes('edge-tls')) {
     const legacyEdge = await lstat(legacyEdgePath);
-    if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()) throw new Error('Unsafe legacy edge TLS file');
+    if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()
+        || legacyEdge.uid !== 101 || legacyEdge.gid !== 101) throw new Error('Unsafe legacy edge TLS file');
     await unlink(legacyEdgePath);
   }
   process.stdout.write(JSON.stringify({ status: 'READY', count: input.files.length }) + '\n');

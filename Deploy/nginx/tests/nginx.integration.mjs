@@ -81,6 +81,7 @@ http {
 }
 `);
   let containerId;
+  let edgeContainerId;
   let oauthId;
   let network;
   try {
@@ -100,7 +101,6 @@ http {
       '--publish', '127.0.0.1::8443',
       '--publish', '127.0.0.1::8080',
       '--env', 'PUBLIC_ORIGIN=https://helm.integration.test:8443',
-      '--env', 'TRUSTED_EDGE_PROXY=127.0.0.1',
       '--mount', `type=bind,source=${resolve(nginxDirectory, 'nginx.conf')},target=/etc/helm/nginx.conf.template,readonly`,
       '--mount', `type=bind,source=${resolve(nginxDirectory, 'entrypoint.sh')},target=/opt/helm/bin/start-nginx,readonly`,
       '--mount', `type=bind,source=${bundlePath},target=/run/secrets/edge_tls_identity,readonly`,
@@ -136,15 +136,31 @@ http {
     assert.match(missingUpstream.headers['content-type'], /application\/problem\+json/);
     assert.equal(missingUpstream.headers.location, undefined);
     assert.equal(missingUpstream.headers['x-content-type-options'], 'nosniff');
-    const httpAddress = docker(['port', containerId, '8080/tcp']);
+    edgeContainerId = docker([
+      'run', '--detach', '--network', network,
+      '--label', `helmglass.acceptance=${testId}`, '--user', '101:101', '--read-only', '--cap-drop', 'ALL',
+      '--security-opt', 'no-new-privileges:true', '--memory', '128m', '--pids-limit', '32',
+      '--tmpfs', '/tmp:size=16m', '--tmpfs', '/run:size=16m,uid=101,gid=101,mode=0700',
+      '--publish', '127.0.0.1::8080',
+      '--env', 'PUBLIC_ORIGIN=https://helm.integration.test:8443',
+      '--env', 'TRUSTED_EDGE_PROXY=127.0.0.1',
+      '--mount', `type=bind,source=${resolve(nginxDirectory, 'nginx.conf')},target=/etc/helm/nginx.conf.template,readonly`,
+      '--mount', `type=bind,source=${resolve(nginxDirectory, 'entrypoint.sh')},target=/opt/helm/bin/start-nginx,readonly`,
+      '--entrypoint', '/bin/sh', IMAGE, '/opt/helm/bin/start-nginx',
+    ]);
+    const httpAddress = docker(['port', edgeContainerId, '8080/tcp']);
+    const edgeDeadline = Date.now() + 15_000;
+    while (Date.now() < edgeDeadline) {
+      try { await untrustedHttpRequest(httpAddress); break; } catch { await delay(100); }
+    }
     assert.equal(await untrustedHttpRequest(httpAddress), 403,
       'Spoofed forwarding headers cannot authorize the HTTP peer');
-    const trusted = spawnSync('docker', ['--context', 'desktop-linux', 'exec', containerId, 'wget', '-S', '-O', '-',
+    const trusted = spawnSync('docker', ['--context', 'desktop-linux', 'exec', edgeContainerId, 'wget', '-S', '-O', '-',
       '--header=Host: helm.integration.test', '--header=X-Forwarded-For: 203.0.113.8',
       'http://127.0.0.1:8080/mcp'], { encoding: 'utf8', timeout: 5000 });
     assert.match(trusted.stderr, /HTTP\/1\.1 503/,
       'The trusted gateway uses the existing authenticated application route');
-    const trustedWeb = spawnSync('docker', ['--context', 'desktop-linux', 'exec', containerId, 'wget', '-S', '-O', '-',
+    const trustedWeb = spawnSync('docker', ['--context', 'desktop-linux', 'exec', edgeContainerId, 'wget', '-S', '-O', '-',
       '--header=Host: helm.integration.test', '--header=X-Forwarded-For: 203.0.113.8',
       'http://127.0.0.1:8080/'], { encoding: 'utf8', timeout: 5000 });
     assert.match(trustedWeb.stderr, /HTTP\/1\.1 200/);
@@ -162,8 +178,11 @@ http {
     assert.ok(configuration.includes('proxy_set_header X-Forwarded-Port 8443;'));
     assert.ok(configuration.includes('wss://helm.integration.test:8443'));
     assert.ok(!configuration.includes('set_real_ip_from 192.0.2.10'));
+    const edgeConfiguration = docker(['exec', edgeContainerId, 'cat', '/run/nginx.conf']);
+    assert.ok(!edgeConfiguration.includes('ssl_certificate'), 'Global edge mode needs no copied public key');
+    assert.ok(!edgeConfiguration.includes('listen 8443'), 'Global edge mode has no duplicate HTTPS listener');
   } finally {
-    for (const id of [containerId, oauthId].filter(Boolean)) {
+    for (const id of [edgeContainerId, containerId, oauthId].filter(Boolean)) {
       assert.equal(docker(['inspect', '--format', '{{index .Config.Labels "helmglass.acceptance"}}', id]), testId);
       docker(['rm', '--force', id]);
     }

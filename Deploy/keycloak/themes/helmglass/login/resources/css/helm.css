@@ -38,6 +38,7 @@ button:disabled, input:disabled { cursor: wait; opacity: .6; }
 [data-password-toggle] { position: relative; border-left: 0; border-radius: 0 6px 6px 0; width: 44px; flex: 0 0 44px; padding: 11px; }
 [data-password-toggle] i { display: block; width: 18px; height: 18px; background: url('../img/eye.svg') center / contain no-repeat; }
 [data-password-toggle] i.fa-eye-slash { background-image: url('../img/eye-off.svg'); }
+[data-password-toggle]:hover { background: #edf1f7; }
 [data-password-toggle]:hover::after, [data-password-toggle]:focus-visible::after { content: attr(aria-label); position: absolute; z-index: 1; right: 0; bottom: calc(100% + 8px); padding: 6px 9px; border-radius: 4px; white-space: nowrap; font-size: 12px; background: #25334b; color: white; }
 #kc-form-options { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
 #kc-form-options label { display: flex; align-items: center; gap: 8px; margin: 0; font-weight: 400; }

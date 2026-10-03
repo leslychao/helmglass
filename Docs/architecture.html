@@ -2321,7 +2321,7 @@ dialog::backdrop { background: #102b3bba; }
 <p id="browser-gpu-host"><strong>Проверено 03.10.2026 через <code>tcp://192.168.0.107:2375</code>:</strong> Docker Engine 27.3.1, API 1.47, Linux/amd64, Docker Desktop, WSL2 kernel <code>6.18.33.2-microsoft-standard-WSL2</code>, NVIDIA runtime. Запущенный без сети и host mounts временный read-only контейнер с GPU device request выполнил <code>nvidia-smi</code>: <strong>GeForce RTX 3070, 8192 MiB, driver 610.62</strong>. Контейнер удалён. Это подтверждает доступ к GPU, но не NVENC: FFmpeg/GStreamer в проверенном существующем image отсутствовали. Целевого Helm worker image и измерений WebRTC пока нет. Docker видит около 15.5 GiB RAM; суммарные лимиты ниже не доказывают, что весь стенд поместится с нужной производительностью.</p>
 <p>Деплой выполняется Docker API на 2375, без SSH: endpoint задаётся launcher через <code>DOCKER_HOST</code> из параметров стенда. Этот management port доступен только доверенному контуру управления; его не публикуют через Nginx, widget или приложение. Build context передаётся клиентом, но bind mounts/Compose secret files разрешаются на стороне daemon: launcher заранее доставляет необходимые файлы в защищённое хранилище host/WSL2 и проверяет доступность daemon paths, не подставляет локальный путь рабочего компьютера как удалённый. Docker socket/credentials не передаются API/worker.</p>
 <p>GPU reservation применяется только к browser-worker. В image закрепляются совместимые GStreamer core/plugins-rs, ximagesrc, conversions, nvcodec и OpenH264; release manifest фиксирует версии/digests и лицензии. NVIDIA driver устанавливается на Windows host, не вторым Linux driver в контейнере. Нужны runtime capabilities <code>compute,video,utility</code> и доступная encoder library. WSL2 поддерживает NVENC, но конкретная комбинация driver/runtime/image должна выполнить synthetic raw → H.264 encode и decode, затем Chromium capture → WebRTC. <code>nvidia-smi</code> и список encoder factories не заменяют этот тест. При необходимости библиотеки из <code>/usr/lib/wsl/lib</code> передаются узкими read-only mounts с проверкой совместимости; privileged и весь host filesystem не требуются. Если сам GPU passthrough не запускается, это ошибка deployment, а не подтверждённый software fallback работающего worker. <a href="https://docs.docker.com/desktop/features/gpu/">Docker GPU/WSL2</a>, <a href="https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/ffmpeg-with-nvidia-gpu/index.html">NVIDIA NVENC в WSL</a>, <a href="https://docs.nvidia.com/metropolis/deepstream/dev-guide/text/DS_WSL2_FAQ.html">Библиотеки в контейнере</a>.</p>
-<p><code>Deploy/compose.yaml</code> содержит состав сервисов и общие несекретные значения. Единственный файл параметров окружения <code>Deploy/.env.dev</code> задаёт origin, bind address/port, путь к bootstrap secrets, число workers, resource overrides и несекретные входы профилей по <a href="#predefined-users">27.1</a>. Отдельных local/production-конфигураций, env-файлов и dev/debug Compose override нет. Название dev не включает debug-режимы и не ослабляет TLS, cookie, авторизацию или требования к сохранности данных. <code>Deploy/.env.example</code> содержит только шаблон параметров без реальных секретов. Image digests поставляются отдельным сгенерированным <code>Deploy/release.env</code>, поскольку версия release не является секретом или параметром окружения.</p>
+<p><code>Deploy/compose.yaml</code> содержит состав сервисов и общие несекретные значения. Единственный файл параметров окружения <code>Deploy/.env.dev</code> задаёт origin, доверенный адрес глобального шлюза, путь к bootstrap secrets, число workers, resource overrides и несекретные входы профилей по <a href="#predefined-users">27.1</a>. Отдельных local/production-конфигураций, env-файлов и dev/debug Compose override нет. Название dev не включает debug-режимы и не ослабляет TLS, cookie, авторизацию или требования к сохранности данных. <code>Deploy/.env.example</code> содержит только шаблон параметров без реальных секретов. Image digests поставляются отдельным сгенерированным <code>Deploy/release.env</code>, поскольку версия release не является секретом или параметром окружения.</p>
 <div class="table-scroll" role="region" aria-label="Таблица 24. 27. Docker Compose topology" tabindex="0"><table>
 <thead>
 <tr>
@@ -2333,9 +2333,9 @@ dialog::backdrop { background: #102b3bba; }
 </thead>
 <tbody><tr>
 <td>nginx</td>
-<td>oauth2-proxy healthy, api healthy, mcp-adapter healthy</td>
+<td>oauth2-proxy healthy, api healthy, mcp-adapter healthy, coturn healthy</td>
 <td>0.5 CPU / 256 MiB</td>
-<td>Нет; Angular в image, TLS read-only</td>
+<td>Нет; Angular в image; публичный TLS принадлежит глобальному шлюзу</td>
 </tr>
 <tr><td>api</td><td>migrate completed, redis healthy, provision completed</td><td>2 CPU / 2 GiB</td><td>Нет; runtime secrets в tmpfs</td></tr>
 <tr><td>mcp-adapter</td><td>api ready; scoped mTLS identity</td><td>0.5 CPU / 256 MiB</td><td>Нет; bounded request/SDK buffers</td></tr>
@@ -2398,262 +2398,8 @@ dialog::backdrop { background: #102b3bba; }
 </tbody></table>
 </div>
 <p>Сумма лимитов при двух browser-worker — 14 GiB для 13 постоянных контейнеров; это не фактическое потребление и не рекомендация host ровно на 16 GiB. В worker budget входят Chromium, X display, raw buffers и GStreamer; GPU VRAM и пропускная способность NVENC общие для реплик и не изолируются Compose memory limit. Бюджеты — исходная конфигурация испытаний, не измеренная вместимость. Нужен запас для Windows/WSL2, Docker, page cache и пиков. Capacity определяется испытанием полного стенда, включая до четырёх video encoders, а не вычисляется из RAM или числа NVENC sessions в паспорте GPU.</p>
-<p>Следующий manifest задаёт итоговые сервисы и связи. Инфраструктурные images собираются из закреплённых upstream images с несекретной конфигурацией и собственным <code>/opt/helm/bin/healthcheck</code>. Это контракт будущих Dockerfile; такого скрипта нет по умолчанию в stock images. Секреты <code>*_identity</code> — bootstrap credentials для получения узких runtime credentials, а не Vault root token.</p>
-<div class="code-block"><div class="code-label">yaml</div><pre><code class="language-yaml">name: helm-glass
-
-x-runtime: &amp;runtime
-  restart: unless-stopped
-  init: true
-  logging:
-    driver: json-file
-    options:
-      max-size: "10m"
-      max-file: "3"
-      labels: "com.docker.compose.project"
-  healthcheck:
-    test: ["CMD", "/opt/helm/bin/healthcheck"]
-    interval: 10s
-    timeout: 3s
-    retries: 6
-    start_period: 40s
-
-x-stateless: &amp;stateless
-  &lt;&lt;: *runtime
-  read_only: true
-  cap_drop: ["ALL"]
-  security_opt: ["no-new-privileges:true"]
-  tmpfs: ["/tmp:size=64m", "/run:size=32m"]
-
-services:
-  nginx:
-    &lt;&lt;: *stateless
-    image: ${NGINX_IMAGE:?required release digest}
-    environment:
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
-      TRUSTED_EDGE_PROXY: ${TRUSTED_EDGE_PROXY:-}
-    ports: ["${BIND_ADDRESS:?required}:${HTTPS_PORT:?required}:8443"]
-    secrets: [edge_tls_identity]
-    networks: [edge, application]
-    depends_on:
-      api: {condition: service_healthy}
-      oauth2-proxy: {condition: service_healthy}
-      mcp-adapter: {condition: service_healthy}
-    cpus: 0.5
-    mem_limit: 256m
-
-  api:
-    &lt;&lt;: *stateless
-    image: ${API_IMAGE:?required release digest}
-    environment:
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
-      TURN_INTERNAL_URL: ${TURN_INTERNAL_URL:?required}
-      TURN_PUBLIC_URLS: ${TURN_PUBLIC_URLS:?required}
-      TURN_REALM: ${TURN_REALM:?required}
-    secrets: [api_identity]
-    networks: [application, data, secrets, mcp-control, worker-control]
-    depends_on:
-      migrate: {condition: service_completed_successfully}
-      redis: {condition: service_healthy}
-      provision: {condition: service_completed_successfully}
-    cpus: 2
-    mem_limit: 2g
-    stop_grace_period: 60s
-
-  mcp-adapter:
-    &lt;&lt;: *stateless
-    image: ${MCP_ADAPTER_IMAGE:?required release digest}
-    environment:
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
-      API_MCP_ENDPOINT: https://api:8446/internal/mcp
-    secrets: [mcp_adapter_identity]
-    networks: [application, mcp-control]
-    depends_on:
-      api: {condition: service_healthy}
-    cpus: 0.5
-    mem_limit: 256m
-    stop_grace_period: 30s
-
-  browser-worker:
-    &lt;&lt;: *stateless
-    image: ${WORKER_IMAGE:?required release digest}
-    environment:
-      WORKER_CAPACITY: "1"
-      CONTROL_ENDPOINT: https://api:8444/internal/worker/control
-      EGRESS_PROXY: http://egress-proxy:3128
-      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
-    secrets: [worker_identity]
-    networks: [worker-control, browser-egress]
-    depends_on:
-      api: {condition: service_healthy}
-      egress-proxy: {condition: service_healthy}
-      coturn: {condition: service_healthy}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${GPU_DEVICE_ID:?required}"]
-              capabilities: [gpu]
-    tmpfs: ["/tmp:size=128m", "/run:size=32m", "/runtime:size=512m"]
-    shm_size: 512m
-    pids_limit: 512
-    cpus: 2
-    mem_limit: 2g
-    stop_grace_period: 60s
-
-
-  egress-proxy:
-    &lt;&lt;: *stateless
-    image: ${EGRESS_IMAGE:?required release digest}
-    environment:
-      TURN_INTERNAL_URL: ${TURN_INTERNAL_URL:?required}
-    secrets: [egress_identity]
-    networks: [browser-egress, internet-egress]
-    cpus: 0.5
-    mem_limit: 256m
-
-  coturn:
-    &lt;&lt;: *stateless
-    image: ${TURN_IMAGE:?required release digest}
-    environment:
-      TURN_REALM: ${TURN_REALM:?required}
-      TURN_ADVERTISED_IP: ${TURN_ADVERTISED_IP:?required}
-      TURN_RELAY_MIN: ${TURN_RELAY_MIN:?required}
-      TURN_RELAY_MAX: ${TURN_RELAY_MAX:?required}
-    secrets: [turn_identity]
-    networks: [internet-egress]
-    ports:
-      - "${TURN_BIND_ADDRESS:?required}:3478:3478/udp"
-      - "${TURN_BIND_ADDRESS:?required}:3478:3478/tcp"
-      - "${TURN_BIND_ADDRESS:?required}:5349:5349/tcp"
-      - "${TURN_BIND_ADDRESS:?required}:${TURN_RELAY_MIN:?required}-${TURN_RELAY_MAX:?required}:${TURN_RELAY_MIN:?required}-${TURN_RELAY_MAX:?required}/udp"
-    cpus: 0.5
-    mem_limit: 256m
-
-  postgres:
-    &lt;&lt;: *runtime
-    image: ${POSTGRES_IMAGE:?required release digest}
-    secrets: [postgres_identity]
-    volumes: ["pg-data:/var/lib/postgresql"]
-    networks: [data, secrets]
-    cpus: 2
-    mem_limit: 2g
-
-  redis:
-    &lt;&lt;: *runtime
-    image: ${REDIS_IMAGE:?required release digest}
-    secrets: [redis_acl]
-    volumes: ["redis-data:/data"]
-    networks: [data]
-    cpus: 1
-    mem_limit: 768m
-
-  minio:
-    &lt;&lt;: *runtime
-    image: ${MINIO_IMAGE:?required community release digest}
-    secrets: [minio_identity]
-    volumes:
-      - type: bind
-        source: ${MINIO_DATA_DIR:?required persistent data directory}
-        target: /data
-        bind: {create_host_path: false}
-    networks: [data]
-    cpus: 1
-    mem_limit: 2g
-
-  vault:
-    &lt;&lt;: *runtime
-    image: ${VAULT_IMAGE:?required release digest}
-    secrets: [vault_tls_identity]
-    volumes: [&quot;vault-data:/vault/data&quot;]
-    networks: [secrets]
-    cap_add: [&quot;IPC_LOCK&quot;]
-    cpus: 0.5
-    mem_limit: 512m
-
-  keycloak:
-    &lt;&lt;: *runtime
-    image: ${KEYCLOAK_IMAGE:?required release digest}
-    environment:
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
-    secrets: [keycloak_identity]
-    networks: [application, data, secrets]
-    depends_on:
-      postgres: {condition: service_healthy}
-      vault: {condition: service_healthy}
-    cpus: 1
-    mem_limit: 1536m
-
-  provision:
-    image: ${PROVISION_IMAGE:?required release digest}
-    restart: "no"
-    environment:
-      DEPLOY_ENVIRONMENT: dev
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
-    secrets: [provision_identity, predefined_users_input]
-    networks: [data, secrets, application]
-    depends_on:
-      postgres: {condition: service_healthy}
-      redis: {condition: service_healthy}
-      minio: {condition: service_healthy}
-      vault: {condition: service_healthy}
-      keycloak: {condition: service_healthy}
-
-  migrate:
-    image: ${API_IMAGE:?required release digest}
-    command: ["migrate"]
-    restart: "no"
-    secrets: [migration_identity]
-    networks: [data, secrets]
-    depends_on:
-      provision: {condition: service_completed_successfully}
-
-  oauth2-proxy:
-    &lt;&lt;: *stateless
-    image: ${OAUTH_IMAGE:?required release digest}
-    environment:
-      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?required}
-    secrets: [oauth_identity]
-    networks: [application, data, secrets]
-    depends_on:
-      provision: {condition: service_completed_successfully}
-    cpus: 0.5
-    mem_limit: 256m
-
-
-networks:
-  edge: {}
-  application: {internal: true}
-  data: {internal: true}
-  mcp-control: {internal: true}
-  secrets: {internal: true}
-  worker-control: {internal: true}
-  browser-egress: {internal: true}
-  internet-egress: {}
-
-volumes:
-  pg-data: {}
-  redis-data: {}
-  vault-data: {}
-
-secrets:
-  edge_tls_identity: {file: "${SECRETS_DIR:?required}/edge-tls"}
-  api_identity: {file: "${SECRETS_DIR:?required}/api-bootstrap"}
-  worker_identity: {file: "${SECRETS_DIR:?required}/worker-bootstrap"}
-  turn_identity: {file: "${SECRETS_DIR:?required}/turn-bootstrap"}
-  egress_identity: {file: "${SECRETS_DIR:?required}/egress-bootstrap"}
-  postgres_identity: {file: "${SECRETS_DIR:?required}/postgres-bootstrap"}
-  redis_acl: {file: "${SECRETS_DIR:?required}/redis-bootstrap.acl"}
-  minio_identity: {file: "${SECRETS_DIR:?required}/minio-bootstrap"}
-  mcp_adapter_identity: {file: "${SECRETS_DIR:?required}/mcp-adapter-bootstrap"}
-  vault_tls_identity: {file: "${SECRETS_DIR:?required}/vault-tls"}
-  provision_identity: {file: "${SECRETS_DIR:?required}/provision-bootstrap"}
-  migration_identity: {file: "${SECRETS_DIR:?required}/migration-bootstrap"}
-  keycloak_identity: {file: "${SECRETS_DIR:?required}/keycloak-bootstrap"}
-  oauth_identity: {file: "${SECRETS_DIR:?required}/oauth-bootstrap"}
-  predefined_users_input: {file: "${SECRETS_DIR:?required}/predefined-users-input"}
-</code></pre>
-</div>
+<p>Инфраструктурные images собираются из закреплённых upstream images с несекретной конфигурацией и собственным <code>/opt/helm/bin/healthcheck</code>. Секреты <code>*_identity</code> — bootstrap credentials для получения узких runtime credentials, а не Vault root token.</p>
+<p>Канонический состав сервисов, сетей и mounts: <a href="../Deploy/compose.yaml"><code>Deploy/compose.yaml</code></a>. Значения стенда: <a href="../Deploy/.env.example"><code>Deploy/.env.example</code></a>; release pins генерируются отдельно. Конфигурация здесь не дублируется.</p>
 <p>Bootstrap имеет неизбежный корень доверия. Compose secrets — защищённые правами host files, а не зашифрованный secret manager. <code>SECRETS_DIR</code> находится вне Git. Static service credentials поступают из Vault KV; автоматическое renewal относится к ограниченным worker certificates, не ко всем паролям сервисов. Worker bootstrap даёт только enrollment, не доступ к business data; каждый процесс получает уникальные identity/сертификат. Общее право enrollment ограничено installation/capacity и ротируется; оно не позволяет назначать себе чужую session.</p>
 <p>Nginx entrypoint валидирует PUBLIC_ORIGIN/trusted proxy и рендерит только эти параметры в конфигурацию в <code>/run</code>; прочие <code>$...</code> переменные Nginx остаются неизменными. Keycloak/OAuth2 Proxy используют тот же PUBLIC_ORIGIN, поэтому redirect/issuer не расходятся между файлами. В сети <code>application</code> фиксированный адрес Nginx <code>172.28.40.2</code> исключён из динамического пула: при subnet <code>172.28.40.0/24</code> Docker выдаёт динамические адреса только из <code>172.28.40.128/25</code>. Порядок запуска сервисов не позволяет занять адрес доверенного proxy.</p>
 <p>Единая команда продукта — <code>./Deploy/up.sh dev</code> либо <code>./Deploy/up.ps1 dev</code> с Linux Docker engine; launcher принимает только dev. Алгоритм: проверить входы → поднять PostgreSQL/Redis/MinIO/Vault → безопасно выполнить init/unseal при необходимости → выполнить <code>provision vault-services</code> без зависимостей → запустить остальной Compose → дождаться ограниченного readiness deadline. Первая фаза проверяет KV/Transit/worker PKI policies и статические DB credentials Keycloak <strong>до</strong> его старта; Database secrets engine не поднимается. Полная <code>provision</code> job после readiness Keycloak создаёт/сверяет realm/client/buckets/ACL и подготавливает <a href="#predefined-users">predefined-пользователей</a>, затем Liquibase применяет схему Helm. Поэтому цикла <code>Keycloak → realm provision → Keycloak</code> нет. Первичные БД/роли PostgreSQL image создаёт из защищённого bootstrap input; schema Keycloak управляет сам Keycloak.</p>
@@ -2672,7 +2418,7 @@ secrets:
 <p>Launcher проверяет, что one-shot jobs завершились именно для текущей версии configuration/release, и явно повторяет их при изменении: прежний exited=0 не доказывает применение новой настройки. Операции provision идемпотентны; SQL migration выполняет только Liquibase. Это небольшой последовательный bootstrap script, не дополнительный orchestrator.</p>
 <p>При обновлении Redis ACL launcher допускает только известный переход, добавляющий команды блокировки сессии OAuth2 Proxy; хеши паролей и область ключей сохраняются. Произвольное изменение bootstrap отклоняется. Если загруженный Redis ACL отличается от проверенного файла, launcher пересоздаёт контейнер Redis с прежним томом данных, чтобы применить политику также после прерванного обновления.</p>
 <p>Vault с Shamir seal после холодного старта требует unseal quorum. Launcher может принять shares интерактивно без echo через stdin/TLS; сохранять shares рядом с volume ради автоматического запуска запрещено. Одна команда обеспечивается, unattended cold start без внешнего корня доверия — нет. Выбрана эта явная граница без обязательного cloud KMS. См. <a href="https://developer.hashicorp.com/vault/docs/concepts/seal">Vault seal</a>.</p>
-<p>При доменном доступе порт внутреннего Nginx bind-ится на loopback, если внешний Nginx на том же host, либо на закрытый интерфейс с firewall allowlist внешнего Nginx. Он не становится обходным публичным адресом. При локальном доступе к тому же dev пользователь обращается к опубликованному HTTPS-порту с доверенным certificate, без отключения Secure cookies; это способ подключения, а не второе окружение.</p>
+<p>На 107 используется существующий глобальный Nginx из отдельного репозитория <code>nginx-edge-gateway</code>. HTTP(S)/WebSocket и TURN проходят через него и внутренний Nginx. Глобальный шлюз имеет адрес <code>172.30.242.2</code>, внутренний — <code>172.30.242.3</code> (alias <code>helmglass-edge</code>) в выделенной сети <code>nginx-edge-helmglass</code>. Внутренний Nginx принимает HTTP на 8080 только от доверенного шлюза; приложение не публикует host ports. Публичные сертификат, private key и автоматическое продление остаются у глобального шлюза. Изолированные проверки прямого доступа могут запускать тот же Nginx image без TRUSTED_EDGE_PROXY с собственным тестовым TLS bundle; это не второй публичный вход стенда.</p>
 <p><code>depends_on</code> с conditions управляет стартом, но не recovery после него. Healthchecks не выводят секреты и не создают tasks. JVM liveness не зависит от доступности ChatGPT; readiness API и readiness allocator разделены. См. <a href="https://docs.docker.com/compose/how-tos/startup-order/">Compose startup order</a>.</p>
 <h3 id="predefined-users" tabindex="-1">27.1. Predefined-пользователи realm helm<a class="heading-link" href="#predefined-users" aria-label="Ссылка на раздел 27.1. Predefined-пользователи realm helm">#</a></h3>
 <p>В единственном окружении <code>dev</code> автоматически подготавливаются две постоянные рабочие учётные записи в realm <code>helm</code>:</p>
@@ -2696,7 +2442,7 @@ secrets:
 <p id="predefined-users-acceptance"><strong>Приёмка.</strong> На новой установке и после повторного provision/restart каждый пользователь в отдельной чистой браузерной сессии входит через внутренний Nginx → OAuth2 Proxy → Keycloak и сразу попадает в кабинет. Проверяются успешный <code>/api/v1/me</code>, создание и чтение собственной задачи, server-side session OAuth2 Proxy в Redis и ticket cookie браузера. <code>admin</code> получает доступ к Administration; <code>angelina</code> получает отказ admin API, а чужие пользовательские данные закрыты для обоих. Повтор сохраняет IDs и самостоятельно изменённый пароль; блокировка и отзыв роли переживают restart. Отдельно проверяются пустые входы, конфликт с чужим username/email и восстановление после прерванной подготовки без дублей. Получение токена или проверка JSON не заменяет браузерную приёмку. Это требования будущей реализации; в текущем репозитории realm и эти учётные записи ещё не созданы.</p>
 
 <h3 id="launcher-commands" tabindex="-1">27.2. Команды сборки и запуска<a class="heading-link" href="#launcher-commands" aria-label="Ссылка на команды сборки и запуска">#</a></h3>
-<p>Для деплоя на единственный рабочий сервер 107 (dev и production) используется <a href="../Deploy/deploy.sh"><code>Deploy/deploy.sh</code></a>. На рабочем компьютере нужны Node.js 24, Docker CLI с Compose, OpenSSL и SH; на Windows используется Git Bash. Исходный перечень несекретных параметров находится в <a href="../Deploy/.env.example"><code>Deploy/.env.example</code></a>; для установки создаётся игнорируемый Git файл <code>Deploy/.env.dev</code>. В нём задаются <code>DOCKER_HOST=tcp://192.168.0.107:2375</code>, <code>PUBLIC_ORIGIN=https://helmg.ru</code>, <code>TRUSTED_EDGE_PROXY=172.30.242.2</code>, профили из <a href="#predefined-users">27.1</a> и пути к подготовленному хранилищу и TLS PEM. TLS PEM содержит сертификат, цепочку и соответствующий private key. Секреты не записываются в этот env-файл. Лицензия MinIO не требуется.</p>
+<p><code>Deploy/.env.dev</code> содержит несекретные параметры единственного стенда 107: Docker endpoint, публичный origin, адрес глобального шлюза, пути к подготовленному хранилищу, recovery и защищённым operator inputs. TLS PEM и лицензия MinIO для запуска приложения не требуются: публичный TLS и продление принадлежат существующему глобальному Nginx.</p>
 <pre><code>sh Deploy/deploy.sh</code></pre>
 <p>Для повторного запуска без ручного экспорта паролей можно задать в <code>.env.dev</code> необязательный <code>OPERATOR_INPUT_FILE</code>: абсолютный путь к защищённому JSON-файлу на компьютере оператора, вне репозитория и <code>LOCAL_SECRETS_DIR</code>. Файл размером не более 64 KiB содержит ровно три ключа: <code>KEYCLOAK_ADMIN_PASSWORD</code>, <code>KEYCLOAK_ANGELINA_PASSWORD</code> и <code>VAULT_CUSTODY_PASSWORD</code>, каждый — непустая однострочная строка. Явно заданные переменные окружения имеют приоритет; ошибочный файл или невалидное значение останавливают запуск без вывода содержимого. Файловые пароли используются только для подготовки аккаунтов и локальной Vault custody и не добавляются в окружение дочерних Docker-команд. Без этого файла сохраняются прежний ввод через окружение и скрытый интерактивный ввод пароля Vault.</p>
 <p>В IntelliJ IDEA выбирается общая Run Configuration <strong>Deploy 107</strong> из <a href="../.run/Deploy%20107.run.xml"><code>.run/Deploy 107.run.xml</code></a>. Она запускает тот же SH-скрипт из корня проекта через установленный Git Bash; параметры и секреты в XML не дублируются. Для интерактивного ввода Vault custody используется окно терминала Run Configuration.</p>
@@ -2728,8 +2474,8 @@ secrets:
 </thead>
 <tbody><tr>
 <td>edge</td>
-<td>Только внутренний Nginx</td>
-<td>Единственный опубликованный HTTPS listener</td>
+<td>Глобальный и внутренний Nginx</td>
+<td>Выделенная nginx-edge-helmglass: HTTP и TURN stream, без прямого доступа к компонентам</td>
 </tr>
 <tr><td>application</td><td>Nginx, API, mcp-adapter, OAuth2 Proxy, Keycloak, provision</td><td>Пользовательский routing; без DB listener</td></tr>
 <tr><td>data</td><td>API, PostgreSQL, Redis, MinIO, Keycloak, OAuth2 Proxy, provision/migrate</td><td>Private; отдельные DB roles и Redis/S3 ACL</td></tr>
@@ -2751,9 +2497,14 @@ secrets:
 <td>Internal network без прямого internet gateway</td>
 </tr>
 <tr>
+<td>browser-relay</td>
+<td>Внутренний Nginx, egress proxy, coturn</td>
+<td>Internal network; TURN listeners и обмен между allocations одного coturn</td>
+</tr>
+<tr>
 <td>internet-egress</td>
-<td>Egress proxy и coturn</td>
-<td>Раздельные ACL: разрешённые сайты и TURN media. Workers сюда не подключены</td>
+<td>Только egress proxy</td>
+<td>Выход к разрешённым сайтам. Workers и coturn сюда не подключены</td>
 </tr>
 
 
@@ -2762,7 +2513,9 @@ secrets:
 <p>Docker network не является фильтром по порту. Egress proxy слушает browser route только на browser-egress; firewall исключает прямой internet bypass и обход между сетями. Browser-worker не получает прямого UDP/QUIC выхода или подключения к internet-egress ради WebRTC. Выдача аудиофайлов в ChatGPT проходит через контракт раздела 18; live video — отдельный маршрут ниже. Политики проверяются отдельно от OAuth callback входящего login.</p>
 <p id="browser-rtc-network"><strong>Минимальная сеть WebRTC:</strong> helper → authenticated Squid CONNECT → coturn по TURN/TCP → viewer по ICE/DTLS-SRTP. Для каждого consumer до ICE задаются <code>webrtcbin.ice-transport-policy=relay</code>, единственный разрешённый TURN endpoint и <code>http-proxy</code> существующего Squid; настройка выполняется через hook готового webrtcsink. Поддержка HTTP proxy для TURN/TCP есть в GStreamer с 1.22. Отдельная proxy identity helper разрешает только CONNECT к coturn:3478 и не выдаётся Chromium; точечное правило предшествует общему deny private destinations. Browser requests сохраняют прежние site ACL. Coturn не подключается к browser-egress/control/data. Так не нужны входящие ICE-порты workers или общее разрешение UDP контейнеру. Цена — дополнительное TCP/proxy-плечо; его вклад в задержку измеряется. <a href="https://gstreamer.freedesktop.org/documentation/webrtc/index.html#webrtcbin:http-proxy">GStreamer TURN proxy</a>, <a href="https://gstreamer.freedesktop.org/documentation/rswebrtc/webrtcsink.html">Consumer hooks</a>.</p>
 <p>Viewer получает scoped короткоживущие TURN credentials после авторизации signaling, с TTL не более срока viewer authorization; shared HMAC secret доступен только API/coturn через bootstrap/Vault. Helper получает свою proxy identity и TURN credentials по scoped control channel, хранит отдельно от browser profile/страницы. Client ICE включает TURN/UDP и TURN/TLS fallback для сетей без прямого UDP. API/worker lease, а не TURN password, определяет право видеть сессию. К TURN применяются authentication, allocation/bandwidth quotas и запрет relay к loopback/link-local/metadata/private service адресам в IPv4/IPv6; TURN не становится обходом SSRF-защиты. Для LAN проверяется relay↔relay через собственный разрешённый relay range вместо широкого разрешения RFC1918 peers. TCP relay к произвольным сервисам запрещён. Один coturn достаточен для текущих двух viewers на сессию; SFU не требуется. <a href="https://webrtc.org/getting-started/turn-server">TURN</a>, <a href="https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf">Coturn configuration</a>.</p>
-<p>TURN/TCP или TLS описывает соединение с relay, но не отменяет UDP relay-порты. Compose публикует listeners 3478/udp, 3478/tcp, 5349/tcp и конечный UDP range из .env.dev; coturn image получает те же min/max и корректный external/private address mapping. Windows firewall, Docker Desktop и при внешнем доступе маршрутизатор должны пропускать этот range с сохранением номеров портов. Docker container IP нельзя объявлять внешнему viewer. На LAN стенде advertised address может быть 192.168.0.107; доступность извне этим не подтверждается. Если host за недоступным NAT/CGNAT, единственный TURN размещается на доступном узле инфраструктуры, его endpoints меняются в Deploy; второй TURN/SFU не добавляется автоматически. Публичный маршрут и hairpin проверяются до объявления внешнего widget рабочим. Nginx остаётся единственным HTTP(S)-входом и переносит только WSS signaling, не SRTP. <a href="https://www.rfc-editor.org/rfc/rfc8656.html#section-3.1">TURN transports</a>, <a href="https://docs.docker.com/desktop/features/networking/">Docker Desktop networking</a>.</p>
+<p>Оба WebRTC-участника используют <code>iceTransportPolicy=relay</code> и один coturn. Его relay IP — фактический адрес единственной внутренней сети <code>browser-relay</code>; media между двумя allocations остаётся в этой сети. Coturn не публикует host ports и не использует external-ip mapping. Диапазон UDP relay задаёт внутренние allocations, но не открывается на host, firewall или маршрутизаторе. Узкое исключение peer ACL разрешает только собственный relay IP coturn; остальные private/loopback/link-local/metadata peers и TCP relay запрещены. Эта схема опирается на relay-only у обоих участников: прямые ICE peers и второй TURN потребуют отдельного пересмотра маршрута.</p>
+<p>Публичные listeners принадлежат глобальному Nginx: UDP 3478 → внутренний Nginx UDP 3478 → coturn UDP 3478; TCP 3478 и TLS/TCP 5349 → внутренний Nginx TCP 5349 → coturn PROXY listener 5555. Глобальный Nginx завершает TLS на существующем сертификате helmg.ru и добавляет PROXY v1 для TCP; внутренний Nginx допускает только доверенный gateway peer и пересылает заголовок без изменения. UDP stream сохраняет сессию с <code>reuseport</code> и timeout 10 минут; coturn видит адрес внутреннего proxy, поэтому ограничения по пользователю и общие quotas остаются обязательными. Nginx переносит TURN packets, а DTLS-SRTP остаётся шифрованием между WebRTC peers. При внешнем доступе маршрутизатор должен доставлять listeners глобального шлюза; доступность LAN сама по себе этого не подтверждает. <a href="https://nginx.org/en/docs/stream/ngx_stream_proxy_module.html">Nginx stream</a>, <a href="https://www.rfc-editor.org/rfc/rfc8656.html#section-11.3">TURN channel data</a>.</p>
+<p>Bootstrap TURN версии 2 содержит только shared secret. Launcher выполняет известный переход версии 1 → 2 с сохранением этого секрета, удаляет управляемые старые копии edge TLS и отклоняет произвольную замену credentials. Coturn запускается без TLS/DTLS private keys. Приватные TLS/mTLS между API, workers и хранилищами сохраняются.</p>
 <p>Host forwarding/firewall и process isolation ограничивают browser runtime; mTLS/credentials остаются проверкой API. Служебные listeners не публикуются. Private key supervisor не передаётся странице/agent tool. Успешный выход за Chromium/container sandbox рассматривается как компрометация worker и требует его fencing/замены; процесс внутри одного контейнера не объявляется абсолютной границей против RCE. Security acceptance отдельно проверяет невозможность обращения сайта к соседним контейнерам.</p>
 <p>Keycloak issuer остаётся внешним HTTPS URL. Серверные token/JWKS/logout обращения идут к <code>keycloak:8080</code> через явный trusted endpoint mapping, без отключения issuer validation. OAuth2 Proxy использует публичные authorize/redirect и внутренние token/JWKS endpoints: discovery не должен требовать уже запущенного Nginx. Hostname Keycloak — полный публичный URL, <code>http-relative-path=/auth</code>; proxy headers принимаются только от доверенных внутренних адресов. См. <a href="https://www.keycloak.org/server/reverseproxy">Keycloak reverse proxy</a>.</p>
 <p>Между контейнерами используются service DNS names, не localhost. Loopback допустим для healthcheck и локального helper/signaller в том же worker. В первом релизе запущен один Java API: control/signaling tunnels заканчиваются в его gateway, live video идёт через TURN. Реестр владельцев среди API replicas и межсерверная пересылка ввода не нужны. После restart API worker восстанавливает tunnel, API сверяет inventory/epochs, UI получает snapshot и создаёт разрешённые peers заново. PostgreSQL constraints/locks, worker fencing и контроль доступа сохраняются: несколько worker и запросов могут конкурировать даже при одном API.</p>
@@ -2772,325 +2525,14 @@ secrets:
 <p>Node mcp-adapter не подключается к data/secrets/worker-control сетям. Его identity доставляется защищённым bootstrap secret; trust и ключ ограничены internal MCP client. API_MCP_ENDPOINT — фиксированный internal route, не URL из model/page content. Keycloak JWKS для независимой transport-проверки берётся через trusted issuer mapping; окончательная авторизация каждого действия всегда выполняется Java owner.</p>
 </section>
 <section class="spec-section" aria-labelledby="section-29"><h2 id="section-29" tabindex="-1">29. Nginx config<a class="heading-link" href="#section-29" aria-label="Ссылка на раздел 29. Nginx config">#</a></h2>
-<p>Полный пример <code>Deploy/nginx/nginx.conf</code> для origin <code>https://helm.example.com</code> ниже. В release этот host/port и trust CIDR заменяются <strong>только</strong> валидированными стендовыми параметрами при сборке конфигурации, без подстановки всех переменных окружения поверх <code>$uri</code> и других Nginx variables. TLS identity material доставляется в <code>/run/tls</code> из secret. Требуется Nginx с <code>http_auth_request</code>, <code>http_realip</code>, SSL и <code>add_header_inherit merge</code> (последняя директива доступна с 1.29.3). Реализация фиксирует поддерживаемый patch/digest, а не <code>latest</code>. <a href="https://nginx.org/en/docs/http/ngx_http_headers_module.html">Header inheritance</a>.</p>
-<div class="code-block"><div class="code-label">nginx</div><pre><code class="language-nginx">worker_processes auto;
-pid /run/nginx.pid;
-error_log /dev/null crit;
-
-events {
-    worker_connections 4096;
-}
-
-http {
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    server_tokens off;
-    sendfile on;
-    tcp_nopush on;
-    keepalive_timeout 65s;
-    client_header_timeout 15s;
-    client_body_timeout 30s;
-    send_timeout 30s;
-    client_max_body_size 2m;
-    client_body_temp_path /tmp/client-body;
-    proxy_temp_path /tmp/proxy;
-
-    # Docker embedded DNS; re-resolve after container replacement.
-    resolver 127.0.0.11 valid=10s ipv6=off;
-    resolver_timeout 2s;
-
-    upstream api_backend {
-        zone api_backend 64k;
-        server api:8080 resolve;
-        keepalive 32;
-    }
-    upstream mcp_backend {
-        zone mcp_backend 64k;
-        server mcp-adapter:8080 resolve;
-        keepalive 16;
-    }
-    upstream oauth_backend {
-        zone oauth_backend 64k;
-        server oauth2-proxy:4180 resolve;
-        keepalive 16;
-    }
-    upstream keycloak_backend {
-        zone keycloak_backend 64k;
-        server keycloak:8080 resolve;
-        keepalive 16;
-    }
-
-    # Log only fixed route classes, never query strings or private resource URLs.
-    map $uri $route_class {
-        default                       "frontend";
-        ~^/api/                       "api";
-        ~^/events/                    "events";
-        ~^/stream/                    "browser-stream";
-        ~^/oauth2/                    "oauth";
-        ~^/auth/                      "identity";
-        /mcp                          "mcp";
-    }
-    log_format safe escape=json
-        '{"requestId":"$request_id","route":"$route_class",'
-        '"method":"$request_method","status":$status,'
-        '"seconds":$request_time,"bytes":$body_bytes_sent}';
-    access_log /dev/stdout safe;
-
-    map $uri $upstream_authorization {
-        default                       "Bearer $auth_token";
-        /mcp                          $http_authorization;
-        /.well-known/oauth-protected-resource/mcp "";
-        ~^/events/v1/widget/tasks/     "";
-        ~^/stream/v1/widget/signaling/ "";
-        ~^/auth/                      $http_authorization;
-        ~^/oauth2/                    "";
-        /_oauth2_auth                 "";
-    }
-    map $uri $upstream_content_length {
-        default                       $http_content_length;
-        /_oauth2_auth                 "";
-    }
-    map $uri $ws_upgrade {
-        default                       "";
-        ~^/stream/v1/                 $http_upgrade;
-        ~^/events/v1/                 $http_upgrade;
-    }
-    map $ws_upgrade $connection_upgrade {
-        default upgrade;
-        ""      "";
-    }
-    map $uri $cache_policy {
-        default                       "no-store";
-        ~^/auth/                      "";
-        ~^/oauth2/                    "";
-        "~^/(main|polyfills|chunk|styles)-[A-Za-z0-9_-]{8,}\.(js|css)$"
-            "private, max-age=31536000, immutable";
-    }
-    map $uri $app_csp {
-        default "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self' wss://helm.example.com; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'";
-        ~^/auth/   "";
-        ~^/oauth2/ "";
-    }
-
-    gzip on;
-    gzip_min_length 1024;
-    gzip_vary on;
-    gzip_types text/css application/javascript image/svg+xml;
-    add_header_inherit merge;
-
-    proxy_http_version 1.1;
-    proxy_connect_timeout 3s;
-    proxy_send_timeout 30s;
-    proxy_read_timeout 30s;
-    proxy_next_upstream off;
-    proxy_cache off;
-    proxy_hide_header Authorization;
-    proxy_hide_header X-Auth-Request-Access-Token;
-
-    # These headers are inherited by all locations; do not add a partial
-    # proxy_set_header list in a child location and lose this overwrite policy.
-    proxy_set_header Host helm.example.com;
-    proxy_set_header X-Forwarded-Host helm.example.com;
-    proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-Port 443;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header Forwarded "";
-    proxy_set_header X-Request-ID $request_id;
-    proxy_set_header X-User "";
-    proxy_set_header X-Email "";
-    proxy_set_header X-Auth-Request-User "";
-    proxy_set_header X-Auth-Request-Email "";
-    proxy_set_header X-Auth-Request-Groups "";
-    proxy_set_header X-Auth-Request-Access-Token "";
-    proxy_set_header X-Forwarded-User "";
-    proxy_set_header X-WEBAUTH-USER "";
-    proxy_set_header X-WEBAUTH-EMAIL "";
-    proxy_set_header X-WEBAUTH-ROLE "";
-    proxy_set_header Authorization $upstream_authorization;
-    proxy_set_header Content-Length $upstream_content_length;
-    proxy_set_header Upgrade $ws_upgrade;
-    proxy_set_header Connection $connection_upgrade;
-
-    server {
-        listen 8443 ssl default_server;
-        ssl_reject_handshake on;
-        return 444;
-    }
-
-    server {
-        listen 8443 ssl;
-        http2 on;
-        server_name helm.example.com;
-        ssl_certificate /run/tls/cert.pem;
-        ssl_certificate_key /run/tls/key.pem;
-        ssl_protocols TLSv1.2 TLSv1.3;
-        ssl_session_cache shared:TLS:10m;
-        ssl_session_tickets off;
-
-        # Example external proxy address only; rendered from deployment input.
-        # For local direct access no external peer is trusted.
-        set_real_ip_from 192.0.2.10;
-        real_ip_header X-Forwarded-For;
-        real_ip_recursive on;
-
-        root /usr/share/nginx/html;
-        index index.html;
-        add_header Strict-Transport-Security "max-age=31536000" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy "no-referrer" always;
-        add_header X-Frame-Options "SAMEORIGIN" always;
-        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-        add_header Content-Security-Policy $app_csp always;
-        add_header Cache-Control $cache_policy always;
-        add_header X-Request-ID $request_id always;
-        add_header Set-Cookie $auth_cookie always;
-
-        auth_request /_oauth2_auth;
-        auth_request_set $auth_token $upstream_http_x_auth_request_access_token;
-        auth_request_set $auth_cookie $upstream_http_set_cookie;
-
-        error_page 401 = @unauthenticated;
-        error_page 403 = @forbidden;
-        error_page 502 504 = @gateway_unavailable;
-
-        location = /_oauth2_auth {
-            internal;
-            auth_request off;
-            access_log off;
-            proxy_pass_request_body off;
-            proxy_pass http://oauth_backend/oauth2/auth;
-        }
-
-        # API performs OAuth forward-auth + the shared JWT/account/role checks.
-
-        location = /oauth2/auth { auth_request off; return 404; }
-        location = /oauth2/sign_out { auth_request off; return 404; }
-        location ~ ^/oauth2/(start|callback|sign_in)$ {
-            auth_request off;
-            access_log off;
-            proxy_pass http://oauth_backend;
-        }
-        location /oauth2/ { auth_request off; return 404; }
-
-        location ^~ /auth/realms/helm/ {
-            auth_request off;
-            access_log off;
-            proxy_pass http://keycloak_backend;
-        }
-        location ^~ /auth/resources/ {
-            auth_request off;
-            proxy_pass http://keycloak_backend;
-        }
-        location /auth/ { auth_request off; return 404; }
-
-        location = /.well-known/oauth-protected-resource/mcp {
-            auth_request off;
-            proxy_pass http://mcp_backend;
-        }
-        location = /mcp {
-            auth_request off;
-            proxy_buffering off;
-            proxy_read_timeout 300s;
-            gzip off;
-            proxy_pass http://mcp_backend;
-        }
-
-        location ^~ /api/v1/uploads/ {
-            client_max_body_size 20m;
-            proxy_request_buffering off;
-            proxy_hide_header Cache-Control;
-            proxy_pass http://api_backend;
-        }
-        location ^~ /api/ {
-            proxy_hide_header Cache-Control;
-            proxy_pass http://api_backend;
-        }
-        # Ticket-only widget routes; API validates Origin, purpose, grant,
-        # ownership and epochs. No anonymous data or cookie fallback.
-        location ^~ /events/v1/widget/tasks/ {
-            auth_request off;
-            limit_except GET { deny all; }
-            proxy_buffering off;
-            proxy_read_timeout 75s;
-            gzip off;
-            proxy_hide_header Cache-Control;
-            proxy_pass http://api_backend;
-        }
-        location ^~ /stream/v1/widget/signaling/ {
-            auth_request off;
-            limit_except GET { deny all; }
-            proxy_buffering off;
-            proxy_read_timeout 75s;
-            proxy_send_timeout 15s;
-            gzip off;
-            proxy_pass http://api_backend;
-        }
-        location ^~ /events/v1/ {
-            limit_except GET { deny all; }
-            proxy_buffering off;
-            proxy_read_timeout 75s;
-            gzip off;
-            proxy_hide_header Cache-Control;
-            proxy_pass http://api_backend;
-        }
-        location ^~ /stream/v1/ {
-            proxy_buffering off;
-            proxy_read_timeout 75s;
-            proxy_send_timeout 15s;
-            gzip off;
-            proxy_pass http://api_backend;
-        }
-
-        location /ops/ { auth_request off; return 404; }
-        location /internal/ { auth_request off; return 404; }
-        location /actuator/ { auth_request off; return 404; }
-        location = /metrics { auth_request off; return 404; }
-        location ~ /\. { auth_request off; return 404; }
-
-        location ~ "^/(main|polyfills|chunk|styles)-[A-Za-z0-9_-]{8,}\.(js|css)$" {
-            try_files $uri =404;
-        }
-        location /assets/ {
-            try_files $uri =404;
-        }
-        location = /index.html {
-            error_page 401 = @web_login;
-            try_files /index.html =404;
-        }
-        location / {
-            error_page 401 = @web_login;
-            try_files $uri /index.html;
-        }
-        location @web_login {
-            auth_request off;
-            return 302 /oauth2/start?rd=%2F;
-        }
-        location @unauthenticated {
-            auth_request off;
-            default_type application/problem+json;
-            return 401 '{"status":401,"code":"AUTHENTICATION_REQUIRED","requestId":"$request_id"}';
-        }
-        location @forbidden {
-            auth_request off;
-            default_type application/problem+json;
-            return 403 '{"status":403,"code":"ACCESS_DENIED","requestId":"$request_id"}';
-        }
-        location @gateway_unavailable {
-            auth_request off;
-            default_type application/problem+json;
-            return 503 '{"status":503,"code":"UPSTREAM_UNAVAILABLE","retryable":false,"requestId":"$request_id"}';
-        }
-    }
-}
-</code></pre>
-</div>
+<p>Внутренний Nginx — единственный владелец маршрутизации приложения для HTTP(S), WebSocket и TURN stream. Он подставляет только валидированные origin/trusted peer и параметры выбранного транспорта; переменные Nginx не заменяются окружением. На 107 публичный TLS завершает глобальный шлюз по <a href="#section-28">разделу 28</a>. Image требует HTTP auth_request/realip/SSL, stream/stream_ssl и <code>add_header_inherit merge</code>; закреплён patch/digest, не latest. <a href="https://nginx.org/en/docs/http/ngx_http_headers_module.html">Header inheritance</a>.</p>
+<p>Каноническая конфигурация HTTP и stream: <a href="../Deploy/nginx/nginx.conf"><code>Deploy/nginx/nginx.conf</code></a>; выбор режима и ограниченная подстановка параметров — <a href="../Deploy/nginx/entrypoint.sh"><code>entrypoint.sh</code></a>.</p>
 <p>OAuth2 Proxy должен иметь <code>reverse-proxy=true</code>, <code>set-xauthrequest=true</code>, <code>pass-access-token=true</code>, Redis session store, cookie настройки раздела 6, <code>upstream=static://202</code>, фиксированные redirect/issuer/client audience/scopes. Доступные flags сверяются с закреплённой версией. С Redis билет мал; если конфигурация допускает разбиение cookie на несколько Set-Cookie, конфигурацию auth_request необходимо расширить и проверить — терять вторую часть запрещено. Не публикуются ни <code>/oauth2/auth</code> с token response headers, ни management endpoints. Application logout через CSRF POST очищает cookie в ответе браузеру и вызывает нужные внутренние logout endpoints.</p>
 <p>В API/stream locations пользовательский bearer перезаписывается токеном proxy; <code>/mcp</code> сохраняет Bearer клиента для официального SDK adapter. На Java internal MCP listener отдельный SecurityFilterChain независимо проверяет этот Bearer и текущие права. Отсутствие token header от proxy приводит к отказу backend.</p>
 <p>API выдаёт 401/403 JSON; WS handshake — тот же статус. Только Angular HTML получает redirect, с безопасным фиксированным <code>rd=/</code>; возврат в требуемую страницу хранит Angular как проверенный same-origin route, не произвольный URL. CSP применяется к приложению; Keycloak отдаёт собственный CSP. JSON/private ответы не gzip-сжимаются; Brotli не добавляется без нужды. HTTP upload передаёт S3 multipart parts до 16 MiB через авторизованный gateway, backend отдельно проверяет общий размер и owner.</p>
 <p>Стандартный Nginx error log способен включать полный URL с OAuth code, поэтому в данном production config он не сохраняется. Диагностика запросов строится по safe access status/requestId и структурированному backend error; конфигурация проверяется <code>nginx -t</code> при запуске. Расширенный debug допускается только на синтетическом стенде без пользовательских secrets. Такой выбор требует alert на рост 5xx/502, а не надежды на необработанный request dump.</p>
-<p>Внешний Nginx должен передавать HTTP/1.1 Upgrade, отключать buffering для WS и MCP Streamable HTTP и иметь timeout не меньше внутреннего. Он перезаписывает forwarded headers, а внутренний доверяет только его точному адресу/CIDR. Между ними используется проверяемый TLS; публичный Host/Proto никогда не берутся из произвольного клиента. Nginx DNS <code>resolve</code> позволяет пережить смену IP контейнера; см. <a href="https://nginx.org/en/docs/http/ngx_http_upstream_module.html">upstream resolve</a>. Режимы WS следуют <a href="https://nginx.org/en/docs/http/websocket.html">WebSocket proxying</a> и <a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html">proxy buffering</a>.</p>
-<p>Конфигурация — проектный пример, не подтверждённый запуск: обязательны <code>nginx -t</code>, проверка сборки auth_request/realip, refresh cookie, URL prefix Keycloak, 401/403/101, MCP Streamable HTTP и WebRTC signaling через оба proxy. Docker daemon сервера 107 доступен по разделу 27, но Helm images/config пока не реализованы; эти runtime проверки и media connectivity здесь не выполнены.</p>
+<p>Внешний Nginx должен передавать HTTP/1.1 Upgrade, отключать buffering для WS и MCP Streamable HTTP и иметь timeout не меньше внутреннего. Он перезаписывает forwarded headers, а внутренний доверяет только его точному адресу/CIDR. На 107 они обмениваются HTTP и TURN внутри выделенной Docker network; публичный TLS завершён глобальным Nginx. Публичный Host/Proto никогда не берутся из произвольного клиента. Nginx DNS <code>resolve</code> позволяет пережить смену IP контейнера; см. <a href="https://nginx.org/en/docs/http/ngx_http_upstream_module.html">upstream resolve</a>. Режимы WS следуют <a href="https://nginx.org/en/docs/http/websocket.html">WebSocket proxying</a> и <a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html">proxy buffering</a>.</p>
+<p>Проверки конфигурации и runtime не заменяют друг друга: обязательны <code>nginx -t</code>, refresh cookie, URL prefix Keycloak, HTTP 401/403, WebSocket, MCP Streamable HTTP и WebRTC через оба proxy. Транспортная регрессия проверяет реальные TURN allocations и обмен по UDP/TCP/TLS, отказы авторизации и недопустимых peers. Пользовательский медиамаршрут проверяется отдельно после развёртывания.</p>
 <p>/mcp не получает web auth redirect; официальный SDK adapter обслуживает endpoint, а Java повторно авторизует каждый вызов на отдельном internal mTLS listener. Metadata публикует тот же resource/audience/issuer. При fallback legacy включается только официальный server-legacy adapter и проверяется согласованный protocol version; отдельный собственный JSON-RPC путь отсутствует.</p>
 </section>
 <section class="spec-section" aria-labelledby="section-30"><h2 id="section-30" tabindex="-1">30. Repository structure<a class="heading-link" href="#section-30" aria-label="Ссылка на раздел 30. Repository structure">#</a></h2>

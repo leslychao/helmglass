@@ -20,6 +20,12 @@ const evidence = {
 };
 const sessionKeys = {};
 
+function redisSessionKey(value) {
+  const encoded = Buffer.from(value.split("|")[0], "base64url").toString();
+  assert.ok(encoded.startsWith("v2."), "Pinned OAuth2 Proxy Redis ticket version");
+  return Buffer.from(encoded.split(".")[1], "base64url").toString();
+}
+
 async function read(account, path) {
   return account.page.evaluate(async (path) => {
     const response = await fetch(path);
@@ -160,7 +166,12 @@ async function signIn(username) {
     assert.equal(await page.locator("#password").getAttribute("type"), "password");
     assert.equal(await toggle.innerText(), "", "Password visibility uses only the eye icon");
     await page.locator("#username").focus();
+    await page.mouse.move(0, 0);
     await page.screenshot({ path: "/evidence/helm-login.png", fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: "/evidence/helm-login-mobile.png", fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1080 });
     await page.locator("#password").fill("incorrect-fixture-password");
     await page.locator("#kc-login").click();
     await page.locator("#input-error").waitFor();
@@ -320,18 +331,7 @@ async function signIn(username) {
   assert.ok(
     !cookies.some((cookie) => /access_token|refresh_token/i.test(cookie.name)),
   );
-  const encodedTicket = Buffer.from(
-    ticket.value.split("|")[0],
-    "base64url",
-  ).toString();
-  assert.ok(
-    encodedTicket.startsWith("v2."),
-    "Pinned OAuth2 Proxy Redis ticket version",
-  );
-  sessionKeys[username] = Buffer.from(
-    encodedTicket.split(".")[1],
-    "base64url",
-  ).toString();
+  sessionKeys[username] = redisSessionKey(ticket.value);
   const authorization = await fetch("http://oauth2-proxy:4180/oauth2/auth", {
     headers: {
       Cookie: cookies
@@ -480,10 +480,26 @@ try {
     .getByRole("dialog")
     .getByLabel("Причина")
     .fill("Finish isolated browser acceptance");
+  const unblockResponse = admin.page.waitForResponse((response) =>
+    response.url().endsWith(`/api/v1/admin/users/${regular.me.id}/unblock`)
+      && response.request().method() === "POST",
+  );
   await admin.page
     .getByRole("dialog")
     .getByRole("button", { name: "Подтвердить", exact: true })
     .click();
+  const unblock = await (await unblockResponse).json();
+  let unblockState;
+  const unblockDeadline = Date.now() + 30_000;
+  do {
+    const operation = await read(admin, `/api/v1/admin/operations/${unblock.operationId}`);
+    assert.equal(operation.status, 200);
+    unblockState = operation.body.state;
+    if (unblockState === "SUCCEEDED") break;
+    assert.ok(["PENDING", "RUNNING"].includes(unblockState), "Unblock must remain recoverable");
+    await delay(250);
+  } while (Date.now() < unblockDeadline);
+  assert.equal(unblockState, "SUCCEEDED", "Unblock includes the provider identity update");
   await admin.page
     .getByRole("button", { name: "Заблокировать", exact: true })
     .waitFor();
@@ -531,6 +547,9 @@ try {
   await regular.page.locator("#kc-login").click();
   await regular.page.waitForURL(fixture.origin + "/tasks");
   assert.equal((await read(regular, "/api/v1/me")).status, 200);
+  const renewedTicket = (await regular.context.cookies()).find((cookie) => cookie.name === "__Host-helm_session");
+  assert.ok(renewedTicket);
+  sessionKeys.angelina = redisSessionKey(renewedTicket.value);
   await regular.page.reload();
   await regular.page.getByRole("button", { name: "Меню профиля" }).click();
   await regular.page.getByRole("button", { name: "Выйти", exact: true }).click();

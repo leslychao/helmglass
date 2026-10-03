@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -20,7 +20,6 @@ test('private TURN allocations exchange data through two Nginx proxies without p
     const cache = resolve('.cache');
     await mkdir(cache, { recursive: true });
     const directory = await mkdtemp(resolve(cache, 'turn-transport-'));
-    const mount = ['--mount', `type=bind,src=${directory},dst=/fixture,readonly`];
     const sharedSecret = randomBytes(32).toString('base64url');
     const name = purpose => `helm-turn-${purpose}-${fixture}`;
     const network = Object.fromEntries(['front', 'edge', 'relay'].map(purpose => [purpose, name(purpose)]));
@@ -51,7 +50,10 @@ test('private TURN allocations exchange data through two Nginx proxies without p
       const container = name(purpose);
       containers.push(container);
       const result = await docker(['run', '--rm', '--name', container, '--label', label,
-        '--network', network.front, ...limited, ...mount, '--entrypoint', 'sh', turnImage,
+        '--network', network.front, ...limited,
+        '--mount', `type=bind,src=${resolve(directory, identity)},dst=/fixture/${identity},readonly`,
+        '--mount', `type=bind,src=${resolve(directory, 'tls.crt')},dst=/fixture/tls.crt,readonly`,
+        '--entrypoint', 'sh', turnImage,
         '-c', 'secret=$(jq -er .turnSharedSecret "/fixture/$1"); shift; '
           + 'exec timeout 15 turnutils_uclient -W "$secret" "$@"', 'turn-client',
         identity, '-c', '-n', '5', '-z', '100', '-K', '0', ...flags, 'gateway'], { allowedExitCodes, timeout: 25_000 });
@@ -84,43 +86,21 @@ test('private TURN allocations exchange data through two Nginx proxies without p
       assert.deepEqual((await docker(['exec', turn, 'sh', '-c',
         'find /run/helm -type f -name "*.pem"'])).stdout.trim(), '');
 
-      const edgeSubnet = JSON.parse((await docker(['network', 'inspect', network.edge])).stdout)[0].IPAM.Config[0].Subnet;
-      await writeFile(resolve(directory, 'internal.conf'), `
-events {}
-stream {
-    server {
-        listen 3478 udp reuseport;
-        allow ${edgeSubnet};
-        deny all;
-        proxy_pass coturn:3478;
-        proxy_timeout 10m;
-    }
-    server {
-        listen 5349;
-        allow ${edgeSubnet};
-        deny all;
-        proxy_pass coturn:5555;
-        proxy_timeout 10m;
-    }
-}
-`);
-      const internal = await start('internal', nginxImage, network.relay,
-        ['--user', '0:0', ...mount, '--entrypoint', 'nginx'], ['-c', '/fixture/internal.conf', '-g', 'daemon off;']);
-      await docker(['network', 'connect', '--alias', 'internal', network.edge, internal]);
-      await ready(internal, ['nginx', '-t', '-c', '/fixture/internal.conf']);
-
       await writeFile(resolve(directory, 'global.conf'), `
 events {}
 stream {
+    resolver 127.0.0.11 valid=1s ipv6=off;
+    upstream internal_udp { zone internal_udp 32k; server internal:3478 resolve; }
+    upstream internal_tcp { zone internal_tcp 32k; server internal:5349 resolve; }
     server {
         listen 3478 udp reuseport;
-        proxy_pass internal:3478;
+        proxy_pass internal_udp;
         proxy_timeout 10m;
     }
     server {
         listen 3478;
         proxy_protocol on;
-        proxy_pass internal:5349;
+        proxy_pass internal_tcp;
         proxy_timeout 10m;
     }
     server {
@@ -129,15 +109,34 @@ stream {
         ssl_certificate_key /fixture/tls.key;
         ssl_protocols TLSv1.2 TLSv1.3;
         proxy_protocol on;
-        proxy_pass internal:5349;
+        proxy_pass internal_tcp;
         proxy_timeout 10m;
     }
 }
 `);
       const gateway = await start('gateway', nginxImage, network.edge,
-        ['--user', '0:0', ...mount, '--entrypoint', 'nginx'], ['-c', '/fixture/global.conf', '-g', 'daemon off;']);
+        ['--user', '0:0',
+          ...['global.conf', 'tls.crt', 'tls.key'].flatMap(file => [
+            '--mount', `type=bind,src=${resolve(directory, file)},dst=/fixture/${file},readonly`]),
+          '--entrypoint', 'nginx'], ['-c', '/fixture/global.conf', '-g', 'daemon off;']);
       await docker(['network', 'connect', '--alias', 'gateway', network.front, gateway]);
       await ready(gateway, ['nginx', '-t', '-c', '/fixture/global.conf']);
+      const gatewayAddress = (await state(gateway)).NetworkSettings.Networks[network.edge].IPAddress;
+      await writeFile(resolve(directory, 'production.conf'), await readFile(new URL('../../nginx/nginx.conf', import.meta.url)));
+      await writeFile(resolve(directory, 'production-entrypoint.sh'), await readFile(new URL('../../nginx/entrypoint.sh', import.meta.url)));
+      const internal = await start('internal', nginxImage, network.relay, [
+        ...limited, '--user', '101:101',
+        '--mount', `type=bind,src=${resolve(directory, 'production-entrypoint.sh')},dst=/fixture/production-entrypoint.sh,readonly`,
+        '--mount', `type=bind,src=${resolve(directory, 'production.conf')},dst=/etc/helm/nginx.conf.template,readonly`,
+        '--tmpfs', '/run:size=32m,uid=101,gid=101,mode=0700', '--tmpfs', '/tmp:size=64m',
+        '--env', 'PUBLIC_ORIGIN=https://helm.integration.test', '--env', `TRUSTED_EDGE_PROXY=${gatewayAddress}`,
+        '--entrypoint', 'sh'], ['/fixture/production-entrypoint.sh']);
+      await docker(['network', 'connect', '--alias', 'internal', network.edge, internal]);
+      await ready(internal, ['nginx', '-t', '-c', '/run/nginx.conf']);
+      await docker(['exec', internal, 'test', '!', '-e', '/run/secrets/edge_tls_identity']);
+      await docker(['exec', internal, 'test', '!', '-e', '/fixture/tls.key']);
+      // The internal endpoint was created after the global listener; resolve its new Docker alias now.
+      await docker(['exec', gateway, 'nginx', '-s', 'reload', '-c', '/fixture/global.conf']);
 
       for (const [transport, flags] of [
         ['udp', ['-y', '-p', '3478']],
@@ -160,6 +159,29 @@ stream {
         const output = await client('bad-auth', ['-t', '-p', '3478', '-y'], [255], 'wrong-secret.json');
         assert.match(output, /Cannot complete Allocation/);
         assert.doesNotMatch(output, /tot_recv_msgs=[1-9]/);
+      });
+
+      await t.test('an untrusted container cannot inject a PROXY header into the internal listener', async () => {
+        const container = name('untrusted');
+        containers.push(container);
+        await docker(['run', '--rm', '-i', '--name', container, '--label', label,
+          '--network', network.edge, ...limited, '--entrypoint', 'node', provisionImage,
+          '--input-type=module'], { input: `
+import { connect } from 'node:net';
+await new Promise((resolve, reject) => {
+  const socket = connect(5349, 'internal');
+  socket.setTimeout(3000, () => { socket.destroy(); reject(new Error('Untrusted connection was not closed')); });
+  socket.once('connect', () => {
+    const binding = Buffer.alloc(20);
+    binding.writeUInt16BE(1, 0);
+    binding.writeUInt32BE(0x2112a442, 4);
+    socket.write(Buffer.concat([Buffer.from('PROXY TCP4 203.0.113.20 203.0.113.30 50000 5349\\r\\n'), binding]));
+  });
+  socket.on('data', () => { socket.destroy(); reject(new Error('Untrusted client reached coturn')); });
+  socket.once('error', error => { if (error.code !== 'ECONNRESET') reject(error); });
+  socket.once('close', () => resolve());
+});
+`, timeout: 10_000 });
       });
 
       await t.test('legacy identities containing a private key cannot start coturn', async () => {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomBytes, X509Certificate } from 'node:crypto';
-import { mkdtemp, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -8,20 +8,18 @@ import { prepareBootstrap } from '../bootstrap.mjs';
 import { encryptRecovery, decryptRecovery } from '../custody.mjs';
 import { isInside, protectDirectory, writeProtectedFile } from '../protected-files.mjs';
 import { createAuthority, createIdentity, validateInternalIdentity } from '../tls.mjs';
+import { upgradeTurnBootstrap } from '../provision/src/turn-bootstrap-upgrade.mjs';
 
 test('protected bootstrap generates distinct TLS identities once and does not replace missing credentials', async () => {
   const temporary = await mkdtemp(join(tmpdir(), 'helm-bootstrap-test-'));
   try {
     await protectDirectory(temporary, resolve('.'));
     const caPem = await createAuthority(temporary);
-    const edge = await createIdentity(temporary, 'helm-test', caPem);
-    const edgePath = join(temporary, 'edge.pem');
-    await writeProtectedFile(edgePath, edge.certificatePem + caPem + edge.privateKeyPem);
+    const recipient = await createIdentity(temporary, 'helm-test', caPem);
     const recipientPath = join(temporary, 'backup-recipient.pem');
-    await writeProtectedFile(recipientPath, edge.certificatePem);
+    await writeProtectedFile(recipientPath, recipient.certificatePem);
     const configuration = { INSTALLATION_ID: 'bootstrap-test', PUBLIC_ORIGIN: 'https://helm-test', TURN_REALM: 'helm-test',
       LOCAL_SECRETS_DIR: join(temporary, 'service-secrets'), LOCAL_RECOVERY_DIR: join(temporary, 'offline-custody'),
-      EDGE_TLS_FILE: edgePath, TURN_TLS_FILE: edgePath,
       BACKUP_RECIPIENT_FILE: recipientPath,
       KEYCLOAK_ADMIN_EMAIL: 'admin@example.test', KEYCLOAK_ADMIN_LAST_NAME: 'Fixture',
       KEYCLOAK_ANGELINA_EMAIL: 'angelina@example.test', KEYCLOAK_ANGELINA_LAST_NAME: 'Fixture',
@@ -46,6 +44,23 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     const expiry = Date.parse(new X509Certificate(api.tls.certificatePem).validTo);
     assert.throws(() => validateInternalIdentity(api.tls, 'api', false, expiry), /rotation/);
     const secrets = JSON.parse(kvBefore);
+    const turnPath = join(first.directory, 'turn-bootstrap');
+    const currentTurn = await readFile(turnPath);
+    const turn = JSON.parse(currentTurn.toString('utf8'));
+    assert.deepEqual(turn, { schemaVersion: 2, turnSharedSecret: secrets.services.api.turnSharedSecret });
+    assert.equal(turn.turnSharedSecret, secrets.services.coturn.turnSharedSecret);
+    const legacyEdgePath = join(first.directory, 'edge-tls');
+    await assert.rejects(readFile(legacyEdgePath), { code: 'ENOENT' });
+    const legacyTurn = { schemaVersion: 1, turnSharedSecret: turn.turnSharedSecret, tls: recipient };
+    assert.deepEqual(upgradeTurnBootstrap(Buffer.from(JSON.stringify(legacyTurn))), currentTurn);
+    for (const invalid of [
+      { ...legacyTurn, unexpected: true },
+      { ...legacyTurn, tls: { ...recipient, pem: 'unexpected' } },
+      { ...legacyTurn, tls: { certificatePem: recipient.certificatePem, privateKeyPem: recipient.privateKeyPem } },
+      { ...legacyTurn, tls: { ...recipient, privateKeyPem: adapter.tls.privateKeyPem } },
+      { ...turn, tls: recipient },
+      { ...turn, turnSharedSecret: 'too-short' },
+    ]) assert.throws(() => upgradeTurnBootstrap(Buffer.from(JSON.stringify(invalid))));
     const backup = JSON.parse(await readFile(join(first.directory, 'backup-bootstrap'), 'utf8'));
     assert.equal(backup.vault.roleId, secrets.credentials.backup.roleId);
     assert.equal(secrets.services.backup, undefined, 'Snapshot role must not receive a service KV record');
@@ -57,8 +72,27 @@ test('protected bootstrap generates distinct TLS identities once and does not re
     const aclPath = join(first.directory, 'redis-bootstrap.acl');
     const currentAcl = await readFile(aclPath, 'utf8');
     await writeFile(aclPath, currentAcl.replace(' +msetnx +mset +mget +getrange', ''));
+    await writeFile(turnPath, JSON.stringify(legacyTurn));
+    await writeProtectedFile(legacyEdgePath, recipient.certificatePem + recipient.privateKeyPem);
+    const unrelatedPath = join(first.directory, 'operator-note');
+    await writeProtectedFile(unrelatedPath, 'Keep unrelated operator files');
+    await assert.rejects(prepareBootstrap({ ...configuration, PUBLIC_ORIGIN: 'https://changed.example.test' }, environment), /different installation/);
+    assert.ok((await readFile(legacyEdgePath)).length > 0);
+    await writeFile(turnPath, JSON.stringify({ ...legacyTurn, turnSharedSecret: randomBytes(32).toString('base64url') }));
+    await assert.rejects(prepareBootstrap(configuration, environment), /TURN credential differs/);
+    assert.notEqual(await readFile(aclPath, 'utf8'), currentAcl, 'Reject the full input before applying another migration');
+    assert.ok((await readFile(legacyEdgePath)).length > 0);
+    await writeFile(turnPath, JSON.stringify(legacyTurn));
     assert.equal((await prepareBootstrap(configuration, environment)).created, false);
     assert.equal(await readFile(aclPath, 'utf8'), currentAcl);
+    assert.deepEqual(await readFile(turnPath), currentTurn);
+    await assert.rejects(readFile(legacyEdgePath), { code: 'ENOENT' });
+    assert.equal(await readFile(unrelatedPath, 'utf8'), 'Keep unrelated operator files');
+    assert.equal((await prepareBootstrap(configuration, environment)).created, false);
+    assert.deepEqual(await readFile(turnPath), currentTurn);
+    await mkdir(legacyEdgePath);
+    await assert.rejects(prepareBootstrap(configuration, environment), /Unsafe legacy edge TLS/);
+    await rmdir(legacyEdgePath);
     assert.deepEqual(await readFile(join(first.directory, 'vault-services-input')), kvBefore);
     await assert.rejects(prepareBootstrap({ ...configuration, PUBLIC_ORIGIN: 'https://changed.example.test' }, environment), /different installation/);
     await unlink(join(first.directory, 'worker-bootstrap'));

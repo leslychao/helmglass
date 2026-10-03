@@ -45,9 +45,11 @@ export async function prepareBootstrap(configuration, environment = process.env)
     if (JSON.stringify(recorded) !== JSON.stringify(binding(configuration))) {
       throw new Error('Existing bootstrap belongs to a different installation or origin; use an explicit certificate rotation');
     }
+    let serviceSecrets;
     for (const file of [...BOOTSTRAP_FILES, 'backup-bootstrap', 'vault-services-input',
       'installation-ca.crt', 'installation-ca.key']) {
-      await readProtectedFile(join(directory, file));
+      const bytes = await readProtectedFile(join(directory, file));
+      if (file === 'vault-services-input') serviceSecrets = JSON.parse(bytes.toString('utf8')).services;
     }
     const legacyEdgePath = join(directory, 'edge-tls');
     if (entries.includes('edge-tls')) {
@@ -66,13 +68,21 @@ export async function prepareBootstrap(configuration, environment = process.env)
     const turnPath = join(directory, 'turn-bootstrap');
     const previousTurn = await readProtectedFile(turnPath);
     const upgradedTurn = upgradeTurnBootstrap(previousTurn);
+    const turnSecret = JSON.parse(upgradedTurn.toString('utf8')).turnSharedSecret;
+    if (turnSecret !== serviceSecrets?.api?.turnSharedSecret || turnSecret !== serviceSecrets?.coturn?.turnSharedSecret) {
+      throw new Error('TURN credential differs from installation credentials');
+    }
     if (!previousAcl.equals(upgradedAcl)) {
       await replaceProtectedFile(aclPath, upgradedAcl, createHash('sha256').update(previousAcl).digest('hex'));
     }
     if (!previousTurn.equals(upgradedTurn)) {
       await replaceProtectedFile(turnPath, upgradedTurn, createHash('sha256').update(previousTurn).digest('hex'));
     }
-    if (entries.includes('edge-tls')) await unlink(legacyEdgePath);
+    if (entries.includes('edge-tls')) {
+      const legacyEdge = await lstat(legacyEdgePath);
+      if (!legacyEdge.isFile() || legacyEdge.isSymbolicLink()) throw new Error('Unsafe legacy edge TLS file');
+      await unlink(legacyEdgePath);
+    }
     return { directory, created: false };
   }
   // Validate every operator-supplied value before creating installation credentials.
