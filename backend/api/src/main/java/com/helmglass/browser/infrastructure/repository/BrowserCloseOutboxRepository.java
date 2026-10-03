@@ -57,7 +57,8 @@ public class BrowserCloseOutboxRepository {
     jdbc.sql(
             """
             WITH closing AS (
-              UPDATE browser_sessions SET state='STOPPING',version=version+1
+              UPDATE browser_sessions SET state='STOPPING',
+                version=version+CASE WHEN state='STOPPING' THEN 0 ELSE 1 END
               WHERE id=:id AND state<>'CLOSED' AND binding_released_at IS NULL
               RETURNING id,user_id,worker_id,worker_boot_id,allocation_epoch
             )
