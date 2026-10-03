@@ -51,4 +51,7 @@
   <changeSet id="030-chat-presentation" author="helmglass">
     <sqlFile path="030-chat-presentation.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="031-continuation-delivery" author="helmglass">
+    <sqlFile path="031-continuation-delivery.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

@@ -18,7 +18,7 @@ const viewerId = randomUUID();
 const media = new MediaSession(() => runtime, (_id, value) => {
   if (value.type === 'peer') console.log('producer signal', value.ice ? 'ICE' : 'SDP');
   socket?.send(JSON.stringify(value));
-}, (_id, code) => { console.log('viewer ended', code); socket?.close(); });
+}, (_binding, code) => { console.log('viewer ended', code); socket?.close(); }, () => undefined);
 const username = `${Math.floor(Date.now() / 1000) + 120}:test`;
 const credential = createHmac('sha1', credentials.turn).update(username).digest('base64');
 const ice = { urls: ['turn:coturn:3478?transport=tcp'], username, credential };
@@ -51,13 +51,16 @@ try {
   runtime = await BrowserSession.create(assignment, { headless: false, display: ':99', stagingDirectory: '/runtime/sessions', mediaBarrier: () => media.closeAll() });
   await runtime.context.pages()[0].setContent('<body style="margin:0;background:#c32231"><h1>Actual Chromium surface</h1></body>');
   const binding = { schemaVersion: 1, type: 'viewOpen', requestId: randomUUID(), viewerId, browserSessionId: assignment.browserSessionId,
+    workerBootId: assignment.workerBootId,
     allocationEpoch: 1, controlEpoch: 1, pageEpoch: assignment.pageEpoch, privacyEpoch: 1, mediaGeneration: 1, viewGeneration: 1, surface: 'WEB',
     iceServers: [ice], producerIceServer: ice, mediaProxy: { url: 'http://egress-proxy:3128', username: 'helm-media', password: credentials.proxy },
     leaseExpiresAt: new Date(Date.now() + 4500).toISOString() };
   ws.once('connection', client => {
     socket = client;
     client.on('message', async raw => {
-      try { await media.accept({ schemaVersion: 1, type: 'signal', requestId: randomUUID(), viewerId, payload: JSON.parse(raw.toString()) }); }
+      try { await media.accept({ schemaVersion: 1, type: 'signal', requestId: randomUUID(), viewerId,
+        workerBootId: binding.workerBootId, browserSessionId: binding.browserSessionId,
+        allocationEpoch: binding.allocationEpoch, viewGeneration: binding.viewGeneration, payload: JSON.parse(raw.toString()) }); }
       catch (error) { console.error('signaling rejected', error.code ?? error.message); }
     });
     void media.accept(binding).then(() => {

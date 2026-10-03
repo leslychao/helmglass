@@ -4,8 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 
+const workerBootId = randomUUID();
 const runtime = fork(new URL('../dist/src/runtime-main.js', import.meta.url), [], {
-  env: { ...process.env, WORKER_BOOT_ID: randomUUID(), STAGING_DIRECTORY: '/runtime/sessions',
+  env: { ...process.env, WORKER_BOOT_ID: workerBootId, STAGING_DIRECTORY: '/runtime/sessions',
     EGRESS_PROXY_URL: 'http://egress-proxy:3128' },
   stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
 });
@@ -20,7 +21,7 @@ runtime.on('message', (message) => {
   if (message.type === 'fatal') response.reject(new Error(`Unexpected runtime failure: ${message.code}`));
 });
 try {
-  runtime.send({ schemaVersion: 1, type: 'viewOpen', requestId, viewerId, browserSessionId: randomUUID(),
+  runtime.send({ schemaVersion: 1, type: 'viewOpen', requestId, viewerId, workerBootId, browserSessionId: randomUUID(),
     allocationEpoch: 1, controlEpoch: 1, pageEpoch: 1, privacyEpoch: 1, mediaGeneration: 1,
     viewGeneration: 1, surface: 'WEB', leaseExpiresAt: new Date(Date.now() + 4500).toISOString(),
     iceServers: [{ urls: ['turn:coturn:3478?transport=tcp'], username: 'fixture', credential: 'fixture' }],

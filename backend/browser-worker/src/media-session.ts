@@ -65,7 +65,7 @@ export class MediaSession {
   readonly capabilities: Promise<{ encoder: string | null; fallbackReason: string; gstreamerVersion: string }>;
 
   constructor(private readonly getSession: () => Pick<BrowserSession, 'assignment' | 'captureBinding'> | undefined,
-    private readonly emit: (viewerId: string, payload: Record<string, unknown>) => void,
+    private readonly emit: (binding: ViewerFence, payload: Record<string, unknown>) => void,
     private readonly ended: (binding: ViewerFence, code: string) => void,
     private readonly closed: (receipt: ViewerClosed) => void,
     options: { helper?: Pick<NativeMediaHelper, 'request' | 'stop'>; onFailure?: () => void } = {}) {
@@ -95,7 +95,7 @@ export class MediaSession {
       case 'viewRenew': await this.renew(message); break;
       case 'viewClose': await this.closeRequested(message); break;
       case 'viewerClosedAck': this.acknowledge(message); break;
-      case 'signal': this.signal(message.viewerId, message.payload); break;
+      case 'signal': this.signal(message, message.payload); break;
     }
   }
 
@@ -302,11 +302,12 @@ export class MediaSession {
     if (viewer.peerId && this.started) await this.helper.request('lease', { peerId: viewer.peerId, generation: this.generation, durationMs: duration });
   }
 
-  private signal(id: string, raw: Record<string, unknown>): void {
-    const viewer = this.requireViewer(id);
+  private signal(binding: ViewerFence, raw: Record<string, unknown>): void {
+    const viewer = this.requireViewer(binding.viewerId);
+    if (!sameFence(binding, viewer.binding)) throw new WorkerError('VIEW_BINDING_FENCED');
     if (!viewer.ready) throw new WorkerError('VIEW_NOT_READY');
     const message = consumerSignalSchema.parse(raw);
-    if (message.type === 'listConsumers') { this.emit(id, { type: 'listConsumers', consumers: [] }); return; }
+    if (message.type === 'listConsumers') { this.emit(viewerFence(viewer.binding), { type: 'listConsumers', consumers: [] }); return; }
     if (message.type === 'setPeerStatus' && JSON.stringify(message.meta ?? {}).length > 2048) throw new WorkerError('SIGNALING_LIMIT');
     if (message.type === 'startSession' && (message.peerId !== viewer.producerId || viewer.sessionId)) throw new WorkerError('PRODUCER_FORBIDDEN');
     if ('sessionId' in message && message.sessionId !== viewer.sessionId) throw new WorkerError('PEER_SESSION_FORBIDDEN');
@@ -325,13 +326,13 @@ export class MediaSession {
       viewer.producerId = producer.id;
       if (!viewer.ready) {
         this.emitState(viewer, 'PREPARING'); viewer.ready = true;
-        this.emit(viewer.binding.viewerId, { type: 'welcome', peerId: viewer.peerId });
+        this.emit(viewerFence(viewer.binding), { type: 'welcome', peerId: viewer.peerId });
       }
-      this.emit(viewer.binding.viewerId, { type: 'list', producers: [producer] }); return;
+      this.emit(viewerFence(viewer.binding), { type: 'list', producers: [producer] }); return;
     }
     if (!viewer.ready) return;
     if (message['type'] === 'peerStatusChanged') {
-      if (message['peerId'] === viewer.peerId || message['peerId'] === viewer.producerId) this.emit(viewer.binding.viewerId, message);
+      if (message['peerId'] === viewer.peerId || message['peerId'] === viewer.producerId) this.emit(viewerFence(viewer.binding), message);
       return;
     }
     if (message['type'] === 'sessionStarted') {
@@ -341,7 +342,7 @@ export class MediaSession {
     if (message['type'] === 'peer' || message['type'] === 'endSession') {
       if (message['sessionId'] !== viewer.sessionId) { this.requestClose(viewer.binding.viewerId, 'PEER_SESSION_FORBIDDEN', viewer); return; }
     } else if (message['type'] !== 'sessionStarted' && message['type'] !== 'error') return;
-    this.emit(viewer.binding.viewerId, message);
+    this.emit(viewerFence(viewer.binding), message);
   }
 
   private requestClose(id: string, code: string, expected: Viewer): void {
@@ -388,7 +389,7 @@ export class MediaSession {
   }
 
   private emitState(viewer: Viewer, captureState: string, captureSequence = 0, captureAgeMs = -1): void {
-    this.emit(viewer.binding.viewerId, { type: 'streamState', sessionId: viewer.binding.browserSessionId,
+    this.emit(viewerFence(viewer.binding), { type: 'streamState', sessionId: viewer.binding.browserSessionId,
       pageEpoch: viewer.binding.pageEpoch, privacyEpoch: viewer.binding.privacyEpoch, controlEpoch: viewer.binding.controlEpoch,
       mediaGeneration: viewer.binding.mediaGeneration, viewGeneration: viewer.binding.viewGeneration,
       producerId: viewer.producerId, viewport: this.getSession()?.assignment.viewport, captureState,

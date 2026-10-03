@@ -100,6 +100,20 @@ public class RealtimeDeliveryService extends TextWebSocketHandler {
     return presentations.find(actor, host.storageKey()).filter(slot -> slot.retiredAt() == null);
   }
 
+  /** Locks and checks the current destination without requiring an iframe to be mounted. */
+  @Transactional
+  public Optional<ChatPresentation> lockCurrentPresentation(
+      AuthenticatedActor actor, HostConversationContext host) {
+    if (!supportedHost(actor, host)) {
+      return Optional.empty();
+    }
+    identities.lockActive(actor.userId());
+    long grantVersion = identities.activeGrantVersion(actor);
+    return presentations.lock(actor, host.storageKey()).filter(slot -> slot.retiredAt() == null
+        && actor.grantId().equals(slot.grantId()) && grantVersion == slot.grantVersion()
+        && actor.accessEpoch() == slot.accessEpoch());
+  }
+
   @Transactional
   public Publication publishPresentation(AuthenticatedActor actor, UUID taskId, UUID scope,
       long expectedRevision, MutationContext context, HostConversationContext host,

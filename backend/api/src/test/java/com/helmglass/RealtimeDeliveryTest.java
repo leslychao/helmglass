@@ -11,7 +11,9 @@ import static org.mockito.Mockito.when;
 import com.helmglass.api.JsonSupport;
 import com.helmglass.identity.domain.AuthenticatedActor;
 import com.helmglass.identity.infrastructure.repository.IdentityRepository;
+import com.helmglass.operation.infrastructure.repository.OperationRepository;
 import com.helmglass.realtime.application.RealtimeDeliveryService;
+import com.helmglass.realtime.infrastructure.repository.ChatPresentationRepository;
 import com.helmglass.realtime.infrastructure.repository.OutboxRepository;
 import java.time.Instant;
 import java.util.List;
@@ -30,7 +32,8 @@ class RealtimeDeliveryTest {
   private final OutboxRepository outbox = mock(OutboxRepository.class);
   private final JsonSupport json = new JsonSupport(JsonMapper.builder().build());
   private final RealtimeDeliveryService realtime =
-      new RealtimeDeliveryService(outbox, identities, json);
+      new RealtimeDeliveryService(outbox, identities, json,
+          mock(ChatPresentationRepository.class), mock(OperationRepository.class));
 
   @Test
   void subscribesBeforeReadyAndOnlyReceivesOwnSafeResources() throws Exception {

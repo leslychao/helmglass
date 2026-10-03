@@ -21,7 +21,7 @@ const supervisor: SessionSupervisor<BrowserSession> = new SessionSupervisor(boot
     .catch(() => send({ type: 'fatal', code: 'RUNTIME_CLOSURE_UNCONFIRMED' })); },
 }));
 const media: MediaSession = new MediaSession(() => supervisor.session,
-  (viewerId, payload) => send({ schemaVersion: 1, type: 'viewerMessage', requestId: randomUUID(), viewerId, payload }),
+  (binding, payload) => send({ schemaVersion: 1, type: 'viewerMessage', requestId: randomUUID(), ...binding, payload }),
   (binding, code) => send({ schemaVersion: 1, type: 'viewerEnded', requestId: randomUUID(), ...binding, code }),
   send,
   { onFailure: () => send({ type: 'fatal', code: 'FENCING_FAILED' }) });
@@ -69,13 +69,15 @@ process.on('message', (raw: unknown) => {
   const signaling = signalingMessageSchema.safeParse(raw);
   if (signaling.success) {
     const message = signaling.data;
+    const binding = { workerBootId: message.workerBootId, browserSessionId: message.browserSessionId,
+      allocationEpoch: message.allocationEpoch, viewerId: message.viewerId, viewGeneration: message.viewGeneration };
     void media.accept(message).then(() => {
       if (message.type !== 'viewClose' && message.type !== 'viewerClosedAck') {
-        send({ schemaVersion: 1, type: message.type + 'Ack', requestId: message.requestId, viewerId: message.viewerId });
+        send({ schemaVersion: 1, type: message.type + 'Ack', requestId: message.requestId, ...binding });
       }
     })
       .catch((error: unknown) => send({ schemaVersion: 1, type: 'viewerMessage', requestId: message.requestId,
-        viewerId: message.viewerId, payload: { type: 'error', details: safeCode(error) } }));
+        ...binding, payload: { type: 'error', details: safeCode(error) } }));
     return;
   }
   const decoded = apiMessageSchema.safeParse(raw);

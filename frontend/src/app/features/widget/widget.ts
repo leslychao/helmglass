@@ -117,7 +117,7 @@ export class Widget {
   private dirty = false;
   private readonly recovery = new ReconnectWindow();
   private dispatching = false;
-  private seenDispatch = new Set<string>();
+  private delivery?: DeliveryAttempt;
   private openingTask = false;
   constructor() {
     this.app.addEventListener('toolresult', (event) => {
@@ -303,7 +303,7 @@ export class Widget {
       }
     }
   }
-  private scheduleRecovery() {
+  private scheduleRecovery(window: ReconnectWindow = this.recovery) {
     if (
       this.disposed ||
       this.inactive() ||
@@ -313,7 +313,7 @@ export class Widget {
       this.recoveryExhausted
     )
       return;
-    const delay = this.recovery.nextDelay();
+    const delay = window.nextDelay();
     if (delay === null) {
       this.recoveryExhausted = true;
       this.error.set('Связь не восстановлена. Откройте ту же задачу в кабинете.');
@@ -416,21 +416,46 @@ export class Widget {
   private async continueIfReady(snapshot: WidgetSnapshot, generation: number) {
     const continuation = snapshot.continuation,
       presentation = snapshot.presentation;
-    if (
-      this.dispatching ||
-      !continuation ||
-      continuation.state !== 'READY' ||
-      continuation.mode !== 'WIDGET_RETURN' ||
-      presentation.presentationState !== 'ACTIVE' ||
-      document.hidden
-    )
+    if (this.dispatching || document.hidden || this.disposed) return;
+    let attempt = this.delivery;
+    // A lost delivery receipt can be repaired after claim/consumption without invoking the host.
+    if (attempt?.outcome && !attempt.recorded && !attempt.stopped) {
+      await this.finishDelivery(attempt, generation);
       return;
+    }
+    if (!continuation || continuation.mode !== 'WIDGET_RETURN'
+      || presentation.presentationState !== 'ACTIVE') return;
+    const sameAttempt = attempt?.continuationId === continuation.id
+      && attempt.taskId === presentation.taskId
+      && attempt.viewScopeId === presentation.viewScopeId
+      && attempt.presentationRevision === presentation.presentationRevision;
+    if (sameAttempt && (attempt?.recorded || attempt?.stopped || attempt?.hostInvoked)) return;
+    // DISPATCHING may be recovered only by the mount that still knows it has not invoked the host.
+    if (continuation.state !== 'READY'
+      && !(sameAttempt && continuation.state === 'DISPATCHING')) return;
     if (!this.app.getHostCapabilities()?.message?.text) {
       this.manualText.set(
         `Продолжи задачу ${presentation.taskId} после моего участия. Не создавай новую задачу.`,
       );
       return;
     }
+    if (!this.snapshotFresh || !this.eventsReady) return;
+    if (!sameAttempt) {
+      attempt = {
+        taskId: presentation.taskId,
+        continuationId: continuation.id,
+        viewScopeId: presentation.viewScopeId,
+        presentationRevision: presentation.presentationRevision,
+        prepareKey: crypto.randomUUID(),
+        recordKey: crypto.randomUUID(),
+        hostInvoked: false,
+        recorded: false,
+        stopped: false,
+        recovery: new ReconnectWindow(),
+      };
+      this.delivery = attempt;
+    }
+    if (!attempt) return;
     this.dispatching = true;
     try {
       const prepared = await this.app.callServerTool(
@@ -442,51 +467,89 @@ export class Widget {
             viewScopeId: presentation.viewScopeId,
             presentationRevision: presentation.presentationRevision,
             viewerInstanceId: this.instanceId,
-            idempotencyKey: crypto.randomUUID(),
+            idempotencyKey: attempt.prepareKey,
           },
         },
         { timeout: 15000 },
       );
-      if (prepared.isError || !record(prepared.structuredContent)) throw new Error();
-      const dispatchId = string(prepared.structuredContent['dispatchId']),
-        text = string(prepared.structuredContent['text']);
-      if (this.seenDispatch.has(dispatchId)) return;
-      this.seenDispatch.add(dispatchId);
-      if (this.seenDispatch.size > 32) {
-        const oldest = this.seenDispatch.values().next().value;
-        if (oldest) this.seenDispatch.delete(oldest);
+      if (prepared.isError) {
+        attempt.stopped = !unknownToolOutcome(prepared);
+        throw new Error();
       }
-      let outcome: 'DELIVERED' | 'UNKNOWN' | 'REJECTED' = 'REJECTED';
-      if (generation === this.generation && !document.hidden && !this.inactive()) {
+      if (!record(prepared.structuredContent)) throw new Error();
+      const dispatchId = string(prepared.structuredContent['dispatchId']),
+        text = string(prepared.structuredContent['text']),
+        expiresAt = Date.parse(string(prepared.structuredContent['expiresAt']));
+      if (!dispatchId || !text || text.length > 4096 || !Number.isFinite(expiresAt))
+        throw new Error();
+      attempt.prepared = { dispatchId, text };
+      attempt.outcome = 'REJECTED';
+      if (generation === this.generation && !document.hidden && !this.inactive()
+        && !this.disposed && !this.accessDenied() && this.snapshotFresh && !this.dirty
+        && expiresAt > Date.now()) {
+        // A timeout does not prove that ChatGPT rejected the message.
+        attempt.hostInvoked = true;
         try {
           const delivered = await this.app.sendMessage(
             { role: 'user', content: [{ type: 'text', text }] },
             { timeout: 15000 },
           );
-          outcome = delivered.isError ? 'REJECTED' : 'DELIVERED';
+          attempt.outcome = delivered.isError ? 'REJECTED' : 'DELIVERED';
         } catch {
-          outcome = 'UNKNOWN';
+          attempt.outcome = 'UNKNOWN';
         }
       }
-      const receipt = await this.app.callServerTool(
-        {
-          name: 'continuations.record_delivery',
-          arguments: { dispatchId, outcome, idempotencyKey: crypto.randomUUID() },
-        },
-        { timeout: 15000 },
-      );
-      if (receipt.isError) throw new Error();
-      if (outcome !== 'DELIVERED') this.manualText.set(text);
-      else this.message.set('Сообщение отправлено. Ожидаем принятия задачи ChatGPT.');
-      this.dirty = true;
+      await this.recordDelivery(attempt);
+      this.showDelivery(attempt, generation);
     } catch {
-      if (generation === this.generation)
-        this.error.set(
-          'Результат передачи продолжения пока неизвестен. Сообщение автоматически не повторяется.',
-        );
+      this.deliveryFailed(attempt, generation);
     } finally {
       this.dispatching = false;
     }
+  }
+  private async finishDelivery(attempt: DeliveryAttempt, generation: number) {
+    this.dispatching = true;
+    try {
+      await this.recordDelivery(attempt);
+      this.showDelivery(attempt, generation);
+    } catch {
+      this.deliveryFailed(attempt, generation);
+    } finally {
+      this.dispatching = false;
+    }
+  }
+  private async recordDelivery(attempt: DeliveryAttempt) {
+    if (!attempt.prepared || !attempt.outcome) return;
+    const receipt = await this.app.callServerTool({
+      name: 'continuations.record_delivery',
+      arguments: {
+        dispatchId: attempt.prepared.dispatchId,
+        outcome: attempt.outcome,
+        idempotencyKey: attempt.recordKey,
+      },
+    }, { timeout: 15000 });
+    if (receipt.isError) {
+      attempt.stopped = !unknownToolOutcome(receipt);
+      throw new Error();
+    }
+    attempt.recorded = true;
+  }
+  private showDelivery(attempt: DeliveryAttempt, generation: number) {
+    if (generation !== this.generation) return;
+    const current = this.snapshot()?.continuation;
+    if (current?.id === attempt.continuationId
+      && !['CLAIMED', 'CONSUMED', 'CANCELLED', 'EXPIRED'].includes(current.state)) {
+      if (attempt.outcome !== 'DELIVERED') this.manualText.set(attempt.prepared?.text ?? '');
+      else this.message.set('Сообщение отправлено. Ожидаем принятия задачи ChatGPT.');
+    }
+    this.dirty = true;
+  }
+  private deliveryFailed(attempt: DeliveryAttempt, generation: number) {
+    if (generation !== this.generation) return;
+    this.error.set(
+      'Результат передачи продолжения пока неизвестен. Сообщение автоматически не повторяется.',
+    );
+    if (!attempt.stopped) this.scheduleRecovery(attempt.recovery);
   }
   refreshView() {
     this.snapshot.set(null);
@@ -546,6 +609,37 @@ export class Widget {
     this.loading.set(false);
     this.dirty = false;
   }
+}
+
+interface DeliveryAttempt {
+  taskId: string;
+  continuationId: string;
+  viewScopeId: string | null;
+  presentationRevision: number;
+  prepareKey: string;
+  recordKey: string;
+  hostInvoked: boolean;
+  recorded: boolean;
+  stopped: boolean;
+  recovery: ReconnectWindow;
+  prepared?: { dispatchId: string; text: string };
+  outcome?: 'DELIVERED' | 'UNKNOWN' | 'REJECTED';
+}
+
+function unknownToolOutcome(result: unknown): boolean {
+  if (!record(result) || !Array.isArray(result['content'])) return true;
+  for (const item of result['content']) {
+    if (!record(item) || item['type'] !== 'text' || typeof item['text'] !== 'string') continue;
+    try {
+      const problem: unknown = JSON.parse(item['text']);
+      if (record(problem) && problem['code'] === 'OWNER_RESPONSE_UNKNOWN') return true;
+      if (record(problem) && typeof problem['status'] === 'number' && problem['status'] >= 500)
+        return true;
+    } catch {
+      // Plain protocol denials are definitive; an ambiguous transport result uses its named code.
+    }
+  }
+  return false;
 }
 
 function accessFailure(result: unknown): 'authentication' | 'authorization' | null {

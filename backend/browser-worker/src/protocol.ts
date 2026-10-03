@@ -124,7 +124,7 @@ export const signalingMessageSchema = z.discriminatedUnion('type', [
   z.strictObject({ ...base, type: z.literal('viewRenew'), ...viewerBinding, leaseExpiresAt: timestamp }),
   z.strictObject({ ...base, type: z.literal('viewClose'), ...viewerFence }),
   z.strictObject({ ...base, type: z.literal('viewerClosedAck'), ...viewerFence }),
-  z.strictObject({ ...base, type: z.literal('signal'), viewerId: id, payload: z.record(z.string(), z.json()) }),
+  z.strictObject({ ...base, type: z.literal('signal'), ...viewerFence, payload: z.record(z.string(), z.json()) }),
 ]);
 export type SignalingMessage = z.infer<typeof signalingMessageSchema>;
 export type ViewOpen = Extract<SignalingMessage, { type: 'viewOpen' }>;
@@ -138,6 +138,8 @@ export const viewerEndedSchema = z.strictObject({ ...base, type: z.literal('view
   ...viewerFence, code: z.string().regex(/^[A-Z_]+$/).max(128) });
 export type ViewerClosed = z.infer<typeof viewerClosedSchema>;
 export type ViewerEnded = z.infer<typeof viewerEndedSchema>;
+export const viewerMessageSchema = z.strictObject({ ...base, type: z.literal('viewerMessage'),
+  ...viewerFence, payload: z.record(z.string(), z.json()) });
 export const apiMessageSchema = z.discriminatedUnion('type', [
   z.strictObject({ ...base, type: z.literal('registered'), workerId: id, bootId: id }),
   z.strictObject({ ...base, type: z.literal('assign'), assignment: assignmentSchema }),
