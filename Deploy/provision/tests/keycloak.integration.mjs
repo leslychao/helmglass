@@ -1,18 +1,87 @@
 import assert from 'node:assert/strict';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { KeycloakClient } from '../src/keycloak-client.mjs';
-import { provisionRealm } from '../src/realm.mjs';
+import { KeycloakClient, readKeycloakJson } from '../src/keycloak-client.mjs';
+import { provisionRealm, reconcileMcpOfflineAccess } from '../src/realm.mjs';
 import { provisionPredefinedUsers } from '../src/predefined-users.mjs';
 
 const IMAGE = 'quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc';
 
 function docker(args, env = process.env) {
-  const result = spawnSync('docker', args, { env, encoding: 'utf8', timeout: 120_000, maxBuffer: 1_048_576 });
+  const result = spawnSync('docker', ['--context', 'desktop-linux', ...args], { env, encoding: 'utf8', timeout: 120_000, maxBuffer: 1_048_576 });
   if (result.status !== 0) throw new Error(`Docker ${args[0]} failed (exit ${result.status}).`);
   return result.stdout.trim();
+}
+
+async function tokenRequest(baseUrl, parameters) {
+  const response = await fetch(`${baseUrl}/realms/helm/protocol/openid-connect/token`, {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: 'helm-mcp', ...parameters }),
+    redirect: 'error', signal: AbortSignal.timeout(10_000),
+  });
+  return { status: response.status, body: await readKeycloakJson(response, 32_768) };
+}
+
+async function authorizeOffline(baseUrl, password) {
+  const verifier = randomBytes(32).toString('base64url');
+  const state = randomUUID();
+  const redirectUri = 'https://chatgpt.com/connector_platform_oauth_redirect';
+  const cookies = new Map();
+  function remember(response) {
+    for (const value of response.headers.getSetCookie()) {
+      const pair = value.split(';', 1)[0];
+      const separator = pair.indexOf('=');
+      cookies.set(pair.slice(0, separator), pair.slice(separator + 1));
+    }
+    assert.ok(cookies.size <= 20);
+  }
+  const authorize = new URL(`${baseUrl}/realms/helm/protocol/openid-connect/auth`);
+  authorize.search = new URLSearchParams({ client_id: 'helm-mcp', response_type: 'code', redirect_uri: redirectUri,
+    scope: 'openid email offline_access tasks:read tasks:write browser:view browser:execute results:write',
+    state, nonce: randomUUID(), code_challenge_method: 'S256',
+    code_challenge: createHash('sha256').update(verifier).digest('base64url') }).toString();
+  const form = await fetch(authorize, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+  assert.equal(form.status, 200, 'The real authorization request must render a login form');
+  remember(form);
+  const reader = form.body.getReader();
+  const chunks = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.length;
+      assert.ok(bytes <= 131_072, 'Login form is bounded');
+      chunks.push(value);
+    }
+  } finally { await reader.cancel(); reader.releaseLock(); }
+  const html = Buffer.concat(chunks, bytes).toString('utf8');
+  const action = /<form\b[^>]*\baction="([^"]+)"/.exec(html)?.[1];
+  assert.ok(action, 'Keycloak login form must expose an action');
+  const login = new URL(action.replaceAll('&amp;', '&'));
+  assert.equal(login.origin, new URL(baseUrl).origin, 'Credentials stay in the disposable issuer');
+  const submitted = await fetch(login, {
+    method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10_000),
+    headers: { 'content-type': 'application/x-www-form-urlencoded',
+      cookie: [...cookies].map(([key, value]) => `${key}=${value}`).join('; ') },
+    body: new URLSearchParams({ username: 'admin', password }),
+  });
+  await submitted.body?.cancel();
+  assert.equal(submitted.status, 302, 'Valid credentials finish the standard code flow');
+  const callback = new URL(submitted.headers.get('location'));
+  assert.equal(callback.origin + callback.pathname, redirectUri);
+  assert.equal(callback.searchParams.get('state'), state);
+  assert.equal(callback.searchParams.has('error'), false, 'OAuth code flow must accept the requested scopes');
+  const tokens = await tokenRequest(baseUrl, { grant_type: 'authorization_code',
+    code: callback.searchParams.get('code'), redirect_uri: redirectUri, code_verifier: verifier });
+  assert.equal(tokens.status, 200, 'Code exchange succeeds with PKCE S256');
+  return tokens.body;
+}
+
+function claims(token) {
+  return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
 }
 
 async function waitForKeycloak(baseUrl) {
@@ -90,6 +159,65 @@ test('real Keycloak provisioning, repeat run, role revocation and conflict handl
     const role = await client.request('GET', 'admin/realms/helm/roles/platform_admin');
     assert.ok((await client.request('GET', `${adminPath}/role-mappings/realm`)).some((item) => item.id === role.id));
     assert.ok(!(await client.request('GET', `${userPath}/role-mappings/realm`)).some((item) => item.id === role.id));
+
+    const findClient = async clientId => (await client.request('GET',
+      `admin/realms/helm/clients?clientId=${clientId}`)).find(item => item.clientId === clientId);
+    const mcp = await findClient('helm-mcp');
+    const web = await findClient('helm-web');
+    const webBefore = await client.request('GET', `admin/realms/helm/clients/${web.id}`);
+    const mcpPath = `admin/realms/helm/clients/${mcp.id}`;
+    const offline = (await client.request('GET', 'admin/realms/helm/client-scopes'))
+      .find(item => item.name === 'offline_access');
+    await client.request('DELETE', `${mcpPath}/optional-client-scopes/${offline.id}`);
+    await client.request('PUT', 'admin/realms/helm', {
+      offlineSessionIdleTimeout: 2592000, offlineSessionMaxLifespanEnabled: true,
+    });
+    await reconcileMcpOfflineAccess(client, configuration.installationId);
+    await reconcileMcpOfflineAccess(client, configuration.installationId);
+    assert.deepEqual(await client.request('GET', `admin/realms/helm/clients/${web.id}`), webBefore);
+    const policyRealm = await client.request('GET', 'admin/realms/helm');
+    assert.equal(policyRealm.offlineSessionIdleTimeout, 7776000);
+    assert.equal(policyRealm.offlineSessionMaxLifespanEnabled, false);
+    assert.equal(policyRealm.ssoSessionIdleTimeout, initialRealm.ssoSessionIdleTimeout);
+    assert.equal(policyRealm.ssoSessionMaxLifespan, initialRealm.ssoSessionMaxLifespan);
+    assert.ok((await client.request('GET', `${mcpPath}/optional-client-scopes`))
+      .some(item => item.name === 'offline_access'));
+    // The base Keycloak fixture has no application theme; the real browser fixture owns theme checks.
+    await client.request('PUT', 'admin/realms/helm', { loginTheme: 'keycloak' });
+    const initialTokens = await authorizeOffline(baseUrl, data.admin.password);
+    const initialClaims = claims(initialTokens.access_token);
+    assert.equal(initialClaims.exp - initialClaims.iat, 300);
+    assert.equal(claims(initialTokens.refresh_token).typ, 'Offline');
+    const initialRefreshClaims = claims(initialTokens.refresh_token);
+    assert.equal(initialRefreshClaims.exp - initialRefreshClaims.iat, 7776000,
+      'Each offline token covers the configured inactivity window');
+    assert.equal(typeof initialClaims.sid, 'string');
+    assert.equal(typeof initialClaims.auth_time, 'number');
+    await client.request('DELETE', `admin/realms/helm/sessions/${initialClaims.sid}`);
+    await delay(1100);
+    const refreshed = await tokenRequest(baseUrl, { grant_type: 'refresh_token', refresh_token: initialTokens.refresh_token });
+    assert.equal(refreshed.status, 200, 'Offline refresh survives ordinary SSO session logout');
+    assert.equal(claims(refreshed.body.access_token).sid, initialClaims.sid);
+    assert.equal(claims(refreshed.body.access_token).auth_time, initialClaims.auth_time);
+    assert.equal(claims(refreshed.body.access_token).exp - claims(refreshed.body.access_token).iat, 300);
+    const refreshedClaims = claims(refreshed.body.refresh_token);
+    assert.equal(refreshedClaims.exp - refreshedClaims.iat, 7776000);
+    assert.ok(refreshedClaims.exp > initialRefreshClaims.exp, 'Refresh advances the inactivity window');
+    assert.ok(refreshed.body.scope.split(' ').includes('offline_access'));
+    const revoked = await fetch(`${baseUrl}/realms/helm/protocol/openid-connect/revoke`, {
+      method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: 'helm-mcp', token: refreshed.body.refresh_token,
+        token_type_hint: 'refresh_token' }), redirect: 'error', signal: AbortSignal.timeout(10_000),
+    });
+    await revoked.body?.cancel();
+    assert.equal(revoked.status, 200);
+    assert.equal((await tokenRequest(baseUrl, { grant_type: 'refresh_token',
+      refresh_token: refreshed.body.refresh_token })).status, 400, 'Explicit revoke denies offline refresh');
+    const blockTokens = await authorizeOffline(baseUrl, data.admin.password);
+    await client.request('PUT', adminPath, { enabled: false });
+    assert.equal((await tokenRequest(baseUrl, { grant_type: 'refresh_token',
+      refresh_token: blockTokens.refresh_token })).status, 400, 'Blocked user cannot refresh offline tokens');
+    await client.request('PUT', adminPath, { enabled: true });
 
     const serviceTokenResponse = await fetch(`${baseUrl}/realms/helm/protocol/openid-connect/token`, {
       method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },

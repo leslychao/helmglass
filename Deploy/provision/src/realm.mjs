@@ -3,6 +3,7 @@ import { ProvisioningError } from './keycloak-client.mjs';
 const REALM_PATH = 'admin/realms/helm';
 const SCOPES = ['tasks:read', 'tasks:write', 'browser:view', 'browser:execute', 'results:write'];
 const PROTECTED_ATTRIBUTES = ['helm.provisioning.installation', 'helm.provisioning.phase'];
+const MCP_OFFLINE_IDLE_SECONDS = 90 * 24 * 60 * 60;
 
 function reject(message) {
   throw new ProvisioningError('REALM_CONFIGURATION_INVALID', message);
@@ -39,6 +40,7 @@ function clientDefinition(input, clientId, audience, redirects, confidential) {
     },
     // Keycloak's built-in basic scope supplies the authenticated session's auth_time and sub.
     defaultClientScopes: confidential ? ['basic', 'profile', 'email', 'roles'] : ['basic', 'profile', 'email', ...SCOPES],
+    ...(!confidential ? { optionalClientScopes: ['offline_access'] } : {}),
     protocolMappers: [{
       name: 'helm-audience', protocol: 'openid-connect', protocolMapper: 'oidc-audience-mapper',
       config: { 'included.custom.audience': audience, 'access.token.claim': 'true', 'id.token.claim': 'false' },
@@ -159,8 +161,60 @@ export async function provisionRealm(client, input) {
       reject(`OAuth client ${definition.clientId} required token scopes need reconciliation.`);
     }
   }
+  await reconcileMcpOfflineAccess(client, input.installationId);
   await provisionApiService(client, input);
   return { realm: 'helm', webClient: 'helm-web', mcpClient: 'helm-mcp' };
+}
+
+/** Applies the persistent ChatGPT connection policy without reprovisioning users or other clients. */
+export async function reconcileMcpOfflineAccess(client, installationId) {
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(installationId ?? '')) reject('installationId is invalid.');
+  const realm = await client.request('GET', REALM_PATH);
+  const clients = await client.request('GET', `${REALM_PATH}/clients?clientId=helm-mcp`);
+  const existing = clients.find(candidate => candidate.clientId === 'helm-mcp');
+  if (realm.attributes?.['helm.installationId'] !== installationId
+      || existing?.attributes?.['helm.installationId'] !== installationId) {
+    reject('The MCP realm or client belongs to another installation.');
+  }
+  const clientPath = `${REALM_PATH}/clients/${encodeURIComponent(existing.id)}`;
+  const actual = await client.request('GET', clientPath);
+  if (!actual.enabled || !actual.publicClient || !actual.standardFlowEnabled
+      || actual.implicitFlowEnabled || actual.directAccessGrantsEnabled
+      || actual.serviceAccountsEnabled || actual.attributes?.['pkce.code.challenge.method'] !== 'S256') {
+    reject('MCP OAuth security settings require explicit reconciliation.');
+  }
+  const scopes = await client.request('GET', `${REALM_PATH}/client-scopes`);
+  const offline = scopes.find(scope => scope.name === 'offline_access' && scope.protocol === 'openid-connect');
+  if (!offline) reject('The built-in offline_access client scope is missing.');
+
+  // A client timeout cannot extend its parent offline user session in Keycloak 26.8.
+  // This realm change leaves ordinary SSO timeouts and all other client definitions untouched.
+  if (realm.offlineSessionIdleTimeout !== MCP_OFFLINE_IDLE_SECONDS || realm.offlineSessionMaxLifespanEnabled) {
+    await client.request('PUT', REALM_PATH, {
+      offlineSessionIdleTimeout: MCP_OFFLINE_IDLE_SECONDS, offlineSessionMaxLifespanEnabled: false,
+    });
+  }
+  const attributes = {
+    ...actual.attributes,
+    'access.token.lifespan': '300',
+    'client.offline.session.idle.timeout': String(MCP_OFFLINE_IDLE_SECONDS),
+    'client.offline.session.max.lifespan': '0',
+  };
+  if (Object.entries(attributes).some(([key, value]) => actual.attributes?.[key] !== value)) {
+    await client.request('PUT', clientPath, { attributes });
+  }
+  if (!actual.optionalClientScopes?.includes('offline_access')
+      && !actual.defaultClientScopes?.includes('offline_access')) {
+    const optionalPath = `${clientPath}/optional-client-scopes`;
+    try {
+      await client.request('PUT', `${optionalPath}/${encodeURIComponent(offline.id)}`);
+    } catch (error) {
+      if (error.code !== 'ADMIN_RESULT_UNKNOWN'
+          || !(await client.request('GET', optionalPath)).some(scope => scope.id === offline.id)) throw error;
+    }
+  }
+  return { clientId: 'helm-mcp', accessTokenSeconds: 300, offlineIdleSeconds: MCP_OFFLINE_IDLE_SECONDS,
+    offlineMaximumEnabled: false };
 }
 
 async function provisionApiService(client, input) {

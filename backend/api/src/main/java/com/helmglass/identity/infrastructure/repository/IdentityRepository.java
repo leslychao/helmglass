@@ -66,10 +66,6 @@ public class IdentityRepository {
 
   public UUID admitLogin(
       Account account, String issuer, String sid, Instant authTime, Instant expiresAt) {
-    if (account.reauthenticationAfter() != null
-        && !authTime.isAfter(account.reauthenticationAfter())) {
-      throw new DomainException(401, "REAUTHENTICATION_REQUIRED", "A fresh login is required");
-    }
     UUID id = UUID.randomUUID();
     jdbc.sql(
             """

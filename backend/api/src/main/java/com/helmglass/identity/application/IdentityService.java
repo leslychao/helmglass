@@ -44,6 +44,15 @@ public class IdentityService {
     if (sid == null || sid.isBlank()) {
       throw new DomainException(401, "SESSION_REQUIRED", "Token has no session identity");
     }
+    Instant authTime = jwt.getClaimAsInstant("auth_time");
+    if (authTime == null || jwt.getExpiresAt() == null) {
+      throw new DomainException(401, "AUTH_TIME_REQUIRED", "Authentication time is required");
+    }
+    // Refresh changes token issuance time, not the authentication that crossed the account barrier.
+    if (account.reauthenticationAfter() != null
+        && !authTime.isAfter(account.reauthenticationAfter())) {
+      throw new DomainException(401, "REAUTHENTICATION_REQUIRED", "A fresh login is required");
+    }
     String clientId = jwt.getClaimAsString("azp");
     Set<String> permissions = new HashSet<>();
     String scopes = jwt.getClaimAsString("scope");
@@ -63,10 +72,6 @@ public class IdentityService {
     if (mcp) {
       grantId = repository.admitGrant(account.id(), clientId, sid, List.copyOf(permissions));
     } else {
-      Instant authTime = jwt.getClaimAsInstant("auth_time");
-      if (authTime == null || jwt.getExpiresAt() == null) {
-        throw new DomainException(401, "AUTH_TIME_REQUIRED", "Authentication time is required");
-      }
       loginId = repository.admitLogin(account, issuer, sid, authTime, jwt.getExpiresAt());
     }
     return new AuthenticatedActor(account.id(), loginId, grantId, clientId, account.displayName(),
