@@ -36,8 +36,10 @@ public class BrowserCloseDeliveryService {
         }
       } catch (RuntimeException error) {
         outbox.transportFailed(intent.id());
-        log.warn("Browser closure delivery deferred; messageId={}, errorType={}",
-            intent.id(), error.getClass().getSimpleName());
+        log.warn(
+            "Browser closure delivery deferred; messageId={}, errorType={}",
+            intent.id(),
+            error.getClass().getSimpleName());
       }
     }
   }

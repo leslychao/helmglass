@@ -350,7 +350,8 @@ public class WorkerGateway extends TextWebSocketHandler {
       message.put("assignment", assignment);
     }
     WorkerChannel channel = workers.get(workerId);
-    if (channel == null || !channel.socket().isOpen()
+    if (channel == null
+        || !channel.socket().isOpen()
         || expectedBootId != null && !expectedBootId.equals(channel.bootId())) {
       return false;
     }

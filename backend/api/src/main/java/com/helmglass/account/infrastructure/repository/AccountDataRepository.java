@@ -98,11 +98,14 @@ public class AccountDataRepository {
 
   /** Returns true only after a complete pass confirms there are no remaining owned records. */
   public boolean purgeBatch(UUID userId) {
-    if (jdbc.sql("""
+    if (jdbc.sql(
+            """
             SELECT EXISTS(SELECT 1 FROM transactional_outbox WHERE user_id=:user
               AND event_type='worker.close' AND published_at IS NULL)
             """)
-        .param("user", userId).query(Boolean.class).single()) {
+        .param("user", userId)
+        .query(Boolean.class)
+        .single()) {
       return false;
     }
     for (String statement : DETACH) {

@@ -17,8 +17,8 @@ import com.helmglass.browser.api.BrowserContracts;
 import com.helmglass.browser.application.BrowserControlService;
 import com.helmglass.browser.application.BrowserSessionOperationService;
 import com.helmglass.browser.application.WorkerProtocol;
-import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserCloseOutboxRepository;
+import com.helmglass.browser.infrastructure.repository.BrowserRepository;
 import com.helmglass.browser.infrastructure.repository.BrowserSessionOperationRepository;
 import com.helmglass.browser.infrastructure.repository.ControlRepository;
 import com.helmglass.connection.application.ConnectionLoginService;
@@ -708,8 +708,7 @@ class ProfilePersistenceIntegrationTest {
     assertThat(operation.loginId()).isNull();
     assertThat(operation.controllerInstanceId()).isNull();
     closeOutbox.enqueueDue();
-    assertThat(closeOutbox.due())
-        .noneMatch(row -> profile.sessionId().equals(row.sessionId()));
+    assertThat(closeOutbox.due()).noneMatch(row -> profile.sessionId().equals(row.sessionId()));
     sessionOperations.acknowledge(
         profile.workerId(),
         profile.bootId(),
@@ -734,8 +733,7 @@ class ProfilePersistenceIntegrationTest {
         new ByteArrayInputStream(new byte[64]));
     sessionOperations.progress(operationId);
     closeOutbox.enqueueDue();
-    assertThat(closeOutbox.due())
-        .anyMatch(row -> profile.sessionId().equals(row.sessionId()));
+    assertThat(closeOutbox.due()).anyMatch(row -> profile.sessionId().equals(row.sessionId()));
     assertThat(operations.owned(profile.userId(), operationId).state()).isEqualTo("PENDING");
     jdbc.sql("UPDATE browser_sessions SET state='CLOSED',binding_released_at=now() WHERE id=:id")
         .param("id", profile.sessionId())
@@ -791,8 +789,7 @@ class ProfilePersistenceIntegrationTest {
         .param("id", profile.userId())
         .update();
     closeOutbox.enqueueDue();
-    assertThat(closeOutbox.due())
-        .anyMatch(row -> profile.sessionId().equals(row.sessionId()));
+    assertThat(closeOutbox.due()).anyMatch(row -> profile.sessionId().equals(row.sessionId()));
     assertThatThrownBy(
             () ->
                 service.upload(

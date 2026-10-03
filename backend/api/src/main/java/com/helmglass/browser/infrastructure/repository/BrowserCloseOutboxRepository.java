@@ -80,14 +80,14 @@ public class BrowserCloseOutboxRepository {
             """
                 + READY_FOR_CLOSE
                 + """
-                AND NOT EXISTS(SELECT 1 FROM transactional_outbox o WHERE o.aggregate_id=s.id
-                  AND o.aggregate_version=s.allocation_epoch AND o.event_type='worker.close')
-                ORDER BY s.requested_at,s.id LIMIT 100 FOR UPDATE OF s SKIP LOCKED
-              ), closing AS (
-                UPDATE browser_sessions s SET state=CASE WHEN s.state='LOST' THEN 'LOST' ELSE 'STOPPING' END,
-                  version=version+1 FROM due WHERE s.id=due.id
-                RETURNING s.id,s.user_id,s.worker_id,s.worker_boot_id,s.allocation_epoch
-              )
+                  AND NOT EXISTS(SELECT 1 FROM transactional_outbox o WHERE o.aggregate_id=s.id
+                    AND o.aggregate_version=s.allocation_epoch AND o.event_type='worker.close')
+                  ORDER BY s.requested_at,s.id LIMIT 100 FOR UPDATE OF s SKIP LOCKED
+                ), closing AS (
+                  UPDATE browser_sessions s SET state=CASE WHEN s.state='LOST' THEN 'LOST' ELSE 'STOPPING' END,
+                    version=version+1 FROM due WHERE s.id=due.id
+                  RETURNING s.id,s.user_id,s.worker_id,s.worker_boot_id,s.allocation_epoch
+                )
                 """
                 + INSERT_INTENT)
         .update();
@@ -109,14 +109,14 @@ public class BrowserCloseOutboxRepository {
                 + " AND o.delivery_attempts<8 AND o.retry_at<=now() AND "
                 + READY_FOR_CLOSE
                 + """
-                ORDER BY o.retry_at,o.id LIMIT 100 FOR UPDATE OF o SKIP LOCKED
-              ) UPDATE transactional_outbox o SET delivery_attempts=delivery_attempts+1,
-                retry_at=now()+make_interval(secs=>least(30,power(2,delivery_attempts+1)::int)),
-                last_failure_code='CLOSE_ACK_PENDING'
-              FROM due WHERE o.id=due.id
-              RETURNING o.id,(o.payload->>'workerId')::uuid worker_id,
-                (o.payload->>'workerBootId')::uuid worker_boot_id,
-                o.aggregate_id session_id,o.aggregate_version allocation_epoch
+                  ORDER BY o.retry_at,o.id LIMIT 100 FOR UPDATE OF o SKIP LOCKED
+                ) UPDATE transactional_outbox o SET delivery_attempts=delivery_attempts+1,
+                  retry_at=now()+make_interval(secs=>least(30,power(2,delivery_attempts+1)::int)),
+                  last_failure_code='CLOSE_ACK_PENDING'
+                FROM due WHERE o.id=due.id
+                RETURNING o.id,(o.payload->>'workerId')::uuid worker_id,
+                  (o.payload->>'workerBootId')::uuid worker_boot_id,
+                  o.aggregate_id session_id,o.aggregate_version allocation_epoch
                 """)
         .query(Delivery.class)
         .list();
