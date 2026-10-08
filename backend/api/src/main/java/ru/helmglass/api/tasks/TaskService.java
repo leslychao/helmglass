@@ -186,6 +186,9 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
         "CREATED",
         prepare ? "Задача подготовлена для ChatGPT" : "Черновик сохранён",
         null);
+    if (prepare) {
+      events.emitAdministrators("admin-user", owner, 1);
+    }
     return get(owner, id);
   }
 

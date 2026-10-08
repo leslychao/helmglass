@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import { SearchInput } from '../shared/search-input';
 import { DatePipe } from '@angular/common';
 import { Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
@@ -15,76 +16,17 @@ import { Empty, Pager, Status } from '../shared/ui';
 
 @Component({
   selector: 'hg-connections',
-  imports: [SearchInput, DatePipe, MultiFilter, Empty, Pager, Status],
+  imports: [Icon, SearchInput, DatePipe, MultiFilter, Empty, Pager, Status],
   providers: [QueryState],
-  template: ` <header class="page-heading">
+  template: `
+    <header class="page-heading">
       <div>
-        <h1>Подключения</h1>
-        <p>Сохранённые входы на сайты. Один сайт может иметь несколько учётных записей.</p>
+        <h1 class="sr-only">Подключения</h1>
       </div>
-      <button class="button primary" (click)="create()">＋ Добавить подключение</button>
+      <button class="button task-create" (click)="create()">
+        <hg-icon name="plus" />Добавить подключение
+      </button>
     </header>
-    <section class="card chatgpt-connection">
-      <div>
-        <div class="section-heading">
-          <h2>ChatGPT</h2>
-          @if (integration(); as integration) {
-            <span class="badge" [class.success]="integration.connected">{{
-              integration.connected ? 'Доступ подключён' : 'Нет активного доступа'
-            }}</span>
-          }
-        </div>
-        <p class="muted">
-          Добавьте Helm Glass в подключениях ChatGPT как MCP-сервер и пройдите авторизацию своей
-          учётной записью.
-        </p>
-        <label class="field"
-          >Адрес MCP-сервера<input [value]="mcpUrl()" readonly (click)="selectAddress($event)"
-        /></label>
-        <p class="muted">
-          В открытом чате включите Helm Glass и поручите работу. Вход в кабинет и доступ ChatGPT
-          независимы.
-        </p>
-      </div>
-      <div class="actions">
-        <button class="button" (click)="copyMcp()">Скопировать адрес</button
-        ><button
-          class="text-button danger-text"
-          [disabled]="
-            revoking() ||
-            (integration()?.connected === false &&
-              !integration()?.viewerClosePending &&
-              !integration()?.viewerCloseFailed)
-          "
-          (click)="revokeMcp()"
-        >
-          {{
-            integration()?.viewerClosePending || integration()?.viewerCloseFailed
-              ? 'Повторить закрытие просмотров'
-              : 'Отозвать доступ ChatGPT'
-          }}
-        </button>
-      </div>
-      @if (mcpMessage()) {
-        <p class="notice" role="status">{{ mcpMessage() }}</p>
-      }
-      @if (integration()?.viewerClosePending || integration()?.viewerCloseFailed) {
-        <p class="notice warning" role="status">
-          Новые команды ChatGPT запрещены. Закрытие прежних просмотров
-          {{
-            integration()?.viewerCloseFailed
-              ? 'не подтверждено; повторите закрытие'
-              : 'ещё выполняется'
-          }}.
-        </p>
-      }
-      @if (integrationError()) {
-        <p class="error-banner" role="alert">
-          {{ integrationError() }}
-          <button class="text-button" (click)="loadIntegration()">Повторить</button>
-        </p>
-      }
-    </section>
     @if (error()) {
       <div class="error-banner" role="alert">
         {{ error() }}<button class="text-button" (click)="load()">Повторить</button>
@@ -106,10 +48,10 @@ import { Empty, Pager, Status } from '../shared/ui';
       }
       <div class="toolbar">
         <label class="search"
-          ><input
+          ><hg-icon name="search" /><input
             hgSearch
             aria-label="Поиск подключений"
-            placeholder="Найти подключение"
+            placeholder="Название или сайт"
             [value]="query.text('search')"
             (searchChange)="query.set({ search: $event || null })" /></label
         ><hg-multi-filter
@@ -128,16 +70,14 @@ import { Empty, Pager, Status } from '../shared/ui';
       @if (data(); as page) {
         @if (page.items.length) {
           <div class="table-scroll">
-            <table>
+            <table class="connections-table">
               <thead>
                 <tr>
                   <th [attr.aria-sort]="query.ariaSort('name')">
-                    <button (click)="query.sort('name')">Подключение ↕</button>
+                    <button (click)="query.sort('name')">
+                      Подключение <hg-icon name="chevron-down" />
+                    </button>
                   </th>
-                  <th [attr.aria-sort]="query.ariaSort('site')">
-                    <button (click)="query.sort('site')">Сайт ↕</button>
-                  </th>
-                  <th>Учётная запись</th>
                   <th>Состояние</th>
                   <th>Последнее использование</th>
                   <th><span class="sr-only">Действия</span></th>
@@ -147,10 +87,19 @@ import { Empty, Pager, Status } from '../shared/ui';
                 @for (connection of page.items; track connection.id) {
                   <tr>
                     <td>
-                      <strong>{{ connection.name }}</strong>
+                      <button class="connection-title" (click)="login(connection)">
+                        <span class="service-mark"><hg-icon name="globe" /></span
+                        ><span
+                          ><strong>{{ connection.name }}</strong
+                          ><small
+                            >{{ connection.site }}
+                            @if (connection.accountLabel) {
+                              · {{ connection.accountLabel }}
+                            }
+                          </small></span
+                        >
+                      </button>
                     </td>
-                    <td>{{ connection.site }}</td>
-                    <td>{{ connection.accountLabel || 'Не указан' }}</td>
                     <td>
                       <hg-status
                         [value]="
@@ -168,17 +117,25 @@ import { Empty, Pager, Status } from '../shared/ui';
                     <td>
                       <div class="actions">
                         <button
-                          class="button small"
-                          [disabled]="busy() === connection.id"
-                          (click)="login(connection)"
-                        >
-                          {{
+                          class="icon-button"
+                          [attr.aria-label]="
                             connection.browser
                               ? 'Продолжить вход'
                               : connection.status === 'READY'
                                 ? 'Обновить вход'
                                 : 'Войти'
-                          }}
+                          "
+                          [title]="
+                            connection.browser
+                              ? 'Продолжить вход'
+                              : connection.status === 'READY'
+                                ? 'Обновить вход'
+                                : 'Войти'
+                          "
+                          [disabled]="busy() === connection.id"
+                          (click)="login(connection)"
+                        >
+                          <hg-icon [name]="connection.browser ? 'browser' : 'lock'" />
                         </button>
                         <details class="action-menu">
                           <summary
@@ -186,7 +143,7 @@ import { Empty, Pager, Status } from '../shared/ui';
                             aria-label="Действия с подключением"
                             title="Действия"
                           >
-                            ⋯
+                            <hg-icon name="more" />
                           </summary>
                           <div class="menu-popover">
                             <button (click)="rename(connection)">Переименовать…</button
@@ -219,7 +176,75 @@ import { Empty, Pager, Status } from '../shared/ui';
       } @else if (loading()) {
         <div class="loading" role="status">Загружаем подключения…</div>
       }
-    </section>`,
+    </section>
+    <details class="card chatgpt-connection">
+      <summary class="integration-header">
+        <span class="service-mark chatgpt"><hg-icon name="gpt" /></span
+        ><span class="integration-name"
+          ><strong>ChatGPT</strong><small>Работа с задачами через MCP</small></span
+        >
+        @if (integration(); as integration) {
+          <span class="badge" [class.success]="integration.connected">{{
+            integration.connected ? 'Доступ подключён' : 'Нет активного доступа'
+          }}</span>
+        }
+        <span class="integration-toggle">Настроить <hg-icon name="chevron-down" /></span>
+      </summary>
+      <div class="integration-body">
+        <div>
+          <p class="muted">
+            Добавьте Helm Glass в подключениях ChatGPT как MCP-сервер и пройдите авторизацию своей
+            учётной записью.
+          </p>
+          <label class="field"
+            >Адрес MCP-сервера<input [value]="mcpUrl()" readonly (click)="selectAddress($event)"
+          /></label>
+          <p class="muted">
+            В открытом чате включите Helm Glass и поручите работу. Вход в кабинет и доступ ChatGPT
+            независимы.
+          </p>
+        </div>
+        <div class="actions">
+          <button class="button" (click)="copyMcp()">Скопировать адрес</button
+          ><button
+            class="text-button danger-text"
+            [disabled]="
+              revoking() ||
+              (integration()?.connected === false &&
+                !integration()?.viewerClosePending &&
+                !integration()?.viewerCloseFailed)
+            "
+            (click)="revokeMcp()"
+          >
+            {{
+              integration()?.viewerClosePending || integration()?.viewerCloseFailed
+                ? 'Повторить закрытие просмотров'
+                : 'Отозвать доступ ChatGPT'
+            }}
+          </button>
+        </div>
+        @if (mcpMessage()) {
+          <p class="notice" role="status">{{ mcpMessage() }}</p>
+        }
+        @if (integration()?.viewerClosePending || integration()?.viewerCloseFailed) {
+          <p class="notice warning" role="status">
+            Новые команды ChatGPT запрещены. Закрытие прежних просмотров
+            {{
+              integration()?.viewerCloseFailed
+                ? 'не подтверждено; повторите закрытие'
+                : 'ещё выполняется'
+            }}.
+          </p>
+        }
+        @if (integrationError()) {
+          <p class="error-banner" role="alert">
+            {{ integrationError() }}
+            <button class="text-button" (click)="loadIntegration()">Повторить</button>
+          </p>
+        }
+      </div>
+    </details>
+  `,
 })
 export class Connections {
   readonly query = inject(QueryState);

@@ -29,7 +29,7 @@ const draftFormSchema = z.object({
 
 @Component({
   selector: 'hg-task-form',
-  imports: [Icon,ReactiveFormsModule, RouterLink, ConnectionPicker],
+  imports: [Icon, ReactiveFormsModule, RouterLink, ConnectionPicker],
   templateUrl: './task-form.html',
   host: { '(window:beforeunload)': 'beforeUnload($event)' },
 })

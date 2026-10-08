@@ -21,11 +21,8 @@
       </button>
     }
     <a routerLink="/tasks" class="brand"
-      ><img src="helm-logo.png" width="38" height="38" alt="" /><span
-        >Helm Glass<small>Рабочее пространство</small></span
-      ></a
+      ><img src="helm-logo.png" width="42" height="42" alt="" /><span>Helm Glass</span></a
     >
-    <div class="sidebar-label">РАБОТА</div>
     <nav aria-label="Основная навигация">
       <a routerLink="/tasks" routerLinkActive="active" ariaCurrentWhenActive="page"
         ><span aria-hidden="true">▤</span>Задачи</a
@@ -37,29 +34,12 @@
         ><span aria-hidden="true">◷</span>Использование</a
       >
       @if (session.admin) {
-        <div class="sidebar-label">УПРАВЛЕНИЕ</div>
+        <div class="nav-divider"></div>
         <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page"
           ><span aria-hidden="true">⚙</span>Администрирование</a
         >
       }
     </nav>
-    <div class="sidebar-bottom">
-      <p>Задачи в браузере.<br />Результат под вашим контролем.</p>
-      <button
-        class="sidebar-logout text-button"
-        [disabled]="session.signingOut()"
-        (click)="logout()"
-      >
-        {{ session.logoutPending() ? 'Повторить завершение выхода' : 'Выйти из кабинета' }}
-      </button>
-      <a routerLink="/profile" routerLinkActive="active" class="account-link"
-        ><span class="avatar">{{ session.user()?.name?.slice(0, 1) }}</span
-        ><span
-          ><strong>{{ session.user()?.name }}</strong
-          ><small>{{ session.user()?.email }}</small></span
-        ></a
-      >
-    </div>
   </aside>
   <div class="workspace">
     <header class="topbar">
@@ -71,15 +51,26 @@
         [attr.aria-expanded]="mobile()"
         (click)="mobile.set(!mobile())"
       >
-        ☰</button
-      ><span class="topbar-label">Рабочее пространство</span><span class="spacer"></span>
-      <span class="sync-indicator" [class.offline]="live.state() !== 'ready'" role="status">{{
-        live.state() === 'ready'
-          ? 'Обновлено'
-          : live.state() === 'unavailable'
-            ? 'Обновления недоступны'
-            : 'Синхронизация…'
-      }}</span>
+        ☰
+      </button>
+      <nav class="breadcrumbs" aria-label="Хлебные крошки">
+        <ol>
+          @for (item of breadcrumbs(); track item.url; let last = $last) {
+            <li>
+              @if (!last) {
+                <a [routerLink]="item.url">{{ item.label }}</a
+                ><hg-icon name="chevron-right" />
+              } @else {
+                <span aria-current="page">{{ item.label }}</span>
+              }
+            </li>
+          }
+        </ol>
+      </nav>
+      <span class="spacer"></span>
+      @if (live.state() !== 'ready' && live.state() !== 'unavailable') {
+        <span class="sync-indicator" role="status">Восстанавливаем актуальность данных…</span>
+      }
       <div class="notification-owner">
         <button
           #bell
@@ -142,9 +133,34 @@
           </section>
         }
       </div>
-      <a routerLink="/profile" class="avatar avatar-small" title="Профиль" aria-label="Профиль">{{
-        session.user()?.name?.slice(0, 1)
-      }}</a>
+      <button
+        class="profile-trigger"
+        title="Профиль"
+        aria-label="Меню профиля"
+        [cdkMenuTriggerFor]="profileMenu"
+      >
+        <span class="avatar avatar-small">
+          @if (session.user()?.avatarUrl; as avatar) {
+            <img [src]="avatar" alt="" />
+          } @else {
+            {{ session.initials() }}
+          }
+        </span>
+        <hg-icon name="chevron-down" />
+      </button>
+      <ng-template #profileMenu>
+        <div cdkMenu class="profile-menu" aria-label="Меню профиля">
+          <a cdkMenuItem routerLink="/profile"><hg-icon name="user" />Профиль</a>
+          <button
+            cdkMenuItem
+            class="danger-text"
+            [disabled]="session.signingOut()"
+            (cdkMenuItemTriggered)="logout()"
+          >
+            <hg-icon name="logout" />{{ session.logoutPending() ? 'Завершить выход' : 'Выйти' }}
+          </button>
+        </div>
+      </ng-template>
     </header>
     @if (api.authenticationRequired()) {
       <div class="auth-banner" role="alert">

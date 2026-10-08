@@ -1,6 +1,5 @@
 import { Component, inject } from '@angular/core';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { Session } from './session';
 import { Empty } from '../shared/ui';
 
 @Component({
@@ -22,30 +21,6 @@ export class SignIn {
         encodeURIComponent(safe && url ? url.pathname + url.search + url.hash : '/tasks'),
     );
   }
-}
-@Component({
-  selector: 'hg-profile',
-  template: `<header class="page-heading">
-      <div>
-        <h1>Профиль</h1>
-        <p>Ваша учётная запись Helm Glass.</p>
-      </div>
-    </header>
-    <section class="card profile-card">
-      <span class="avatar large">{{ session.user()?.name?.slice(0, 1) }}</span>
-      <h2>{{ session.user()?.name }}</h2>
-      <p class="muted">{{ session.user()?.email }}</p>
-      <a
-        class="button"
-        [href]="session.user()?.accountManagementUrl"
-        target="_blank"
-        rel="noopener noreferrer"
-        >Управление аккаунтом ↗</a
-      >
-    </section>`,
-})
-export class Profile {
-  readonly session = inject(Session);
 }
 @Component({
   selector: 'hg-unavailable',

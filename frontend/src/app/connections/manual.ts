@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import { Component, DestroyRef, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ActivatedRoute, Router } from '@angular/router';
@@ -10,14 +11,14 @@ import { Status } from '../shared/ui';
 
 @Component({
   selector: 'hg-manual',
-  imports: [BrowserViewer, Status],
+  imports: [Icon, BrowserViewer, Status],
   template: `
     <header class="page-heading">
       <div>
-        <button class="back-link" (click)="back()">‹ К подключениям</button>
-        <h1>
-          {{ connection()?.browser?.privateMode ? 'Защищённый вход' : 'Браузер подключения' }}
-        </h1>
+        <button class="back-link" (click)="back()">
+          <hg-icon name="arrow-left" />К подключениям
+        </button>
+        <h1>Вход на сайт</h1>
         <p>{{ connection()?.name }} · {{ connection()?.site }}</p>
       </div>
       @if (connection(); as item) {
@@ -39,31 +40,51 @@ import { Status } from '../shared/ui';
       </div>
     }
     @if (connection(); as item) {
-      <hg-browser
-        [browser]="item.browser"
-        [role]="controller() && item.browser?.controlOwner === 'USER' ? 'CONTROLLER' : 'VIEWER'"
-        (controlLost)="controller.set(false)"
-      />
-      <section class="card login-actions">
-        <h2>Когда вход завершён</h2>
-        <p>Проверьте учётную запись на сайте и сохраните её для будущих задач.</p>
-        <div class="actions">
-          <button class="button primary" [disabled]="busy() || !canSave()" (click)="finish()">
-            Сохранить вход</button
-          ><button class="button" [disabled]="busy()" (click)="close()">
-            Закрыть без сохранения
-          </button>
-          @if (!canSave()) {
-            <button
-              class="button"
-              [disabled]="busy() || item.browser?.controlOwner === 'TRANSFERRING'"
-              (click)="start()"
-            >
-              {{ item.browser?.privateMode ? 'Взять управление' : 'Войти защищённо' }}
+      <div class="manual-layout">
+        <hg-browser
+          [browser]="item.browser"
+          [role]="controller() && item.browser?.controlOwner === 'USER' ? 'CONTROLLER' : 'VIEWER'"
+          (controlLost)="controller.set(false)"
+        />
+        <aside class="card manual-guide">
+          <h2>Войдите в аккаунт сайта</h2>
+          <ol class="manual-steps">
+            <li>
+              <span>1</span>
+              <p>Введите логин и пароль в браузере слева.</p>
+            </li>
+            <li>
+              <span>2</span>
+              <p>При необходимости подтвердите вход кодом или другим способом сайта.</p>
+            </li>
+            <li>
+              <span>3</span>
+              <p>Убедитесь, что открыт нужный аккаунт, и сохраните вход.</p>
+            </li>
+          </ol>
+          <div class="manual-guide-note">
+            <hg-icon name="shield" />
+            <p>Пароли и коды вводятся только на сайте. ChatGPT не видит защищённый вход.</p>
+          </div>
+
+          <div class="actions">
+            <button class="button primary" [disabled]="busy() || !canSave()" (click)="finish()">
+              <hg-icon name="save" />Сохранить вход</button
+            ><button class="button" [disabled]="busy()" (click)="close()">
+              Закрыть без сохранения
             </button>
-          }
-        </div>
-      </section>
+            @if (!canSave()) {
+              <button
+                class="button"
+                [disabled]="busy() || item.browser?.controlOwner === 'TRANSFERRING'"
+                (click)="start()"
+              >
+                {{ item.browser?.privateMode ? 'Взять управление' : 'Войти защищённо' }}
+              </button>
+            }
+          </div>
+        </aside>
+      </div>
     } @else if (!error()) {
       <div class="loading" role="status">Загружаем сеанс входа…</div>
     }

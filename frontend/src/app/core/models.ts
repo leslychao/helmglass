@@ -16,11 +16,12 @@ export interface Page<T> {
 }
 export const meSchema = z.object({
   id: z.string(),
+  version: z.number(),
   name: z.string(),
   email: z.string(),
   roles: z.array(z.string()),
   status: z.string(),
-  accountManagementUrl: z.string(),
+  avatarUrl: z.nullable(z.string()),
 });
 export type Me = z.infer<typeof meSchema>;
 export const usageSchema = z.object({

@@ -1,0 +1,71 @@
+<h1 class="sr-only">Профиль</h1>
+<form (ngSubmit)="save()">
+  <section class="profile-card">
+    <div class="profile-hero">
+      <span class="profile-photo">
+        @if (preview() || session.user()?.avatarUrl; as avatar) {
+          <img [src]="avatar" alt="Фото профиля" />
+        } @else {
+          {{ session.initials(name()) }}
+        }
+      </span>
+      <div class="profile-identity">
+        <h2>{{ session.user()?.name }}</h2>
+        <p>{{ session.user()?.email }}</p>
+        <button type="button" class="button" [disabled]="saving()" (click)="photoInput.click()">
+          <hg-icon name="camera" />Изменить фото
+        </button>
+        <input
+          #photoInput
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          hidden
+          (change)="choosePhoto($event)"
+        />
+      </div>
+    </div>
+    <div class="profile-fields">
+      <label for="profile-name"
+        >Имя и фамилия
+        <input
+          id="profile-name"
+          name="name"
+          autocomplete="name"
+          required
+          maxlength="300"
+          [ngModel]="name()"
+          (ngModelChange)="name.set($event); saved.set(false)"
+          [disabled]="saving()"
+        />
+      </label>
+      <div>
+        <label for="profile-email"
+          >Email
+          <input
+            id="profile-email"
+            type="email"
+            [value]="session.user()?.email ?? ''"
+            readonly
+            aria-describedby="email-help"
+          />
+        </label>
+        <p id="email-help" class="field-help">Данные подтверждённого аккаунта</p>
+      </div>
+    </div>
+    <p class="photo-help">Фото можно выбрать с устройства. PNG, JPG или WebP, до 5 МБ и 16 мегапикселей.</p>
+  </section>
+  @if (error()) {
+    <p class="error-banner" role="alert">{{ error() }}</p>
+  }
+  @if (saved()) {
+    <p class="profile-success" role="status"><hg-icon name="check" />Профиль сохранён</p>
+  }
+  <div class="profile-actions">
+    <button type="button" class="button" (click)="cancel()" [disabled]="saving() || !hasChanges()">
+      Отменить изменения
+    </button>
+    <button type="submit" class="button primary" [disabled]="saving() || !hasChanges()">
+      {{ saving() ? 'Сохранение…' : 'Сохранить профиль' }}
+    </button>
+  </div>
+</form>

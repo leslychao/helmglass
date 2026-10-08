@@ -34,7 +34,7 @@ export class Session {
     try {
       this.pending = this.api.get('/api/me', meSchema);
       const value = await this.pending;
-      if (value.id === this.user()?.id) this.user.set(value);
+      this.applyProfile(value);
       this.refreshError.set('');
     } catch (error: unknown) {
       this.refreshError.set(
@@ -65,6 +65,19 @@ export class Session {
   }
   get admin() {
     return this.user()?.roles.some((role) => role.toLowerCase() === 'admin') ?? false;
+  }
+  applyProfile(value: Me) {
+    const current = this.user();
+    if (current?.id === value.id && current.version <= value.version) this.user.set(value);
+  }
+  initials(name = this.user()?.name ?? '') {
+    return name
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part.slice(0, 1))
+      .join('')
+      .toUpperCase();
   }
   async logout() {
     if (this.signingOut()) return;
@@ -118,4 +131,4 @@ export interface EditedForm {
   hasChanges(): boolean;
 }
 export const preserveForm = (component: EditedForm) =>
-  !component.hasChanges() || confirm('Покинуть форму без сохранения задачи?');
+  !component.hasChanges() || confirm('Покинуть форму без сохранения изменений?');

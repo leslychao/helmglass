@@ -5,6 +5,7 @@ import io.modelcontextprotocol.server.McpStatelessServerFeatures.SyncResourceSpe
 import io.modelcontextprotocol.server.McpStatelessServerFeatures.SyncToolSpecification;
 import io.modelcontextprotocol.spec.McpSchema;
 import java.io.IOException;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -247,10 +248,22 @@ public class McpTools {
     result.add(
         tool(
             "audio.get",
-            "Получить сохранённый оригинал аудио как MCP AudioContent. Максимум 8 MiB без"
-                + " обрезания. Если host не анализирует звук, сообщить ограничение; не заменять"
-                + " анализ расшифровкой.",
-            object(Map.of("taskId", uuid(), "artifactId", uuid()), "taskId", "artifactId"),
+            "Получить сохранённый оригинал аудио. delivery=file (по умолчанию) возвращает файл"
+                + " через MCP EmbeddedResource для анализа исходных байтов в ChatGPT, в том числе"
+                + " Python. Host может запросить разрешение на загрузку. delivery=audio явно"
+                + " выбирает MCP AudioContent для поддерживающих его клиентов. Максимум 8 MiB"
+                + " без обрезания. Анализировать доступный оригинал; сообщать фактическое"
+                + " ограничение, если host не получил файл или не может выполнить анализ. Не"
+                + " заменять анализ расшифровкой и не угадывать ответ по метаданным.",
+            object(
+                Map.of(
+                    "taskId", uuid(),
+                    "artifactId", uuid(),
+                    "delivery",
+                        Map.of(
+                            "type", "string", "enum", List.of("file", "audio"), "default", "file")),
+                "taskId",
+                "artifactId"),
             true,
             false));
     result.add(
@@ -480,7 +493,7 @@ public class McpTools {
                       return tasks.get(owner, taskId);
                     }));
         case "browser.execute" -> execute(owner, taskId, chat, input.path("action"));
-        case "audio.get" -> audio(owner, taskId, uuid(input, "artifactId"));
+        case "audio.get" -> audio(owner, taskId, uuid(input, "artifactId"), input);
         case "results.publish" ->
             textResult(
                 idempotency.execute(
@@ -610,7 +623,11 @@ public class McpTools {
     return textResult(operation);
   }
 
-  private McpSchema.CallToolResult audio(UUID owner, UUID task, UUID id) {
+  private McpSchema.CallToolResult audio(UUID owner, UUID task, UUID id, JsonNode input) {
+    String delivery = input.has("delivery") ? input.path("delivery").asString("") : "file";
+    if (!Set.of("audio", "file").contains(delivery)) {
+      throw ApiException.invalid("delivery", "Допустимы только audio и file.");
+    }
     tasks.get(owner, task);
     boolean belongs =
         jdbc.sql(
@@ -634,21 +651,30 @@ public class McpTools {
           "AUDIO_INLINE_LIMIT",
           "Оригинал сохранён без обрезания, но превышает предел передачи ChatGPT 8 MiB.");
     }
-    return McpSchema.CallToolResult.builder()
-        .addTextContent(
-            json.write(
-                Map.of(
-                    "artifact",
-                    artifact,
-                    "instructionContext",
-                    artifacts.audioContext(owner, id),
-                    "originalBytes",
-                    true)))
-        .addContent(
-            McpSchema.AudioContent.builder(
-                    Base64.getEncoder().encodeToString(originalBytes(owner, artifact)),
-                    artifact.mimeType())
-                .build())
+    var result =
+        McpSchema.CallToolResult.builder()
+            .addTextContent(
+                json.write(
+                    Map.of(
+                        "artifact",
+                        artifact,
+                        "instructionContext",
+                        artifacts.audioContext(owner, id),
+                        "originalBytes",
+                        true)));
+    String encoded = Base64.getEncoder().encodeToString(originalBytes(owner, artifact));
+    if ("file".equals(delivery)) {
+      String filename =
+          URLEncoder.encode(artifact.name(), StandardCharsets.UTF_8).replace("+", "%20");
+      var resource =
+          McpSchema.BlobResourceContents.builder(
+                  "helmglass://artifacts/" + id + "/" + filename, encoded)
+              .mimeType(artifact.mimeType())
+              .build();
+      return result.addContent(McpSchema.EmbeddedResource.builder(resource).build()).build();
+    }
+    return result
+        .addContent(McpSchema.AudioContent.builder(encoded, artifact.mimeType()).build())
         .build();
   }
 

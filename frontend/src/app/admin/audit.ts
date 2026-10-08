@@ -1,6 +1,7 @@
+import { Icon } from '../shared/icon';
 import { SearchInput } from '../shared/search-input';
 import { DatePipe } from '@angular/common';
-import { Component, DestroyRef, effect, inject, signal } from '@angular/core';
+import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DateFilter } from '../shared/date-filter';
 import * as z from 'zod/mini';
@@ -14,35 +15,51 @@ import { Empty, Pager, Status } from '../shared/ui';
 
 @Component({
   selector: 'hg-audit',
-  imports: [SearchInput, DatePipe, DateFilter, MultiFilter, Empty, Pager, Status],
+  imports: [Icon, SearchInput, DatePipe, DateFilter, MultiFilter, Empty, Pager, Status],
   providers: [QueryState],
   template: `
     <section class="card table-card">
-      <div class="toolbar">
-        <label class="search"
-          ><input
-            hgSearch
-            aria-label="Поиск аудита"
-            placeholder="Администратор, объект или причина"
-            [value]="query.text('search')"
-            (searchChange)="query.set({ search: $event || null })" /></label
-        ><hg-multi-filter
-          label="Действие"
-          [options]="actions"
-          [value]="query.values('action')"
-          (changed)="query.set({ action: $event })"
-        /><hg-multi-filter
-          label="Результат"
-          [options]="statuses"
-          [value]="query.values('status')"
-          (changed)="query.set({ status: $event })"
-        />
-        <hg-date-filter
-          [from]="query.text('from')"
-          [to]="query.text('to')"
-          (changed)="query.set($event)"
-        />
+      <div class="section-heading padded">
+        <h2>Журнал действий</h2>
+        <button
+          class="button small"
+          [attr.aria-expanded]="filtersOpen()"
+          (click)="filtersOpen.set(!filtersOpen())"
+        >
+          <hg-icon name="filter" />Поиск и фильтры
+        </button>
       </div>
+      @if (filtersOpen()) {
+        <div class="toolbar">
+          <label class="search"
+            ><hg-icon name="search" /><input
+              hgSearch
+              aria-label="Поиск аудита"
+              placeholder="Администратор, объект или причина"
+              [value]="query.text('auditSearch')"
+              (searchChange)="
+                query.set({ auditSearch: $event || null, auditPage: null }, false)
+              " /></label
+          ><hg-multi-filter
+            label="Действие"
+            [options]="actions"
+            [value]="query.values('auditAction')"
+            (changed)="query.set({ auditAction: $event, auditPage: null }, false)"
+          /><hg-multi-filter
+            label="Результат"
+            [options]="statuses"
+            [value]="query.values('auditStatus')"
+            (changed)="query.set({ auditStatus: $event, auditPage: null }, false)"
+          />
+          <hg-date-filter
+            [from]="query.text('auditFrom')"
+            [to]="query.text('auditTo')"
+            (changed)="
+              query.set({ auditFrom: $event.from, auditTo: $event.to, auditPage: null }, false)
+            "
+          />
+        </div>
+      }
       @if (error()) {
         <div class="error-banner" role="alert">
           {{ error() }}<button class="text-button" (click)="load()">Повторить</button>
@@ -81,7 +98,7 @@ import { Empty, Pager, Status } from '../shared/ui';
                         title="Подробности изменения"
                         (click)="details(event)"
                       >
-                        ↗
+                        <hg-icon name="chevron-right" />
                       </button>
                     </td>
                   </tr>
@@ -99,8 +116,8 @@ import { Empty, Pager, Status } from '../shared/ui';
           [page]="page.page"
           [size]="page.pageSize"
           [total]="page.total"
-          (pageChange)="query.set({ page: $event }, false)"
-          (sizeChange)="query.set({ pageSize: $event })"
+          (pageChange)="query.set({ auditPage: $event }, false)"
+          (sizeChange)="query.set({ auditPageSize: $event, auditPage: null }, false)"
         />
       } @else if (!error()) {
         <div class="loading" role="status">Загружаем аудит…</div>
@@ -115,6 +132,24 @@ export class Audit {
   private generation = 0;
   readonly data = signal<Page<z.infer<typeof auditSchema>> | null>(null);
   readonly error = signal('');
+  readonly filtersOpen = signal(
+    ['auditSearch', 'auditAction', 'auditStatus', 'auditFrom', 'auditTo'].some(
+      (key) => this.query.text(key) !== '',
+    ),
+  );
+  readonly filterKey = computed(() =>
+    [
+      'auditSearch',
+      'auditAction',
+      'auditStatus',
+      'auditFrom',
+      'auditTo',
+      'auditPage',
+      'auditPageSize',
+    ]
+      .map((key) => this.query.values(key).join('\u0000'))
+      .join('\u0001'),
+  );
   readonly actions = [
     'LIMITS',
     'BLOCK',
@@ -134,8 +169,8 @@ export class Audit {
   ];
   constructor() {
     effect(() => {
-      this.query.params();
-      void this.load();
+      this.filterKey();
+      untracked(() => void this.load());
     });
     inject(LiveEvents)
       .watch(['admin-audit'])
@@ -149,13 +184,13 @@ export class Audit {
     const generation = ++this.generation;
     try {
       const data = await this.api.get('/api/admin/audit', pageSchema(auditSchema), {
-        search: this.query.text('search'),
-        action: this.query.values('action'),
-        status: this.query.values('status'),
-        from: this.query.text('from'),
-        to: this.query.text('to'),
-        page: this.query.number('page', 1),
-        pageSize: this.query.number('pageSize', 20),
+        search: this.query.text('auditSearch'),
+        action: this.query.values('auditAction'),
+        status: this.query.values('auditStatus'),
+        from: this.query.text('auditFrom'),
+        to: this.query.text('auditTo'),
+        page: this.query.number('auditPage', 1),
+        pageSize: this.query.number('auditPageSize', 20),
       });
       if (generation === this.generation) {
         this.data.set(data);

@@ -1,11 +1,14 @@
 package ru.helmglass.api;
 
 import jakarta.servlet.http.HttpServletRequest;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.CacheControl;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -21,9 +24,13 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.multipart.MultipartHttpServletRequest;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+import ru.helmglass.api.accounts.ProfileImage;
 import ru.helmglass.api.artifacts.ArtifactService;
 import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
@@ -51,6 +58,7 @@ public class ApiController {
   private final ru.helmglass.api.tasks.TaskQueries taskQueries;
   private final ru.helmglass.api.accounts.AccountService accounts;
   private final String publicUrl;
+  private final ProfileImage profileImages;
 
   public ApiController(
       Identity identity,
@@ -65,6 +73,7 @@ public class ApiController {
       JsonSupport json,
       ru.helmglass.api.tasks.TaskQueries taskQueries,
       ru.helmglass.api.accounts.AccountService accounts,
+      ProfileImage profileImages,
       @Value("${helm.public-url}") String publicUrl) {
     this.identity = identity;
     this.tasks = tasks;
@@ -79,6 +88,7 @@ public class ApiController {
     this.taskQueries = taskQueries;
     this.accounts = accounts;
     this.publicUrl = publicUrl;
+    this.profileImages = profileImages;
   }
 
   @GetMapping("/me")
@@ -88,8 +98,59 @@ public class ApiController {
     if (token instanceof CsrfToken csrf) {
       csrf.getToken();
     }
-    return accounts.me(actor, publicUrl);
+    return accounts.me(actor);
   }
+
+  @PostMapping(value = "/me", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+  Object saveProfile(
+      @RequestHeader("Idempotency-Key") String key,
+      @RequestParam String name,
+      @RequestParam Long expectedVersion,
+      @RequestPart(required = false) MultipartFile avatar,
+      MultipartHttpServletRequest request)
+      throws IOException {
+    Actor actor = web();
+    if (!java.util.Set.of("name", "expectedVersion").containsAll(request.getParameterMap().keySet())
+        || !java.util.Set.of("avatar").containsAll(request.getMultiFileMap().keySet())
+        || request.getParameterMap().values().stream().anyMatch(values -> values.length != 1)
+        || request.getMultiFileMap().values().stream().anyMatch(values -> values.size() != 1)) {
+      throw ApiException.invalid(
+          "profile", "В запросе профиля есть неизвестные или повторяющиеся поля.");
+    }
+    Contracts.ProfileInput input = new Contracts.ProfileInput(name, expectedVersion);
+    if (avatar == null) {
+      return command(
+          actor.id(),
+          key,
+          "profile:save",
+          new ProfileSave(input, null, null, null),
+          () -> accounts.updateProfile(actor, input, null));
+    }
+    try (var stream = avatar.getInputStream();
+        var image =
+            profileImages.validate(actor.id(), stream, avatar.getSize(), avatar.getContentType())) {
+      return command(
+          actor.id(),
+          key,
+          "profile:save",
+          new ProfileSave(input, image.sha256(), image.contentType(), image.sizeBytes()),
+          () -> accounts.updateProfile(actor, input, image));
+    }
+  }
+
+  @GetMapping("/me/avatar")
+  ResponseEntity<InputStreamResource> avatar(@RequestParam(required = false) UUID v) {
+    var avatar = accounts.avatar(web(), v);
+    return ResponseEntity.ok()
+        .contentType(MediaType.parseMediaType(avatar.contentType()))
+        .contentLength(avatar.sizeBytes())
+        .cacheControl(CacheControl.noStore())
+        .header("X-Content-Type-Options", "nosniff")
+        .body(new InputStreamResource(avatar.content()));
+  }
+
+  private record ProfileSave(
+      Contracts.ProfileInput profile, String sha256, String contentType, Integer sizeBytes) {}
 
   @PostMapping("/auth/logout")
   Object logout() {

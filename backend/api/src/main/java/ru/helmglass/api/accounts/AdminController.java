@@ -48,6 +48,12 @@ public class AdminController {
     return accounts.users(ListQuery.from(query), query.getOrDefault("flag", List.of()));
   }
 
+  @GetMapping("/users/summary")
+  Contracts.AdminUsersSummary usersSummary() {
+    identity.administrator();
+    return accounts.usersSummary();
+  }
+
   @GetMapping("/users/{id}")
   Object user(
       @PathVariable UUID id,

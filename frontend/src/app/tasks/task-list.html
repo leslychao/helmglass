@@ -1,51 +1,59 @@
 <header class="page-heading">
   <div>
-    <h1>Задачи</h1>
-    <p>Работа в браузере — с понятным ходом и сохранённым результатом.</p>
+    <h1 class="sr-only">Задачи</h1>
   </div>
-  <a class="button primary" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
-    >＋ Создать задачу</a
+  <a class="button task-create" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
+    ><hg-icon name="plus" />Новая задача</a
   >
 </header>
-<section class="kpis" aria-label="Сводка задач">
+<section class="kpis task-kpis" aria-label="Сводка задач">
   <button
-    class="kpi"
+    class="kpi task-kpi"
     [class.selected]="selectedCard(activeStates)"
     [attr.aria-pressed]="selectedCard(activeStates)"
     [disabled]="!summary()"
-    [title]="summary() ? 'Выбрать активные задачи' : 'Сводка ещё не получена'"
     (click)="selectCard(activeStates)"
   >
-    <span class="kpi-icon">↗</span
-    ><span
-      ><small>Активные задачи</small><strong>{{ summary()?.active ?? '—' }}</strong></span
-    >
+    <span class="task-kpi-top"
+      ><span>Активные задачи</span><span class="task-kpi-icon"><hg-icon name="play" /></span
+    ></span>
+    <strong class="task-kpi-value">{{ summary()?.active ?? '—' }}</strong>
+    <span class="task-kpi-bottom"
+      ><span>Запуск, выполнение и остановка</span
+      ><hg-icon [name]="selectedCard(activeStates) ? 'check' : 'chevron-right'"
+    /></span>
   </button>
   <button
-    class="kpi"
+    class="kpi task-kpi green"
     [class.selected]="selectedCard(successStates)"
     [attr.aria-pressed]="selectedCard(successStates)"
     [disabled]="!summary()"
-    [title]="summary() ? 'Выбрать успешные задачи' : 'Сводка ещё не получена'"
     (click)="selectCard(successStates)"
   >
-    <span class="kpi-icon green">✓</span
-    ><span
-      ><small>Успешно выполнены</small><strong>{{ summary()?.succeeded ?? '—' }}</strong></span
-    >
+    <span class="task-kpi-top"
+      ><span>Успешно выполнены</span><span class="task-kpi-icon"><hg-icon name="check" /></span
+    ></span>
+    <strong class="task-kpi-value">{{ summary()?.succeeded ?? '—' }}</strong>
+    <span class="task-kpi-bottom"
+      ><span>Цель достигнута полностью</span
+      ><hg-icon [name]="selectedCard(successStates) ? 'check' : 'chevron-right'"
+    /></span>
   </button>
   <button
-    class="kpi"
+    class="kpi task-kpi amber"
     [class.selected]="selectedCard(attentionStates)"
     [attr.aria-pressed]="selectedCard(attentionStates)"
     [disabled]="!summary()"
-    [title]="summary() ? 'Выбрать задачи, ожидающие вас' : 'Сводка ещё не получена'"
     (click)="selectCard(attentionStates)"
   >
-    <span class="kpi-icon amber">!</span
-    ><span
-      ><small>Ожидают вас</small><strong>{{ summary()?.waitingForYou ?? '—' }}</strong></span
-    >
+    <span class="task-kpi-top"
+      ><span>Ожидают вас</span><span class="task-kpi-icon"><hg-icon name="user" /></span
+    ></span>
+    <strong class="task-kpi-value">{{ summary()?.waitingForYou ?? '—' }}</strong>
+    <span class="task-kpi-bottom"
+      ><span>Вход, ответ, подтверждение или проверка</span
+      ><hg-icon [name]="selectedCard(attentionStates) ? 'check' : 'chevron-right'"
+    /></span>
   </button>
 </section>
 <section class="card table-card" [attr.aria-busy]="loading()">
@@ -64,11 +72,10 @@
   }
   <div class="toolbar">
     <label class="search"
-      ><span aria-hidden="true">⌕</span
-      ><input
+      ><hg-icon name="search" /><input
         hgSearch
         aria-label="Поиск задач"
-        placeholder="Найти задачу"
+        placeholder="Поиск задач"
         [value]="query.text('search')"
         (searchChange)="query.set({ search: $event || null })"
     /></label>
@@ -107,18 +114,20 @@
   @if (data(); as page) {
     @if (page.items.length) {
       <div class="table-scroll">
-        <table>
+        <table class="v12-task-table">
           <thead>
             <tr>
               <th [attr.aria-sort]="query.ariaSort('title')">
-                <button (click)="query.sort('title')">Задача ↕</button>
+                <button (click)="query.sort('title')">
+                  Задача <hg-icon name="chevron-down" />
+                </button>
               </th>
-              <th>Состояние</th>
               @if (columns().includes('site')) {
                 <th>Сайт</th>
               }
+              <th>Состояние</th>
               @if (columns().includes('executionSeconds')) {
-                <th>Выполнение</th>
+                <th>Время выполнения</th>
               }
               @if (columns().includes('manualSeconds')) {
                 <th>Человек</th>
@@ -131,12 +140,15 @@
               }
               @if (columns().includes('updatedAt')) {
                 <th [attr.aria-sort]="query.ariaSort('updatedAt')">
-                  <button (click)="query.sort('updatedAt')">Обновлена ↕</button>
+                  <button (click)="query.sort('updatedAt')">
+                    Обновлено <hg-icon name="chevron-down" />
+                  </button>
                 </th>
               }
               @if (columns().includes('summary')) {
-                <th>Краткий итог</th>
+                <th>Текущий шаг / итог</th>
               }
+              <th class="row-menu-cell"><span class="sr-only">Действия</span></th>
             </tr>
           </thead>
           <tbody>
@@ -145,13 +157,21 @@
                 <td class="task-name">
                   <a [routerLink]="['/tasks', task.id]" [queryParams]="{ back: query.context() }">{{
                     task.title || task.goal || 'Черновик без названия'
-                  }}</a
-                  ><small>{{ task.source === 'MCP' ? 'ChatGPT' : 'Веб-интерфейс' }}</small>
+                  }}</a>
+                  <span class="task-cell-meta"
+                    ><span class="task-short-id" [title]="task.id">#{{ task.id.slice(0, 8) }}</span
+                    ><small>{{ task.source === 'MCP' ? 'ChatGPT' : 'Веб-интерфейс' }}</small></span
+                  >
                 </td>
-                <td><hg-status [value]="task.outcome || task.status" /></td>
                 @if (columns().includes('site')) {
-                  <td>{{ task.site || 'Без сайта' }}</td>
+                  <td>
+                    <span class="site-cell"
+                      ><span class="service-mark"><hg-icon name="globe" /></span
+                      ><span>{{ task.site || 'Без сайта' }}</span></span
+                    >
+                  </td>
                 }
+                <td><hg-status [value]="task.outcome || task.status" /></td>
                 @if (columns().includes('executionSeconds')) {
                   <td>{{ task.usage.executionSeconds | duration }}</td>
                 }
@@ -170,6 +190,39 @@
                 @if (columns().includes('summary')) {
                   <td class="summary-cell">{{ task.summary || task.result?.summary || '—' }}</td>
                 }
+                <td class="row-menu-cell">
+                  <details class="action-menu">
+                    <summary
+                      class="icon-button"
+                      [attr.aria-label]="'Действия задачи ' + task.title"
+                      title="Действия задачи"
+                    >
+                      <hg-icon name="more" />
+                    </summary>
+                    <div class="menu-popover">
+                      <a
+                        [routerLink]="['/tasks', task.id]"
+                        [queryParams]="{ back: query.context() }"
+                        >Открыть задачу</a
+                      ><a
+                        [routerLink]="['/tasks', task.id]"
+                        [queryParams]="{ back: query.context(), tab: 'result' }"
+                        >Результат</a
+                      >
+                      @if (task.allowedCommands.includes('AMEND')) {
+                        <a
+                          [routerLink]="[
+                            '/tasks',
+                            task.id,
+                            task.status === 'DRAFT' ? 'edit' : 'refine',
+                          ]"
+                          [queryParams]="{ back: query.context() }"
+                          >{{ task.status === 'DRAFT' ? 'Редактировать' : 'Уточнить' }}</a
+                        >
+                      }
+                    </div>
+                  </details>
+                </td>
               </tr>
             }
           </tbody>

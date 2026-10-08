@@ -37,12 +37,14 @@ class UsageAdministrationTest(unittest.TestCase):
         cls.admin.login_web()
 
     def setUp(self):
+        self.purged = False
         self.identity = dev.DisposableIdentity(self.settings, self.template)
         self.client = self.identity.client()
         self.client.login_web()
 
     def tearDown(self):
-        self.purge_identity(self.identity)
+        if not self.purged:
+            self.purge_identity(self.identity)
 
     def create(self, title, prepare=True, site="example.com"):
         status, task = self.client.api("/api/tasks", "POST", {
@@ -121,6 +123,122 @@ class UsageAdministrationTest(unittest.TestCase):
         return self.admin.api(path + "/commands", "POST", {
             "type": kind, "expectedVersion": detail["user"]["version"],
             "reason": "Disposable reporting contract", **fields})
+
+    def test_admin_summary_exact_counts_privacy_access_and_push(self):
+        endpoint = "/api/admin/users/summary"
+        self.assertEqual(403, self.client.api(endpoint)[0])
+        self.assertEqual(401, dev.DevClient(self.settings, "test", "KEYCLOAK_TEST_PASSWORD").api(endpoint)[0])
+
+        def summary():
+            status, value = self.admin.api(endpoint)
+            self.assertEqual(200, status, value)
+            self.assertEqual({"users", "blocked", "waitingTasks"}, set(value))
+            self.assertTrue(all(isinstance(count, int) and count >= 0 for count in value.values()))
+            return value
+
+        def event(stream):
+            for _ in range(100):
+                line = stream.readline()
+                self.assertTrue(line, "Administrative SSE ended before the expected change")
+                if line.startswith(b"data:"):
+                    value = json.loads(line[5:])
+                    self.assertEqual({"id", "resource", "entityId", "version"}, set(value))
+                    return value
+            self.fail("Administrative SSE did not return bounded metadata")
+
+        baseline = summary()
+        self.assertEqual(baseline, self.admin.api(endpoint + "?search=no-match&status=BLOCKED&page=2")[1])
+        administrator = self.admin.api("/api/me")[1]["id"]
+        sequence = int(self.sql("SELECT coalesce(min(sequence),0) FROM user_events "
+            f"WHERE owner_id='{administrator}' AND resource='admin-user' AND entity_id=:owner;"))
+        self.assertGreater(sequence, 0, "New account creation must notify current administrators")
+        with self.admin.http.open(self.admin.base + "/api/events?cursor=" + str(sequence - 1), timeout=12) as stream:
+            observed = []
+            for _ in range(1000):
+                change = event(stream)
+                observed.append(change)
+                if change["resource"] == "sync":
+                    break
+            else:
+                self.fail("Administrative replay did not finish")
+            self.assertTrue(any(item["resource"] == "admin-user" and item["entityId"] == self.identity.id
+                                for item in observed))
+            self.create("Private summary sentinel", prepare=False)
+            self.assertEqual(baseline, summary())
+            task = self.create("Private prepared summary sentinel")
+            for _ in range(100):
+                change = event(stream)
+                if change["resource"] == "admin-user" and change["entityId"] == self.identity.id:
+                    break
+            else:
+                self.fail("Prepared task did not notify administrators")
+            self.assertEqual({**baseline, "waitingTasks": baseline["waitingTasks"] + 1}, summary())
+        task = self.command(task, "PAUSE")
+        self.assertEqual(baseline, summary())
+        task = self.command(task, "RESUME")
+        self.assertEqual({**baseline, "waitingTasks": baseline["waitingTasks"] + 1}, summary())
+        self.command(task, "STOP")
+        self.assertEqual(baseline, summary())
+
+        # Historical fixture states exercise the reporting boundary without launching browsers.
+        for state in ("QUEUED", "WAITING_CHATGPT", "WAITING_USER", "PAUSED", "DRAFT", "SUCCEEDED", "UNKNOWN", "STOPPING"):
+            task = self.create("Numeric summary " + state, prepare=False)
+            self.sql(f"UPDATE tasks SET status='{state}' WHERE id='{task['id']}' AND owner_id=:owner;")
+        self.assertEqual({**baseline, "waitingTasks": baseline["waitingTasks"] + 3}, summary())
+        self.sql("UPDATE tasks SET status='STOPPED' WHERE owner_id=:owner AND status<>'DRAFT';")
+        self.assertEqual(baseline, summary())
+        self.assertEqual(200, self.admin_command("BLOCK")[0])
+        self.assertEqual({**baseline, "blocked": baseline["blocked"] + 1}, summary())
+        self.assertEqual(200, self.admin_command("REQUEST_DELETION")[0])
+        self.assertEqual(baseline, summary(), "Pending deletion is counted as a user, not BLOCKED")
+        self.purge_identity(self.identity)
+        self.purged = True
+        self.assertEqual({**baseline, "users": baseline["users"] - 1}, summary())
+
+    def test_first_admin_request_authentication_is_transactional(self):
+        identity = dev.DisposableIdentity(self.settings, self.template)
+        endpoint = "/api/admin/users/summary"
+
+        def cabinet_login_without_api():
+            client = identity.client()
+            status, html, _ = client.request(client.base + "/oauth2/start?rd=/sign-in")
+            self.assertEqual(200, status)
+            status, _, _ = client.submit_login(html)
+            self.assertEqual(200, status)
+            return client
+
+        def account_count():
+            return int(self.sql(f"SELECT count(*) FROM accounts WHERE id='{identity.id}';"))
+
+        try:
+            client = cabinet_login_without_api()
+            self.assertEqual(0, account_count(), "OIDC alone must not create an application account")
+            self.assertEqual(403, client.api(endpoint)[0])
+            self.assertEqual(0, account_count(), "Denied first admin request must roll back account creation")
+            self.assertEqual('0', self.sql("SELECT count(*) FROM user_events "
+                                         f"WHERE resource='admin-user' AND entity_id='{identity.id}';"))
+
+            administrator = self.admin.api('/api/me')[1]['id']
+            status, roles, _ = identity.admin('/users/' + administrator + '/role-mappings/realm')
+            self.assertEqual(200, status)
+            admin_roles = [role for role in roles if role['name'] == 'ADMIN']
+            self.assertEqual(1, len(admin_roles))
+            self.assertEqual(204, identity.admin('/users/' + identity.id + '/role-mappings/realm',
+                                               'POST', admin_roles)[0])
+            client = cabinet_login_without_api()
+            self.assertEqual(0, account_count())
+            status, summary = client.api(endpoint)
+            self.assertEqual(200, status, summary)
+            self.assertEqual({'users', 'blocked', 'waitingTasks'}, set(summary))
+            self.assertEqual(1, account_count())
+            self.assertEqual('t', self.sql(f"SELECT administrator FROM accounts WHERE id='{identity.id}';"))
+            self.assertNotEqual('0', self.sql("SELECT count(*) FROM user_events "
+                                            f"WHERE resource='admin-user' AND entity_id='{identity.id}';"))
+        finally:
+            if account_count():
+                self.purge_identity(identity)
+            else:
+                self.assertIn(identity.admin('/users/' + identity.id, 'DELETE')[0], (204, 404))
 
     def test_lost_create_body_and_status_counters_use_the_entire_filtered_cohort(self):
         marker = "Counter cohort " + str(uuid.uuid4())

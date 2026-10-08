@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import {
   Component,
   DestroyRef,
@@ -27,25 +28,30 @@ export function browserViewerId(): string {
 }
 @Component({
   selector: 'hg-browser',
-  imports: [Status, A11yModule],
+  imports: [Icon, Status, A11yModule],
   template: ` <section
     class="browser-card"
     [class.browser-expanded]="expanded()"
     [cdkTrapFocus]="expanded()"
     (keydown.escape)="expanded.set(false)"
   >
+    <div class="browser-title">
+      <strong>Браузер агента</strong>
+    </div>
     <header class="browser-toolbar">
-      <span class="browser-dots" aria-hidden="true">● ● ●</span
-      ><span class="browser-address">{{
-        browser()?.privateMode ? 'Защищённый вход' : browser()?.currentUrl || 'Браузер задачи'
-      }}</span
-      ><hg-status [value]="browser()?.status ?? 'PENDING'" /><button
+      <span class="browser-address"
+        ><hg-icon [name]="browser()?.privateMode ? 'lock' : 'globe'" />{{
+          browser()?.privateMode ? 'Защищённый вход' : browser()?.currentUrl || 'Браузер задачи'
+        }}</span
+      >
+      <div class="browser-controls"><ng-content /></div>
+      <button
         class="icon-button"
         [attr.aria-label]="expanded() ? 'Свернуть браузер' : 'Развернуть браузер'"
         [title]="expanded() ? 'Свернуть' : 'Развернуть'"
         (click)="expanded.set(!expanded())"
       >
-        ⛶
+        <hg-icon [name]="expanded() ? 'close' : 'expand'" />
       </button>
     </header>
     @if (error()) {
@@ -57,13 +63,13 @@ export function browserViewerId(): string {
       <div class="browser-viewport">
         @if (!browser()) {
           <div class="viewer-placeholder">
-            <span>◇</span>
+            <span class="viewer-mark"><hg-icon name="browser" /></span>
             <h3>Браузер ещё не запущен</h3>
             <p>Здесь появится просмотр, когда браузер будет запущен.</p>
           </div>
         } @else if (!viewAllowed()) {
           <div class="viewer-placeholder">
-            <span>♧</span>
+            <span class="viewer-mark"><hg-icon name="shield" /></span>
             <h3>
               {{
                 browser()?.controlOwner === 'TRANSFERRING'
@@ -106,8 +112,11 @@ export function browserViewerId(): string {
     </div>
     <footer class="browser-footer">
       <span class="connection-dot" [class.online]="connected()"></span
-      >{{ connected() ? 'Просмотр подключён' : 'Просмотр не подключён' }}<span class="spacer"></span
-      ><ng-content />
+      >{{ connected() ? 'Просмотр подключён' : 'Просмотр не подключён' }}
+      @if (browser(); as item) {
+        <hg-status [value]="item.status" />
+      }
+      <span class="spacer"></span><ng-content select="[browserFooter]" />
     </footer>
   </section>`,
 })

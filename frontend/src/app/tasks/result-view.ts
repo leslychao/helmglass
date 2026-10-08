@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import { SearchInput } from '../shared/search-input';
 import { Component, DestroyRef, computed, effect, inject, input, signal } from '@angular/core';
 import * as z from 'zod/mini';
@@ -10,174 +11,202 @@ import { QueryState } from '../shared/query-state';
 
 @Component({
   selector: 'hg-result',
-  imports: [SearchInput, MultiFilter, Empty, Pager, Status],
+  imports: [Icon, SearchInput, MultiFilter, Empty, Pager, Status],
   providers: [QueryState],
   template: `
     @if (task().result; as result) {
-      <section class="card result-summary">
-        <div class="section-heading">
-          <h2>Результат</h2>
-          <button class="button" (click)="copy()">Скопировать текст</button>
+      <section class="card result-report">
+        <section class="result-summary">
+          <div class="section-heading">
+            <h2>Итог</h2>
+            <button
+              class="icon-button"
+              (click)="copy()"
+              aria-label="Скопировать вывод"
+              title="Скопировать вывод"
+            >
+              <hg-icon name="copy" />
+            </button>
+          </div>
+          <p class="preserve-lines">{{ result.summary }}</p>
+          @if (result.limitations.length) {
+            <div class="result-limitations">
+              <h2>Что осталось неизвестным</h2>
+              <ul>
+                @for (item of result.limitations; track $index) {
+                  <li>{{ item }}</li>
+                }
+              </ul>
+            </div>
+          }
+        </section>
+        <div class="result-facts">
+          @if (rows(); as page) {
+            <span
+              >Строк в выборке: <strong>{{ page.total }}</strong></span
+            >
+          }
+          <span
+            >Источников: <strong>{{ result.sources.length }}</strong></span
+          >
+          @if (result.artifactCount) {
+            <span
+              >Файлов: <strong>{{ result.artifactCount }}</strong></span
+            >
+          }
         </div>
-        <p class="preserve-lines">{{ result.summary }}</p>
-        @if (result.limitations.length) {
-          <div class="notice">
-            <h3>Ограничения результата</h3>
-            <ul>
-              @for (item of result.limitations; track $index) {
-                <li>{{ item }}</li>
-              }
-            </ul>
-          </div>
-        }
-        @if (result.sources.length) {
-          <h3>Источники</h3>
-          <ul class="sources">
-            @for (source of result.sources; track $index) {
-              <li>
-                <a [href]="source.url" target="_blank" rel="noopener noreferrer"
-                  >{{ source.title || source.url }} ↗</a
-                >
-              </li>
-            }
-          </ul>
-        }
-      </section>
-      @if (result.columns.length) {
-        <section class="card table-card" [attr.aria-busy]="loading()">
-          <div class="toolbar">
-            <h2>Данные</h2>
-            <label class="search"
-              ><input
-                hgSearch
-                aria-label="Поиск по результату"
-                placeholder="Найти в результате"
-                [value]="search()"
-                (searchChange)="set({ resultSearch: $event || null })" /></label
-            ><span class="spacer"></span
-            ><hg-multi-filter
-              label="Колонки"
-              [options]="columnOptions()"
-              [value]="columns()"
-              (changed)="query.set({ resultColumns: $event.length ? $event : '' }, false)"
-            />
-          </div>
-          @if (rows(); as data) {
-            @if (data.items.length) {
-              <div class="table-scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      @for (column of result.columns; track column.key) {
-                        @if (columns().includes(column.key)) {
-                          <th
-                            [attr.aria-sort]="
-                              sort() === column.key
-                                ? direction() === 'asc'
-                                  ? 'ascending'
-                                  : 'descending'
-                                : 'none'
-                            "
-                          >
-                            <button (click)="sortBy(column.key)">{{ column.label }} ↕</button>
-                          </th>
-                        }
-                      }
-                      <th><span class="sr-only">Полная строка</span></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    @for (row of data.items; track row.id) {
+        @if (result.columns.length) {
+          <section class="result-data" [attr.aria-busy]="loading()">
+            <div class="toolbar">
+              <h2>Данные</h2>
+              <label class="search"
+                ><hg-icon name="search" /><input
+                  hgSearch
+                  aria-label="Поиск по результату"
+                  placeholder="Найти в результате"
+                  [value]="search()"
+                  (searchChange)="set({ resultSearch: $event || null })" /></label
+              ><span class="spacer"></span
+              ><hg-multi-filter
+                label="Колонки"
+                [options]="columnOptions()"
+                [value]="columns()"
+                (changed)="query.set({ resultColumns: $event.length ? $event : '' }, false)"
+              />
+            </div>
+            @if (rows(); as data) {
+              @if (data.items.length) {
+                <div class="table-scroll">
+                  <table>
+                    <thead>
                       <tr>
                         @for (column of result.columns; track column.key) {
                           @if (columns().includes(column.key)) {
-                            <td>{{ row.cells[column.key] ?? '—' }}</td>
+                            <th
+                              [attr.aria-sort]="
+                                sort() === column.key
+                                  ? direction() === 'asc'
+                                    ? 'ascending'
+                                    : 'descending'
+                                  : 'none'
+                              "
+                            >
+                              <button (click)="sortBy(column.key)">
+                                {{ column.label }} <hg-icon name="chevron-down" />
+                              </button>
+                            </th>
                           }
                         }
-                        <td>
-                          <button
-                            class="icon-button"
-                            title="Показать всю строку"
-                            aria-label="Показать всю строку"
-                            (click)="openRow(row)"
-                          >
-                            ↗
-                          </button>
-                        </td>
+                        <th><span class="sr-only">Полная строка</span></th>
                       </tr>
-                    }
-                  </tbody>
-                </table>
-              </div>
-            } @else {
-              <hg-empty
-                title="Строки не найдены"
-                description="Измените поиск. Полученный вывод и файлы остаются доступны."
+                    </thead>
+                    <tbody>
+                      @for (row of data.items; track row.id) {
+                        <tr>
+                          @for (column of result.columns; track column.key) {
+                            @if (columns().includes(column.key)) {
+                              <td>{{ row.cells[column.key] ?? '—' }}</td>
+                            }
+                          }
+                          <td>
+                            <button
+                              class="icon-button"
+                              title="Показать всю строку"
+                              aria-label="Показать всю строку"
+                              (click)="openRow(row)"
+                            >
+                              <hg-icon name="expand" />
+                            </button>
+                          </td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              } @else {
+                <hg-empty
+                  title="Строки не найдены"
+                  description="Измените поиск. Полученный вывод и файлы остаются доступны."
+                />
+              }
+              <hg-pager
+                [page]="data.page"
+                [size]="data.pageSize"
+                [total]="data.total"
+                (pageChange)="query.set({ resultPage: $event }, false)"
+                (sizeChange)="set({ resultPageSize: $event })"
+              />
+            } @else if (loading()) {
+              <p class="loading" role="status">Загружаем строки результата…</p>
+            }
+          </section>
+        }
+        @if (result.artifactCount) {
+          <section class="result-files">
+            <h2>Файлы · {{ files()?.total ?? result.artifactCount }}</h2>
+            @if (filesError()) {
+              <p class="error-banner" role="alert">
+                {{ filesError() }}
+                <button class="text-button" (click)="loadFiles()">Повторить</button>
+              </p>
+            }
+            @if (filesLoading() && !files()) {
+              <p class="loading" role="status">Загружаем файлы…</p>
+            }
+            <div class="file-list">
+              @for (file of files()?.items; track file.id) {
+                <div class="file-row">
+                  <span class="file-mark"><hg-icon name="file" /></span
+                  ><span
+                    ><strong>{{ file.name }}</strong
+                    ><small>{{ file.mimeType }} · {{ file.sizeBytes ?? '—' }} байт</small></span
+                  ><span class="spacer"></span
+                  ><hg-status
+                    [value]="
+                      file.status === 'READY'
+                        ? file.complete
+                          ? 'FILE_READY'
+                          : 'INCOMPLETE'
+                        : file.status
+                    "
+                  />
+                  @if (file.status === 'READY' && file.complete) {
+                    <a class="button" [href]="'/api/artifacts/' + file.id + '/download'" download
+                      >Скачать</a
+                    >
+                  }
+                </div>
+              }
+            </div>
+            @if (files(); as data) {
+              @if (!data.items.length) {
+                <p class="empty-small">На этой странице файлов нет.</p>
+              }
+              <hg-pager
+                [page]="data.page"
+                [size]="data.pageSize"
+                [total]="data.total"
+                (pageChange)="query.set({ filePage: $event }, false)"
+                (sizeChange)="query.set({ filePage: null, filePageSize: $event }, false)"
               />
             }
-            <hg-pager
-              [page]="data.page"
-              [size]="data.pageSize"
-              [total]="data.total"
-              (pageChange)="query.set({ resultPage: $event }, false)"
-              (sizeChange)="set({ resultPageSize: $event })"
-            />
-          } @else if (loading()) {
-            <p class="loading" role="status">Загружаем строки результата…</p>
-          }
-        </section>
-      }
-      @if (result.artifactCount) {
-        <section class="card">
-          <h2>Файлы · {{ files()?.total ?? result.artifactCount }}</h2>
-          @if (filesError()) {
-            <p class="error-banner" role="alert">
-              {{ filesError() }}
-              <button class="text-button" (click)="loadFiles()">Повторить</button>
-            </p>
-          }
-          @if (filesLoading() && !files()) {
-            <p class="loading" role="status">Загружаем файлы…</p>
-          }
-          <div class="file-list">
-            @for (file of files()?.items; track file.id) {
-              <div class="file-row">
-                <span aria-hidden="true">▤</span
-                ><span
-                  ><strong>{{ file.name }}</strong
-                  ><small>{{ file.mimeType }} · {{ file.sizeBytes ?? '—' }} байт</small></span
-                ><span class="spacer"></span
-                ><hg-status
-                  [value]="
-                    file.status === 'READY'
-                      ? file.complete
-                        ? 'FILE_READY'
-                        : 'INCOMPLETE'
-                      : file.status
-                  "
-                />
-                @if (file.status === 'READY' && file.complete) {
-                  <a class="button" [href]="'/api/artifacts/' + file.id + '/download'" download
-                    >Скачать</a
+          </section>
+        }
+        <section class="result-sources">
+          @if (result.sources.length) {
+            <h2>Источники</h2>
+            <ul class="sources">
+              @for (source of result.sources; track $index) {
+                <li>
+                  <a [href]="source.url" target="_blank" rel="noopener noreferrer"
+                    >{{ source.title || source.url }} ↗</a
                   >
-                }
-              </div>
-            }
-          </div>
-          @if (files(); as data) {
-            @if (!data.items.length) {
-              <p class="empty-small">На этой странице файлов нет.</p>
-            }
-            <hg-pager
-              [page]="data.page"
-              [size]="data.pageSize"
-              [total]="data.total"
-              (pageChange)="query.set({ filePage: $event }, false)"
-              (sizeChange)="query.set({ filePage: null, filePageSize: $event }, false)"
-            />
+                </li>
+              }
+            </ul>
           }
         </section>
-      }
+      </section>
     } @else {
       <section class="card">
         <hg-empty

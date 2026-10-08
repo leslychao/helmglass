@@ -53,7 +53,7 @@ export class Api {
     schema: z.ZodMiniType<T>,
     method = 'POST',
   ): Promise<T> {
-    const fingerprint = this.account + method + path + JSON.stringify(body);
+    const fingerprint = this.account + method + path + (await this.bodyFingerprint(body));
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(fingerprint));
     const storageKey =
       'helm-operation:' +
@@ -84,6 +84,34 @@ export class Api {
       }
       throw failure;
     }
+  }
+
+  private async bodyFingerprint(body: object): Promise<string> {
+    if (!(body instanceof FormData)) return JSON.stringify(body);
+    const entries: [
+      string,
+      string | { name: string; type: string; size: number; sha256: string },
+    ][] = [];
+    for (const [name, value] of body.entries()) {
+      if (typeof value === 'string') entries.push([name, value]);
+      else {
+        if (value.size > 5 * 1024 * 1024)
+          throw new Error('Размер фотографии не должен превышать 5 МБ.');
+        const digest = await crypto.subtle.digest('SHA-256', await value.arrayBuffer());
+        entries.push([
+          name,
+          {
+            name: value.name,
+            type: value.type,
+            size: value.size,
+            sha256: Array.from(new Uint8Array(digest), (byte) =>
+              byte.toString(16).padStart(2, '0'),
+            ).join(''),
+          },
+        ]);
+      }
+    }
+    return JSON.stringify(entries);
   }
 
   private failure(error: unknown, mutation: boolean): ApiError {

@@ -29,6 +29,67 @@ paths:
           $ref: "#/components/responses/ApplicationError"
         "500":
           $ref: "#/components/responses/ApplicationError"
+    post:
+      operationId: saveProfile
+      description: Atomically updates the display name and optional portrait. Email remains read-only. Portraits are PNG/JPEG/WebP, at most 5 MiB and 16 megapixels; omitted avatar preserves the current photo.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, expectedVersion]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 300
+                expectedVersion:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                avatar:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: Saved profile or the receipt for an identical repeated operation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Me"
+        "400":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+        "413":
+          $ref: "#/components/responses/ApplicationError"
+  /me/avatar:
+    get:
+      operationId: profileAvatar
+      description: Original current portrait of the authenticated WEB account only; never a public file URL.
+      parameters:
+        - name: v
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Streamed original image with no-store and nosniff.
+          content:
+            image/png:
+              schema: {type: string, format: binary}
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/webp:
+              schema: {type: string, format: binary}
+        "404":
+          $ref: "#/components/responses/ApplicationError"
   /tasks:
     get:
       operationId: tasks
@@ -697,6 +758,21 @@ paths:
             type: integer
             format: int64
             minimum: 0
+  /admin/users/summary:
+    get:
+      operationId: adminUsersSummary
+      description: Global counts independent of user-table filters; ADMIN web only. No user or task content is returned.
+      responses:
+        "200":
+          description: Accounts excluding DELETED, BLOCKED accounts, and tasks waiting in QUEUED/WAITING_CHATGPT/WAITING_USER.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminUsersSummary"
+        "401":
+          $ref: "#/components/responses/ApplicationError"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
   /admin/users:
     get:
       operationId: adminUsers
@@ -1264,7 +1340,8 @@ components:
         - email
         - roles
         - status
-        - accountManagementUrl
+        - version
+        - avatarUrl
       properties:
         id:
           type: string
@@ -1283,9 +1360,13 @@ components:
           maxItems: 2
         status:
           $ref: "#/components/schemas/AccountStatus"
-        accountManagementUrl:
-          type: string
-          format: uri
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+        avatarUrl:
+          type: [string, "null"]
+          description: Authenticated relative URL of the current profile image, or null.
     TaskInput:
       type: object
       properties:
@@ -1855,6 +1936,23 @@ components:
           maximum: 1
         usage:
           $ref: "#/components/schemas/Usage"
+    AdminUsersSummary:
+      type: object
+      additionalProperties: false
+      required: [users, blocked, waitingTasks]
+      properties:
+        users:
+          type: integer
+          format: int64
+          minimum: 0
+        blocked:
+          type: integer
+          format: int64
+          minimum: 0
+        waitingTasks:
+          type: integer
+          format: int64
+          minimum: 0
     AdminUser:
       type: object
       properties:

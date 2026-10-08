@@ -1,5 +1,8 @@
 package ru.helmglass.api.accounts;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -8,10 +11,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Contracts;
@@ -28,6 +36,7 @@ import ru.helmglass.api.usage.UsageService;
 
 @Service
 public class AccountService {
+  private static final Logger log = LoggerFactory.getLogger(AccountService.class);
   private static final String USER_SELECT =
       """
 SELECT a.*,
@@ -48,6 +57,9 @@ FROM accounts a
   private final ru.helmglass.api.auth.IdentityLifecycle identityLifecycle;
   private final ru.helmglass.api.browsers.BrowserService browserService;
   private final TransactionTemplate transactions;
+  private final ProfileImage profileImages;
+  private final Identity identity;
+  private UUID profileCleanupCursor = new UUID(0, 0);
 
   public AccountService(
       JdbcClient jdbc,
@@ -60,6 +72,8 @@ FROM accounts a
       ru.helmglass.api.browsers.ViewerAccess viewers,
       ru.helmglass.api.browsers.BrowserService browserService,
       ru.helmglass.api.auth.IdentityLifecycle identityLifecycle,
+      ProfileImage profileImages,
+      Identity identity,
       org.springframework.transaction.PlatformTransactionManager manager) {
     this.jdbc = jdbc;
     this.json = json;
@@ -71,6 +85,8 @@ FROM accounts a
     this.viewers = viewers;
     this.browserService = browserService;
     this.identityLifecycle = identityLifecycle;
+    this.profileImages = profileImages;
+    this.identity = identity;
     transactions = new TransactionTemplate(manager);
   }
 
@@ -97,26 +113,126 @@ FROM accounts a
     return Map.of("status", current, "taskId", reference.taskId());
   }
 
-  public Object me(Actor actor, String publicUrl) {
-    return jdbc.sql("SELECT id,name,email,status FROM accounts WHERE id=:id")
+  public Contracts.Me me(Actor actor) {
+    return jdbc.sql(
+            "SELECT a.id,a.version,a.name,a.email,a.status,p.id avatar_id FROM accounts a"
+                + " LEFT JOIN account_avatars p ON p.owner_id=a.id WHERE a.id=:id")
         .param("id", actor.id())
         .query(
             (row, index) ->
-                Map.of(
-                    "id",
+                new Contracts.Me(
                     row.getObject("id", UUID.class),
-                    "name",
+                    row.getLong("version"),
                     row.getString("name"),
-                    "email",
                     row.getString("email"),
-                    "status",
                     row.getString("status"),
-                    "roles",
                     actor.roles(),
-                    "accountManagementUrl",
-                    publicUrl + "/auth/realms/helmglass/account/"))
+                    row.getObject("avatar_id") == null
+                        ? null
+                        : "/api/me/avatar?v=" + row.getObject("avatar_id", UUID.class)))
         .single();
   }
+
+  @Transactional
+  public Contracts.Me updateProfile(
+      Actor actor, Contracts.ProfileInput input, ProfileImage.Upload image) {
+    tasks.lockOwner(actor.id());
+    identity.requireGrant(actor);
+    Contracts.Me previous = me(actor);
+    if (!"ACTIVE".equals(previous.status()) || !"WEB".equals(actor.channel())) {
+      throw Identity.denied("Редактирование профиля недоступно.");
+    }
+    if (input.expectedVersion() == null || input.expectedVersion() != previous.version()) {
+      throw ApiException.conflict(
+          "STALE_VERSION", "Профиль изменился. Получите актуальные данные.");
+    }
+    String name = input.name() == null ? "" : input.name().strip();
+    if (name.isEmpty()
+        || name.length() > 300
+        || name.codePoints().anyMatch(Character::isISOControl)) {
+      throw ApiException.invalid(
+          "name", "Введите имя от 1 до 300 символов без управляющих знаков.");
+    }
+    if (image != null) {
+      TransactionSynchronizationManager.registerSynchronization(
+          new TransactionSynchronization() {
+            @Override
+            public void afterCompletion(int status) {
+              if (status != STATUS_COMMITTED) {
+                try {
+                  Files.deleteIfExists(image.destination());
+                } catch (IOException exception) {
+                  log.warn("Uncommitted profile image cleanup pending for {}", actor.id());
+                }
+              }
+            }
+          });
+      try {
+        image.install();
+      } catch (IOException exception) {
+        throw new ApiException(
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "PROFILE_IMAGE_UNAVAILABLE",
+            "Не удалось сохранить фотографию. Изменения не применены.");
+      }
+      jdbc.sql(
+              """
+              INSERT INTO account_avatars(owner_id,id,content_type,size_bytes,sha256)
+              VALUES (:owner,:id,:type,:size,:sha) ON CONFLICT(owner_id) DO UPDATE
+              SET id=EXCLUDED.id,content_type=EXCLUDED.content_type,
+                size_bytes=EXCLUDED.size_bytes,sha256=EXCLUDED.sha256
+              """)
+          .param("owner", actor.id())
+          .param("id", image.id())
+          .param("type", image.contentType())
+          .param("size", image.sizeBytes())
+          .param("sha", image.sha256())
+          .update();
+    }
+    long version =
+        jdbc.sql(
+                "UPDATE accounts SET name=:name,version=version+1 WHERE id=:owner RETURNING"
+                    + " version")
+            .param("name", name)
+            .param("owner", actor.id())
+            .query(Long.class)
+            .single();
+    events.emit(actor.id(), "account", actor.id(), version);
+    events.emitAdministrators("admin-user", actor.id(), version);
+    return me(actor);
+  }
+
+  public AvatarFile avatar(Actor actor, UUID expectedImage) {
+    AvatarMetadata metadata =
+        jdbc.sql("SELECT id,content_type,size_bytes FROM account_avatars WHERE owner_id=:owner")
+            .param("owner", actor.id())
+            .query(
+                (row, index) ->
+                    new AvatarMetadata(
+                        row.getObject("id", UUID.class),
+                        row.getString("content_type"),
+                        row.getInt("size_bytes")))
+            .optional()
+            .orElseThrow(ApiException::notFound);
+    if (expectedImage != null && !expectedImage.equals(metadata.id())) {
+      throw ApiException.notFound();
+    }
+    var path = profileImages.path(actor.id(), metadata.id());
+    try {
+      if (Files.size(path) != metadata.sizeBytes()) {
+        throw new IOException("Profile image is incomplete");
+      }
+      return new AvatarFile(
+          metadata.contentType(), metadata.sizeBytes(), Files.newInputStream(path));
+    } catch (IOException exception) {
+      throw new ApiException(
+          HttpStatus.CONFLICT, "PROFILE_IMAGE_UNAVAILABLE", "Фотография временно недоступна.");
+    }
+  }
+
+  public record AvatarFile(String contentType, int sizeBytes, InputStream content) {}
+
+  private record AvatarMetadata(UUID id, String contentType, int sizeBytes) {}
 
   public Object integration(UUID owner, String publicUrl) {
     boolean connected =
@@ -151,6 +267,22 @@ FROM accounts a
     events.emit(owner, "integration", owner, 0);
     var closure = viewers.revoke(owner, "MCP", null);
     return new RevokeReceipt(true, closure.status(), closure.message());
+  }
+
+  public Contracts.AdminUsersSummary usersSummary() {
+    return jdbc.sql(
+            """
+            SELECT count(*) AS users,count(*) FILTER (WHERE status='BLOCKED') AS blocked,
+              (SELECT count(*) FROM tasks t JOIN accounts owner ON owner.id=t.owner_id
+                WHERE owner.status<>'DELETED'
+                  AND t.status IN ('QUEUED','WAITING_CHATGPT','WAITING_USER')) AS waiting_tasks
+            FROM accounts WHERE status<>'DELETED'
+            """)
+        .query(
+            (row, index) ->
+                new Contracts.AdminUsersSummary(
+                    row.getLong("users"), row.getLong("blocked"), row.getLong("waiting_tasks")))
+        .single();
   }
 
   public Contracts.Page<AdminUser> users(ListQuery query, List<String> flags) {
@@ -625,6 +757,7 @@ FROM accounts a
 
   @Scheduled(fixedDelay = 30000)
   public void purgeDueAccounts() {
+    cleanupProfileImages();
     var owners =
         jdbc.sql(
                 "SELECT id FROM accounts WHERE (status='DELETION_PENDING' AND"
@@ -661,7 +794,7 @@ FROM accounts a
                     }
                     return stopped;
                   }));
-      if (!ready || !artifacts.purgeBatch(owner)) {
+      if (!ready || !artifacts.purgeBatch(owner) || !purgeProfileImage(owner)) {
         continue;
       }
       boolean profilesRemoved = true;
@@ -694,6 +827,52 @@ FROM accounts a
     }
     jdbc.sql("DELETE FROM administrative_audit WHERE created_at<now()-interval '365 days'")
         .update();
+  }
+
+  private boolean purgeProfileImage(UUID owner) {
+    return Boolean.TRUE.equals(
+        transactions.execute(
+            transaction -> {
+              tasks.lockOwner(owner);
+              try {
+                if (!profileImages.cleanup(owner, null, true)) {
+                  return false;
+                }
+                jdbc.sql("DELETE FROM account_avatars WHERE owner_id=:owner")
+                    .param("owner", owner)
+                    .update();
+                return true;
+              } catch (IOException exception) {
+                log.warn("Profile image purge pending for {}", owner);
+                return false;
+              }
+            }));
+  }
+
+  private void cleanupProfileImages() {
+    var owners =
+        jdbc.sql("SELECT id FROM accounts WHERE id>:cursor ORDER BY id LIMIT 100")
+            .param("cursor", profileCleanupCursor)
+            .query(UUID.class)
+            .list();
+    for (UUID owner : owners) {
+      transactions.executeWithoutResult(
+          transaction -> {
+            tasks.lockOwner(owner);
+            UUID current =
+                jdbc.sql("SELECT id FROM account_avatars WHERE owner_id=:owner")
+                    .param("owner", owner)
+                    .query(UUID.class)
+                    .optional()
+                    .orElse(null);
+            try {
+              profileImages.cleanup(owner, current, false);
+            } catch (IOException exception) {
+              log.warn("Old profile image cleanup pending for {}", owner);
+            }
+          });
+    }
+    profileCleanupCursor = owners.size() < 100 ? new UUID(0, 0) : owners.getLast();
   }
 
   private void purgeRecords(UUID owner) {

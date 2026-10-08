@@ -68,11 +68,41 @@ def main():
                 {"newName": "helmglass-mcp"}, token)
         flows = request(prefix + "/authentication/flows", token=token)
         flow = next(item for item in flows if item["alias"] == "helmglass-mcp")
-    execution_path = prefix + "/authentication/flows/helmglass-mcp/executions"
-    for execution in request(execution_path, token=token):
-        if execution.get("providerId") == "auth-cookie":
-            execution["requirement"] = "DISABLED"
-            request(execution_path, "PUT", execution, token)
+    for flow_alias in ("browser", "helmglass-mcp"):
+        execution_path = prefix + "/authentication/flows/" + flow_alias + "/executions"
+        executions = request(execution_path, token=token)
+        for execution in executions:
+            if execution.get("providerId") == "auth-otp-form" or (
+                flow_alias == "helmglass-mcp" and execution.get("providerId") == "auth-cookie"
+            ):
+                execution["requirement"] = "DISABLED"
+                request(execution_path, "PUT", execution, token)
+        for index, execution in enumerate(executions):
+            if execution.get("providerId") != "auth-otp-form":
+                continue
+            parent_index = next((position for position in range(index - 1, -1, -1)
+                                 if executions[position]["level"] < execution["level"]), None)
+            if parent_index is None:
+                raise RuntimeError("The managed OTP execution has no parent flow")
+            parent = executions[parent_index]
+            descendants = []
+            for child in executions[parent_index + 1:]:
+                if child["level"] <= parent["level"]:
+                    break
+                descendants.append(child)
+            active_authenticators = [child for child in descendants
+                                     if child.get("providerId")
+                                     and not child["providerId"].startswith("conditional-")
+                                     and child["requirement"] != "DISABLED"]
+            # An empty conditional 2FA flow rejects otherwise valid password authentication.
+            if parent["requirement"] == "CONDITIONAL" and not active_authenticators:
+                parent["requirement"] = "DISABLED"
+                request(execution_path, "PUT", parent, token)
+    required_otp_path = prefix + "/authentication/required-actions/CONFIGURE_TOTP"
+    required_otp = request(required_otp_path, token=token)
+    required_otp["enabled"] = False
+    required_otp["defaultAction"] = False
+    request(required_otp_path, "PUT", required_otp, token)
     for expected in realm["clients"]:
         if expected["clientId"] == "helmglass-chatgpt":
             expected["authenticationFlowBindingOverrides"] = {"browser": flow["id"]}

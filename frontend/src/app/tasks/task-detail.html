@@ -1,63 +1,77 @@
 @if (task(); as task) {
+  <button class="back-link detail-back" (click)="back()">
+    <hg-icon name="arrow-left" />К задачам
+  </button>
   <header class="page-heading detail-heading">
-    <div>
-      <button class="back-link" (click)="back()">‹ К задачам</button>
-      <h1>{{ task.title || 'Задача без названия' }}</h1>
-      <div class="inline-meta">
-        <hg-status [value]="task.outcome || task.status" /><span>{{
-          task.source === 'MCP' ? 'ChatGPT' : 'Веб-интерфейс'
-        }}</span
-        ><span>{{ task.createdAt | date: 'dd.MM.yyyy HH:mm' }}</span>
-      </div>
-    </div>
+    <h1>{{ task.title || 'Задача без названия' }}</h1>
     <div class="actions">
       @if (task.status === 'DRAFT') {
-        <a class="button" [routerLink]="['/tasks', task.id, 'edit']" queryParamsHandling="preserve"
-          >Редактировать</a
-        ><button class="button primary" [disabled]="busy()" (click)="command('PREPARE')">
-          Подготовить</button
-        ><button
+        <a
+          class="button primary"
+          [routerLink]="['/tasks', task.id, 'edit']"
+          queryParamsHandling="preserve"
+          ><hg-icon name="edit" />Редактировать</a
+        >
+        <button class="button" [disabled]="busy()" (click)="command('PREPARE')">Подготовить</button>
+        <button
           class="icon-button"
           aria-label="Удалить черновик"
           title="Удалить черновик"
           (click)="deleteDraft()"
         >
-          ⌫
+          <hg-icon name="trash" />
         </button>
-      }
-      @if (can('PAUSE')) {
-        <button class="button" [disabled]="busy()" (click)="command('PAUSE')">Ⅱ Пауза</button>
-      }
-      @if (can('RESUME')) {
-        <button class="button primary" [disabled]="busy()" (click)="command('RESUME')">
-          Продолжить
-        </button>
-      }
-      @if (can('AMEND') && task.status !== 'DRAFT') {
-        <a
-          class="button"
-          [routerLink]="['/tasks', task.id, 'refine']"
-          queryParamsHandling="preserve"
-          >Уточнить</a
-        >
-      }
-      @if (can('COPY') || can('STOP')) {
-        <details class="action-menu">
-          <summary class="icon-button" aria-label="Действия с задачей" title="Действия">⋯</summary>
-          <div class="menu-popover">
-            @if (can('COPY')) {
-              <button (click)="command('COPY')">Создать похожую</button>
-            }
-            @if (can('STOP')) {
-              <button class="danger-text" [disabled]="busy()" (click)="command('STOP')">
-                Остановить задачу
-              </button>
-            }
-          </div>
-        </details>
+      } @else {
+        @if (
+          can('COPY') &&
+          ['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'STOPPED', 'FAILED'].includes(task.status)
+        ) {
+          <button class="button quiet" (click)="command('COPY')">
+            <hg-icon name="plus" />Создать похожую
+          </button>
+        }
+        @if (
+          can('AMEND') ||
+          can('STOP') ||
+          (can('COPY') &&
+            !['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'STOPPED', 'FAILED'].includes(task.status))
+        ) {
+          <details class="action-menu">
+            <summary class="icon-button" aria-label="Действия с задачей" title="Действия задачи">
+              <hg-icon name="more" />
+            </summary>
+            <div class="menu-popover">
+              @if (can('AMEND')) {
+                <a [routerLink]="['/tasks', task.id, 'refine']" queryParamsHandling="preserve"
+                  >Уточнить задание</a
+                >
+              }
+              @if (
+                can('COPY') &&
+                !['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'STOPPED', 'FAILED'].includes(task.status)
+              ) {
+                <button (click)="command('COPY')">Создать похожую</button>
+              }
+              @if (can('STOP')) {
+                <button class="danger-text" [disabled]="busy()" (click)="command('STOP')">
+                  Остановить задачу
+                </button>
+              }
+            </div>
+          </details>
+        }
       }
     </div>
   </header>
+  <div class="inline-meta task-detail-meta">
+    <hg-status [value]="task.outcome || task.status" />
+    <span class="duration-chip"
+      ><hg-icon name="clock" />Время выполнения: {{ task.usage.executionSeconds | duration }}</span
+    >
+    <span><hg-icon name="globe" />{{ task.site || 'Сайт не задан' }}</span>
+    <span>{{ task.source === 'MCP' ? 'Из ChatGPT' : 'Веб-интерфейс' }}</span>
+    <span><hg-icon name="clock" />{{ task.createdAt | date: 'dd.MM.yyyy HH:mm' }}</span>
+  </div>
   @if (error()) {
     <div class="error-banner" role="alert">{{ error() }}</div>
   }
@@ -223,19 +237,36 @@
               Вернуть управление
             </button>
           }
+          @if (can('PAUSE')) {
+            <button
+              class="icon-button"
+              [disabled]="busy()"
+              title="Приостановить задачу"
+              aria-label="Приостановить задачу"
+              (click)="command('PAUSE')"
+            >
+              <hg-icon name="pause" />
+            </button>
+          }
+          @if (can('RESUME')) {
+            <button class="button primary small" [disabled]="busy()" (click)="command('RESUME')">
+              <hg-icon name="play" />Продолжить
+            </button>
+          }
           <button
-            class="icon-button"
+            browserFooter
+            class="text-button history-toggle"
             title="История действий"
             aria-label="История действий"
             [attr.aria-expanded]="historyOpen()"
             (click)="openHistory()"
           >
-            ☷
+            <hg-icon name="panel-right" />История действий
           </button>
           @if ((can('BEGIN_LOGIN') && !task.browser?.privateMode) || can('END_SESSION')) {
             <details class="action-menu">
               <summary class="icon-button" aria-label="Действия браузера" title="Действия браузера">
-                ⋯
+                <hg-icon name="more" />
               </summary>
               <div class="menu-popover">
                 @if (can('BEGIN_LOGIN') && !task.browser?.privateMode) {
@@ -269,7 +300,7 @@
                     title="Закрыть"
                     (click)="historyOpen.set(false)"
                   >
-                    ×
+                    <hg-icon name="close" />
                   </button>
                 </header>
                 <div class="history-filters">
@@ -323,14 +354,8 @@
         </hg-browser>
       </div>
       <aside class="task-sidebar">
-        <section class="card">
-          <h2>Текущее состояние</h2>
-          <hg-status [value]="task.status" />
-          @if (task.usage.incomplete) {
-            <p class="notice warning">
-              Измерения пока неполные; неизвестные значения не считаются нулём.
-            </p>
-          }
+        <section class="card current-step-card">
+          <h2>Текущий шаг</h2>
           <p>
             {{
               task.request?.prompt ||
@@ -338,11 +363,20 @@
                 'Изменения появятся здесь автоматически.'
             }}
           </p>
+          <hg-status [value]="task.status" />
+        </section>
+        <section class="card task-resource-card">
+          <h2>Ресурсы</h2>
+          <div class="resource-primary">
+            <span><hg-icon name="clock" />Время браузера</span
+            ><strong>{{ task.usage.browserSeconds | duration }}</strong>
+          </div>
+          @if (task.usage.incomplete) {
+            <p class="notice warning">
+              Измерения пока неполные; неизвестные значения не считаются нулём.
+            </p>
+          }
           <dl class="metrics">
-            <div>
-              <dt>Браузер</dt>
-              <dd>{{ task.usage.browserSeconds | duration }}</dd>
-            </div>
             <div>
               <dt>Выполнение</dt>
               <dd>{{ task.usage.executionSeconds | duration }}</dd>
@@ -355,17 +389,6 @@
               <dt>Медиа</dt>
               <dd>{{ task.usage.mediaSeconds | duration }}</dd>
             </div>
-          </dl>
-        </section>
-        <section class="card">
-          <h2>Параметры</h2>
-          <dl>
-            <dt>Сайт</dt>
-            <dd>{{ task.site || 'Не задан' }}</dd>
-            <dt>Редакция инструкции</dt>
-            <dd>{{ task.instructionRevision }}</dd>
-            <dt>Обновлена</dt>
-            <dd>{{ task.updatedAt | date: 'dd.MM.yyyy HH:mm' }}</dd>
           </dl>
         </section>
       </aside>
@@ -419,9 +442,15 @@
       </section>
     }
     <details class="card task-parameters">
-      <summary>Исходная задача и условия</summary>
+      <summary>Исходное задание и параметры</summary>
       <p class="preserve-lines">{{ task.goal }}</p>
       <dl>
+        <dt>ID задачи</dt>
+        <dd class="mono">{{ task.id }}</dd>
+        <dt>Редакция инструкции</dt>
+        <dd>{{ task.instructionRevision }}</dd>
+        <dt>Обновлена</dt>
+        <dd>{{ task.updatedAt | date: 'dd.MM.yyyy HH:mm' }}</dd>
         <dt>Начальный адрес</dt>
         <dd>{{ task.startUrl || 'Не задан' }}</dd>
         <dt>Формат результата</dt>

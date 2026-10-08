@@ -4,16 +4,21 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.Semaphore;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.FileImageInputStream;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import ru.helmglass.api.ApiException;
@@ -26,8 +31,13 @@ public class ProfileImage {
   private static final Map<String, String> CONTENT_TYPES =
       Map.of("png", "image/png", "jpeg", "image/jpeg", "webp", "image/webp");
   private final Semaphore decoder = new Semaphore(1);
+  private final Path directory;
 
-  public Upload validate(InputStream source, long declaredSize, String declaredType)
+  public ProfileImage(@Value("${helm.artifact-directory}") String artifactDirectory) {
+    directory = Path.of(artifactDirectory).resolve("profiles");
+  }
+
+  public Upload validate(UUID owner, InputStream source, long declaredSize, String declaredType)
       throws IOException {
     if (declaredSize < 1 || declaredSize > MAX_BYTES) {
       throw ApiException.invalid("file", "Выберите фотографию размером не более 5 МиБ.");
@@ -37,11 +47,16 @@ public class ProfileImage {
     }
     if (!decoder.tryAcquire()) {
       throw new ApiException(
-          HttpStatus.TOO_MANY_REQUESTS, "IMAGE_BUSY", "Другая фотография проверяется. Повторите позже.");
+          HttpStatus.TOO_MANY_REQUESTS,
+          "IMAGE_BUSY",
+          "Другая фотография проверяется. Повторите позже.");
     }
     Path temporary = null;
     try {
-      temporary = Files.createTempFile("helm-profile-", ".upload");
+      UUID id = UUID.randomUUID();
+      Path ownerDirectory = directory.resolve(owner.toString());
+      Files.createDirectories(ownerDirectory);
+      temporary = ownerDirectory.resolve(id + ".part");
       MessageDigest digest = sha256();
       long copied = 0;
       try (var input = new DigestInputStream(source, digest);
@@ -61,7 +76,13 @@ public class ProfileImage {
       }
       validatePixels(temporary, declaredType);
       Upload upload =
-          new Upload(temporary, declaredType, (int) copied, HexFormat.of().formatHex(digest.digest()));
+          new Upload(
+              id,
+              temporary,
+              ownerDirectory.resolve(id.toString()),
+              declaredType,
+              (int) copied,
+              HexFormat.of().formatHex(digest.digest()));
       temporary = null;
       return upload;
     } finally {
@@ -70,6 +91,51 @@ public class ProfileImage {
         Files.deleteIfExists(temporary);
       }
     }
+  }
+
+  public Path path(UUID owner, UUID image) {
+    return directory.resolve(owner.toString()).resolve(image.toString());
+  }
+
+  /** Called under the account row lock, so a newly installed image cannot race cleanup. */
+  public boolean cleanup(UUID owner, UUID current, boolean purging) throws IOException {
+    Path ownerDirectory = directory.resolve(owner.toString());
+    if (!Files.exists(ownerDirectory)) {
+      return true;
+    }
+    int removed = 0;
+    boolean complete = true;
+    try (var files = Files.newDirectoryStream(ownerDirectory)) {
+      for (Path file : files) {
+        String name = file.getFileName().toString();
+        boolean temporary = name.endsWith(".part");
+        String identifier = temporary ? name.substring(0, name.length() - 5) : name;
+        UUID id;
+        try {
+          id = UUID.fromString(identifier);
+        } catch (IllegalArgumentException exception) {
+          complete = false;
+          continue;
+        }
+        if (!purging
+            && (id.equals(current)
+                || temporary
+                    && Files.getLastModifiedTime(file)
+                        .toInstant()
+                        .isAfter(Instant.now().minus(1, ChronoUnit.HOURS)))) {
+          continue;
+        }
+        if (removed == 100) {
+          return false;
+        }
+        Files.deleteIfExists(file);
+        removed++;
+      }
+    }
+    if (purging && complete) {
+      Files.deleteIfExists(ownerDirectory);
+    }
+    return complete;
   }
 
   private static void validatePixels(Path file, String declaredType) throws IOException {
@@ -88,9 +154,13 @@ public class ProfileImage {
         int width = reader.getWidth(0);
         int height = reader.getHeight(0);
         if (width < 1 || height < 1 || (long) width * height > MAX_PIXELS) {
-          throw ApiException.invalid("file", "Разрешение фотографии должно быть не более 16 мегапикселей.");
+          throw ApiException.invalid(
+              "file", "Разрешение фотографии должно быть не более 16 мегапикселей.");
         }
-        reader.addIIOReadWarningListener((ignored, warning) -> { throw invalidImage(); });
+        reader.addIIOReadWarningListener(
+            (ignored, warning) -> {
+              throw invalidImage();
+            });
         var pixels = reader.read(0);
         if (pixels == null) {
           throw invalidImage();
@@ -105,7 +175,8 @@ public class ProfileImage {
   }
 
   private static ApiException invalidImage() {
-    return ApiException.invalid("file", "Не удалось прочитать фотографию. Выберите корректный PNG, JPEG или WebP.");
+    return ApiException.invalid(
+        "file", "Не удалось прочитать фотографию. Выберите корректный PNG, JPEG или WebP.");
   }
 
   private static MessageDigest sha256() {
@@ -116,8 +187,13 @@ public class ProfileImage {
     }
   }
 
-  public record Upload(Path path, String contentType, int sizeBytes, String sha256)
+  public record Upload(
+      UUID id, Path path, Path destination, String contentType, int sizeBytes, String sha256)
       implements AutoCloseable {
+    public void install() throws IOException {
+      Files.move(path, destination, StandardCopyOption.ATOMIC_MOVE);
+    }
+
     @Override
     public void close() throws IOException {
       Files.deleteIfExists(path);

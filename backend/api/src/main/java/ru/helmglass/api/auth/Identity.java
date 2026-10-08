@@ -10,15 +10,19 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Database;
+import ru.helmglass.api.events.EventService;
 
 @Service
 public class Identity {
   private final JdbcClient jdbc;
   private final ru.helmglass.api.browsers.ViewerAccess viewers;
+  private final EventService events;
 
-  public Identity(JdbcClient jdbc, ru.helmglass.api.browsers.ViewerAccess viewers) {
+  public Identity(
+      JdbcClient jdbc, ru.helmglass.api.browsers.ViewerAccess viewers, EventService events) {
     this.jdbc = jdbc;
     this.viewers = viewers;
+    this.events = events;
   }
 
   @Transactional
@@ -60,17 +64,30 @@ public class Identity {
     if (email == null) {
       email = "";
     }
-    jdbc.sql(
-            """
+    boolean created =
+        jdbc.sql(
+                """
 INSERT INTO accounts(id,name,email,administrator) VALUES (:id,:name,:email,:admin)
-ON CONFLICT(id) DO UPDATE SET email=EXCLUDED.email,
-  administrator=EXCLUDED.administrator,last_seen_at=now() WHERE accounts.status <> 'DELETED'
+ON CONFLICT(id) DO NOTHING RETURNING id
 """)
-        .param("id", owner)
-        .param("name", name)
-        .param("email", email)
-        .param("admin", roles.contains("ADMIN"))
-        .update();
+            .param("id", owner)
+            .param("name", name)
+            .param("email", email)
+            .param("admin", roles.contains("ADMIN"))
+            .query(UUID.class)
+            .optional()
+            .isPresent();
+    if (created) {
+      events.emitAdministrators("admin-user", owner, 1);
+    } else {
+      jdbc.sql(
+              "UPDATE accounts SET email=:email,administrator=:admin,last_seen_at=now()"
+                  + " WHERE id=:id AND status<>'DELETED'")
+          .param("email", email)
+          .param("admin", roles.contains("ADMIN"))
+          .param("id", owner)
+          .update();
+    }
     AccountAccess account =
         jdbc.sql(
                 """
@@ -114,6 +131,7 @@ ON CONFLICT(id) DO UPDATE SET email=EXCLUDED.email,
     return new Actor(owner, roles, channel, sid, authTime, jwt.getExpiresAt());
   }
 
+  @Transactional
   public Actor administrator() {
     Actor actor = current();
     if (!actor.administrator()) {

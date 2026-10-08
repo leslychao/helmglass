@@ -1,20 +1,20 @@
+import { Icon } from '../shared/icon';
 import { Component } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 @Component({
   selector: 'hg-admin',
-  imports: [RouterLink, RouterLinkActive, RouterOutlet],
-  template: `<header class="page-heading">
+  imports: [Icon, RouterLink, RouterLinkActive, RouterOutlet],
+  template: `<header class="page-heading admin-heading">
       <div>
-        <h1>Администрирование</h1>
-        <p>Доступ пользователей, браузеры и журнал действий.</p>
+        <h1 class="sr-only">Администрирование</h1>
       </div>
     </header>
     <nav class="tabs" aria-label="Администрирование">
       <a routerLink="/admin/users" routerLinkActive="active" ariaCurrentWhenActive="page"
-        >Пользователи</a
+        ><hg-icon name="user" />Пользователи и журнал</a
       ><a routerLink="/admin/nodes" routerLinkActive="active" ariaCurrentWhenActive="page"
-        >Браузеры</a
-      ><a routerLink="/admin/audit" routerLinkActive="active" ariaCurrentWhenActive="page">Аудит</a>
+        ><hg-icon name="browser" />Браузеры</a
+      >
     </nav>
     <router-outlet />`,
 })

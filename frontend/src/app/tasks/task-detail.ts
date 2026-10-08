@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import { DatePipe } from '@angular/common';
 import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
@@ -28,6 +29,7 @@ import { QueryState } from '../shared/query-state';
 @Component({
   selector: 'hg-task-detail',
   imports: [
+    Icon,
     DatePipe,
     FormsModule,
     RouterLink,

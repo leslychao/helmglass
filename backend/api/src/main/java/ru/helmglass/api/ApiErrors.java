@@ -28,7 +28,9 @@ public class ApiErrors {
 
   @ExceptionHandler({
     IllegalArgumentException.class,
-    org.springframework.http.converter.HttpMessageNotReadableException.class
+    org.springframework.http.converter.HttpMessageNotReadableException.class,
+    org.springframework.web.bind.MissingServletRequestParameterException.class,
+    org.springframework.web.multipart.MultipartException.class
   })
   ResponseEntity<Map<String, String>> invalid(Exception exception) {
     return ResponseEntity.badRequest()
@@ -49,6 +51,17 @@ public class ApiErrors {
                 "CONCURRENT_CHANGE",
                 "message",
                 "Состояние уже изменилось. Получите актуальные данные."));
+  }
+
+  @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+  ResponseEntity<Map<String, String>> uploadTooLarge() {
+    return ResponseEntity.status(413)
+        .body(
+            Map.of(
+                "code",
+                "IMAGE_TOO_LARGE",
+                "message",
+                "Размер фотографии не должен превышать 5 МиБ."));
   }
 
   @ExceptionHandler(NoResourceFoundException.class)

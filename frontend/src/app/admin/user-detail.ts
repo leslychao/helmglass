@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import { DatePipe } from '@angular/common';
 import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
@@ -13,7 +14,7 @@ import { QueryState } from '../shared/query-state';
 
 @Component({
   selector: 'hg-user-detail',
-  imports: [DatePipe, DurationPipe, LabelPipe, Pager, Status],
+  imports: [Icon, DatePipe, DurationPipe, LabelPipe, Pager, Status],
   templateUrl: './user-detail.html',
   providers: [QueryState],
 })

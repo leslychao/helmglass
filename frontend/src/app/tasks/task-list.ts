@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import { SearchInput } from '../shared/search-input';
 import { DatePipe } from '@angular/common';
 import { Component, DestroyRef, effect, inject, signal, untracked } from '@angular/core';
@@ -15,6 +16,7 @@ import { DurationPipe, Empty, Pager, Status, states } from '../shared/ui';
 @Component({
   selector: 'hg-task-list',
   imports: [
+    Icon,
     SearchInput,
     DatePipe,
     DateFilter,

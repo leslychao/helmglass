@@ -1,5 +1,5 @@
 <button class="back-link" (click)="back()">
-  {{ nodeReturn() ? '‹ К браузерам' : '‹ К пользователям' }}
+  <hg-icon name="arrow-left" />{{ nodeReturn() ? 'К браузерам' : 'К пользователям' }}
 </button>
 @if (error()) {
   <div class="error-banner" role="alert">
@@ -7,30 +7,50 @@
   </div>
 }
 @if (data(); as detail) {
-  <header class="page-heading">
-    <div>
-      <h2>{{ detail.user.name }}</h2>
-      <p>{{ detail.user.email }}</p>
-      <hg-status [value]="detail.user.status" />
+  <header class="page-heading admin-user-heading">
+    <div class="admin-user-identity">
+      <span class="user-initial">{{ detail.user.name.slice(0, 1).toUpperCase() }}</span>
+      <div>
+        <h1>{{ detail.user.name }}</h1>
+        <p>
+          {{ detail.user.email }}
+          <span class="mono" [title]="detail.user.id">· {{ detail.user.id.slice(0, 8) }}</span>
+          @if (detail.user.id === session.user()?.id) {
+            · Вы
+          }
+        </p>
+      </div>
     </div>
     <div class="actions">
       <button
-        class="button"
-        [disabled]="busy() || detail.user.status === 'DELETED'"
-        (click)="limits()"
+        class="button danger-soft"
+        [disabled]="busy() || detail.user.status === 'PURGING' || detail.user.status === 'DELETED'"
+        (click)="change('STOP_ALL')"
       >
-        Изменить лимиты
+        <hg-icon name="stop" />Остановить все браузеры
       </button>
-      <details class="action-menu">
-        <summary class="button">Действия ⌄</summary>
-        <div class="menu-popover">
-          @if (detail.user.id !== session.user()?.id) {
-            @if (detail.user.status === 'ACTIVE') {
-              <button (click)="change('BLOCK')">Заблокировать</button>
-            }
-            @if (detail.user.status === 'BLOCKED') {
-              <button (click)="change('UNBLOCK')">Разблокировать</button>
-            }
+      @if (detail.user.status === 'ACTIVE' || detail.user.status === 'BLOCKED') {
+        <button
+          class="button"
+          [class.danger-soft]="detail.user.status === 'ACTIVE'"
+          [disabled]="busy() || detail.user.id === session.user()?.id"
+          [title]="detail.user.id === session.user()?.id ? 'Нельзя заблокировать самого себя' : ''"
+          (click)="change(detail.user.status === 'ACTIVE' ? 'BLOCK' : 'UNBLOCK')"
+        >
+          <hg-icon [name]="detail.user.status === 'ACTIVE' ? 'lock' : 'user'" />{{
+            detail.user.status === 'ACTIVE' ? 'Заблокировать' : 'Разблокировать'
+          }}
+        </button>
+      }
+      @if (
+        detail.user.id !== session.user()?.id &&
+        ['ACTIVE', 'BLOCKED', 'DELETION_PENDING'].includes(detail.user.status)
+      ) {
+        <details class="action-menu">
+          <summary class="icon-button" aria-label="Действия аккаунта" title="Действия аккаунта">
+            <hg-icon name="more" />
+          </summary>
+          <div class="menu-popover">
             @if (detail.user.status === 'ACTIVE' || detail.user.status === 'BLOCKED') {
               <button class="danger-text" (click)="change('REQUEST_DELETION')">
                 Запланировать удаление
@@ -39,12 +59,19 @@
             @if (detail.user.status === 'DELETION_PENDING') {
               <button (click)="change('CANCEL_DELETION')">Отменить удаление</button>
             }
-          }
-          <button class="danger-text" (click)="change('STOP_ALL')">Остановить все браузеры</button>
-        </div>
-      </details>
+          </div>
+        </details>
+      }
     </div>
   </header>
+  <div class="admin-user-facts">
+    <hg-status [value]="detail.user.status" /><span
+      ><hg-icon name="clock" />Последнее обращение:
+      {{
+        detail.user.lastAccessAt ? (detail.user.lastAccessAt | date: 'dd.MM.yyyy HH:mm') : '—'
+      }}</span
+    >
+  </div>
   @if (detail.user.status === 'DELETION_PENDING' && detail.user.deleteUntil) {
     <div class="notice warning">
       <strong>Запланировано удаление</strong>
@@ -59,45 +86,81 @@
       <p>Отменить удаление уже нельзя.</p>
     </div>
   }
-  <div class="usage-grid">
-    <section class="card">
-      <h2>Лимиты и текущее использование</h2>
-      <dl class="metrics">
+  <div class="admin-user-overview">
+    <section class="card quota-card">
+      <div class="section-heading">
+        <h2>Лимиты и текущее использование</h2>
+        <button
+          class="button"
+          [disabled]="busy() || detail.user.status === 'DELETED'"
+          (click)="limits()"
+        >
+          Изменить лимиты
+        </button>
+      </div>
+      <dl class="quota-rows">
         <div>
-          <dt>Одновременные браузеры</dt>
+          <dt>
+            <strong>Одновременные браузеры</strong
+            ><small>{{
+              detail.user.browserLimitMode === 'PLATFORM'
+                ? 'Лимит по умолчанию'
+                : detail.user.browserLimitMode === 'UNLIMITED'
+                  ? 'Без ограничения'
+                  : 'Индивидуальный лимит'
+            }}</small>
+          </dt>
           <dd>
-            {{ detail.user.browserCount ?? '—' }} /
-            {{
-              detail.user.browserLimitMode === 'UNLIMITED' ? '∞' : (detail.user.browserLimit ?? 2)
-            }}
+            {{ detail.user.browserCount ?? '—'
+            }}<span>
+              /
+              {{
+                detail.user.browserLimitMode === 'UNLIMITED' ? '∞' : (detail.user.browserLimit ?? 2)
+              }}</span
+            >
           </dd>
         </div>
         <div>
-          <dt>Ожидающие задачи</dt>
-          <dd>{{ detail.user.waitingCount }} / {{ detail.user.waitingLimit ?? '∞' }}</dd>
+          <dt>
+            <strong>Ожидающие задачи</strong
+            ><small>Очередь, ChatGPT или участие пользователя</small>
+          </dt>
+          <dd>
+            {{ detail.user.waitingCount }}<span> / {{ detail.user.waitingLimit ?? '∞' }}</span>
+          </dd>
         </div>
         <div>
-          <dt>Незавершённые операции</dt>
+          <dt>
+            <strong>Незавершённые операции</strong
+            ><small>Операции, результат которых ещё уточняется</small>
+          </dt>
           <dd>{{ detail.user.pendingOperations }}</dd>
         </div>
       </dl>
     </section>
-    <section class="card">
-      <h2>Последние 7 календарных дней</h2>
-      <dl class="metrics">
+    <section class="card admin-usage-card">
+      <div class="section-heading">
+        <h2>Использование за 7 дней</h2>
+        <small>Последние 7 календарных дней</small>
+      </div>
+      <div class="admin-usage-values">
         <div>
-          <dt>Задачи</dt>
-          <dd>{{ detail.usage.totalTasks }}</dd>
+          <span>Задачи</span><strong>{{ detail.usage.totalTasks }}</strong
+          ><small>{{ detail.usage.successfulTasks }} успешно</small>
         </div>
         <div>
-          <dt>Браузер</dt>
-          <dd>{{ detail.usage.usage.browserSeconds | duration }}</dd>
+          <span>Время браузера</span
+          ><strong>{{ detail.usage.usage.browserSeconds | duration }}</strong
+          ><small>Выполнение: {{ detail.usage.usage.executionSeconds | duration }}</small>
         </div>
-        <div>
-          <dt>Выполнение</dt>
-          <dd>{{ detail.usage.usage.executionSeconds | duration }}</dd>
-        </div>
-      </dl>
+      </div>
+      <p class="admin-usage-note">
+        {{
+          detail.usage.usage.incomplete
+            ? 'Часть измерений ещё не подтверждена. Неизвестные значения не считаются нулём.'
+            : 'Измеренные показатели не являются счётом к оплате.'
+        }}
+      </p>
     </section>
   </div>
   @if (detail.operations.length) {
@@ -154,7 +217,7 @@
                     title="Остановить браузер задачи"
                     (click)="stop(task.browserId, task.id)"
                   >
-                    ■
+                    <hg-icon name="stop" />
                   </button>
                 }
               </td>

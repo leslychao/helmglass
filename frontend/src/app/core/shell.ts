@@ -1,6 +1,16 @@
+import { CdkMenuModule } from '@angular/cdk/menu';
+import { Icon } from '../shared/icon';
 import { A11yModule } from '@angular/cdk/a11y';
 import { DatePipe } from '@angular/common';
-import { Component, DestroyRef, ElementRef, inject, signal, viewChild } from '@angular/core';
+import {
+  Component,
+  computed,
+  DestroyRef,
+  ElementRef,
+  inject,
+  signal,
+  viewChild,
+} from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import {
   NavigationEnd,
@@ -19,7 +29,16 @@ import { Status } from '../shared/ui';
 
 @Component({
   selector: 'hg-shell',
-  imports: [A11yModule, DatePipe, RouterLink, RouterLinkActive, RouterOutlet, Status],
+  imports: [
+    CdkMenuModule,
+    Icon,
+    A11yModule,
+    DatePipe,
+    RouterLink,
+    RouterLinkActive,
+    RouterOutlet,
+    Status,
+  ],
   templateUrl: './shell.html',
 })
 export class Shell {
@@ -35,6 +54,36 @@ export class Shell {
   readonly navigationFailed = signal(false);
   readonly reading = signal(false);
   readonly current = signal(this.router.url);
+  readonly breadcrumbs = computed(() => {
+    const parts = this.current().split('?')[0].split('/').filter(Boolean);
+    const labels: Record<string, string> = {
+      tasks: 'Задачи',
+      connections: 'Подключения',
+      usage: 'Использование',
+      profile: 'Профиль',
+      admin: 'Администрирование',
+      users: 'Пользователи',
+      nodes: 'Браузеры',
+      audit: 'Журнал',
+      new: 'Новая задача',
+      edit: 'Редактирование',
+      refine: 'Уточнение',
+      similar: 'Похожая задача',
+      result: 'Результат',
+      manual: 'Ручное управление',
+      login: 'Вход на сайт',
+    };
+    return parts.map((part, index) => ({
+      label:
+        labels[part] ??
+        (parts[0] === 'tasks'
+          ? 'Задача'
+          : parts[0] === 'connections'
+            ? 'Подключение'
+            : 'Пользователь'),
+      url: '/' + parts.slice(0, index + 1).join('/'),
+    }));
+  });
   private generation = 0;
   private preserveNotifications = false;
   private readonly bell = viewChild<ElementRef<HTMLButtonElement>>('bell');

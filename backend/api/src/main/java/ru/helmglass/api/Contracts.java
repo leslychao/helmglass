@@ -13,10 +13,17 @@ public final class Contracts {
   public record Page<T>(List<T> items, long total, int page, int pageSize) {}
 
   public record Me(
-      UUID id, long version, String name, String email, String status, Set<String> roles,
+      UUID id,
+      long version,
+      String name,
+      String email,
+      String status,
+      Set<String> roles,
       String avatarUrl) {}
 
   public record ProfileInput(String name, Long expectedVersion) {}
+
+  public record AdminUsersSummary(long users, long blocked, long waitingTasks) {}
 
   public record TaskInput(
       String title,

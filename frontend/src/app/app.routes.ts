@@ -1,4 +1,5 @@
-import { Routes } from '@angular/router';
+import { inject } from '@angular/core';
+import { Router, Routes } from '@angular/router';
 import { authenticated, administrator, preserveForm } from './core/session';
 
 export const routes: Routes = [
@@ -75,7 +76,8 @@ export const routes: Routes = [
       },
       {
         path: 'profile',
-        loadComponent: () => import('./core/account').then((module) => module.Profile),
+        canDeactivate: [preserveForm],
+        loadComponent: () => import('./core/profile').then((module) => module.Profile),
       },
       {
         path: 'admin',
@@ -97,7 +99,20 @@ export const routes: Routes = [
           },
           {
             path: 'audit',
-            loadComponent: () => import('./admin/audit').then((module) => module.Audit),
+            pathMatch: 'full',
+            redirectTo: ({ queryParams }) => {
+              const parameters: Record<string, string | string[]> = { section: 'audit' };
+              for (const key of ['search', 'action', 'status', 'from', 'to', 'page', 'pageSize']) {
+                const value: unknown = queryParams[key];
+                if (
+                  typeof value === 'string' ||
+                  (Array.isArray(value) && value.every((item: unknown) => typeof item === 'string'))
+                ) {
+                  parameters['audit' + key[0].toUpperCase() + key.slice(1)] = value;
+                }
+              }
+              return inject(Router).createUrlTree(['/admin/users'], { queryParams: parameters });
+            },
           },
         ],
       },

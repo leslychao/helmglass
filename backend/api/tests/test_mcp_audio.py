@@ -99,19 +99,29 @@ class McpOriginalAudioTest(unittest.TestCase):
             task = self.task(task_id)
             revision = task["instructionRevision"]
 
-            def read_audio():
-                failed, metadata, result = self.client.tool("audio.get", {"taskId": task_id, "artifactId": artifact["id"]})
+            def read_audio(delivery=None):
+                arguments = {"taskId": task_id, "artifactId": artifact["id"]}
+                if delivery is not None:
+                    arguments["delivery"] = delivery
+                failed, metadata, result = self.client.tool("audio.get", arguments)
                 self.assertFalse(failed, "Original audio and its immutable assignment must be available")
                 self.assertEqual("READY", metadata["artifact"]["status"])
                 self.assertTrue(metadata["artifact"]["complete"])
                 self.assertTrue(metadata["originalBytes"])
                 self.assertEqual(39868, metadata["artifact"]["sizeBytes"])
                 self.assertEqual(original_hash, metadata["artifact"]["sha256"])
-                audio = [item for item in result["content"] if item["type"] == "audio"]
-                self.assertEqual(1, len(audio))
-                self.assertEqual("audio/mpeg", audio[0]["mimeType"])
+                file_delivery = delivery != "audio"
+                content_type = "resource" if file_delivery else "audio"
+                content = [item for item in result["content"] if item["type"] == content_type]
+                self.assertEqual(1, len(content))
+                source = content[0]["resource"] if file_delivery else content[0]
+                self.assertEqual("audio/mpeg", source["mimeType"])
+                if file_delivery:
+                    self.assertEqual("helmglass://artifacts/" + artifact["id"]
+                                     + "/original-roar.mp3", source["uri"])
+                    self.assertFalse(any(item["type"] == "audio" for item in result["content"]))
                 # This fixed public 39 KiB sample is deliberately below the inline 8 MiB limit.
-                payload = base64.b64decode(audio[0]["data"], validate=True)
+                payload = base64.b64decode(source["blob" if file_delivery else "data"], validate=True)
                 self.assertEqual(39868, len(payload))
                 self.assertEqual(original_hash, hashlib.sha256(payload).hexdigest())
                 self.assertEqual({"revision": revision, "title": title, "goal": goal,
@@ -119,6 +129,35 @@ class McpOriginalAudioTest(unittest.TestCase):
                 return metadata
 
             first = read_audio()
+            self.assertEqual(first, read_audio("file"), "Delivery format must preserve the original and context")
+            self.assertEqual(first, read_audio("audio"), "Explicit AudioContent preserves the same original")
+            for invalid_delivery in ("url", None):
+                failed, refusal, result = self.client.tool("audio.get", {
+                    "taskId": task_id, "artifactId": artifact["id"], "delivery": invalid_delivery})
+                self.assertTrue(failed)
+                self.assertIn("input validation failed", refusal["message"])
+                self.assertIn("/delivery", refusal["message"])
+                self.assertFalse(any(item["type"] in ("audio", "resource")
+                                     for item in result.get("content", [])))
+            stranger = DevClient(self.settings, "admin", "KEYCLOAK_APP_ADMIN_PASSWORD")
+            stranger.login_web()
+            stranger.login_mcp()
+            failed, own_presentation, _ = stranger.tool("tasks.create", {
+                "operationKey": str(uuid.uuid4()), "task": {
+                    "title": "Audio file owner boundary", "goal": "Refuse a foreign audio artifact",
+                    "startUrl": "https://example.com", "prepare": False}})
+            self.assertFalse(failed)
+            own_task = own_presentation["task"]["id"]
+
+            def delete_foreign_check_draft():
+                self.assertEqual(200, stranger.api("/api/tasks/" + own_task, "DELETE")[0])
+
+            self.addCleanup(delete_foreign_check_draft)
+            failed, refusal, result = stranger.tool("audio.get", {
+                "taskId": own_task, "artifactId": artifact["id"], "delivery": "file"})
+            self.assertTrue(failed)
+            self.assertEqual("NOT_FOUND", refusal["code"])
+            self.assertFalse(any(item["type"] == "resource" for item in result.get("content", [])))
             status, changed = self.client.api("/api/tasks/" + task_id + "/commands", "POST", {
                 "type": "AMEND", "expectedVersion": task["version"], "title": "Revised current task",
                 "goal": "A later instruction must not rewrite an already saved audio assignment.",
@@ -126,15 +165,18 @@ class McpOriginalAudioTest(unittest.TestCase):
             self.assertEqual(200, status)
             self.assertGreater(changed["instructionRevision"], revision)
             self.assertEqual(first, read_audio())
+            self.assertEqual(first, read_audio("audio"))
             try:
                 for complete, size, expected in [(False, 39868, "FILE_NOT_READY"),
                                                   (True, 8_388_609, "AUDIO_INLINE_LIMIT")]:
                     self.change_fixture_metadata(artifact["id"], complete, size)
-                    failed, refusal, result = self.client.tool("audio.get", {
-                        "taskId": task_id, "artifactId": artifact["id"]})
-                    self.assertTrue(failed)
-                    self.assertEqual(expected, refusal["code"])
-                    self.assertFalse(any(item["type"] == "audio" for item in result.get("content", [])))
+                    for delivery in ("audio", "file"):
+                        failed, refusal, result = self.client.tool("audio.get", {
+                            "taskId": task_id, "artifactId": artifact["id"], "delivery": delivery})
+                        self.assertTrue(failed)
+                        self.assertEqual(expected, refusal["code"])
+                        self.assertFalse(any(item["type"] in ("audio", "resource")
+                                             for item in result.get("content", [])))
                     if not complete:
                         status, download_refusal = self.client.api(
                             "/api/artifacts/" + artifact["id"] + "/download")
@@ -145,6 +187,7 @@ class McpOriginalAudioTest(unittest.TestCase):
             self.assertEqual(first, read_audio())
             self.stop_task(task_id)
             self.assertEqual(first, read_audio(), "Confirmed original remains available after browser closure")
+            self.assertEqual(first, read_audio("audio"))
         finally:
             self.stop_task(task_id)
 

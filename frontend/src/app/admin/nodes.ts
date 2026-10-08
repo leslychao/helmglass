@@ -1,3 +1,4 @@
+import { Icon } from '../shared/icon';
 import { Component, DestroyRef, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
@@ -13,7 +14,7 @@ import { QueryState } from '../shared/query-state';
 
 @Component({
   selector: 'hg-nodes',
-  imports: [FormsModule, RouterLink, MultiFilter, Empty, Pager, Status],
+  imports: [Icon, FormsModule, RouterLink, MultiFilter, Empty, Pager, Status],
   providers: [QueryState],
   template: `
     @if (error()) {
@@ -21,10 +22,11 @@ import { QueryState } from '../shared/query-state';
         {{ error() }}<button class="text-button" (click)="load()">Повторить</button>
       </div>
     }
+    <h2 class="admin-section-title">Браузеры</h2>
     <section class="card table-card">
       <div class="toolbar">
         <label class="search"
-          ><input
+          ><hg-icon name="search" /><input
             aria-label="Поиск узлов"
             placeholder="Найти узел"
             [ngModel]="query.text('search')"
@@ -39,7 +41,7 @@ import { QueryState } from '../shared/query-state';
       @if (nodes() !== null) {
         @if (visible().length) {
           <div class="table-scroll">
-            <table>
+            <table class="admin-nodes-table">
               <thead>
                 <tr>
                   <th>Узел</th>
@@ -57,17 +59,17 @@ import { QueryState } from '../shared/query-state';
                         [attr.aria-expanded]="expanded().includes(node.id)"
                         (click)="toggle(node.id)"
                       >
-                        {{ expanded().includes(node.id) ? '⌄' : '›' }} {{ node.name }}</button
-                      ><small
-                        ><code>{{ node.id }}</code></small
-                      >
+                        <hg-icon
+                          [name]="expanded().includes(node.id) ? 'chevron-down' : 'chevron-right'"
+                        /><hg-icon name="database" /><span [title]="node.id">{{ node.name }}</span>
+                      </button>
                     </td>
                     <td><hg-status [value]="node.status" /></td>
                     <td>{{ node.occupied ?? '—' }} / {{ node.capacity }}</td>
                     <td>
                       <details class="action-menu">
                         <summary class="icon-button" aria-label="Действия с узлом" title="Действия">
-                          ⋯
+                          <hg-icon name="more" />
                         </summary>
                         <div class="menu-popover">
                           <button (click)="info(node)">Сведения об узле</button>
@@ -91,9 +93,8 @@ import { QueryState } from '../shared/query-state';
                           <table class="nested-table">
                             <thead>
                               <tr>
-                                <th>ID браузера</th>
+                                <th>Браузер / задача</th>
                                 <th>Пользователь</th>
-                                <th>Задача / назначение</th>
                                 <th>Состояние</th>
                                 <th><span class="sr-only">Остановить</span></th>
                               </tr>
@@ -102,7 +103,12 @@ import { QueryState } from '../shared/query-state';
                               @for (browser of node.browsers; track browser.id) {
                                 <tr>
                                   <td>
-                                    <code>{{ browser.id }}</code>
+                                    <code [title]="browser.id">{{ browser.id.slice(0, 8) }}</code
+                                    ><small [title]="browser.taskId || 'Отдельный вход на сайт'">{{
+                                      browser.taskId
+                                        ? 'Задача #' + browser.taskId.slice(0, 8)
+                                        : 'Отдельный вход на сайт'
+                                    }}</small>
                                   </td>
                                   <td>
                                     <a
@@ -111,14 +117,11 @@ import { QueryState } from '../shared/query-state';
                                       >{{ browser.ownerName }}</a
                                     >
                                   </td>
-                                  <td>
-                                    <code>{{ browser.taskId || 'Отдельный вход на сайт' }}</code>
-                                  </td>
                                   <td><hg-status [value]="browser.status" /></td>
                                   <td>
                                     @if (browser.taskId) {
                                       <button
-                                        class="button small danger-soft"
+                                        class="icon-button danger-soft"
                                         [attr.aria-label]="
                                           browser.taskId
                                             ? 'Остановить браузер задачи'
@@ -132,7 +135,7 @@ import { QueryState } from '../shared/query-state';
                                         [disabled]="busy() === browser.id"
                                         (click)="stop(browser.id, browser.taskId)"
                                       >
-                                        Остановить
+                                        <hg-icon name="stop" />
                                       </button>
                                     }
                                   </td>
