@@ -1,8 +1,8 @@
 <h1 class="sr-only">Профиль</h1>
 <form (ngSubmit)="save()">
-  <section class="profile-card">
+  <section class="card profile-card">
     <div class="profile-hero">
-      <span class="profile-photo">
+      <span class="avatar profile-photo">
         @if (preview() || session.user()?.avatarUrl; as avatar) {
           <img [src]="avatar" alt="Фото профиля" />
         } @else {
@@ -25,7 +25,7 @@
       </div>
     </div>
     <div class="profile-fields">
-      <label for="profile-name"
+      <label class="field" for="profile-name"
         >Имя и фамилия
         <input
           id="profile-name"
@@ -39,7 +39,7 @@
         />
       </label>
       <div>
-        <label for="profile-email"
+        <label class="field" for="profile-email"
           >Email
           <input
             id="profile-email"
@@ -52,7 +52,9 @@
         <p id="email-help" class="field-help">Данные подтверждённого аккаунта</p>
       </div>
     </div>
-    <p class="photo-help">Фото можно выбрать с устройства. PNG, JPG или WebP, до 5 МБ и 16 мегапикселей.</p>
+    <p class="photo-help">
+      Фото можно выбрать с устройства. PNG, JPG или WebP, до 5 МБ и 16 мегапикселей.
+    </p>
   </section>
   @if (error()) {
     <p class="error-banner" role="alert">{{ error() }}</p>
@@ -62,10 +64,10 @@
   }
   <div class="profile-actions">
     <button type="button" class="button" (click)="cancel()" [disabled]="saving() || !hasChanges()">
-      Отменить изменения
+      Отменить
     </button>
     <button type="submit" class="button primary" [disabled]="saving() || !hasChanges()">
-      {{ saving() ? 'Сохранение…' : 'Сохранить профиль' }}
+      {{ saving() ? 'Сохранение…' : 'Сохранить' }}
     </button>
   </div>
 </form>

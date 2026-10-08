@@ -35,3 +35,31 @@ test('site-controlled observation fields are bounded and oversized URLs are neve
     assert.equal(media.result.sources.find(source => source.url.startsWith('https://example.com/source')), undefined);
   } finally { assert.equal((await request(base, undefined, 'DELETE')).status, 'CLOSED'); }
 });
+
+// Serve fixtures/private-input.html through the existing dev public frontend and
+// select this test by name. The synthetic values are not real account credentials.
+test('sensitive input rejected before effect is FAILED and does not block later input', { timeout: 40_000 }, async () => {
+  const id = randomUUID(), base = '/sessions/' + id;
+  const action = (type, args) => ({ operationId: randomUUID(), type, arguments: args, instructionRevision: 0, controlEpoch: 1 });
+  const command = input => request(base + '/commands', input);
+  try {
+    assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
+    await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false });
+    for (const selector of ['#password', '#current-password', '#new-password', '#one-time-code']) {
+      assert.equal((await command(action('click', { selector }))).status, 'SUCCEEDED');
+      for (const input of [action('fill', { selector, text: 'synthetic-rejected-value' }),
+        action('press', { selector, key: 'a' }), action('press', { key: 'a' })]) {
+        const receipt = await command(input);
+        assert.equal(receipt.status, 'FAILED', 'A known pre-effect refusal must not become UNKNOWN');
+        assert.equal(receipt.error, 'Private input requires the user');
+        assert.deepEqual(await command(input), receipt, 'Replay must preserve the original known refusal');
+      }
+    }
+    assert.equal((await command(action('fill', { selector: '#plain', text: 'allowed-after-refusal' }))).status, 'SUCCEEDED');
+    assert.equal((await command(action('click', { selector: '#read-state' }))).status, 'SUCCEEDED');
+    const observation = await request(base + '/observe');
+    assert.ok(observation.text.includes('"sensitiveValues":["","","",""]'));
+    assert.ok(observation.text.includes('"sensitiveEvents":0'));
+    assert.ok(observation.text.includes('"plain":"allowed-after-refusal"'));
+  } finally { assert.equal((await request(base, undefined, 'DELETE')).status, 'CLOSED'); }
+});

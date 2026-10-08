@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Synthetic private input boundary</title>
+<label>Password <input id="password" type="password"></label>
+<label>Current password <input id="current-password" autocomplete="current-password"></label>
+<label>New password <input id="new-password" autocomplete="new-password"></label>
+<label>One-time code <input id="one-time-code" autocomplete="one-time-code"></label>
+<label>Ordinary text <input id="plain"></label>
+<button id="read-state" type="button">Read synthetic state</button>
+<pre id="state"></pre>
+<script>
+  const sensitive = ['password', 'current-password', 'new-password', 'one-time-code']
+    .map(id => document.getElementById(id));
+  let sensitiveEvents = 0;
+  for (const input of sensitive) {
+    input.addEventListener('input', () => sensitiveEvents++);
+    input.addEventListener('keydown', () => sensitiveEvents++);
+  }
+  document.getElementById('read-state').addEventListener('click', () => {
+    document.getElementById('state').textContent = JSON.stringify({
+      sensitiveValues: sensitive.map(input => input.value),
+      sensitiveEvents,
+      plain: document.getElementById('plain').value,
+    });
+  });
+</script>
+</html>

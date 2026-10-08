@@ -46,27 +46,30 @@ const adminSummarySchema = z.object({
     Status,
   ],
   providers: [QueryState],
-  template: ` <section class="admin-summary" aria-label="Сводка администрирования">
-      <div class="admin-summary-card">
-        <span class="metric-mark blue"><hg-icon name="user" /></span>
-        <div>
-          <small>Пользователей</small><strong>{{ summary()?.users ?? '—' }}</strong
-          ><span>Без удалённых аккаунтов</span>
+  template: ` <section class="metric-grid" aria-label="Сводка администрирования">
+      <div class="metric">
+        <div class="metric-top">
+          <span class="metric-label">Пользователей</span>
+          <span class="metric-icon"><hg-icon name="user" /></span>
         </div>
+        <strong class="metric-value">{{ summary()?.users ?? '—' }}</strong>
+        <p class="metric-context">Без удалённых аккаунтов</p>
       </div>
-      <div class="admin-summary-card">
-        <span class="metric-mark blue"><hg-icon name="lock" /></span>
-        <div>
-          <small>Заблокировано</small><strong>{{ summary()?.blocked ?? '—' }}</strong
-          ><span>Пользователи с закрытым доступом</span>
+      <div class="metric">
+        <div class="metric-top">
+          <span class="metric-label">Заблокировано</span>
+          <span class="metric-icon"><hg-icon name="lock" /></span>
         </div>
+        <strong class="metric-value">{{ summary()?.blocked ?? '—' }}</strong>
+        <p class="metric-context">Пользователи с закрытым доступом</p>
       </div>
-      <div class="admin-summary-card">
-        <span class="metric-mark blue"><hg-icon name="clock" /></span>
-        <div>
-          <small>Ожидающих задач</small><strong>{{ summary()?.waitingTasks ?? '—' }}</strong
-          ><span>Очередь, ChatGPT или участие пользователя</span>
+      <div class="metric">
+        <div class="metric-top">
+          <span class="metric-label">Ожидающих задач</span>
+          <span class="metric-icon"><hg-icon name="clock" /></span>
         </div>
+        <strong class="metric-value">{{ summary()?.waitingTasks ?? '—' }}</strong>
+        <p class="metric-context">Очередь, ChatGPT или участие пользователя</p>
       </div>
     </section>
     @if (summaryError()) {
@@ -255,7 +258,7 @@ export class AdminUsers {
   readonly summary = signal<z.infer<typeof adminSummarySchema> | null>(null);
   readonly summaryError = signal('');
   private summaryGeneration = 0;
-  private readonly auditSection = viewChild<ElementRef<HTMLElement>>('auditSection', {
+  private readonly auditSection = viewChild<Audit, ElementRef<HTMLElement>>('auditSection', {
     read: ElementRef,
   });
   private readonly audit = viewChild(Audit);

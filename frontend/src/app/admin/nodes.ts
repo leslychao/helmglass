@@ -22,7 +22,7 @@ import { QueryState } from '../shared/query-state';
         {{ error() }}<button class="text-button" (click)="load()">Повторить</button>
       </div>
     }
-    <h2 class="admin-section-title">Браузеры</h2>
+    <h2 class="sr-only">Браузеры</h2>
     <section class="card table-card">
       <div class="toolbar">
         <label class="search"

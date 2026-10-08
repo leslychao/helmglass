@@ -381,7 +381,7 @@ async function perform(command: Command, signal: AbortSignal): Promise<unknown> 
       const input = z.object({ selector: z.string().max(2000), text: z.string().max(50_000) }).parse(args);
       const locator = page.locator(input.selector);
       const sensitive = await locator.evaluate((element) => element instanceof HTMLInputElement && (element.type === "password" || /password|one-time-code/i.test(element.autocomplete)), undefined, { signal });
-      if (sensitive) throw new HttpError(403, "Private input requires the user");
+      if (sensitive) throw new BeforeEffectRejection(403, "Private input requires the user");
       await locator.fill(input.text, { signal }); break;
     }
     case "press": {
@@ -389,7 +389,7 @@ async function perform(command: Command, signal: AbortSignal): Promise<unknown> 
       const sensitive = input.selector
         ? await page.locator(input.selector).evaluate((element) => element instanceof HTMLInputElement && (element.type === "password" || /password|one-time-code/i.test(element.autocomplete)), undefined, { signal })
         : await page.evaluate(() => document.activeElement instanceof HTMLInputElement && (document.activeElement.type === "password" || /password|one-time-code/i.test(document.activeElement.autocomplete)));
-      if (sensitive) throw new HttpError(403, "Private input requires the user");
+      if (sensitive) throw new BeforeEffectRejection(403, "Private input requires the user");
       if (input.selector) await page.locator(input.selector).press(input.key, { signal }); else { signal.throwIfAborted(); await page.keyboard.press(input.key); } break;
     }
     case "selectOption": { const input = z.object({ selector: z.string().max(2000), values: z.array(z.string().max(1000)).max(100) }).parse(args); await page.locator(input.selector).selectOption(input.values, { signal }); break; }

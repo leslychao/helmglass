@@ -11,12 +11,13 @@ import {
   viewChild,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { Icon } from './icon';
 
 export type DateRange = { from: string | null; to: string | null };
 
 @Component({
   selector: 'hg-date-filter',
-  imports: [A11yModule, FormsModule],
+  imports: [A11yModule, FormsModule, Icon],
   host: { '(document:click)': 'outside($event)', '(keydown.escape)': 'close()' },
   template: `<button
       type="button"
@@ -26,7 +27,7 @@ export type DateRange = { from: string | null; to: string | null };
       aria-haspopup="dialog"
       (click)="toggle($event)"
     >
-      {{ label() }} <span aria-hidden="true">⌄</span>
+      {{ label() }} <hg-icon name="chevron-down" />
     </button>
     @if (open()) {
       <section

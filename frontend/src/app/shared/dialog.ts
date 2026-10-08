@@ -5,6 +5,7 @@ import { FormsModule } from '@angular/forms';
 import { NavigationEnd, Router } from '@angular/router';
 import * as z from 'zod/mini';
 import { Session } from '../core/session';
+import { Icon } from './icon';
 
 export interface DialogField {
   key: string;
@@ -143,7 +144,7 @@ export class Dialog {
 }
 @Component({
   selector: 'hg-dialog',
-  imports: [FormsModule, A11yModule],
+  imports: [FormsModule, A11yModule, Icon],
   template: ` @if (dialog.current(); as request) {
     <div class="modal-shade" (keydown.escape)="dialog.close(null)">
       <section
@@ -162,7 +163,7 @@ export class Dialog {
             title="Закрыть"
             (click)="dialog.close(null)"
           >
-            ×
+            <hg-icon name="close" />
           </button>
         </header>
         <p class="muted">{{ request.text }}</p>

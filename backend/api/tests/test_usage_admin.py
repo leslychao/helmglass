@@ -181,7 +181,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(baseline, summary())
 
         # Historical fixture states exercise the reporting boundary without launching browsers.
-        for state in ("QUEUED", "WAITING_CHATGPT", "WAITING_USER", "PAUSED", "DRAFT", "SUCCEEDED", "UNKNOWN", "STOPPING"):
+        for state in ("QUEUED", "WAITING_CHATGPT", "WAITING_USER", "PAUSED", "DRAFT", "SUCCEEDED", "FAILED", "STOPPING"):
             task = self.create("Numeric summary " + state, prepare=False)
             self.sql(f"UPDATE tasks SET status='{state}' WHERE id='{task['id']}' AND owner_id=:owner;")
         self.assertEqual({**baseline, "waitingTasks": baseline["waitingTasks"] + 3}, summary())

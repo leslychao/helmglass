@@ -36,7 +36,7 @@ export function browserViewerId(): string {
     (keydown.escape)="expanded.set(false)"
   >
     <div class="browser-title">
-      <strong>Браузер агента</strong>
+      <strong>{{ title() }}</strong>
     </div>
     <header class="browser-toolbar">
       <span class="browser-address"
@@ -121,6 +121,7 @@ export function browserViewerId(): string {
   </section>`,
 })
 export class BrowserViewer {
+  readonly title = input('Браузер агента');
   readonly browser = input<BrowserSession | null>(null);
   readonly role = input<'VIEWER' | 'CONTROLLER'>('VIEWER');
   readonly transport = output<string>();

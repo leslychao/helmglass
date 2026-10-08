@@ -13,10 +13,11 @@ import { Api, errorMessage } from '../core/api';
 import { Connection, Page, connectionSchema, pageSchema } from '../core/models';
 import { Pager, Status } from '../shared/ui';
 import { SearchInput } from '../shared/search-input';
+import { Icon } from '../shared/icon';
 
 @Component({
   selector: 'hg-connection-picker',
-  imports: [A11yModule, Pager, Status, SearchInput],
+  imports: [A11yModule, Icon, Pager, Status, SearchInput],
   template: ` <button
       type="button"
       class="button"
@@ -48,7 +49,7 @@ import { SearchInput } from '../shared/search-input';
               title="Закрыть"
               (click)="close()"
             >
-              ×
+              <hg-icon name="close" />
             </button>
           </header>
           <label class="search"

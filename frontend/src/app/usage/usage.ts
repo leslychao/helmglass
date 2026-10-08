@@ -15,7 +15,7 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
   imports: [Icon, DecimalPipe, DateFilter, DurationPipe, Empty, Pager],
   providers: [QueryState],
   template: `
-    <header class="page-heading"><h1 class="sr-only">Использование</h1></header>
+    <h1 class="sr-only">Использование</h1>
     <div class="usage-period">
       <div class="period-options">
         <button [class.selected]="query.text('period', '7') === '7'" (click)="period(7)">
@@ -44,53 +44,55 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
           Некоторые измерения ещё не подтверждены. Неизвестные значения показаны отдельно от нуля.
         </div>
       }
-      <section class="usage-kpis v12-usage-kpis">
-        <div class="usage-metric">
-          <span class="metric-mark"><hg-icon name="tasks" /></span>
-          <div>
-            <small>Всего задач</small><strong>{{ report.totalTasks }}</strong
-            ><span>Без черновиков</span>
+      <section class="metric-grid usage-kpis" aria-label="Сводка использования">
+        <div class="metric">
+          <div class="metric-top">
+            <span class="metric-label">Всего задач</span>
+            <span class="metric-icon"><hg-icon name="tasks" /></span>
           </div>
+          <strong class="metric-value">{{ report.totalTasks }}</strong>
+          <p class="metric-context">Без черновиков</p>
         </div>
-        <div class="usage-metric">
-          <span class="metric-mark green"><hg-icon name="check" /></span>
-          <div>
-            <small>Успешно завершено</small><strong>{{ report.successfulTasks }}</strong
-            ><span
-              >{{
-                report.successRate === null
-                  ? '—'
-                  : (report.successRate * 100 | number: '1.0-1') + '%'
-              }}
-              из {{ report.completedTasks }} завершённых</span
-            >
+        <div class="metric">
+          <div class="metric-top">
+            <span class="metric-label">Успешно завершено</span>
+            <span class="metric-icon"><hg-icon name="check" /></span>
           </div>
+          <strong class="metric-value">{{ report.successfulTasks }}</strong>
+          <p class="metric-context">
+            {{
+              report.successRate === null ? '—' : (report.successRate * 100 | number: '1.0-1') + '%'
+            }}
+            из {{ report.completedTasks }} завершённых
+          </p>
         </div>
-        <div class="usage-metric">
-          <span class="metric-mark blue"><hg-icon name="clock" /></span>
-          <div>
-            <small>Время браузера</small
-            ><strong>{{ report.usage.browserSeconds | duration }}</strong
-            ><span>Вручную: {{ report.usage.manualSeconds | duration }}</span>
+        <div class="metric text-value">
+          <div class="metric-top">
+            <span class="metric-label">Время браузера</span>
+            <span class="metric-icon"><hg-icon name="clock" /></span>
           </div>
+          <strong class="metric-value">{{ report.usage.browserSeconds | duration }}</strong>
+          <p class="metric-context">Вручную: {{ report.usage.manualSeconds | duration }}</p>
         </div>
-        <div class="usage-metric">
-          <span class="metric-mark violet"><hg-icon name="image" /></span>
-          <div>
-            <small>Длительность медиа</small
-            ><strong>{{ report.usage.mediaSeconds | duration }}</strong
-            ><span>Переданные записи</span>
+        <div class="metric text-value">
+          <div class="metric-top">
+            <span class="metric-label">Длительность медиа</span>
+            <span class="metric-icon"><hg-icon name="image" /></span>
           </div>
+          <strong class="metric-value">{{ report.usage.mediaSeconds | duration }}</strong>
+          <p class="metric-context">Переданные записи</p>
         </div>
-        <div class="usage-metric">
-          <span class="metric-mark cyan"><hg-icon name="database" /></span>
-          <div>
-            <small>Объём медиа</small
-            ><strong>{{
-              report.usage.mediaBytes === null ? '—' : (report.usage.mediaBytes | number)
-            }}</strong
-            ><span>{{ report.usage.mediaBytes === null ? 'Нет данных' : 'байт передано' }}</span>
+        <div class="metric">
+          <div class="metric-top">
+            <span class="metric-label">Объём медиа</span>
+            <span class="metric-icon"><hg-icon name="database" /></span>
           </div>
+          <strong class="metric-value">{{
+            report.usage.mediaBytes === null ? '—' : (report.usage.mediaBytes | number)
+          }}</strong>
+          <p class="metric-context">
+            {{ report.usage.mediaBytes === null ? 'Нет данных' : 'байт передано' }}
+          </p>
         </div>
       </section>
       <div class="usage-charts">

@@ -1,5 +1,6 @@
 import { Component, Pipe, PipeTransform, computed, input, output } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { Icon } from './icon';
 
 export const states: Record<string, string> = {
   BROWSER_CAPACITY: 'Ожидание свободного браузера или освобождения лимита',
@@ -133,7 +134,7 @@ export class Status {
 }
 @Component({
   selector: 'hg-pager',
-  imports: [FormsModule],
+  imports: [FormsModule, Icon],
   template: ` <footer class="table-footer">
     <span aria-live="polite">{{ total() === null ? 'Данные ещё не получены' : range() }}</span>
     @if (!fixed()) {
@@ -155,19 +156,21 @@ export class Status {
         type="button"
         class="icon-button"
         aria-label="Предыдущая страница"
+        title="Предыдущая страница"
         [disabled]="page() <= 1 || total() === null"
         (click)="pageChange.emit(page() - 1)"
       >
-        ‹</button
+        <hg-icon name="chevron-right" class="previous-page" /></button
       ><span>{{ page() }} / {{ pages() }}</span
       ><button
         type="button"
         class="icon-button"
         aria-label="Следующая страница"
+        title="Следующая страница"
         [disabled]="page() >= pages() || total() === null"
         (click)="pageChange.emit(page() + 1)"
       >
-        ›
+        <hg-icon name="chevron-right" />
       </button>
     </div>
   </footer>`,
@@ -194,8 +197,9 @@ export class Pager {
 }
 @Component({
   selector: 'hg-empty',
+  imports: [Icon],
   template:
-    '<div class="empty"><span class="empty-symbol">◇</span><h2>{{ title() }}</h2><p>{{ description() }}</p><ng-content /></div>',
+    '<div class="empty"><span class="empty-symbol"><hg-icon name="list" /></span><h2>{{ title() }}</h2><p>{{ description() }}</p><ng-content /></div>',
 })
 export class Empty {
   readonly title = input('Ничего не найдено');

@@ -19,11 +19,9 @@ import { Empty, Pager, Status } from '../shared/ui';
   imports: [Icon, SearchInput, DatePipe, MultiFilter, Empty, Pager, Status],
   providers: [QueryState],
   template: `
-    <header class="page-heading">
-      <div>
-        <h1 class="sr-only">Подключения</h1>
-      </div>
-      <button class="button task-create" (click)="create()">
+    <h1 class="sr-only">Подключения</h1>
+    <header class="page-actions">
+      <button class="button primary" (click)="create()">
         <hg-icon name="plus" />Добавить подключение
       </button>
     </header>
@@ -41,7 +39,7 @@ import { Empty, Pager, Status } from '../shared/ui';
               [attr.aria-label]="'Снять фильтр сайта ' + site"
               (click)="removeSite(site)"
             >
-              {{ site }} ×
+              {{ site }} <hg-icon name="close" />
             </button>
           }
         </div>

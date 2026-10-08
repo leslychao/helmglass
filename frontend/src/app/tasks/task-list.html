@@ -1,56 +1,57 @@
-<header class="page-heading">
-  <div>
-    <h1 class="sr-only">Задачи</h1>
-  </div>
-  <a class="button task-create" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
+<h1 class="sr-only">Задачи</h1>
+<header class="page-actions">
+  <a class="button primary" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
     ><hg-icon name="plus" />Новая задача</a
   >
 </header>
-<section class="kpis task-kpis" aria-label="Сводка задач">
+<section class="metric-grid" aria-label="Сводка задач">
   <button
-    class="kpi task-kpi"
+    class="metric"
     [class.selected]="selectedCard(activeStates)"
     [attr.aria-pressed]="selectedCard(activeStates)"
     [disabled]="!summary()"
     (click)="selectCard(activeStates)"
   >
-    <span class="task-kpi-top"
-      ><span>Активные задачи</span><span class="task-kpi-icon"><hg-icon name="play" /></span
+    <span class="metric-top"
+      ><span class="metric-label">Активные задачи</span
+      ><span class="metric-icon"><hg-icon name="play" /></span
     ></span>
-    <strong class="task-kpi-value">{{ summary()?.active ?? '—' }}</strong>
-    <span class="task-kpi-bottom"
+    <strong class="metric-value">{{ summary()?.active ?? '—' }}</strong>
+    <span class="metric-bottom"
       ><span>Запуск, выполнение и остановка</span
       ><hg-icon [name]="selectedCard(activeStates) ? 'check' : 'chevron-right'"
     /></span>
   </button>
   <button
-    class="kpi task-kpi green"
+    class="metric"
     [class.selected]="selectedCard(successStates)"
     [attr.aria-pressed]="selectedCard(successStates)"
     [disabled]="!summary()"
     (click)="selectCard(successStates)"
   >
-    <span class="task-kpi-top"
-      ><span>Успешно выполнены</span><span class="task-kpi-icon"><hg-icon name="check" /></span
+    <span class="metric-top"
+      ><span class="metric-label">Успешно выполнены</span
+      ><span class="metric-icon"><hg-icon name="check" /></span
     ></span>
-    <strong class="task-kpi-value">{{ summary()?.succeeded ?? '—' }}</strong>
-    <span class="task-kpi-bottom"
+    <strong class="metric-value">{{ summary()?.succeeded ?? '—' }}</strong>
+    <span class="metric-bottom"
       ><span>Цель достигнута полностью</span
       ><hg-icon [name]="selectedCard(successStates) ? 'check' : 'chevron-right'"
     /></span>
   </button>
   <button
-    class="kpi task-kpi amber"
+    class="metric"
     [class.selected]="selectedCard(attentionStates)"
     [attr.aria-pressed]="selectedCard(attentionStates)"
     [disabled]="!summary()"
     (click)="selectCard(attentionStates)"
   >
-    <span class="task-kpi-top"
-      ><span>Ожидают вас</span><span class="task-kpi-icon"><hg-icon name="user" /></span
+    <span class="metric-top"
+      ><span class="metric-label">Ожидают вас</span
+      ><span class="metric-icon"><hg-icon name="user" /></span
     ></span>
-    <strong class="task-kpi-value">{{ summary()?.waitingForYou ?? '—' }}</strong>
-    <span class="task-kpi-bottom"
+    <strong class="metric-value">{{ summary()?.waitingForYou ?? '—' }}</strong>
+    <span class="metric-bottom"
       ><span>Вход, ответ, подтверждение или проверка</span
       ><hg-icon [name]="selectedCard(attentionStates) ? 'check' : 'chevron-right'"
     /></span>
@@ -65,7 +66,7 @@
           [attr.aria-label]="'Снять фильтр сайта ' + site"
           (click)="removeSite(site)"
         >
-          {{ site }} ×
+          {{ site }} <hg-icon name="close" />
         </button>
       }
     </div>

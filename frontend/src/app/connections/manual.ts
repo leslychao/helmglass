@@ -13,11 +13,11 @@ import { Status } from '../shared/ui';
   selector: 'hg-manual',
   imports: [Icon, BrowserViewer, Status],
   template: `
-    <header class="page-heading">
+    <button class="back-link detail-back" (click)="back()">
+      <hg-icon name="arrow-left" />К подключениям
+    </button>
+    <header class="page-heading manual-heading">
       <div>
-        <button class="back-link" (click)="back()">
-          <hg-icon name="arrow-left" />К подключениям
-        </button>
         <h1>Вход на сайт</h1>
         <p>{{ connection()?.name }} · {{ connection()?.site }}</p>
       </div>
@@ -42,48 +42,59 @@ import { Status } from '../shared/ui';
     @if (connection(); as item) {
       <div class="manual-layout">
         <hg-browser
+          [title]="item.name"
           [browser]="item.browser"
           [role]="controller() && item.browser?.controlOwner === 'USER' ? 'CONTROLLER' : 'VIEWER'"
           (controlLost)="controller.set(false)"
         />
         <aside class="card manual-guide">
-          <h2>Войдите в аккаунт сайта</h2>
+          <h2>Как войти на сайт</h2>
           <ol class="manual-steps">
             <li>
               <span>1</span>
-              <p>Введите логин и пароль в браузере слева.</p>
+              <div>
+                <h3>Войдите в аккаунт</h3>
+                <p>Используйте тот аккаунт, с которым должна работать задача.</p>
+              </div>
             </li>
             <li>
               <span>2</span>
-              <p>При необходимости подтвердите вход кодом или другим способом сайта.</p>
+              <div>
+                <h3>Подтвердите вход</h3>
+                <p>При необходимости пройдите второй фактор непосредственно на сайте.</p>
+              </div>
             </li>
             <li>
               <span>3</span>
-              <p>Убедитесь, что открыт нужный аккаунт, и сохраните вход.</p>
+              <div>
+                <h3>Завершите вход</h3>
+                <p>
+                  Убедитесь, что открыт нужный аккаунт, и сохраните профиль для следующих задач.
+                </p>
+              </div>
             </li>
           </ol>
           <div class="manual-guide-note">
             <hg-icon name="shield" />
             <p>Пароли и коды вводятся только на сайте. ChatGPT не видит защищённый вход.</p>
           </div>
-
-          <div class="actions">
-            <button class="button primary" [disabled]="busy() || !canSave()" (click)="finish()">
-              <hg-icon name="save" />Сохранить вход</button
-            ><button class="button" [disabled]="busy()" (click)="close()">
-              Закрыть без сохранения
-            </button>
-            @if (!canSave()) {
-              <button
-                class="button"
-                [disabled]="busy() || item.browser?.controlOwner === 'TRANSFERRING'"
-                (click)="start()"
-              >
-                {{ item.browser?.privateMode ? 'Взять управление' : 'Войти защищённо' }}
-              </button>
-            }
-          </div>
         </aside>
+      </div>
+      <div class="manual-action-bar">
+        <button class="button" [disabled]="busy()" (click)="close()">Закрыть без сохранения</button>
+        <span>Пароль и коды вводятся только на сайте</span>
+        @if (!canSave()) {
+          <button
+            class="button"
+            [disabled]="busy() || item.browser?.controlOwner === 'TRANSFERRING'"
+            (click)="start()"
+          >
+            {{ item.browser?.privateMode ? 'Взять управление' : 'Войти защищённо' }}
+          </button>
+        }
+        <button class="button primary" [disabled]="busy() || !canSave()" (click)="finish()">
+          <hg-icon name="save" />Сохранить вход
+        </button>
       </div>
     } @else if (!error()) {
       <div class="loading" role="status">Загружаем сеанс входа…</div>

@@ -17,7 +17,7 @@
         title="Закрыть меню"
         (click)="closeMenu()"
       >
-        ×
+        <hg-icon name="close" />
       </button>
     }
     <a routerLink="/tasks" class="brand"
@@ -25,18 +25,18 @@
     >
     <nav aria-label="Основная навигация">
       <a routerLink="/tasks" routerLinkActive="active" ariaCurrentWhenActive="page"
-        ><span aria-hidden="true">▤</span>Задачи</a
+        ><hg-icon name="tasks" />Задачи</a
       >
       <a routerLink="/connections" routerLinkActive="active" ariaCurrentWhenActive="page"
-        ><span aria-hidden="true">⌘</span>Подключения</a
+        ><hg-icon name="plug" />Подключения</a
       >
       <a routerLink="/usage" routerLinkActive="active" ariaCurrentWhenActive="page"
-        ><span aria-hidden="true">◷</span>Использование</a
+        ><hg-icon name="chart" />Использование</a
       >
       @if (session.admin) {
         <div class="nav-divider"></div>
         <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page"
-          ><span aria-hidden="true">⚙</span>Администрирование</a
+          ><hg-icon name="shield" />Администрирование</a
         >
       }
     </nav>
@@ -51,7 +51,7 @@
         [attr.aria-expanded]="mobile()"
         (click)="mobile.set(!mobile())"
       >
-        ☰
+        <hg-icon name="menu" />
       </button>
       <nav class="breadcrumbs" aria-label="Хлебные крошки">
         <ol>
@@ -80,7 +80,7 @@
           [attr.aria-expanded]="notificationsOpen()"
           (click)="notificationsOpen.set(!notificationsOpen())"
         >
-          ♧
+          <hg-icon name="bell" />
           @if (notifications()?.total) {
             <b>{{ notifications()?.total }}</b>
           }
@@ -103,7 +103,7 @@
                 title="Закрыть"
                 (click)="closeNotifications()"
               >
-                ×
+                <hg-icon name="close" />
               </button>
             </header>
             @if (notificationError()) {

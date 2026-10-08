@@ -17,13 +17,14 @@ import * as z from 'zod/mini';
 import { Api, errorMessage } from '../core/api';
 import { Page, pageSchema } from '../core/models';
 import { Pager } from './ui';
+import { Icon } from './icon';
 export interface Option {
   id: string;
   label: string;
 }
 @Component({
   selector: 'hg-multi-filter',
-  imports: [FormsModule, A11yModule, Pager],
+  imports: [FormsModule, A11yModule, Pager, Icon],
   host: { '(document:click)': 'outside($event)', '(keydown.escape)': 'close()' },
   template: ` <button
       class="filter"
@@ -36,7 +37,7 @@ export interface Option {
       @if (value().length > 1) {
         <b>{{ value().length }}</b>
       }
-      <span aria-hidden="true">⌄</span>
+      <hg-icon name="chevron-down" />
     </button>
     @if (open()) {
       <div
@@ -52,7 +53,14 @@ export interface Option {
             @if (value().length) {
               · {{ value().length }}
             }</strong
-          ><button class="icon-button" aria-label="Закрыть фильтр" (click)="close()">×</button>
+          ><button
+            class="icon-button"
+            aria-label="Закрыть фильтр"
+            title="Закрыть фильтр"
+            (click)="close()"
+          >
+            <hg-icon name="close" />
+          </button>
         </header>
         <input
           #filterSearch
