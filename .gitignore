@@ -1,0 +1,14 @@
+**/node_modules/
+**/dist/
+**/target/
+**/.angular/
+**/.cache/
+**/__pycache__/
+*.pyc
+deploy/.env.local
+deploy/.env.dev
+.work/
+*.log
+backend/api/src/main/resources/mcp-widget/
+.idea/
+!.run/

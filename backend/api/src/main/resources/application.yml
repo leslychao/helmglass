@@ -1,0 +1,42 @@
+server:
+  port: 8080
+  forward-headers-strategy: none
+spring:
+  application:
+    name: helmglass-api
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+      accept-float-as-int: false
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USER}
+    password: ${DATABASE_PASSWORD}
+    hikari:
+      maximum-pool-size: 12
+  liquibase:
+    change-log: classpath:db/changelog.xml
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
+      file-size-threshold: 0
+  mvc:
+    async:
+      request-timeout: 0
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+helm:
+  public-url: ${PUBLIC_URL}
+  issuer: ${PUBLIC_URL}/auth/realms/helmglass
+  jwk-set-uri: ${KEYCLOAK_INTERNAL_URL}/realms/helmglass/protocol/openid-connect/certs
+  worker-url: ${WORKER_URL}
+  worker-token: ${WORKER_TOKEN}
+  artifact-directory: /data/artifacts
+  platform-browser-limit: 2

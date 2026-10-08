@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+  <changeSet id="1-initial-domain" author="helmglass">
+    <sqlFile path="001-initial.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="2-mcp-chat-bindings" author="helmglass">
+    <sqlFile path="002-mcp.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="3-control-intents" author="helmglass">
+    <sql>ALTER TABLE browser_sessions ADD COLUMN pending_control jsonb;
+      ALTER TABLE browser_sessions ADD COLUMN artifact_cursor bigint NOT NULL DEFAULT 0;
+      ALTER TABLE browser_sessions ADD COLUMN pending_connection_id uuid REFERENCES connections(id);
+      CREATE UNIQUE INDEX browser_pending_connection ON browser_sessions(pending_connection_id)
+        WHERE pending_connection_id IS NOT NULL AND status NOT IN ('CLOSED','LOST');
+      ALTER TABLE operations ADD COLUMN requested_control_epoch bigint;
+      ALTER TABLE accounts ADD COLUMN administrator boolean NOT NULL DEFAULT false;</sql>
+    <sql>ALTER TABLE accounts ADD COLUMN mcp_connected_at timestamptz;</sql>
+  </changeSet>
+  <changeSet id="4-operation-instruction-snapshot" author="helmglass">
+    <sql>ALTER TABLE operations ADD COLUMN instruction_snapshot jsonb;</sql>
+  </changeSet>
+  <changeSet id="5-viewer-revocations" author="helmglass">
+    <sqlFile path="005-viewer-revocations.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="6-continuation-request-time" author="helmglass">
+    <sql>ALTER TABLE mcp_chats ADD COLUMN continuation_requested_at timestamptz;
+      UPDATE mcp_chats SET continuation_requested_at=updated_at
+        WHERE continuation_status&lt;&gt;'IDLE';</sql>
+  </changeSet>
+  <changeSet id="7-remove-presentation-only-pause-field" author="helmglass">
+    <sqlFile path="007-remove-presentation-only-pause-field.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="8-audit-owner" author="helmglass">
+    <sqlFile path="008-audit-owner.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="9-synchronous-audit-outcomes" author="helmglass">
+    <sql>UPDATE administrative_audit SET status='SUCCEEDED'
+      WHERE status='PENDING' AND action IN ('LIMITS','UNBLOCK','CANCEL_DELETION');</sql>
+  </changeSet>
+  <changeSet id="10-continuation-intent-identity" author="helmglass">
+    <sqlFile path="010-continuation-intent.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="11-account-profile-image" author="helmglass">
+    <sqlFile path="011-account-profile-image.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,221 @@
+name: helmglass
+services:
+  postgres:
+    image: helmglass-postgres:current
+    build: ./postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      KEYCLOAK_DATABASE_PASSWORD: ${KEYCLOAK_DATABASE_PASSWORD:?KEYCLOAK_DATABASE_PASSWORD is required}
+    volumes: [postgres:/var/lib/postgresql/data]
+    networks: [data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d postgres']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7.4.8-alpine
+    command: [redis-server, --appendonly, 'yes', --requirepass, '${REDIS_PASSWORD:?REDIS_PASSWORD is required}']
+    restart: unless-stopped
+    volumes: [redis:/data]
+    networks: [identity]
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$${REDIS_PASSWORD}" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+  keycloak:
+    image: helmglass-keycloak:current
+    build: ./keycloak
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      KEYCLOAK_LIFECYCLE_SECRET: ${KEYCLOAK_LIFECYCLE_SECRET:?KEYCLOAK_LIFECYCLE_SECRET is required}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DATABASE_PASSWORD:?KEYCLOAK_DATABASE_PASSWORD is required}
+      KC_HOSTNAME: ${PUBLIC_URL:?PUBLIC_URL is required}/auth
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: 'true'
+      KC_HTTP_ENABLED: 'true'
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_PROXY_HEADERS: xforwarded
+      KC_PROXY_TRUSTED_ADDRESSES: 172.30.244.0/24
+      KC_BOOTSTRAP_ADMIN_USERNAME: bootstrap
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_PASSWORD:?KEYCLOAK_BOOTSTRAP_PASSWORD is required}
+      PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
+      OAUTH2_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET:?OAUTH2_CLIENT_SECRET is required}
+      KEYCLOAK_TEST_PASSWORD: ${KEYCLOAK_TEST_PASSWORD:?KEYCLOAK_TEST_PASSWORD is required}
+      KEYCLOAK_APP_ADMIN_PASSWORD: ${KEYCLOAK_APP_ADMIN_PASSWORD:?KEYCLOAK_APP_ADMIN_PASSWORD is required}
+    networks: [data, identity]
+  provisioning:
+    image: helmglass-provisioning:current
+    build:
+      context: .
+      dockerfile: provisioning/Dockerfile
+    depends_on: [keycloak]
+    restart: 'no'
+    environment:
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080/auth
+      KEYCLOAK_LIFECYCLE_SECRET: ${KEYCLOAK_LIFECYCLE_SECRET:?KEYCLOAK_LIFECYCLE_SECRET is required}
+      KC_BOOTSTRAP_ADMIN_USERNAME: bootstrap
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_BOOTSTRAP_PASSWORD:?KEYCLOAK_BOOTSTRAP_PASSWORD is required}
+      PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
+      OAUTH2_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET:?OAUTH2_CLIENT_SECRET is required}
+      KEYCLOAK_TEST_PASSWORD: ${KEYCLOAK_TEST_PASSWORD:?KEYCLOAK_TEST_PASSWORD is required}
+      KEYCLOAK_APP_ADMIN_PASSWORD: ${KEYCLOAK_APP_ADMIN_PASSWORD:?KEYCLOAK_APP_ADMIN_PASSWORD is required}
+    networks: [identity]
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    restart: unless-stopped
+    depends_on:
+      redis: {condition: service_healthy}
+      provisioning: {condition: service_completed_successfully}
+    environment:
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_PROVIDER: keycloak-oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${PUBLIC_URL:?PUBLIC_URL is required}/auth/realms/helmglass
+      OAUTH2_PROXY_SKIP_OIDC_DISCOVERY: 'true'
+      OAUTH2_PROXY_LOGIN_URL: ${PUBLIC_URL:?PUBLIC_URL is required}/auth/realms/helmglass/protocol/openid-connect/auth
+      OAUTH2_PROXY_REDEEM_URL: http://keycloak:8080/auth/realms/helmglass/protocol/openid-connect/token
+      OAUTH2_PROXY_OIDC_JWKS_URL: http://keycloak:8080/auth/realms/helmglass/protocol/openid-connect/certs
+      OAUTH2_PROXY_PROFILE_URL: http://keycloak:8080/auth/realms/helmglass/protocol/openid-connect/userinfo
+      OAUTH2_PROXY_CLIENT_ID: helmglass-web
+      OAUTH2_PROXY_CLIENT_SECRET: ${OAUTH2_CLIENT_SECRET:?OAUTH2_CLIENT_SECRET is required}
+      OAUTH2_PROXY_REDIRECT_URL: ${PUBLIC_URL:?PUBLIC_URL is required}/oauth2/callback
+      OAUTH2_PROXY_EMAIL_DOMAINS: '*'
+      OAUTH2_PROXY_SCOPE: openid profile email
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+      OAUTH2_PROXY_SESSION_STORE_TYPE: redis
+      OAUTH2_PROXY_REDIS_CONNECTION_URL: redis://redis:6379/0
+      OAUTH2_PROXY_REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+      OAUTH2_PROXY_COOKIE_NAME: _helmglass_session
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_COOKIE_SECRET:?OAUTH2_COOKIE_SECRET is required}
+      OAUTH2_PROXY_COOKIE_SECURE: ${COOKIE_SECURE:?COOKIE_SECURE is required}
+      OAUTH2_PROXY_COOKIE_HTTPONLY: 'true'
+      OAUTH2_PROXY_COOKIE_SAMESITE: lax
+      OAUTH2_PROXY_COOKIE_REFRESH: 2m
+      OAUTH2_PROXY_COOKIE_EXPIRE: 168h
+      OAUTH2_PROXY_COOKIE_CSRF_PER_REQUEST: 'true'
+      OAUTH2_PROXY_REVERSE_PROXY: 'true'
+      OAUTH2_PROXY_TRUSTED_PROXY_IPS: 172.30.244.0/24
+      OAUTH2_PROXY_SET_XAUTHREQUEST: 'true'
+      OAUTH2_PROXY_PASS_ACCESS_TOKEN: 'true'
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: 'true'
+      OAUTH2_PROXY_UPSTREAMS: static://202
+      OAUTH2_PROXY_WHITELIST_DOMAINS: ${PUBLIC_HOST:?PUBLIC_HOST is required}
+      OAUTH2_PROXY_BACKEND_LOGOUT_URL: http://keycloak:8080/auth/realms/helmglass/protocol/openid-connect/logout?id_token_hint={id_token}&client_id=helmglass-web
+      OAUTH2_PROXY_REQUEST_LOGGING: 'false'
+      OAUTH2_PROXY_AUTH_LOGGING: 'false'
+      OAUTH2_PROXY_STANDARD_LOGGING: 'true'
+    networks: [identity]
+  api:
+    image: helmglass-api:current
+    build: ../backend/api
+    restart: unless-stopped
+    depends_on:
+      postgres: {condition: service_healthy}
+      provisioning: {condition: service_completed_successfully}
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/helmglass
+      DATABASE_USER: helmglass
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}
+      PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
+      KEYCLOAK_INTERNAL_URL: http://keycloak:8080/auth
+      KEYCLOAK_LIFECYCLE_SECRET: ${KEYCLOAK_LIFECYCLE_SECRET:?KEYCLOAK_LIFECYCLE_SECRET is required}
+      WORKER_URL: http://browser-node:8090
+      WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+    volumes: [artifacts:/data/artifacts]
+    networks: [data, identity, control]
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.4.2
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: warning
+      CONTAINERS: '1'
+      IMAGES: '1'
+      NETWORKS: '1'
+      VOLUMES: '1'
+      INFO: '1'
+      VERSION: '1'
+      PING: '1'
+      POST: '1'
+      ALLOW_START: '1'
+      ALLOW_STOP: '1'
+      ALLOW_RESTARTS: '0'
+    volumes: [/var/run/docker.sock:/var/run/docker.sock:ro]
+    networks: [docker]
+  browser-node:
+    image: helmglass-browser-node:current
+    build: ../backend/browser-node
+    restart: unless-stopped
+    depends_on: [docker-proxy]
+    environment:
+      NODE_ID: ${NODE_ID:?NODE_ID is required}
+      WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+      PROFILE_ENCRYPTION_KEY: ${PROFILE_ENCRYPTION_KEY:?PROFILE_ENCRYPTION_KEY is required}
+      DOCKER_HOST: http://docker-proxy:2375
+      BROWSER_SESSION_IMAGE: helmglass-browser-session:current
+      BROWSER_EGRESS_IMAGE: helmglass-browser-egress:current
+      BROWSER_EGRESS_NETWORK: helmglass-browser-egress
+      BROWSER_CAPACITY: '4'
+      PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
+    volumes: [browser-node:/data]
+    networks: [control, docker, browser-egress]
+  browser-session-image:
+    image: helmglass-browser-session:current
+    build: ../backend/browser-session
+    profiles: [build]
+    network_mode: none
+  browser-egress-image:
+    image: helmglass-browser-egress:current
+    build: ../backend/egress
+    profiles: [build]
+    network_mode: none
+  frontend:
+    image: helmglass-frontend:current
+    build: ../frontend
+    restart: unless-stopped
+    networks: [identity]
+  edge:
+    image: helmglass-edge:current
+    build: ./nginx
+    restart: unless-stopped
+    depends_on: [api, oauth2-proxy, frontend, browser-node]
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
+      PUBLIC_HOST: ${PUBLIC_HOST:?PUBLIC_HOST is required}
+      NGINX_ENVSUBST_FILTER: ^(PUBLIC_URL|PUBLIC_HOST)$
+    ports: ['${EDGE_BIND_ADDRESS:?EDGE_BIND_ADDRESS is required}:${EDGE_HTTP_PORT:?EDGE_HTTP_PORT is required}:8080']
+    networks:
+      identity: {}
+      control: {}
+      ingress:
+        ipv4_address: ${EDGE_NETWORK_ADDRESS:?EDGE_NETWORK_ADDRESS is required}
+        aliases: [helmglass-edge]
+
+volumes:
+  postgres: {}
+  redis: {}
+  artifacts: {}
+  browser-node: {}
+networks:
+  data: {internal: true}
+  identity:
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.244.0/24}]
+  control: {internal: true}
+  docker: {internal: true}
+  ingress:
+    external: true
+    name: ${EDGE_NETWORK:?EDGE_NETWORK is required}
+  browser-egress:
+    name: helmglass-browser-egress

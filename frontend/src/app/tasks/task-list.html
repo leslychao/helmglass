@@ -1,0 +1,197 @@
+<header class="page-heading">
+  <div>
+    <h1>Задачи</h1>
+    <p>Работа в браузере — с понятным ходом и сохранённым результатом.</p>
+  </div>
+  <a class="button primary" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
+    >＋ Создать задачу</a
+  >
+</header>
+<section class="kpis" aria-label="Сводка задач">
+  <button
+    class="kpi"
+    [class.selected]="selectedCard(activeStates)"
+    [attr.aria-pressed]="selectedCard(activeStates)"
+    [disabled]="!summary()"
+    [title]="summary() ? 'Выбрать активные задачи' : 'Сводка ещё не получена'"
+    (click)="selectCard(activeStates)"
+  >
+    <span class="kpi-icon">↗</span
+    ><span
+      ><small>Активные задачи</small><strong>{{ summary()?.active ?? '—' }}</strong></span
+    >
+  </button>
+  <button
+    class="kpi"
+    [class.selected]="selectedCard(successStates)"
+    [attr.aria-pressed]="selectedCard(successStates)"
+    [disabled]="!summary()"
+    [title]="summary() ? 'Выбрать успешные задачи' : 'Сводка ещё не получена'"
+    (click)="selectCard(successStates)"
+  >
+    <span class="kpi-icon green">✓</span
+    ><span
+      ><small>Успешно выполнены</small><strong>{{ summary()?.succeeded ?? '—' }}</strong></span
+    >
+  </button>
+  <button
+    class="kpi"
+    [class.selected]="selectedCard(attentionStates)"
+    [attr.aria-pressed]="selectedCard(attentionStates)"
+    [disabled]="!summary()"
+    [title]="summary() ? 'Выбрать задачи, ожидающие вас' : 'Сводка ещё не получена'"
+    (click)="selectCard(attentionStates)"
+  >
+    <span class="kpi-icon amber">!</span
+    ><span
+      ><small>Ожидают вас</small><strong>{{ summary()?.waitingForYou ?? '—' }}</strong></span
+    >
+  </button>
+</section>
+<section class="card table-card" [attr.aria-busy]="loading()">
+  @if (query.values('site').length) {
+    <div class="selected-chips" aria-label="Выбранные сайты">
+      @for (site of query.values('site'); track site) {
+        <button
+          class="site-chip"
+          [attr.aria-label]="'Снять фильтр сайта ' + site"
+          (click)="removeSite(site)"
+        >
+          {{ site }} ×
+        </button>
+      }
+    </div>
+  }
+  <div class="toolbar">
+    <label class="search"
+      ><span aria-hidden="true">⌕</span
+      ><input
+        hgSearch
+        aria-label="Поиск задач"
+        placeholder="Найти задачу"
+        [value]="query.text('search')"
+        (searchChange)="query.set({ search: $event || null })"
+    /></label>
+    <hg-multi-filter
+      label="Состояние"
+      [options]="stateOptions"
+      [value]="query.values('status')"
+      (changed)="query.set({ status: $event })"
+    />
+    <hg-multi-filter
+      label="Сайт"
+      remotePath="/api/tasks/sites"
+      [value]="query.values('site')"
+      (changed)="query.set({ site: $event })"
+    />
+    <hg-multi-filter
+      label="Источник"
+      [options]="sourceOptions"
+      [value]="query.values('source')"
+      (changed)="query.set({ source: $event })"
+    />
+    <hg-date-filter
+      label="Период создания"
+      [from]="query.text('from')"
+      [to]="query.text('to')"
+      (changed)="query.set($event)"
+    />
+    <button class="text-button" (click)="clear()">Сбросить</button><span class="spacer"></span>
+    <hg-multi-filter label="Колонки" [options]="columnOptions" [(value)]="columns" />
+  </div>
+  @if (error()) {
+    <div class="error-banner" role="alert">
+      {{ error() }} <button class="text-button" (click)="load()">Повторить</button>
+    </div>
+  }
+  @if (data(); as page) {
+    @if (page.items.length) {
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th [attr.aria-sort]="query.ariaSort('title')">
+                <button (click)="query.sort('title')">Задача ↕</button>
+              </th>
+              <th>Состояние</th>
+              @if (columns().includes('site')) {
+                <th>Сайт</th>
+              }
+              @if (columns().includes('executionSeconds')) {
+                <th>Выполнение</th>
+              }
+              @if (columns().includes('manualSeconds')) {
+                <th>Человек</th>
+              }
+              @if (columns().includes('mediaSeconds')) {
+                <th>Медиа</th>
+              }
+              @if (columns().includes('mediaBytes')) {
+                <th>Байты медиа</th>
+              }
+              @if (columns().includes('updatedAt')) {
+                <th [attr.aria-sort]="query.ariaSort('updatedAt')">
+                  <button (click)="query.sort('updatedAt')">Обновлена ↕</button>
+                </th>
+              }
+              @if (columns().includes('summary')) {
+                <th>Краткий итог</th>
+              }
+            </tr>
+          </thead>
+          <tbody>
+            @for (task of page.items; track task.id) {
+              <tr>
+                <td class="task-name">
+                  <a [routerLink]="['/tasks', task.id]" [queryParams]="{ back: query.context() }">{{
+                    task.title || task.goal || 'Черновик без названия'
+                  }}</a
+                  ><small>{{ task.source === 'MCP' ? 'ChatGPT' : 'Веб-интерфейс' }}</small>
+                </td>
+                <td><hg-status [value]="task.outcome || task.status" /></td>
+                @if (columns().includes('site')) {
+                  <td>{{ task.site || 'Без сайта' }}</td>
+                }
+                @if (columns().includes('executionSeconds')) {
+                  <td>{{ task.usage.executionSeconds | duration }}</td>
+                }
+                @if (columns().includes('manualSeconds')) {
+                  <td>{{ task.usage.manualSeconds | duration }}</td>
+                }
+                @if (columns().includes('mediaSeconds')) {
+                  <td>{{ task.usage.mediaSeconds | duration }}</td>
+                }
+                @if (columns().includes('mediaBytes')) {
+                  <td>{{ task.usage.mediaBytes ?? 'Нет данных' }}</td>
+                }
+                @if (columns().includes('updatedAt')) {
+                  <td class="nowrap">{{ task.updatedAt | date: 'dd.MM.yyyy HH:mm' }}</td>
+                }
+                @if (columns().includes('summary')) {
+                  <td class="summary-cell">{{ task.summary || task.result?.summary || '—' }}</td>
+                }
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+    } @else {
+      <hg-empty
+        [title]="summary()?.total === 0 ? 'Здесь появятся ваши задачи' : 'Задачи не найдены'"
+        description="Создайте задачу в интерфейсе или через ChatGPT."
+        ><a class="button" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
+          >Создать задачу</a
+        ></hg-empty
+      >
+    }
+    <hg-pager
+      [page]="page.page"
+      [size]="page.pageSize"
+      [total]="page.total"
+      (pageChange)="query.set({ page: $event }, false)"
+      (sizeChange)="query.set({ pageSize: $event })"
+    />
+  } @else if (loading()) {
+    <div class="loading" role="status">Загружаем задачи…</div>
+  }
+</section>

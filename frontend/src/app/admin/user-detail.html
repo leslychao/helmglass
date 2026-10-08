@@ -1,0 +1,210 @@
+<button class="back-link" (click)="back()">
+  {{ nodeReturn() ? '‹ К браузерам' : '‹ К пользователям' }}
+</button>
+@if (error()) {
+  <div class="error-banner" role="alert">
+    {{ error() }}<button class="text-button" (click)="load()">Повторить</button>
+  </div>
+}
+@if (data(); as detail) {
+  <header class="page-heading">
+    <div>
+      <h2>{{ detail.user.name }}</h2>
+      <p>{{ detail.user.email }}</p>
+      <hg-status [value]="detail.user.status" />
+    </div>
+    <div class="actions">
+      <button
+        class="button"
+        [disabled]="busy() || detail.user.status === 'DELETED'"
+        (click)="limits()"
+      >
+        Изменить лимиты
+      </button>
+      <details class="action-menu">
+        <summary class="button">Действия ⌄</summary>
+        <div class="menu-popover">
+          @if (detail.user.id !== session.user()?.id) {
+            @if (detail.user.status === 'ACTIVE') {
+              <button (click)="change('BLOCK')">Заблокировать</button>
+            }
+            @if (detail.user.status === 'BLOCKED') {
+              <button (click)="change('UNBLOCK')">Разблокировать</button>
+            }
+            @if (detail.user.status === 'ACTIVE' || detail.user.status === 'BLOCKED') {
+              <button class="danger-text" (click)="change('REQUEST_DELETION')">
+                Запланировать удаление
+              </button>
+            }
+            @if (detail.user.status === 'DELETION_PENDING') {
+              <button (click)="change('CANCEL_DELETION')">Отменить удаление</button>
+            }
+          }
+          <button class="danger-text" (click)="change('STOP_ALL')">Остановить все браузеры</button>
+        </div>
+      </details>
+    </div>
+  </header>
+  @if (detail.user.status === 'DELETION_PENDING' && detail.user.deleteUntil) {
+    <div class="notice warning">
+      <strong>Запланировано удаление</strong>
+      <p>
+        Отменить можно до {{ detail.user.deleteUntil | date: 'dd.MM.yyyy HH:mm:ss' }} по местному
+        времени. Прежнее состояние: {{ detail.user.previousStatus | label }}.
+      </p>
+    </div>
+  } @else if (detail.user.status === 'PURGING') {
+    <div class="notice warning">
+      <strong>Очистка данных началась</strong>
+      <p>Отменить удаление уже нельзя.</p>
+    </div>
+  }
+  <div class="usage-grid">
+    <section class="card">
+      <h2>Лимиты и текущее использование</h2>
+      <dl class="metrics">
+        <div>
+          <dt>Одновременные браузеры</dt>
+          <dd>
+            {{ detail.user.browserCount ?? '—' }} /
+            {{
+              detail.user.browserLimitMode === 'UNLIMITED' ? '∞' : (detail.user.browserLimit ?? 2)
+            }}
+          </dd>
+        </div>
+        <div>
+          <dt>Ожидающие задачи</dt>
+          <dd>{{ detail.user.waitingCount }} / {{ detail.user.waitingLimit ?? '∞' }}</dd>
+        </div>
+        <div>
+          <dt>Незавершённые операции</dt>
+          <dd>{{ detail.user.pendingOperations }}</dd>
+        </div>
+      </dl>
+    </section>
+    <section class="card">
+      <h2>Последние 7 календарных дней</h2>
+      <dl class="metrics">
+        <div>
+          <dt>Задачи</dt>
+          <dd>{{ detail.usage.totalTasks }}</dd>
+        </div>
+        <div>
+          <dt>Браузер</dt>
+          <dd>{{ detail.usage.usage.browserSeconds | duration }}</dd>
+        </div>
+        <div>
+          <dt>Выполнение</dt>
+          <dd>{{ detail.usage.usage.executionSeconds | duration }}</dd>
+        </div>
+      </dl>
+    </section>
+  </div>
+  @if (detail.operations.length) {
+    <section class="card">
+      <h2>Незавершённые операции</h2>
+      @for (operation of detail.operations; track operation.id) {
+        <div class="file-row">
+          <code>{{ operation.id }}</code
+          ><span>{{ operation.description }}</span
+          ><span class="spacer"></span><hg-status [value]="operation.status" />
+        </div>
+      }
+    </section>
+  }
+  <section class="card table-card">
+    <div class="section-heading padded">
+      <h2>Последние 50 задач</h2>
+      <span class="muted">Только служебные сведения</span>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>ID задачи</th>
+            <th>Состояние</th>
+            <th>ID браузера</th>
+            <th>Причина ожидания</th>
+            <th>Создана</th>
+            <th><span class="sr-only">Действие</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (task of detail.tasks.items; track task.id) {
+            <tr>
+              <td>
+                <code>{{ task.id }}</code>
+              </td>
+              <td><hg-status [value]="task.status" /></td>
+              <td>
+                <code>{{ task.browserId || '—' }}</code>
+              </td>
+              <td>{{ task.reason | label }}</td>
+              <td>{{ task.createdAt | date: 'dd.MM HH:mm' }}</td>
+              <td>
+                @if (
+                  task.browserId &&
+                  !['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'STOPPED', 'FAILED'].includes(
+                    task.status
+                  )
+                ) {
+                  <button
+                    class="icon-button danger-text"
+                    aria-label="Остановить браузер задачи"
+                    title="Остановить браузер задачи"
+                    (click)="stop(task.browserId, task.id)"
+                  >
+                    ■
+                  </button>
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+    <hg-pager
+      [page]="detail.tasks.page"
+      [size]="detail.tasks.pageSize"
+      [total]="detail.tasks.total"
+      (pageChange)="taskPageChange($event)"
+      (sizeChange)="taskSizeChange($event)"
+    />
+  </section>
+  <section class="card table-card">
+    <div class="section-heading padded"><h2>Аудит пользователя</h2></div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Время</th>
+            <th>Администратор</th>
+            <th>Действие</th>
+            <th>Причина</th>
+            <th>Результат</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (event of detail.audit.items; track event.id) {
+            <tr>
+              <td>{{ event.createdAt | date: 'dd.MM HH:mm' }}</td>
+              <td>{{ event.actor }}</td>
+              <td>{{ event.action }}</td>
+              <td>{{ event.reason || '—' }}</td>
+              <td><hg-status [value]="event.status" /></td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </div>
+    <hg-pager
+      [page]="detail.audit.page"
+      [size]="detail.audit.pageSize"
+      [total]="detail.audit.total"
+      (pageChange)="auditPageChange($event)"
+      (sizeChange)="auditSizeChange($event)"
+    />
+  </section>
+} @else if (!error()) {
+  <div class="loading" role="status">Загружаем пользователя…</div>
+}

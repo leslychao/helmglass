@@ -1,0 +1,25 @@
+{
+  "name": "@helmglass/browser-session",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.17.0 <25"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "file-type": "22.1.1",
+    "playwright": "1.64.0",
+    "undici": "7.30.0",
+    "ws": "8.22.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.0",
+    "@types/ws": "8.18.1",
+    "typescript": "5.9.3"
+  }
+}

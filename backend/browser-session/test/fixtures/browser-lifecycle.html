@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Browser lifecycle acceptance</title>
+<h1>Browser lifecycle acceptance</h1>
+<label>Page marker <input id="marker" value="unchanged"></label><output id="marker-copy">unchanged</output>
+<form id="post-form" action="https://httpbin.org/delay/3" method="post">
+  <label>Safe echo message <input name="message" id="message"></label>
+  <button id="submit" type="submit">Submit to public echo service</button>
+</form>
+<p id="submissions"></p>
+<button id="download-later">Download a completed result after this action returns</button>
+<script>
+  document.querySelector('#submissions').textContent = 'Submissions: ' + (localStorage.getItem('helm-safe-post-count') || '0');
+  document.querySelector('#post-form').onsubmit = () => localStorage.setItem('helm-safe-post-count', String(Number(localStorage.getItem('helm-safe-post-count') || '0') + 1));
+  document.querySelector('#marker').oninput = event => document.querySelector('#marker-copy').textContent = event.target.value;
+  document.querySelector('#download-later').onclick = () => setTimeout(() => {
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob(['Helm Glass pre-private completed download\n'], {type: 'application/octet-stream'}));
+    link.download = 'pre-private-result.txt'; link.click();
+  }, 1500);
+</script>

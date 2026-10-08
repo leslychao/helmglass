@@ -1,0 +1,206 @@
+{
+  "realm": "helmglass",
+  "enabled": true,
+  "displayName": "Helm Glass",
+  "internationalizationEnabled": true,
+  "supportedLocales": [
+    "ru",
+    "en"
+  ],
+  "defaultLocale": "ru",
+  "loginTheme": "helmglass",
+  "accountTheme": "helmglass",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "editUsernameAllowed": false,
+  "verifyEmail": false,
+  "sslRequired": "external",
+  "bruteForceProtected": true,
+  "ssoSessionIdleTimeout": 28800,
+  "ssoSessionMaxLifespan": 604800,
+  "accessTokenLifespan": 300,
+  "roles": {
+    "realm": [
+      {
+        "name": "USER"
+      },
+      {
+        "name": "ADMIN"
+      }
+    ]
+  },
+  "defaultRoles": [
+    "USER",
+    "offline_access"
+  ],
+  "clients": [
+    {
+      "clientId": "helmglass-lifecycle",
+      "name": "Helm Glass account lifecycle",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${KEYCLOAK_LIFECYCLE_SECRET}",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "helmglass-api",
+      "name": "Helm Glass API",
+      "enabled": true,
+      "bearerOnly": true,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "helmglass-web",
+      "name": "Helm Glass",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${OAUTH2_CLIENT_SECRET}",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "${PUBLIC_URL}/oauth2/callback"
+      ],
+      "webOrigins": [
+        "${PUBLIC_URL}"
+      ],
+      "attributes": {
+        "post.logout.redirect.uris": "${PUBLIC_URL}/sign-in",
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "helmglass-api",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "config": {
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "jsonType.label": "String",
+            "claim.name": "realm_access.roles"
+          },
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "protocol": "openid-connect",
+          "name": "application-roles"
+        }
+      ],
+      "fullScopeAllowed": true
+    },
+    {
+      "clientId": "helmglass-chatgpt",
+      "name": "Helm Glass in ChatGPT",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "consentRequired": true,
+      "redirectUris": [
+        "https://chatgpt.com/connector_platform_oauth_redirect"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "helmglass-api",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "mcp-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "${PUBLIC_URL}/mcp",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "config": {
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "jsonType.label": "String",
+            "claim.name": "realm_access.roles"
+          },
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "protocol": "openid-connect",
+          "name": "application-roles"
+        }
+      ],
+      "fullScopeAllowed": true
+    }
+  ],
+  "users": [
+    {
+      "username": "test",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Тестовый",
+      "lastName": "Пользователь",
+      "email": "test@helmglass.invalid",
+      "requiredActions": [],
+      "realmRoles": [
+        "USER",
+        "offline_access",
+        "default-roles-helmglass"
+      ],
+      "attributes": {
+        "helmglass-managed": [
+          "true"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_TEST_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Администратор",
+      "lastName": "Helm Glass",
+      "email": "admin@helmglass.invalid",
+      "requiredActions": [],
+      "realmRoles": [
+        "USER",
+        "ADMIN",
+        "offline_access",
+        "default-roles-helmglass"
+      ],
+      "attributes": {
+        "helmglass-managed": [
+          "true"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${KEYCLOAK_APP_ADMIN_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

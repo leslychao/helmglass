@@ -1,0 +1,137 @@
+<header class="page-heading">
+  <div>
+    <button class="back-link" (click)="back()">‹ К задачам</button>
+    <h1>{{ title }}</h1>
+    <p>Опишите, что нужно сделать. Выполнение запускается из ChatGPT.</p>
+  </div>
+</header>
+@if (error()) {
+  <div class="error-banner" role="alert">
+    {{ error() }}
+    @if (!loaded()) {
+      <button type="button" class="text-button" (click)="load()">Повторить загрузку</button>
+    }
+  </div>
+}
+@if (loading()) {
+  <div class="loading" role="status">Загружаем параметры…</div>
+} @else if (loaded()) {
+  @if (versionConflict() && !pending()) {
+    <section class="notice warning" role="alert">
+      <strong>Задача изменилась после начала редактирования.</strong>
+      <p>Ваш ввод сохранён. Сравните его с текущими параметрами перед повторным сохранением.</p>
+      <details>
+        <summary>Текущие параметры задачи</summary>
+        <p class="preserve-lines">{{ task()?.goal }}</p>
+        <dl>
+          <dt>Начальная страница</dt>
+          <dd>{{ task()?.startUrl || 'Не задана' }}</dd>
+          <dt>Вид результата</dt>
+          <dd>{{ task()?.outputFormat }}</dd>
+          <dt>Подтверждение действий</dt>
+          <dd>{{ task()?.requireConfirmation ? 'Включено' : 'Выключено' }}</dd>
+          <dt>Подключения</dt>
+          <dd>{{ task()?.preferredConnectionIds?.join(', ') || 'Автоматический выбор' }}</dd>
+        </dl>
+      </details>
+      <button class="button" (click)="acceptCurrentVersion()">
+        Использовать мой ввод для текущей версии
+      </button>
+    </section>
+  }
+  @if (pending() && !busy()) {
+    <div class="notice warning" role="alert">
+      Исход предыдущего сохранения ещё не подтверждён. Повторите то же действие: номер операции и
+      отправленные параметры сохранены.
+    </div>
+  }
+  <form [formGroup]="form" (ngSubmit)="save(mode !== 'refine')" class="form-layout v12-task-form">
+    <div class="form-sections">
+      <section class="card form-section">
+        <span class="step-number">1</span>
+        <div class="form-step-content">
+          <h2>Что нужно сделать</h2>
+          <p class="form-sub">Опишите задачу и ожидаемый результат.</p>
+          <label class="field"><span class="sr-only">Цель задачи</span>
+            <textarea formControlName="goal" rows="3" maxlength="20000"
+              placeholder="Например: Найти 10 увлажняющих шампуней на Ozon, сравнить цены и сохранить результат в таблицу."
+              [attr.aria-invalid]="!!fieldErrors()['goal']"
+              [attr.aria-describedby]="fieldErrors()['goal'] ? 'goal-help goal-error' : 'goal-help'"></textarea>
+          </label>
+          <span class="character-count">{{ form.controls.goal.value.length }} символов</span>
+          <small id="goal-help" class="form-hint">Пароли и одноразовые коды сюда не вставляйте.</small>
+          @if (fieldErrors()['goal']) {
+            <p id="goal-error" class="field-error" role="alert">{{ fieldErrors()['goal'] }}</p>
+          }
+        </div>
+      </section>
+      <section class="card form-section">
+        <span class="step-number">2</span>
+        <div class="form-step-content">
+          <h2>Сайт и стартовая страница</h2>
+          <p class="form-sub">Укажите, с какого сайта начать выполнение.</p>
+          <label class="form-url"><hg-icon name="plug"/><span class="sr-only">Начальный сайт</span>
+            <input formControlName="startUrl" type="url" placeholder="https://"
+              [attr.aria-invalid]="!!fieldErrors()['startUrl'] || (form.controls.startUrl.invalid && form.controls.startUrl.touched)"
+              [attr.aria-describedby]="fieldErrors()['startUrl'] ? 'start-url-error' : 'start-url-hint'"/>
+          </label>
+          <small id="start-url-hint" class="form-hint">Например: https://www.ozon.ru. В черновике можно не заполнять.</small>
+          @if (form.controls.startUrl.invalid && form.controls.startUrl.touched) {
+            <p class="field-error">Укажите полный адрес с https:// или http://.</p>
+          }
+          @if (fieldErrors()['startUrl']) {
+            <p id="start-url-error" class="field-error" role="alert">{{ fieldErrors()['startUrl'] }}</p>
+          }
+        </div>
+      </section>
+      <section class="card form-section">
+        <span class="step-number">3</span>
+        <div class="form-step-content">
+          <h2>Предпочтительные подключения</h2>
+          <p class="form-sub">Аккаунты для своих сайтов. Можно оставить автоматический подбор.</p>
+          <hg-connection-picker [disabled]="pending() !== null"
+            [selected]="form.controls.preferredConnectionIds.value" (changed)="selectConnections($event)"/>
+          <small class="form-hint">Аккаунт определяется после входа. Подключения не обязательны для публичных страниц.</small>
+          <a routerLink="/connections" class="text-button">Управление подключениями <hg-icon name="chevron-right"/></a>
+          @if (fieldErrors()['preferredConnectionIds']) {
+            <p class="field-error" role="alert">{{ fieldErrors()['preferredConnectionIds'] }}</p>
+          }
+        </div>
+      </section>
+      <section class="card form-section">
+        <span class="step-number">4</span>
+        <div class="form-step-content">
+          <h2>В каком виде нужен результат</h2>
+          <p class="form-sub">Выбранный вариант будет включён в поручение.</p>
+          <div class="radio-cards output-cards">
+            <label><hg-icon name="grid"/><span><strong>Таблица</strong><small>Строки и столбцы</small></span><input type="radio" formControlName="outputFormat" value="TABLE"/></label>
+            <label><hg-icon name="file"/><span><strong>Отчёт</strong><small>Показать внутри задачи</small></span><input type="radio" formControlName="outputFormat" value="REPORT"/></label>
+            <label><hg-icon name="list"/><span><strong>Текстовый ответ</strong><small>Краткий результат</small></span><input type="radio" formControlName="outputFormat" value="TEXT"/></label>
+          </div>
+        </div>
+      </section>
+      <section class="card form-section">
+        <span class="step-number">5</span>
+        <div class="form-step-content">
+          <h2>Параметры</h2>
+          <p class="form-sub">Дополнительные условия для этого поручения.</p>
+          <label class="confirmation-setting"><hg-icon name="shield"/><span>Подтверждать важные действия<small>Запрашивать отдельное подтверждение перед отправкой, покупкой, оплатой и удалением.</small></span><input class="switch" type="checkbox" formControlName="requireConfirmation"/></label>
+        </div>
+      </section>
+    </div>
+    <aside class="card form-summary">
+      <h2>Краткая информация</h2>
+      <div class="summary-block"><span class="service-mark chatgpt"><hg-icon name="gpt"/></span><div><small>Исполнитель</small><strong>ChatGPT через MCP</strong><small>Действия в вашем браузере</small></div></div>
+      <div class="summary-block"><hg-icon name="clock"/><div><small>Продолжительность</small><strong>Без ограничения времени</strong><small>Тот же браузер до завершения задачи.</small></div></div>
+      <div class="summary-block next-steps"><hg-icon name="tasks"/><div><span>Что произойдёт дальше</span><ol><li>Поручение сохранится в этой задаче</li><li>Вы передадите задачу в ChatGPT</li><li>ChatGPT выполнит действия в браузере</li><li>Результат появится в кабинете</li></ol></div></div>
+      <button type="submit" class="button primary" [disabled]="!canSubmit(mode !== 'refine')"><hg-icon name="play"/>
+        {{ busy() ? 'Сохраняем…' : mode === 'refine' ? 'Сохранить уточнение' : 'Подготовить для ChatGPT' }}
+      </button>
+      @if (mode !== 'refine') {
+        <button type="button" class="button" [disabled]="!canSubmit(false)" (click)="save(false)"><hg-icon name="save"/>Сохранить как черновик</button>
+      }
+      <button type="button" class="text-button" (click)="back()">Отмена</button>
+      <p class="summary-foot"><hg-icon name="info"/><span>Сохранение поручения не запускает браузер. Выполнение начинается после команды из ChatGPT.</span></p>
+    </aside>
+  </form>
+}

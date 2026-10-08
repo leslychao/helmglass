@@ -1,0 +1,440 @@
+@if (task(); as task) {
+  <header class="page-heading detail-heading">
+    <div>
+      <button class="back-link" (click)="back()">‹ К задачам</button>
+      <h1>{{ task.title || 'Задача без названия' }}</h1>
+      <div class="inline-meta">
+        <hg-status [value]="task.outcome || task.status" /><span>{{
+          task.source === 'MCP' ? 'ChatGPT' : 'Веб-интерфейс'
+        }}</span
+        ><span>{{ task.createdAt | date: 'dd.MM.yyyy HH:mm' }}</span>
+      </div>
+    </div>
+    <div class="actions">
+      @if (task.status === 'DRAFT') {
+        <a class="button" [routerLink]="['/tasks', task.id, 'edit']" queryParamsHandling="preserve"
+          >Редактировать</a
+        ><button class="button primary" [disabled]="busy()" (click)="command('PREPARE')">
+          Подготовить</button
+        ><button
+          class="icon-button"
+          aria-label="Удалить черновик"
+          title="Удалить черновик"
+          (click)="deleteDraft()"
+        >
+          ⌫
+        </button>
+      }
+      @if (can('PAUSE')) {
+        <button class="button" [disabled]="busy()" (click)="command('PAUSE')">Ⅱ Пауза</button>
+      }
+      @if (can('RESUME')) {
+        <button class="button primary" [disabled]="busy()" (click)="command('RESUME')">
+          Продолжить
+        </button>
+      }
+      @if (can('AMEND') && task.status !== 'DRAFT') {
+        <a
+          class="button"
+          [routerLink]="['/tasks', task.id, 'refine']"
+          queryParamsHandling="preserve"
+          >Уточнить</a
+        >
+      }
+      @if (can('COPY') || can('STOP')) {
+        <details class="action-menu">
+          <summary class="icon-button" aria-label="Действия с задачей" title="Действия">⋯</summary>
+          <div class="menu-popover">
+            @if (can('COPY')) {
+              <button (click)="command('COPY')">Создать похожую</button>
+            }
+            @if (can('STOP')) {
+              <button class="danger-text" [disabled]="busy()" (click)="command('STOP')">
+                Остановить задачу
+              </button>
+            }
+          </div>
+        </details>
+      }
+    </div>
+  </header>
+  @if (error()) {
+    <div class="error-banner" role="alert">{{ error() }}</div>
+  }
+  @if (task.status === 'WAITING_CHATGPT') {
+    <div class="notice">
+      <strong>Задача готова для ChatGPT</strong>
+      <p>Откройте подключение Helm Glass в ChatGPT и продолжите работу с этой задачей.</p>
+      @if (task.chatUrl) {
+        <a class="button primary" [href]="task.chatUrl" target="_blank" rel="noopener noreferrer"
+          >Открыть ChatGPT ↗</a
+        >
+      }
+    </div>
+  }
+  @if (task.request?.type === 'UNKNOWN_RESULT') {
+    <div class="notice warning">
+      <strong>Исход внешнего действия неизвестен</strong>
+      <p>Проверьте текущее состояние сайта. Задача не повторяет действие автоматически.</p>
+    </div>
+  }
+  <nav class="tabs" aria-label="Раздел задачи">
+    <button
+      [class.active]="tab() === 'overview'"
+      [attr.aria-current]="tab() === 'overview' ? 'page' : null"
+      (click)="query.set({ tab: 'overview' }, false)"
+    >
+      Выполнение</button
+    ><button
+      [class.active]="tab() === 'result'"
+      [attr.aria-current]="tab() === 'result' ? 'page' : null"
+      (click)="query.set({ tab: 'result' }, false)"
+    >
+      Результат
+    </button>
+  </nav>
+  @if (tab() === 'result') {
+    <hg-result [task]="task" />
+  } @else {
+    @if (task.request; as request) {
+      <section class="card request-card" aria-labelledby="request-title">
+        <h2 id="request-title">Нужно ваше участие</h2>
+        <p class="preserve-lines">{{ request.prompt }}</p>
+        @if (can('ANSWER')) {
+          <label class="field"
+            >Ответ<textarea
+              maxlength="20000"
+              rows="3"
+              [ngModel]="answer"
+              (ngModelChange)="answerChanged($event)"
+            ></textarea></label
+          ><button
+            class="button primary"
+            [disabled]="busy() || !answer.trim()"
+            (click)="respond('ANSWER')"
+          >
+            Отправить ответ
+          </button>
+        }
+        @if (can('CHOOSE_CONNECTION')) {
+          @if (request.options.length) {
+            <label class="field"
+              >Подключение<select
+                [ngModel]="selectedConnection"
+                (ngModelChange)="connectionChanged($event)"
+              >
+                <option value="">Выберите вход</option>
+                @for (option of request.options; track option.id) {
+                  <option [value]="option.id">{{ option.label }}</option>
+                }
+              </select></label
+            >
+          } @else if (task.site; as site) {
+            <hg-connection-picker
+              title="Выберите аккаунт сайта"
+              [maximum]="1"
+              [site]="site"
+              status="READY"
+              [disabled]="busy()"
+              [selected]="selectedConnection ? [selectedConnection] : []"
+              (changed)="connectionChanged($event[0] ?? '')"
+            />
+          } @else {
+            <p class="error-banner" role="alert">У задачи не указан сайт для выбора аккаунта.</p>
+          }
+          <button
+            class="button primary"
+            [disabled]="busy() || !selectedConnection || (!request.options.length && !task.site)"
+            (click)="respond('CHOOSE_CONNECTION')"
+          >
+            Использовать подключение
+          </button>
+        }
+        @if (can('CONFIRM')) {
+          @if (request.type === 'UNKNOWN_RESULT') {
+            <label class="field"
+              >Что удалось проверить на сайте<textarea
+                maxlength="4000"
+                rows="3"
+                [ngModel]="answer"
+                (ngModelChange)="answerChanged($event)"
+                placeholder="Укажите наблюдаемый результат, например номер созданной записи."
+              ></textarea>
+            </label>
+          }
+          <div class="actions">
+            <button
+              class="button primary"
+              [disabled]="busy() || (request.type === 'UNKNOWN_RESULT' && !answer.trim())"
+              (click)="respond('CONFIRM')"
+            >
+              {{
+                request.type === 'UNKNOWN_RESULT' ? 'Действие выполнено' : 'Подтвердить действие'
+              }}</button
+            ><button
+              class="button"
+              [disabled]="busy() || (request.type === 'UNKNOWN_RESULT' && !answer.trim())"
+              (click)="respond('REJECT')"
+            >
+              {{ request.type === 'UNKNOWN_RESULT' ? 'Действие не выполнено' : 'Не выполнять' }}
+            </button>
+          </div>
+        }
+        @if (can('BEGIN_LOGIN') && !task.browser?.privateMode) {
+          <button
+            class="button primary"
+            [disabled]="busy()"
+            (click)="
+              command('BEGIN_LOGIN', {
+                viewerId: viewerId,
+                requestId: request.id,
+                requestVersion: request.version,
+              })
+            "
+          >
+            Войти на сайт
+          </button>
+        }
+      </section>
+    }
+    <div class="task-workspace">
+      <div class="browser-and-history" [class.with-history]="historyOpen()">
+        <hg-browser
+          [browser]="task.browser"
+          [role]="controller() && task.browser?.controlOwner === 'USER' ? 'CONTROLLER' : 'VIEWER'"
+          (controlLost)="controller.set(false)"
+        >
+          @if (can('TAKE_CONTROL') && (!controller() || task.browser?.controlOwner !== 'USER')) {
+            <button
+              class="button small"
+              [disabled]="busy()"
+              (click)="command('TAKE_CONTROL', { viewerId: viewerId })"
+            >
+              Взять управление
+            </button>
+          }
+          @if (can('RETURN_CONTROL') && controller()) {
+            <button
+              class="button primary small"
+              [disabled]="busy()"
+              title="Действующие паузы и запросы подтверждения сохранятся"
+              (click)="command('RETURN_CONTROL', { viewerId: viewerId, resume: true })"
+            >
+              Вернуть управление
+            </button>
+          }
+          <button
+            class="icon-button"
+            title="История действий"
+            aria-label="История действий"
+            [attr.aria-expanded]="historyOpen()"
+            (click)="openHistory()"
+          >
+            ☷
+          </button>
+          @if ((can('BEGIN_LOGIN') && !task.browser?.privateMode) || can('END_SESSION')) {
+            <details class="action-menu">
+              <summary class="icon-button" aria-label="Действия браузера" title="Действия браузера">
+                ⋯
+              </summary>
+              <div class="menu-popover">
+                @if (can('BEGIN_LOGIN') && !task.browser?.privateMode) {
+                  <button
+                    [disabled]="busy()"
+                    (click)="command('BEGIN_LOGIN', { viewerId: viewerId })"
+                  >
+                    Войти на сайт
+                  </button>
+                }
+                @if (can('END_SESSION')) {
+                  <button class="danger-text" [disabled]="busy()" (click)="command('END_SESSION')">
+                    Завершить сессию…
+                  </button>
+                }
+              </div>
+            </details>
+          }
+          <ng-container browserHistory>
+            @if (historyOpen()) {
+              <aside
+                class="history-panel"
+                aria-label="История действий"
+                (keydown.escape)="historyOpen.set(false)"
+              >
+                <header>
+                  <h2>История</h2>
+                  <button
+                    class="icon-button"
+                    aria-label="Закрыть историю"
+                    title="Закрыть"
+                    (click)="historyOpen.set(false)"
+                  >
+                    ×
+                  </button>
+                </header>
+                <div class="history-filters">
+                  <input
+                    hgSearch
+                    aria-label="Поиск истории"
+                    placeholder="Найти событие"
+                    [value]="historySearch()"
+                    (searchChange)="filterHistory($event, historyTypes())"
+                  /><hg-multi-filter
+                    label="Тип события"
+                    [options]="historyOptions"
+                    [value]="historyTypes()"
+                    (changed)="filterHistory(historySearch(), $event)"
+                  />
+                </div>
+                @if (newEvents()) {
+                  <button class="notice" (click)="latestHistory()">Есть новые события ↑</button>
+                }
+                @if (historyError()) {
+                  <p class="error-banner" role="alert">{{ historyError() }}</p>
+                }
+                @if (historyLoading() && !history()) {
+                  <p class="loading" role="status">Загружаем историю…</p>
+                } @else if (history() && !history()?.items?.length) {
+                  <p class="empty-small">События не найдены.</p>
+                }
+                <ol class="history-list">
+                  @for (event of history()?.items; track event.id) {
+                    <li>
+                      <time>{{ event.createdAt | date: 'HH:mm:ss' }}</time
+                      ><strong>{{ event.title }}</strong>
+                      @if (event.detail) {
+                        <p>{{ event.detail }}</p>
+                      }
+                    </li>
+                  }
+                </ol>
+                @if (history(); as data) {
+                  <hg-pager
+                    [page]="data.page"
+                    [size]="10"
+                    [total]="data.total"
+                    [fixed]="true"
+                    (pageChange)="historyPage.set($event)"
+                  />
+                }
+              </aside>
+            }
+          </ng-container>
+        </hg-browser>
+      </div>
+      <aside class="task-sidebar">
+        <section class="card">
+          <h2>Текущее состояние</h2>
+          <hg-status [value]="task.status" />
+          @if (task.usage.incomplete) {
+            <p class="notice warning">
+              Измерения пока неполные; неизвестные значения не считаются нулём.
+            </p>
+          }
+          <p>
+            {{
+              task.request?.prompt ||
+                (task.waitReason ? (task.waitReason | label) : task.summary) ||
+                'Изменения появятся здесь автоматически.'
+            }}
+          </p>
+          <dl class="metrics">
+            <div>
+              <dt>Браузер</dt>
+              <dd>{{ task.usage.browserSeconds | duration }}</dd>
+            </div>
+            <div>
+              <dt>Выполнение</dt>
+              <dd>{{ task.usage.executionSeconds | duration }}</dd>
+            </div>
+            <div>
+              <dt>Управление человеком</dt>
+              <dd>{{ task.usage.manualSeconds | duration }}</dd>
+            </div>
+            <div>
+              <dt>Медиа</dt>
+              <dd>{{ task.usage.mediaSeconds | duration }}</dd>
+            </div>
+          </dl>
+        </section>
+        <section class="card">
+          <h2>Параметры</h2>
+          <dl>
+            <dt>Сайт</dt>
+            <dd>{{ task.site || 'Не задан' }}</dd>
+            <dt>Редакция инструкции</dt>
+            <dd>{{ task.instructionRevision }}</dd>
+            <dt>Обновлена</dt>
+            <dd>{{ task.updatedAt | date: 'dd.MM.yyyy HH:mm' }}</dd>
+          </dl>
+        </section>
+      </aside>
+    </div>
+    @if (can('FINISH_LOGIN') && controller()) {
+      <section class="card login-actions">
+        <h2>Завершить защищённый вход</h2>
+        <p>Перед завершением убедитесь, что сайт показывает нужную учётную запись.</p>
+        <p>
+          Выберите подключение для сохранения. Для другого аккаунта создайте отдельное подключение.
+        </p>
+        <div class="actions">
+          <hg-connection-picker
+            [maximum]="1"
+            title="Куда сохранить вход"
+            [selected]="loginConnections()"
+            [disabled]="busy()"
+            (changed)="loginConnectionChanged($event)"
+          />
+          <button class="button" [disabled]="busy()" (click)="createLoginConnection()">
+            Создать подключение
+          </button>
+        </div>
+        <div class="actions">
+          <button
+            class="button primary"
+            [disabled]="busy() || !loginConnections().length"
+            (click)="
+              command('FINISH_LOGIN', { viewerId: viewerId, saveConnection: true, resume: true })
+            "
+          >
+            Сохранить вход и продолжить</button
+          ><button
+            class="button"
+            [disabled]="busy() || !loginConnections().length"
+            (click)="
+              command('FINISH_LOGIN', { viewerId: viewerId, saveConnection: true, resume: false })
+            "
+          >
+            Сохранить вход и оставить на паузе</button
+          ><button
+            class="text-button"
+            [disabled]="busy()"
+            (click)="
+              command('FINISH_LOGIN', { viewerId: viewerId, saveConnection: false, resume: true })
+            "
+          >
+            Продолжить без сохранения
+          </button>
+        </div>
+      </section>
+    }
+    <details class="card task-parameters">
+      <summary>Исходная задача и условия</summary>
+      <p class="preserve-lines">{{ task.goal }}</p>
+      <dl>
+        <dt>Начальный адрес</dt>
+        <dd>{{ task.startUrl || 'Не задан' }}</dd>
+        <dt>Формат результата</dt>
+        <dd>{{ task.outputFormat | label }}</dd>
+        <dt>Подтверждения</dt>
+        <dd>{{ task.requireConfirmation ? 'Включены' : 'По обязательным правилам действия' }}</dd>
+      </dl>
+    </details>
+  }
+} @else if (loading()) {
+  <div class="loading" role="status">Загружаем задачу…</div>
+} @else {
+  <div class="error-banner" role="alert">
+    {{ error() }}<button class="button" (click)="load()">Повторить</button>
+  </div>
+}

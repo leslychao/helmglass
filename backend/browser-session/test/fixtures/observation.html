@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bounded observation</title>
+<h1>Bounded observation fixture</h1>
+<input aria-label="field">
+<a>Oversized destination</a>
+<audio preload="none"><source src="https://example.com/known-original.mp3" type="audio/mpeg"></audio>
+<audio preload="none"><source></audio>
+<script>
+  document.title = 'Title'.repeat(1000);
+  const input = document.querySelector('input');
+  input.id = 'identifier'.repeat(1000); input.name = 'name'.repeat(1000);
+  input.setAttribute('type', 'unrecognized'.repeat(1000));
+  input.setAttribute('aria-label', 'label'.repeat(2000));
+  document.querySelector('a').href = 'https://example.com/' + 'destination'.repeat(1000);
+  document.querySelectorAll('audio').forEach(audio => audio.setAttribute('aria-label', 'media'.repeat(2000)));
+  document.querySelectorAll('source')[1].src = 'https://example.com/' + 'source'.repeat(2000) + '.mp3';
+  history.replaceState(null, '', '#' + 'location'.repeat(2000));
+</script>

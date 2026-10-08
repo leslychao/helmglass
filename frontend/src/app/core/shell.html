@@ -1,0 +1,180 @@
+<a href="#main-content" class="skip-link">Перейти к содержимому</a>
+<div class="application-shell">
+  @if (mobile()) {
+    <div class="drawer-shade" (click)="closeMenu()"></div>
+  }
+  <aside
+    class="sidebar"
+    [class.mobile-open]="mobile()"
+    (keydown.escape)="closeMenu()"
+    [cdkTrapFocus]="mobile()"
+    [cdkTrapFocusAutoCapture]="mobile()"
+  >
+    @if (mobile()) {
+      <button
+        class="icon-button mobile-close"
+        aria-label="Закрыть меню"
+        title="Закрыть меню"
+        (click)="closeMenu()"
+      >
+        ×
+      </button>
+    }
+    <a routerLink="/tasks" class="brand"
+      ><img src="helm-logo.png" width="38" height="38" alt="" /><span
+        >Helm Glass<small>Рабочее пространство</small></span
+      ></a
+    >
+    <div class="sidebar-label">РАБОТА</div>
+    <nav aria-label="Основная навигация">
+      <a routerLink="/tasks" routerLinkActive="active" ariaCurrentWhenActive="page"
+        ><span aria-hidden="true">▤</span>Задачи</a
+      >
+      <a routerLink="/connections" routerLinkActive="active" ariaCurrentWhenActive="page"
+        ><span aria-hidden="true">⌘</span>Подключения</a
+      >
+      <a routerLink="/usage" routerLinkActive="active" ariaCurrentWhenActive="page"
+        ><span aria-hidden="true">◷</span>Использование</a
+      >
+      @if (session.admin) {
+        <div class="sidebar-label">УПРАВЛЕНИЕ</div>
+        <a routerLink="/admin" routerLinkActive="active" ariaCurrentWhenActive="page"
+          ><span aria-hidden="true">⚙</span>Администрирование</a
+        >
+      }
+    </nav>
+    <div class="sidebar-bottom">
+      <p>Задачи в браузере.<br />Результат под вашим контролем.</p>
+      <button
+        class="sidebar-logout text-button"
+        [disabled]="session.signingOut()"
+        (click)="logout()"
+      >
+        {{ session.logoutPending() ? 'Повторить завершение выхода' : 'Выйти из кабинета' }}
+      </button>
+      <a routerLink="/profile" routerLinkActive="active" class="account-link"
+        ><span class="avatar">{{ session.user()?.name?.slice(0, 1) }}</span
+        ><span
+          ><strong>{{ session.user()?.name }}</strong
+          ><small>{{ session.user()?.email }}</small></span
+        ></a
+      >
+    </div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar">
+      <button
+        id="mobile-navigation-button"
+        class="icon-button mobile-toggle"
+        aria-label="Открыть меню"
+        title="Меню"
+        [attr.aria-expanded]="mobile()"
+        (click)="mobile.set(!mobile())"
+      >
+        ☰</button
+      ><span class="topbar-label">Рабочее пространство</span><span class="spacer"></span>
+      <span class="sync-indicator" [class.offline]="live.state() !== 'ready'" role="status">{{
+        live.state() === 'ready'
+          ? 'Обновлено'
+          : live.state() === 'unavailable'
+            ? 'Обновления недоступны'
+            : 'Синхронизация…'
+      }}</span>
+      <div class="notification-owner">
+        <button
+          #bell
+          class="icon-button bell"
+          aria-label="Уведомления"
+          title="Уведомления"
+          [attr.aria-expanded]="notificationsOpen()"
+          (click)="notificationsOpen.set(!notificationsOpen())"
+        >
+          ♧
+          @if (notifications()?.total) {
+            <b>{{ notifications()?.total }}</b>
+          }
+        </button>
+        @if (notificationsOpen()) {
+          <section
+            class="notification-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Уведомления"
+            cdkTrapFocus
+            [cdkTrapFocusAutoCapture]="true"
+            (keydown.escape)="closeNotifications()"
+          >
+            <header>
+              <h2 #notificationHeading tabindex="-1">Уведомления</h2>
+              <button
+                class="icon-button"
+                aria-label="Закрыть уведомления"
+                title="Закрыть"
+                (click)="closeNotifications()"
+              >
+                ×
+              </button>
+            </header>
+            @if (notificationError()) {
+              <p class="error-banner" role="alert">
+                {{ notificationError() }}<button (click)="loadNotifications()">Повторить</button>
+              </p>
+            }
+            @if (notifications()?.items?.length) {
+              <div class="notification-items">
+                @for (item of notifications()?.items; track item.id) {
+                  <button class="notification-item" [disabled]="reading()" (click)="read(item)">
+                    <strong>{{ item.title }}</strong
+                    ><hg-status [value]="item.status" /><time>{{
+                      item.createdAt | date: 'dd.MM HH:mm'
+                    }}</time>
+                  </button>
+                }
+              </div>
+              <button class="notification-read-all" [disabled]="reading()" (click)="readAll()">
+                Пометить все как прочитанные
+              </button>
+            } @else if (notifications()) {
+              <div class="empty-small">Новых уведомлений нет</div>
+            } @else {
+              <div class="empty-small" role="status">Загрузка…</div>
+            }
+          </section>
+        }
+      </div>
+      <a routerLink="/profile" class="avatar avatar-small" title="Профиль" aria-label="Профиль">{{
+        session.user()?.name?.slice(0, 1)
+      }}</a>
+    </header>
+    @if (api.authenticationRequired()) {
+      <div class="auth-banner" role="alert">
+        Сессия входа завершилась. Введённые данные сохранены.<button
+          class="button small"
+          (click)="signIn()"
+        >
+          Войти снова
+        </button>
+      </div>
+    }
+    @if (live.state() === 'unavailable') {
+      <div class="notice" role="alert">
+        Данные могут быть неактуальны.<button class="text-button" (click)="live.reconnect()">
+          Восстановить обновления
+        </button>
+      </div>
+    }
+    @if (error()) {
+      <div class="error-banner" role="alert">{{ error() }}</div>
+    }
+    @if (session.refreshError() && !api.authenticationRequired()) {
+      <div class="notice warning" role="alert">{{ session.refreshError() }}</div>
+    }
+    @if (navigationFailed()) {
+      <div class="notice warning" role="alert">
+        Не удалось открыть страницу. Проверьте соединение или загрузите новую версию приложения.
+        <button class="button small" (click)="reloadApplication()">Обновить приложение</button>
+      </div>
+    }
+    <main #main id="main-content" class="main-content" tabindex="-1"><router-outlet /></main>
+  </div>
+</div>
