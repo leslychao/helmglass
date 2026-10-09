@@ -17,6 +17,7 @@ import ru.helmglass.api.Contracts;
 import ru.helmglass.api.Database;
 import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.artifacts.ArtifactService;
+import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.browsers.BrowserService;
 import ru.helmglass.api.browsers.WorkerClient;
@@ -50,6 +51,7 @@ public class ActionService {
   private final JdbcClient jdbc;
   private final JsonSupport json;
   private final TaskService tasks;
+  private final TaskStepService steps;
   private final BrowserService browsers;
   private final WorkerClient worker;
   private final ArtifactService artifacts;
@@ -61,6 +63,7 @@ public class ActionService {
       JdbcClient jdbc,
       JsonSupport json,
       TaskService tasks,
+      TaskStepService steps,
       BrowserService browsers,
       WorkerClient worker,
       ArtifactService artifacts,
@@ -70,6 +73,7 @@ public class ActionService {
     this.jdbc = jdbc;
     this.json = json;
     this.tasks = tasks;
+    this.steps = steps;
     this.browsers = browsers;
     this.worker = worker;
     this.artifacts = artifacts;
@@ -91,6 +95,8 @@ public class ActionService {
         || json.write(action.arguments()).length() > 65536) {
       throw ApiException.invalid("action", "Некорректная команда браузера.");
     }
+    String confirmation = action.confirmationPrompt() == null ? null
+        : TaskService.required(action.confirmationPrompt(), "confirmationPrompt", 4000);
     var previous =
         jdbc.sql("SELECT id FROM operations WHERE id=:id AND owner_id=:owner")
             .param("id", action.operationId())
@@ -100,14 +106,17 @@ public class ActionService {
     if (previous.isPresent()) {
       boolean same =
           jdbc.sql(
-                  "SELECT task_id=:task AND type=:type AND arguments=CAST(:arguments AS jsonb) AND"
+                  "SELECT task_id=:task AND step_id IS NOT DISTINCT FROM CAST(:step AS uuid) AND type=:type AND arguments=CAST(:arguments AS jsonb) AND"
                       + " instruction_revision=:revision AND requested_control_epoch IS NOT"
-                      + " DISTINCT FROM CAST(:epoch AS bigint) FROM operations WHERE id=:id")
+                      + " DISTINCT FROM CAST(:epoch AS bigint) AND instruction_snapshot->>'confirmationPrompt'"
+                      + " IS NOT DISTINCT FROM CAST(:confirmation AS text) FROM operations WHERE id=:id")
               .param("task", taskId)
+              .param("step", action.stepId())
               .param("type", action.type())
               .param("arguments", json.write(action.arguments()))
               .param("revision", action.instructionRevision())
               .param("epoch", action.controlEpoch())
+              .param("confirmation", confirmation)
               .param("id", action.operationId())
               .query(Boolean.class)
               .single();
@@ -144,6 +153,7 @@ public class ActionService {
             || task.browser().privateMode())) {
       throw ApiException.conflict("CONTROL_NOT_OWNED", "Браузером управляет пользователь.");
     }
+    steps.requireRunning(owner, taskId, action.stepId());
     boolean mutating = !READ_ONLY.contains(action.type());
     if ("captureAudio".equals(action.type())) {
       validateAudioContext(action.arguments().path("sourceContext"));
@@ -152,18 +162,22 @@ public class ActionService {
     instruction.put("revision", task.instructionRevision());
     instruction.put("title", task.title());
     instruction.put("goal", task.goal());
+    if (confirmation != null) {
+      instruction.put("confirmationPrompt", confirmation);
+    }
     if ("captureAudio".equals(action.type())) {
       instruction.put("sourceContext", action.arguments().path("sourceContext"));
     }
-    String state = task.requireConfirmation() && mutating ? "AWAITING_CONFIRMATION" : "ACCEPTED";
+    String state = confirmation == null ? "ACCEPTED" : "AWAITING_CONFIRMATION";
     jdbc.sql(
             """
-        INSERT INTO operations(id,owner_id,task_id,type,arguments,status,mutating,instruction_revision,control_epoch,requested_control_epoch,instruction_snapshot)
-        VALUES (:id,:owner,:task,:type,CAST(:arguments AS jsonb),:status,:mutating,:revision,:epoch,:epoch,CAST(:instruction AS jsonb))
+        INSERT INTO operations(id,owner_id,task_id,step_id,type,arguments,status,mutating,instruction_revision,control_epoch,requested_control_epoch,instruction_snapshot)
+        VALUES (:id,:owner,:task,:step,:type,CAST(:arguments AS jsonb),:status,:mutating,:revision,:epoch,:epoch,CAST(:instruction AS jsonb))
 """)
         .param("id", action.operationId())
         .param("owner", owner)
         .param("task", taskId)
+        .param("step", action.stepId())
         .param("type", action.type())
         .param("arguments", json.write(action.arguments()))
         .param("status", state)
@@ -173,17 +187,7 @@ public class ActionService {
         .param("instruction", json.write(instruction))
         .update();
     if ("AWAITING_CONFIRMATION".equals(state)) {
-      String preview = json.write(action.arguments());
-      tasks.request(
-          owner,
-          taskId,
-          "CONFIRMATION",
-          "Подтвердите действие ChatGPT: "
-              + action.type()
-              + "\n"
-              + preview.substring(0, Math.min(preview.length(), 4000)),
-          action.operationId(),
-          null);
+      tasks.request(owner, taskId, "CONFIRMATION", confirmation, action.operationId(), null);
     } else {
       ensureBrowser(owner, task);
     }
@@ -206,6 +210,29 @@ public class ActionService {
       }
       TaskService.required(question.asString(), "questions", 4000);
     }
+  }
+
+  @Transactional
+  public Contracts.Task respond(Actor actor, String chat, TaskService.ElicitationClaim claim,
+      String command, String text, UUID connection) {
+    Contracts.Task task = tasks.respond(actor, chat, claim, command, text, connection);
+    if ("CHOOSE_CONNECTION".equals(command)) {
+      return selectConnection(actor.id(), task.id(), task.instructionRevision(), connection, null);
+    }
+    return prepareBrowser(actor.id(), task.id());
+  }
+
+  @Transactional
+  public Contracts.Task prepareBrowser(UUID owner, UUID taskId) {
+    identity.requireActive(owner);
+    tasks.lockOwner(owner);
+    tasks.lockTask(owner, taskId);
+    Contracts.Task task = tasks.get(owner, taskId);
+    if (task.request() == null && !TaskService.TERMINAL.contains(task.status())
+        && !Set.of("DRAFT", "PAUSED", "PAUSING", "STOPPING").contains(task.status())) {
+      ensureBrowser(owner, task);
+    }
+    return tasks.get(owner, taskId);
   }
 
   private void ensureBrowser(UUID owner, Contracts.Task task) {
@@ -285,31 +312,19 @@ public class ActionService {
     if (connection == null && task.preferredConnectionIds().isEmpty()) {
       var matches =
           jdbc.sql(
-                  "SELECT id FROM connections WHERE owner_id=:owner AND site=:site AND deleted_at"
-                      + " IS NULL AND status='READY' ORDER BY last_used_at DESC NULLS LAST,id LIMIT"
-                      + " 2")
+                  "SELECT id,name FROM connections WHERE owner_id=:owner AND site=:site AND deleted_at"
+                      + " IS NULL AND status='READY' ORDER BY name,id LIMIT 50")
               .param("owner", owner)
               .param("site", task.site())
-              .query(UUID.class)
+              .query((row, index) -> Map.of("id", row.getObject("id", UUID.class).toString(),
+                  "label", row.getString("name")))
               .list();
       if (matches.size() == 1) {
-        connection = matches.getFirst();
+        connection = UUID.fromString(matches.getFirst().get("id"));
       } else if (matches.size() > 1) {
-        var used =
-            jdbc.sql(
-                    "SELECT id FROM connections WHERE owner_id=:owner AND site=:site AND deleted_at"
-                        + " IS NULL AND status='READY' AND last_used_at IS NOT NULL ORDER BY"
-                        + " last_used_at DESC LIMIT 1")
-                .param("owner", owner)
-                .param("site", task.site())
-                .query(UUID.class)
-                .optional();
-        if (used.isPresent()) {
-          connection = used.get();
-        } else {
-          tasks.request(owner, task.id(), "ACCOUNT_CHOICE", "Выберите аккаунт сайта.", null, null);
-          return;
-        }
+        tasks.request(owner, task.id(), "ACCOUNT_CHOICE", "Выберите аккаунт сайта.", null,
+            json.tree(matches));
+        return;
       }
     }
     if (connection != null) {
@@ -340,12 +355,51 @@ public class ActionService {
 
   @Transactional
   public Contracts.Task selectConnection(
-      UUID owner, UUID taskId, long instructionRevision, UUID connectionId) {
-    Contracts.Task task = tasks.selectConnection(owner, taskId, instructionRevision, connectionId);
-    if (task.browser() == null || Set.of("CLOSED", "LOST").contains(task.browser().status())) {
+      UUID owner, UUID taskId, long instructionRevision, UUID connectionId, String confirmationPrompt) {
+    Contracts.Task task = tasks.selectConnection(owner, taskId, instructionRevision, connectionId, confirmationPrompt);
+    boolean ready = jdbc.sql("SELECT status='READY' FROM connections WHERE id=:id AND owner_id=:owner")
+        .param("id", connectionId).param("owner", owner).query(Boolean.class).single();
+    if (!ready && confirmationPrompt == null) {
+      return browsers.requireLogin(owner, taskId, task.version());
+    }
+    if (!"PAUSED".equals(task.status())
+        && (task.browser() == null || Set.of("CLOSED", "LOST").contains(task.browser().status()))) {
       ensureBrowser(owner, task);
     }
     return tasks.get(owner, taskId);
+  }
+
+  public Contracts.Page<Contracts.OperationSummary> list(
+      UUID owner, UUID task, UUID step, int page) {
+    tasks.get(owner, task);
+    if (page < 1 || page > 1000000) {
+      throw ApiException.invalid("page", "Недопустимая страница операций.");
+    }
+    String filter = "owner_id=:owner AND task_id=:task";
+    Map<String, Object> parameters = new HashMap<>();
+    parameters.put("owner", owner);
+    parameters.put("task", task);
+    if (step != null) {
+      boolean belongs = jdbc.sql("SELECT EXISTS(SELECT 1 FROM task_steps"
+              + " WHERE id=:step AND task_id=:task AND owner_id=:owner)")
+          .param("step", step).param("task", task).param("owner", owner)
+          .query(Boolean.class).single();
+      if (!belongs) {
+        throw ApiException.notFound();
+      }
+      filter += " AND step_id=:step";
+      parameters.put("step", step);
+    }
+    long total = jdbc.sql("SELECT count(*) FROM operations WHERE " + filter)
+        .params(parameters).query(Long.class).single();
+    var items = jdbc.sql("SELECT id,task_id,step_id,type,status,created_at FROM operations WHERE "
+            + filter + " ORDER BY created_at DESC,id DESC LIMIT 10 OFFSET :offset")
+        .params(parameters).param("offset", (long) (page - 1) * 10)
+        .query((row, index) -> new Contracts.OperationSummary(row.getObject("id", UUID.class),
+            row.getObject("task_id", UUID.class), row.getObject("step_id", UUID.class),
+            row.getString("type"), row.getString("status"), Database.instant(row, "created_at")))
+        .list();
+    return new Contracts.Page<>(items, total, page, 10);
   }
 
   public Contracts.Operation result(UUID owner, UUID id) {
@@ -375,6 +429,7 @@ public class ActionService {
                 new Contracts.Operation(
                     id,
                     row.getObject("task_id", UUID.class),
+                    row.getObject("step_id", UUID.class),
                     row.getString("type"),
                     row.getString("status"),
                     json.read(row.getString("result")),
@@ -460,7 +515,9 @@ ORDER BY o.created_at LIMIT 1
       return null;
     }
     Contracts.Task task = tasks.get(candidate.owner(), candidate.task());
-    if (task.request() != null && !"UNKNOWN_RESULT".equals(task.request().type())) {
+    if (TaskService.TERMINAL.contains(task.status())
+        || Set.of("DRAFT", "PAUSED", "PAUSING", "STOPPING").contains(task.status())
+        || task.request() != null && !"UNKNOWN_RESULT".equals(task.request().type())) {
       return null;
     }
     ensureBrowser(candidate.owner(), task);
@@ -672,6 +729,9 @@ ORDER BY o.created_at LIMIT 1
           }
           if ("SUCCEEDED".equals(status)) {
             browsers.recordSuccessfulUse(operation.owner(), operation.session());
+            if (!Set.of("applyConnection", "screenshot").contains(operation.type())) {
+              browsers.refreshProfile(operation.owner(), operation.session());
+            }
           }
           jdbc.sql(
                   "UPDATE usage_intervals SET ended_at=now(),incomplete=incomplete OR :unknown"
@@ -680,6 +740,9 @@ ORDER BY o.created_at LIMIT 1
               .param("session", operation.session())
               .update();
           Contracts.Task task = tasks.get(operation.owner(), operation.task());
+          if ("UNKNOWN".equals(status)) {
+            steps.operationUnknown(operation.owner(), operation.task(), operation.id());
+          }
           tasks.history(
               operation.owner(), operation.task(), "ACTION_" + status, operation.type(), message);
           if ("UNKNOWN".equals(status)
@@ -740,6 +803,7 @@ ORDER BY o.created_at LIMIT 1
               }
             }
           }
+          tasks.settleStop(operation.owner(), operation.task());
           events.emit(operation.owner(), "operation", operation.id(), 1);
         });
   }

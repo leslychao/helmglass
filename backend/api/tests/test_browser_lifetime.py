@@ -30,7 +30,7 @@ class BrowserLifetimeTest(unittest.TestCase):
         client = identity.client(); client.login_web(); client.login_mcp()
         error, presentation, _ = client.tool("tasks.create", {"operationKey": str(uuid.uuid4()),
             "task": {"title": "Browser lifetime contract", "goal": "Preserve private and paused page state",
-                     "startUrl": fixture, "requireConfirmation": False, "prepare": True}})
+                     "startUrl": fixture, "prepare": True}})
         self.assertFalse(error); task_id = presentation["task"]["id"]
 
         def current():
@@ -51,7 +51,7 @@ class BrowserLifetimeTest(unittest.TestCase):
                       "instructionRevision": task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"] = task["browser"]["controlEpoch"]
-            error, result, _ = client.tool("browser.execute", {"taskId": task_id, "action": action})
+            error, result, _ = client.execute_in_scenario_step({"taskId": task_id, "action": action})
             return error, result, action["operationId"]
 
         def completed(kind, arguments):

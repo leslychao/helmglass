@@ -39,6 +39,7 @@ import ru.helmglass.api.connections.ConnectionService;
 import ru.helmglass.api.events.EventService;
 import ru.helmglass.api.events.NotificationService;
 import ru.helmglass.api.tasks.TaskService;
+import ru.helmglass.api.tasks.TaskStepService;
 import ru.helmglass.api.usage.UsageService;
 import tools.jackson.databind.JsonNode;
 
@@ -47,6 +48,7 @@ import tools.jackson.databind.JsonNode;
 public class ApiController {
   private final Identity identity;
   private final TaskService tasks;
+  private final TaskStepService steps;
   private final BrowserService browsers;
   private final ConnectionService connections;
   private final NotificationService notifications;
@@ -63,6 +65,7 @@ public class ApiController {
   public ApiController(
       Identity identity,
       TaskService tasks,
+      TaskStepService steps,
       BrowserService browsers,
       ConnectionService connections,
       NotificationService notifications,
@@ -77,6 +80,7 @@ public class ApiController {
       @Value("${helm.public-url}") String publicUrl) {
     this.identity = identity;
     this.tasks = tasks;
+    this.steps = steps;
     this.browsers = browsers;
     this.connections = connections;
     this.notifications = notifications;
@@ -188,13 +192,17 @@ public class ApiController {
       @PathVariable UUID id,
       @RequestHeader("Idempotency-Key") String key,
       @RequestBody Contracts.TaskCommand input) {
-    UUID owner = web().id();
+    Actor actor = web();
+    UUID owner = actor.id();
     return command(
         owner,
         key,
         "tasks:" + id,
         input,
         () -> {
+          if ("OPEN_BROWSER".equals(input.type())) {
+            return browsers.openTaskBrowser(owner, id, input.expectedVersion());
+          }
           if (input.type() != null
               && List.of("TAKE_CONTROL", "RETURN_CONTROL", "BEGIN_LOGIN", "FINISH_LOGIN")
                   .contains(input.type())) {
@@ -212,9 +220,7 @@ public class ApiController {
                   case "RETURN_CONTROL" -> "RETURN";
                   default -> input.type();
                 };
-            browsers.control(
-                owner,
-                task.browser().id(),
+            var control =
                 new Contracts.ControlInput(
                     type,
                     input.viewerId(),
@@ -222,10 +228,15 @@ public class ApiController {
                     input.saveConnection(),
                     input.connectionId(),
                     input.accountLabel(),
-                    input.accountSubject()));
+                    input.accountSubject());
+            if ("FINISH_LOGIN".equals(type)) {
+              connections.finishTaskLogin(owner, task.browser().id(), control);
+            } else {
+              browsers.control(owner, task.browser().id(), control);
+            }
             return tasks.get(owner, id);
           }
-          return tasks.command(owner, id, input);
+          return tasks.command(actor, id, input);
         });
   }
 
@@ -233,6 +244,11 @@ public class ApiController {
   Object deleteDraft(@PathVariable UUID id, @RequestHeader("Idempotency-Key") String key) {
     UUID owner = web().id();
     return command(owner, key, "tasks:delete:" + id, Map.of(), () -> tasks.deleteDraft(owner, id));
+  }
+
+  @GetMapping("/tasks/{id}/steps")
+  Object steps(@PathVariable UUID id, @RequestParam MultiValueMap<String, String> values) {
+    return steps.list(web().id(), id, values);
   }
 
   @GetMapping("/tasks/{id}/history")
@@ -326,6 +342,16 @@ public class ApiController {
         owner, key, "browsers:control:" + id, input, () -> browsers.control(owner, id, input));
   }
 
+  @PostMapping("/browser-sessions/{id}/login")
+  Object browserLogin(
+      @PathVariable UUID id,
+      @RequestHeader("Idempotency-Key") String key,
+      @RequestBody Contracts.ControlInput input) {
+    UUID owner = web().id();
+    return command(owner, key, "browsers:login:" + id, input,
+        () -> connections.sessionLogin(owner, id, input));
+  }
+
   @GetMapping("/artifacts/{id}/download")
   ResponseEntity<StreamingResponseBody> download(@PathVariable UUID id) {
     UUID owner = web().id();
@@ -377,7 +403,10 @@ public class ApiController {
         query.getFirst("timezone"),
         daysPage,
         sitesPage,
-        pageSize);
+        pageSize,
+        query.getFirst("sitesPageSize") == null ? pageSize : Integer.parseInt(query.getFirst("sitesPageSize")),
+        query.getFirst("sitesSort"),
+        !"desc".equals(query.getFirst("sitesDirection")));
   }
 
   @GetMapping(value = "/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)

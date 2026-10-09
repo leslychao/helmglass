@@ -4,8 +4,11 @@ This check never deploys or restarts infrastructure. It prints READY after closi
 its browser and retains the fixture credentials only in process memory.
 """
 
+import base64
 import hashlib
+import json
 import os
+from pathlib import Path
 import subprocess
 import time
 import unittest
@@ -31,30 +34,68 @@ class ApplicationPersistenceTest(unittest.TestCase):
             text=True, capture_output=True, timeout=15)
         return result.stdout.strip() if result.returncode == 0 else None
 
+    def browser_action(self, task, kind, arguments=None):
+        status, current = self.client.api('/api/tasks/' + task['id'])
+        self.assertEqual(200, status)
+        operation = str(uuid.uuid4())
+        error, receipt, _ = self.client.execute_in_scenario_step({'taskId': task['id'], 'action': {
+            'operationId': operation, 'type': kind, 'arguments': arguments or {},
+            'instructionRevision': current['instructionRevision'],
+            'controlEpoch': current['browser']['controlEpoch']}})
+        self.assertFalse(error, receipt)
+        receipt = self.wait_operation(operation, self.client)
+        self.assertEqual('SUCCEEDED', receipt['status'], receipt)
+        return receipt['result']
+
+    def login_control(self, task, kind, viewer):
+        self.command(task, kind, viewerId=viewer, accountLabel='Synthetic persisted account',
+                     accountSubject='helm-credential-test')
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            status, current = self.client.api('/api/tasks/' + task['id'])
+            self.assertEqual(200, status)
+            if current['browser']['controlOwner'] != 'TRANSFERRING':
+                self.assertIsNone(current['browser']['profileSaveError'])
+                self.assertEqual(kind == 'BEGIN_LOGIN', current['browser']['privateMode'])
+                return current
+            time.sleep(.2)
+        self.fail('Protected control transition was not acknowledged')
+
     def test_saved_application_data_survives_ordinary_deployment(self):
         self.assertEqual("1",os.environ.get("HELM_TEST_WAIT_DEPLOY"),
                          "This check requires an explicitly coordinated ordinary dev deployment")
         self.client.login_mcp()
+        fixtures = Path(__file__).resolve().parents[2] / 'browser-session' / 'test' / 'fixtures'
+        profile_url = 'https://httpbin.org/base64/' + base64.urlsafe_b64encode(
+            (fixtures / 'profile-lifetime.html').read_bytes()).decode()
+        credential_url = 'https://httpbin.org/base64/' + base64.urlsafe_b64encode(
+            (fixtures / 'credentials.html').read_bytes()).decode()
         creation={"operationKey":str(uuid.uuid4()),"task":{
             "title":"Disposable deployment persistence","goal":"Keep original persisted application data",
-            "startUrl":"https://example.com","prepare":True,"requireConfirmation":False,"outputFormat":"TABLE"}}
+            "startUrl":profile_url,"prepare":True,"outputFormat":"TABLE"}}
         error,state,_=self.client.tool("tasks.create",creation)
         self.assertFalse(error,state)
         task=state["task"]
         task_id=task["id"]
+        self.browser_action(task, 'click', {'selector': '#account-a'})
         operation=str(uuid.uuid4())
-        error,receipt,_=self.client.tool("browser.execute",{"taskId":task_id,"action":{
-            "operationId":operation,"type":"screenshot","arguments":{},"instructionRevision":task["instructionRevision"]}})
+        error,receipt,_=self.client.execute_in_scenario_step({"taskId":task_id,"action":{
+            "operationId":operation,"type":"screenshot","arguments":{},"instructionRevision":task["instructionRevision"],
+            "controlEpoch":task["browser"]["controlEpoch"]}})
         self.assertFalse(error,receipt)
         receipt=self.wait_operation(operation,self.client)
         self.assertEqual("SUCCEEDED",receipt["status"],receipt)
+        viewer = str(uuid.uuid4())
+        task = self.login_control(task, 'BEGIN_LOGIN', viewer)
+        task = self.login_control(task, 'FINISH_LOGIN', viewer)
         error,result,_=self.client.tool("results.publish",{
             "taskId":task_id,"instructionRevision":task["instructionRevision"],"operationKey":str(uuid.uuid4()),
             "result":{"summary":"Persisted original result","limitations":[],
-                      "sources":[{"title":"Public starting page","url":"https://example.com"}],
+                      "sources":[{"title":"Synthetic profile fixture","url":profile_url}],
                       "columns":[{"key":"answer","label":"Answer","type":"string"}]},
             "rows":[{"answer":"Preserved across deployment"}]})
         self.assertFalse(error,result)
+        self.client.complete_scenario_step(task_id, operation)
         self.command(task,"FINISH",outcome="SUCCEEDED",text="Persisted complete result")
         deadline=time.monotonic()+30
         while time.monotonic()<deadline:
@@ -75,9 +116,25 @@ class ApplicationPersistenceTest(unittest.TestCase):
         view_body = {"taskId":task_id,"operationKey":view_key}
         error,view,_ = self.client.tool("tasks.view",view_body)
         self.assertFalse(error,view)
-        status,connection=self.client.api("/api/connections","POST",{
-            "name":"Persisted connection metadata","site":"example.org","startUrl":"https://example.org"})
-        self.assertEqual(200,status,connection)
+        status, connections = self.client.api('/api/connections')
+        self.assertEqual(200, status)
+        self.assertEqual(1, connections['total'])
+        connection = connections['items'][0]
+        self.assertGreater(connection['profileRevision'], 0)
+        # This fixture covers already-saved credential persistence. Native private form
+        # capture has its own browser regression; there is no public password-write API.
+        seeded = subprocess.run([
+            'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+            'exec', '-i', 'helmglass-browser-node-1', 'node', '--input-type=module', '-e',
+            "import {DatabaseSync} from 'node:sqlite';import {CredentialStore} from './dist/credentials.js';"
+            "let data='';for await(const chunk of process.stdin)data+=chunk;const {owner,id}=JSON.parse(data);"
+            "const db=new DatabaseSync((process.env.DATA_DIR??'/data')+'/node.sqlite');"
+            "try{new CredentialStore(db,Buffer.from(process.env.PROFILE_ENCRYPTION_KEY,'base64'))"
+            ".write(id,owner,'persistence-fixture-seed',0,{origin:'https://httpbin.org',"
+            "username:'helm-credential-test',password:'synthetic-not-a-secret'});}finally{db.close()}"],
+            input=json.dumps({'owner': self.identity.id, 'id': connection['id']}),
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(0, seeded.returncode, 'Owned encrypted persistence fixture failed')
         self.assertEqual(200,self.admin_command("LIMITS",browserLimitMode="CUSTOM",browserLimit=2,waitingLimit=7)[0])
         resources=["/api/tasks/"+task_id,"/api/tasks/"+task_id+"/history",
                    "/api/tasks/"+task_id+"/result/rows","/api/tasks/"+task_id+"/artifacts",
@@ -93,7 +150,7 @@ class ApplicationPersistenceTest(unittest.TestCase):
         self.assertEqual(artifact["sha256"],hashlib.sha256(original).hexdigest())
         started=self.started_at()
         self.assertIsNotNone(started)
-        print("READY persistence fixture " + self.identity.id + "; browser CLOSED; waiting for ordinary deployment",flush=True)
+        print("READY persistence fixture " + self.identity.id + "; browser CLOSED; encrypted profile and credentials saved; waiting for ordinary deployment",flush=True)
         deadline=time.monotonic()+420
         while time.monotonic()<deadline:
             restarted=self.started_at()
@@ -132,7 +189,28 @@ class ApplicationPersistenceTest(unittest.TestCase):
         error,persisted_receipt,_=self.client.tool("operations.get",{"operationId":operation})
         self.assertFalse(error,persisted_receipt)
         self.assertEqual(receipt,persisted_receipt)
-        print("PASS persisted task, results, history, original file, connection, notifications, usage, audit, idempotency and receipt",flush=True)
+        error, state, _ = self.client.tool('tasks.create', {'operationKey': str(uuid.uuid4()), 'task': {
+            'title': 'Restore synthetic login after deployment', 'goal': 'Verify saved profile and optional credentials',
+            'startUrl': profile_url, 'preferredConnectionIds': [connection['id']], 'prepare': True}})
+        self.assertFalse(error, state)
+        restored = state['task']
+        self.assertNotEqual(task['browser']['id'], restored['browser']['id'])
+        self.browser_action(restored, 'click', {'selector': '#read-state'})
+        observed = self.browser_action(restored, 'observe')
+        self.assertIn('"account":"a"', observed['text'])
+        self.assertIn('"localAccount":"a"', observed['text'])
+        self.browser_action(restored, 'navigate', {'url': credential_url})
+        restored = self.login_control(restored, 'BEGIN_LOGIN', viewer)
+        status, credential = self.client.api('/api/browser-sessions/' + restored['browser']['id']
+            + '/credentials?viewerId=' + viewer)
+        self.assertEqual(200, status)
+        self.assertTrue(credential['available'])
+        self.assertEqual(1, credential['revision'])
+        restored = self.login_control(restored, 'FINISH_LOGIN', viewer)
+        self.browser_action(restored, 'click', {'selector': '#verify'})
+        self.assertIn('Expected synthetic credentials', self.browser_action(restored, 'observe')['text'])
+        self.command(restored, 'STOP')
+        print("PASS persisted application data, encrypted cookies/localStorage and automatic protected credential fill in a new Chromium",flush=True)
 
 
 if __name__=="__main__":

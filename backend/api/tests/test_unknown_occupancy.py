@@ -67,12 +67,12 @@ class UnknownOccupancyTest(unittest.TestCase):
             transport.login_mcp()
             error, shown, _ = transport.tool("tasks.create", {"operationKey": str(uuid.uuid4()),
                 "task": {"title": label, "goal": "Verify occupancy without stopping another owner",
-                         "startUrl": "https://example.com", "requireConfirmation": False, "prepare": True}})
+                         "startUrl": "https://example.com", "prepare": True}})
             self.assertFalse(error)
             task = shown["task"]
             tasks.append(task["id"])
             operation = str(uuid.uuid4())
-            error, _, _ = transport.tool("browser.execute", {"taskId": task["id"], "action": {
+            error, _, _ = transport.execute_in_scenario_step({"taskId": task["id"], "action": {
                 "operationId": operation, "type": "observe", "arguments": {},
                 "instructionRevision": task["instructionRevision"]}})
             self.assertFalse(error)

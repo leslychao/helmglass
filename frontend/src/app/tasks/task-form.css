@@ -1,0 +1,18 @@
+.page-heading {
+  margin-bottom: 14px;
+}
+
+@media (max-width: 580px) {
+  .v12-task-form .form-summary {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .v12-task-form .form-summary .button {
+    flex: none;
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+  }
+}

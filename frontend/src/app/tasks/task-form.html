@@ -1,9 +1,7 @@
-<header class="page-heading">
-  <div>
-    <button class="back-link" (click)="back()"><hg-icon name="arrow-left" />К задачам</button>
-    <h1 class="sr-only">{{ title }}</h1>
-  </div>
-</header>
+<button class="back-link" hgTooltip="Вернуться на исходную страницу" (click)="back()">
+  <hg-icon name="arrow-left" />{{ returnLabel }}
+</button>
+<h1 class="sr-only">{{ title }}</h1>
 @if (error()) {
   <div class="error-banner" role="alert">
     {{ error() }}
@@ -27,8 +25,6 @@
           <dd>{{ task()?.startUrl || 'Не задана' }}</dd>
           <dt>Вид результата</dt>
           <dd>{{ task()?.outputFormat }}</dd>
-          <dt>Подтверждение действий</dt>
-          <dd>{{ task()?.requireConfirmation ? 'Включено' : 'Выключено' }}</dd>
           <dt>Подключения</dt>
           <dd>{{ task()?.preferredConnectionIds?.join(', ') || 'Автоматический выбор' }}</dd>
         </dl>
@@ -44,7 +40,7 @@
       отправленные параметры сохранены.
     </div>
   }
-  <form [formGroup]="form" (ngSubmit)="save(mode !== 'refine')" class="form-layout v12-task-form">
+  <form [formGroup]="form" (ngSubmit)="save(true)" class="form-layout v12-task-form">
     <div class="form-sections">
       <section class="card form-section">
         <span class="step-number">1</span>
@@ -91,9 +87,7 @@
               "
             />
           </label>
-          <small id="start-url-hint" class="form-hint"
-            >Например: https://www.ozon.ru. В черновике можно не заполнять.</small
-          >
+          <small id="start-url-hint" class="form-hint">Например: https://www.ozon.ru</small>
           @if (form.controls.startUrl.invalid && form.controls.startUrl.touched) {
             <p class="field-error">Укажите полный адрес с https:// или http://.</p>
           }
@@ -118,9 +112,6 @@
             >Аккаунт определяется после входа. Подключения не обязательны для публичных
             страниц.</small
           >
-          <a routerLink="/connections" class="text-button"
-            >Управление подключениями <hg-icon name="chevron-right"
-          /></a>
           @if (fieldErrors()['preferredConnectionIds']) {
             <p class="field-error" role="alert">{{ fieldErrors()['preferredConnectionIds'] }}</p>
           }
@@ -148,21 +139,6 @@
               ><input type="radio" formControlName="outputFormat" value="TEXT"
             /></label>
           </div>
-        </div>
-      </section>
-      <section class="card form-section">
-        <span class="step-number">5</span>
-        <div class="form-step-content">
-          <h2>Параметры</h2>
-          <p class="form-sub">Дополнительные условия для этого поручения.</p>
-          <label class="confirmation-setting"
-            ><hg-icon name="shield" /><span
-              >Подтверждать важные действия<small
-                >Запрашивать отдельное подтверждение перед отправкой, покупкой, оплатой и
-                удалением.</small
-              ></span
-            ><input class="switch" type="checkbox" formControlName="requireConfirmation"
-          /></label>
         </div>
       </section>
     </div>
@@ -194,22 +170,13 @@
           </ol>
         </div>
       </div>
-      <button type="submit" class="button primary" [disabled]="!canSubmit(mode !== 'refine')">
+      <button type="submit" class="button primary" [disabled]="!canSubmit(true)">
         <hg-icon name="play" />
-        {{
-          busy()
-            ? 'Сохраняем…'
-            : mode === 'refine'
-              ? 'Сохранить уточнение'
-              : 'Подготовить для ChatGPT'
-        }}
+        {{ busy() ? 'Сохраняем…' : 'Подготовить для ChatGPT' }}
       </button>
-      @if (mode !== 'refine') {
-        <button type="button" class="button" [disabled]="!canSubmit(false)" (click)="save(false)">
-          <hg-icon name="save" />Сохранить как черновик
-        </button>
-      }
-      <button type="button" class="text-button" (click)="back()">Отмена</button>
+      <button type="button" class="button" [disabled]="!canSubmit(false)" (click)="save(false)">
+        <hg-icon name="save" />Сохранить как черновик
+      </button>
       <p class="summary-foot">
         <hg-icon name="info" /><span
           >Сохранение поручения не запускает браузер. Выполнение начинается после команды из

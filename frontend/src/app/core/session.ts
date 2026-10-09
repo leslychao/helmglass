@@ -6,6 +6,18 @@ import { Api, ApiError } from './api';
 import { LiveEvents } from './live-events';
 import { Me, meSchema } from './models';
 
+const SIGN_IN_RETURN = 'helm-sign-in-return';
+
+export function accountReturnPath(target: string | null | undefined): string {
+  const url = URL.parse(target ?? '/tasks', location.origin);
+  if (
+    !url || url.origin !== location.origin ||
+    url.pathname.startsWith('/sign-in') || url.pathname.startsWith('/oauth2/') ||
+    url.pathname.startsWith('/auth/')
+  ) return '/tasks';
+  return url.pathname + url.search + url.hash;
+}
+
 @Injectable({ providedIn: 'root' })
 export class Session {
   private readonly api = inject(Api);
@@ -16,6 +28,11 @@ export class Session {
   readonly refreshError = signal('');
   readonly signingOut = signal(false);
   readonly logoutPending = signal(false);
+  beginSignIn(target: string | null) {
+    const path = accountReturnPath(target ?? sessionStorage.getItem(SIGN_IN_RETURN));
+    sessionStorage.setItem(SIGN_IN_RETURN, path);
+    location.replace('/oauth2/start?rd=' + encodeURIComponent(path));
+  }
   constructor() {
     this.live
       .watch(['account'])
@@ -54,6 +71,7 @@ export class Session {
     return (this.pending ??= this.api
       .get('/api/me', meSchema)
       .then((value) => {
+        sessionStorage.removeItem(SIGN_IN_RETURN);
         this.user.set(value);
         this.api.setAccount(value.id);
         this.live.start();
@@ -79,7 +97,7 @@ export class Session {
       .join('')
       .toUpperCase();
   }
-  async logout() {
+  async logout(returnTo?: string) {
     if (this.signingOut()) return;
     this.signingOut.set(true);
     try {
@@ -104,7 +122,11 @@ export class Session {
           'LOGOUT_PENDING',
         );
       this.user.set(null);
-      location.assign('/oauth2/sign_out?rd=%2Fsign-in');
+      sessionStorage.removeItem(SIGN_IN_RETURN);
+      const signIn = returnTo
+        ? '/sign-in?return=' + encodeURIComponent(accountReturnPath(returnTo))
+        : '/sign-in';
+      location.assign('/oauth2/sign_out?rd=' + encodeURIComponent(signIn));
     } finally {
       this.signingOut.set(false);
     }

@@ -43,4 +43,31 @@
   <changeSet id="11-account-profile-image" author="helmglass">
     <sqlFile path="011-account-profile-image.sql" relativeToChangelogFile="true" splitStatements="true"/>
   </changeSet>
+  <changeSet id="12-chat-task-autonomy" author="helmglass">
+    <sqlFile path="012-chat-task-autonomy.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="13-task-responses" author="helmglass">
+    <sqlFile path="013-task-responses.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="14-request-receipts" author="helmglass">
+    <sqlFile path="014-request-receipts.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="15-human-elicitation" author="helmglass">
+    <sqlFile path="015-elicitation.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="16-profile-state" author="helmglass">
+    <sqlFile path="016-profile-state.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="17-business-steps" author="helmglass">
+    <sqlFile path="017-business-steps.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="18-browser-login-confirmation" author="helmglass">
+    <sqlFile path="018-browser-login-confirmation.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="19-administration-admission" author="helmglass">
+    <sqlFile path="019-administration-admission.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="20-browser-login-completion" author="helmglass">
+    <sqlFile path="020-browser-login-completion.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
 </databaseChangeLog>

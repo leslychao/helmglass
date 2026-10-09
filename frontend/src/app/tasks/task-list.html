@@ -1,62 +1,67 @@
 <h1 class="sr-only">Задачи</h1>
+<hg-kpi-section label="Сводка задач">
+  <section class="metric-grid" aria-label="Сводка задач">
+    <button
+      class="metric"
+      [class.selected]="selectedCard(activeStates)"
+      [attr.aria-pressed]="selectedCard(activeStates)"
+      [disabled]="!summary()"
+      (click)="selectCard(activeStates)"
+    >
+      <span class="metric-top"
+        ><span class="metric-label">Активные задачи</span
+        ><span class="metric-icon"><hg-icon name="play" /></span
+      ></span>
+      <strong class="metric-value">{{ summary()?.active ?? '—' }}</strong>
+      <span class="metric-bottom"
+        ><span>Запуск, выполнение и остановка</span
+        ><hg-icon [name]="selectedCard(activeStates) ? 'check' : 'chevron-right'"
+      /></span>
+    </button>
+    <button
+      class="metric"
+      [class.selected]="selectedCard(successStates)"
+      [attr.aria-pressed]="selectedCard(successStates)"
+      [disabled]="!summary()"
+      (click)="selectCard(successStates)"
+    >
+      <span class="metric-top"
+        ><span class="metric-label">Успешно выполнены</span
+        ><span class="metric-icon"><hg-icon name="check" /></span
+      ></span>
+      <strong class="metric-value">{{ summary()?.succeeded ?? '—' }}</strong>
+      <span class="metric-bottom"
+        ><span>Цель достигнута полностью</span
+        ><hg-icon [name]="selectedCard(successStates) ? 'check' : 'chevron-right'"
+      /></span>
+    </button>
+    <button
+      class="metric"
+      [class.selected]="selectedCard(attentionStates)"
+      [attr.aria-pressed]="selectedCard(attentionStates)"
+      [disabled]="!summary()"
+      (click)="selectCard(attentionStates)"
+    >
+      <span class="metric-top"
+        ><span class="metric-label">Ожидают вас</span
+        ><span class="metric-icon"><hg-icon name="user" /></span
+      ></span>
+      <strong class="metric-value">{{ summary()?.waitingForYou ?? '—' }}</strong>
+      <span class="metric-bottom"
+        ><span>Вход, ответ, подтверждение или проверка</span
+        ><hg-icon [name]="selectedCard(attentionStates) ? 'check' : 'chevron-right'"
+      /></span>
+    </button>
+  </section>
+</hg-kpi-section>
 <header class="page-actions">
-  <a class="button primary" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
-    ><hg-icon name="plus" />Новая задача</a
+  <a
+    class="button primary page-create-action"
+    routerLink="/tasks/new"
+    [queryParams]="{ back: query.context() }"
+    ><span class="page-create-icon"><hg-icon name="plus" /></span>Добавить задачу</a
   >
 </header>
-<section class="metric-grid" aria-label="Сводка задач">
-  <button
-    class="metric"
-    [class.selected]="selectedCard(activeStates)"
-    [attr.aria-pressed]="selectedCard(activeStates)"
-    [disabled]="!summary()"
-    (click)="selectCard(activeStates)"
-  >
-    <span class="metric-top"
-      ><span class="metric-label">Активные задачи</span
-      ><span class="metric-icon"><hg-icon name="play" /></span
-    ></span>
-    <strong class="metric-value">{{ summary()?.active ?? '—' }}</strong>
-    <span class="metric-bottom"
-      ><span>Запуск, выполнение и остановка</span
-      ><hg-icon [name]="selectedCard(activeStates) ? 'check' : 'chevron-right'"
-    /></span>
-  </button>
-  <button
-    class="metric"
-    [class.selected]="selectedCard(successStates)"
-    [attr.aria-pressed]="selectedCard(successStates)"
-    [disabled]="!summary()"
-    (click)="selectCard(successStates)"
-  >
-    <span class="metric-top"
-      ><span class="metric-label">Успешно выполнены</span
-      ><span class="metric-icon"><hg-icon name="check" /></span
-    ></span>
-    <strong class="metric-value">{{ summary()?.succeeded ?? '—' }}</strong>
-    <span class="metric-bottom"
-      ><span>Цель достигнута полностью</span
-      ><hg-icon [name]="selectedCard(successStates) ? 'check' : 'chevron-right'"
-    /></span>
-  </button>
-  <button
-    class="metric"
-    [class.selected]="selectedCard(attentionStates)"
-    [attr.aria-pressed]="selectedCard(attentionStates)"
-    [disabled]="!summary()"
-    (click)="selectCard(attentionStates)"
-  >
-    <span class="metric-top"
-      ><span class="metric-label">Ожидают вас</span
-      ><span class="metric-icon"><hg-icon name="user" /></span
-    ></span>
-    <strong class="metric-value">{{ summary()?.waitingForYou ?? '—' }}</strong>
-    <span class="metric-bottom"
-      ><span>Вход, ответ, подтверждение или проверка</span
-      ><hg-icon [name]="selectedCard(attentionStates) ? 'check' : 'chevron-right'"
-    /></span>
-  </button>
-</section>
 <section class="card table-card" [attr.aria-busy]="loading()">
   @if (query.values('site').length) {
     <div class="selected-chips" aria-label="Выбранные сайты">
@@ -72,25 +77,26 @@
     </div>
   }
   <div class="toolbar">
-    <label class="search"
-      ><hg-icon name="search" /><input
-        hgSearch
-        aria-label="Поиск задач"
-        placeholder="Поиск задач"
-        [value]="query.text('search')"
-        (searchChange)="query.set({ search: $event || null })"
-    /></label>
+    <hg-autocomplete
+      label="Поиск задач"
+      [value]="query.text('search')"
+      [selected]="query.values('taskId')"
+      [load]="taskSuggestions"
+      (searched)="query.set({ search: $event || null, taskId: null })"
+      (picked)="selectTask($event)"
+    />
     <hg-multi-filter
       label="Состояние"
       [options]="stateOptions"
       [value]="query.values('status')"
       (changed)="query.set({ status: $event })"
     />
-    <hg-multi-filter
+    <hg-autocomplete
       label="Сайт"
-      remotePath="/api/tasks/sites"
-      [value]="query.values('site')"
-      (changed)="query.set({ site: $event })"
+      [multiple]="true"
+      [selected]="query.values('site')"
+      [load]="siteSuggestions"
+      (picked)="selectSite($event)"
     />
     <hg-multi-filter
       label="Источник"
@@ -99,13 +105,14 @@
       (changed)="query.set({ source: $event })"
     />
     <hg-date-filter
-      label="Период создания"
+      label="Период"
       [from]="query.text('from')"
       [to]="query.text('to')"
       (changed)="query.set($event)"
     />
-    <button class="text-button" (click)="clear()">Сбросить</button><span class="spacer"></span>
-    <hg-multi-filter label="Колонки" [options]="columnOptions" [(value)]="columns" />
+    <hg-filter-reset [keys]="filterKeys" />
+    <span class="spacer"></span>
+    <hg-column-picker [view]="table" />
   </div>
   @if (error()) {
     <div class="error-banner" role="alert">
@@ -114,125 +121,91 @@
   }
   @if (data(); as page) {
     @if (page.items.length) {
-      <div class="table-scroll">
-        <table class="v12-task-table">
-          <thead>
-            <tr>
-              <th [attr.aria-sort]="query.ariaSort('title')">
-                <button (click)="query.sort('title')">
-                  Задача <hg-icon name="chevron-down" />
-                </button>
-              </th>
-              @if (columns().includes('site')) {
-                <th>Сайт</th>
+      <hg-data-table [view]="table" [rows]="page.items" label="Задачи">
+        <ng-template hgCell="title" [hgCellOf]="page.items" let-task>
+          <a [routerLink]="['/tasks', task.id]" [queryParams]="{ back: query.context() }">{{
+            task.title || task.goal || 'Черновик без названия'
+          }}</a>
+          <span class="task-cell-meta"
+            ><span class="task-short-id" [hgTooltip]="task.id" tabindex="0"
+              >#{{ task.id.slice(0, 8) }}</span
+            ><small>{{ task.source === 'MCP' ? 'ChatGPT' : 'Веб-интерфейс' }}</small></span
+          >
+        </ng-template>
+        <ng-template hgCell="site" [hgCellOf]="page.items" let-task>
+          <span class="site-cell"
+            ><span class="service-mark"><hg-icon name="globe" /></span
+            ><span>{{ task.site || 'Без сайта' }}</span></span
+          >
+        </ng-template>
+        <ng-template hgCell="status" [hgCellOf]="page.items" let-task
+          ><hg-status [value]="task.outcome || task.status"
+        /></ng-template>
+        <ng-template hgCell="executionSeconds" [hgCellOf]="page.items" let-task>{{
+          task.usage.executionSeconds | duration
+        }}</ng-template>
+        <ng-template hgCell="manualSeconds" [hgCellOf]="page.items" let-task>{{
+          task.usage.manualSeconds | duration
+        }}</ng-template>
+        <ng-template hgCell="mediaSeconds" [hgCellOf]="page.items" let-task>{{
+          task.usage.mediaSeconds | duration
+        }}</ng-template>
+        <ng-template hgCell="mediaBytes" [hgCellOf]="page.items" let-task>{{
+          task.usage.mediaBytes ?? 'Нет данных'
+        }}</ng-template>
+        <ng-template hgCell="updatedAt" [hgCellOf]="page.items" let-task>{{
+          task.updatedAt | date: 'dd.MM.yyyy HH:mm'
+        }}</ng-template>
+        <ng-template hgCell="summary" [hgCellOf]="page.items" let-task>
+          <span
+            class="task-summary-text"
+            [hgTooltip]="task.summary || task.result?.summary || ''"
+            tabindex="0"
+            >{{ task.summary || task.result?.summary || '—' }}</span
+          >
+        </ng-template>
+        <ng-template hgCell="actions" [hgCellOf]="page.items" let-task>
+          <button
+            class="icon-button"
+            [cdkMenuTriggerFor]="taskActions"
+            [attr.aria-label]="'Действия задачи ' + task.title"
+            hgTooltip="Действия задачи"
+          >
+            <hg-icon name="more" />
+          </button>
+          <ng-template #taskActions>
+            <div cdkMenu class="menu-popover anchored-menu">
+              <a
+                cdkMenuItem
+                [routerLink]="['/tasks', task.id]"
+                [queryParams]="{ back: query.context() }"
+                >Открыть задачу</a
+              ><a
+                cdkMenuItem
+                [routerLink]="['/tasks', task.id]"
+                [queryParams]="{ back: query.context(), tab: 'result' }"
+                >Результат</a
+              >
+              @if (task.status === 'DRAFT' && task.allowedCommands.includes('AMEND')) {
+                <a
+                  cdkMenuItem
+                  [routerLink]="['/tasks', task.id, 'edit']"
+                  [queryParams]="{ back: query.context() }"
+                  >Редактировать</a
+                >
               }
-              <th>Состояние</th>
-              @if (columns().includes('executionSeconds')) {
-                <th>Время выполнения</th>
-              }
-              @if (columns().includes('manualSeconds')) {
-                <th>Человек</th>
-              }
-              @if (columns().includes('mediaSeconds')) {
-                <th>Медиа</th>
-              }
-              @if (columns().includes('mediaBytes')) {
-                <th>Байты медиа</th>
-              }
-              @if (columns().includes('updatedAt')) {
-                <th [attr.aria-sort]="query.ariaSort('updatedAt')">
-                  <button (click)="query.sort('updatedAt')">
-                    Обновлено <hg-icon name="chevron-down" />
-                  </button>
-                </th>
-              }
-              @if (columns().includes('summary')) {
-                <th>Текущий шаг / итог</th>
-              }
-              <th class="row-menu-cell"><span class="sr-only">Действия</span></th>
-            </tr>
-          </thead>
-          <tbody>
-            @for (task of page.items; track task.id) {
-              <tr>
-                <td class="task-name">
-                  <a [routerLink]="['/tasks', task.id]" [queryParams]="{ back: query.context() }">{{
-                    task.title || task.goal || 'Черновик без названия'
-                  }}</a>
-                  <span class="task-cell-meta"
-                    ><span class="task-short-id" [title]="task.id">#{{ task.id.slice(0, 8) }}</span
-                    ><small>{{ task.source === 'MCP' ? 'ChatGPT' : 'Веб-интерфейс' }}</small></span
-                  >
-                </td>
-                @if (columns().includes('site')) {
-                  <td>
-                    <span class="site-cell"
-                      ><span class="service-mark"><hg-icon name="globe" /></span
-                      ><span>{{ task.site || 'Без сайта' }}</span></span
-                    >
-                  </td>
-                }
-                <td><hg-status [value]="task.outcome || task.status" /></td>
-                @if (columns().includes('executionSeconds')) {
-                  <td>{{ task.usage.executionSeconds | duration }}</td>
-                }
-                @if (columns().includes('manualSeconds')) {
-                  <td>{{ task.usage.manualSeconds | duration }}</td>
-                }
-                @if (columns().includes('mediaSeconds')) {
-                  <td>{{ task.usage.mediaSeconds | duration }}</td>
-                }
-                @if (columns().includes('mediaBytes')) {
-                  <td>{{ task.usage.mediaBytes ?? 'Нет данных' }}</td>
-                }
-                @if (columns().includes('updatedAt')) {
-                  <td class="nowrap">{{ task.updatedAt | date: 'dd.MM.yyyy HH:mm' }}</td>
-                }
-                @if (columns().includes('summary')) {
-                  <td class="summary-cell">{{ task.summary || task.result?.summary || '—' }}</td>
-                }
-                <td class="row-menu-cell">
-                  <details class="action-menu">
-                    <summary
-                      class="icon-button"
-                      [attr.aria-label]="'Действия задачи ' + task.title"
-                      title="Действия задачи"
-                    >
-                      <hg-icon name="more" />
-                    </summary>
-                    <div class="menu-popover">
-                      <a
-                        [routerLink]="['/tasks', task.id]"
-                        [queryParams]="{ back: query.context() }"
-                        >Открыть задачу</a
-                      ><a
-                        [routerLink]="['/tasks', task.id]"
-                        [queryParams]="{ back: query.context(), tab: 'result' }"
-                        >Результат</a
-                      >
-                      @if (task.allowedCommands.includes('AMEND')) {
-                        <a
-                          [routerLink]="[
-                            '/tasks',
-                            task.id,
-                            task.status === 'DRAFT' ? 'edit' : 'refine',
-                          ]"
-                          [queryParams]="{ back: query.context() }"
-                          >{{ task.status === 'DRAFT' ? 'Редактировать' : 'Уточнить' }}</a
-                        >
-                      }
-                    </div>
-                  </details>
-                </td>
-              </tr>
-            }
-          </tbody>
-        </table>
-      </div>
+            </div>
+          </ng-template>
+        </ng-template>
+      </hg-data-table>
     } @else {
       <hg-empty
-        [title]="summary()?.total === 0 ? 'Здесь появятся ваши задачи' : 'Задачи не найдены'"
-        description="Создайте задачу в интерфейсе или через ChatGPT."
+        [title]="query.hasFilters(filterKeys) ? 'Задачи не найдены' : 'Здесь появятся ваши задачи'"
+        [description]="
+          query.hasFilters(filterKeys)
+            ? 'Измените поиск или сбросьте фильтры.'
+            : 'Создайте задачу в интерфейсе или через ChatGPT.'
+        "
         ><a class="button" routerLink="/tasks/new" [queryParams]="{ back: query.context() }"
           >Создать задачу</a
         ></hg-empty

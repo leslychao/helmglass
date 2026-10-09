@@ -1,6 +1,3 @@
-<button class="back-link" (click)="back()">
-  <hg-icon name="arrow-left" />{{ nodeReturn() ? 'К браузерам' : 'К пользователям' }}
-</button>
 @if (error()) {
   <div class="error-banner" role="alert">
     {{ error() }}<button class="text-button" (click)="load()">Повторить</button>
@@ -11,10 +8,10 @@
     <div class="admin-user-identity">
       <span class="user-initial">{{ detail.user.name.slice(0, 1).toUpperCase() }}</span>
       <div>
-        <h1>{{ detail.user.name }}</h1>
+        <h1 class="sr-only">{{ detail.user.name }}</h1>
         <p>
           {{ detail.user.email }}
-          <span class="mono" [title]="detail.user.id">· {{ detail.user.id.slice(0, 8) }}</span>
+          <span class="mono" [hgTooltip]="detail.user.id">· {{ detail.user.id.slice(0, 8) }}</span>
           @if (detail.user.id === session.user()?.id) {
             · Вы
           }
@@ -24,17 +21,29 @@
     <div class="actions">
       <button
         class="button danger-soft"
-        [disabled]="busy() || detail.user.status === 'PURGING' || detail.user.status === 'DELETED'"
+        [disabled]="
+          busy() ||
+          unavailable() ||
+          detail.user.status === 'PURGING' ||
+          detail.user.status === 'DELETED'
+        "
+        [hgTooltip]="
+          ['PURGING', 'DELETED'].includes(detail.user.status)
+            ? 'Аккаунт недоступен для новых действий'
+            : 'Остановить текущие задачи и отдельные браузеры входа'
+        "
         (click)="change('STOP_ALL')"
       >
-        <hg-icon name="stop" />Остановить все браузеры
+        <hg-icon name="stop" />Остановить все задачи
       </button>
       @if (detail.user.status === 'ACTIVE' || detail.user.status === 'BLOCKED') {
         <button
           class="button"
           [class.danger-soft]="detail.user.status === 'ACTIVE'"
-          [disabled]="busy() || detail.user.id === session.user()?.id"
-          [title]="detail.user.id === session.user()?.id ? 'Нельзя заблокировать самого себя' : ''"
+          [disabled]="busy() || unavailable() || detail.user.id === session.user()?.id"
+          [hgTooltip]="
+            detail.user.id === session.user()?.id ? 'Нельзя заблокировать самого себя' : ''
+          "
           (click)="change(detail.user.status === 'ACTIVE' ? 'BLOCK' : 'UNBLOCK')"
         >
           <hg-icon [name]="detail.user.status === 'ACTIVE' ? 'lock' : 'user'" />{{
@@ -42,26 +51,48 @@
           }}
         </button>
       }
-      @if (
-        detail.user.id !== session.user()?.id &&
-        ['ACTIVE', 'BLOCKED', 'DELETION_PENDING'].includes(detail.user.status)
-      ) {
-        <details class="action-menu">
-          <summary class="icon-button" aria-label="Действия аккаунта" title="Действия аккаунта">
-            <hg-icon name="more" />
-          </summary>
-          <div class="menu-popover">
-            @if (detail.user.status === 'ACTIVE' || detail.user.status === 'BLOCKED') {
-              <button class="danger-text" (click)="change('REQUEST_DELETION')">
-                Запланировать удаление
-              </button>
-            }
-            @if (detail.user.status === 'DELETION_PENDING') {
-              <button (click)="change('CANCEL_DELETION')">Отменить удаление</button>
-            }
-          </div>
-        </details>
-      }
+      <button
+        class="icon-button"
+        aria-label="Действия аккаунта"
+        hgTooltip="Действия аккаунта"
+        [cdkMenuTriggerFor]="accountMenu"
+      >
+        <hg-icon name="more" />
+      </button>
+      <ng-template #accountMenu
+        ><div cdkMenu class="menu-popover anchored-menu">
+          <a
+            cdkMenuItem
+            routerLink="/admin/audit"
+            [queryParams]="{ user: detail.user.id, return: returnUrl() }"
+            ><hg-icon name="list" />Журнал пользователя</a
+          >
+          @if (detail.user.status === 'ACTIVE' || detail.user.status === 'BLOCKED') {
+            <button
+              cdkMenuItem
+              class="danger-text"
+              [cdkMenuItemDisabled]="unavailable() || detail.user.id === session.user()?.id"
+              [disabled]="unavailable() || detail.user.id === session.user()?.id"
+              [hgTooltip]="
+                detail.user.id === session.user()?.id ? 'Нельзя удалить самого себя' : ''
+              "
+              (click)="change('REQUEST_DELETION')"
+            >
+              Запланировать удаление
+            </button>
+          }
+          @if (detail.user.status === 'DELETION_PENDING') {
+            <button
+              cdkMenuItem
+              [disabled]="unavailable() || busy()"
+              [cdkMenuItemDisabled]="unavailable() || busy()"
+              (click)="change('CANCEL_DELETION')"
+            >
+              Отменить удаление
+            </button>
+          }
+        </div></ng-template
+      >
     </div>
   </header>
   <div class="admin-user-facts">
@@ -79,85 +110,201 @@
         Отменить можно до {{ detail.user.deleteUntil | date: 'dd.MM.yyyy HH:mm:ss' }} по местному
         времени. Прежнее состояние: {{ detail.user.previousStatus | label }}.
       </p>
+      <button
+        class="button small"
+        [disabled]="busy() || unavailable()"
+        (click)="change('CANCEL_DELETION')"
+      >
+        <hg-icon name="arrow-left" />Отменить удаление
+      </button>
     </div>
   } @else if (detail.user.status === 'PURGING') {
     <div class="notice warning">
       <strong>Очистка данных началась</strong>
       <p>Отменить удаление уже нельзя.</p>
     </div>
+  } @else if (detail.user.status === 'DELETED') {
+    <div class="notice warning">
+      <strong>Аккаунт удалён</strong>
+      <p>Восстановление недоступно. Служебная история действий сохраняется в журнале.</p>
+    </div>
+  } @else if (detail.user.status === 'BLOCKED') {
+    <div class="notice">
+      <strong>Доступ пользователя заблокирован</strong>
+      <p>Разблокировка потребует нового входа и не запустит остановленные задачи снова.</p>
+    </div>
   }
   <div class="admin-user-overview">
     <section class="card quota-card">
       <div class="section-heading">
-        <h2>Лимиты и текущее использование</h2>
+        <h2>Квоты и текущая нагрузка</h2>
         <button
-          class="button"
-          [disabled]="busy() || detail.user.status === 'DELETED'"
+          class="button quiet small"
+          aria-label="Изменить лимиты"
+          [disabled]="
+            busy() || unavailable() || ['PURGING', 'DELETED'].includes(detail.user.status)
+          "
+          [hgTooltip]="
+            ['PURGING', 'DELETED'].includes(detail.user.status)
+              ? 'Аккаунт недоступен для изменения лимитов'
+              : 'Изменить лимиты'
+          "
           (click)="limits()"
         >
-          Изменить лимиты
+          <hg-icon name="edit" />Изменить
         </button>
       </div>
       <dl class="quota-rows">
         <div>
           <dt>
             <strong>Одновременные браузеры</strong
-            ><small>{{
-              detail.user.browserLimitMode === 'PLATFORM'
-                ? 'Лимит по умолчанию'
-                : detail.user.browserLimitMode === 'UNLIMITED'
-                  ? 'Без ограничения'
-                  : 'Индивидуальный лимит'
-            }}</small>
-          </dt>
-          <dd>
-            {{ detail.user.browserCount ?? '—'
-            }}<span>
-              /
+            ><small
+              >Назначено:
               {{
-                detail.user.browserLimitMode === 'UNLIMITED' ? '∞' : (detail.user.browserLimit ?? 2)
-              }}</span
+                detail.user.browserLimitMode === 'PLATFORM'
+                  ? 'Стандартный · 2'
+                  : detail.user.browserLimitMode === 'UNLIMITED'
+                    ? 'Без индивидуального лимита'
+                    : detail.user.browserLimit
+              }}</small
             >
+          </dt>
+          <dd
+            class="admin-quota-cell"
+            [class.over-limit]="
+              detail.user.browserCount !== null &&
+              detail.user.browserLimitMode !== 'UNLIMITED' &&
+              detail.user.browserCount > (detail.user.browserLimit ?? 2)
+            "
+          >
+            <strong>Занято: {{ detail.user.browserCount ?? '—' }}</strong>
+            <small>{{
+              detail.user.browserLimitMode === 'UNLIMITED'
+                ? 'Без лимита'
+                : 'Лимит: ' + (detail.user.browserLimit ?? 2)
+            }}</small>
+            @if (
+              detail.user.browserCount !== null && detail.user.browserLimitMode !== 'UNLIMITED'
+            ) {
+              <span class="quota-bar" aria-hidden="true"
+                ><i
+                  [style.width.%]="
+                    Math.min(
+                      100,
+                      (detail.user.browserCount / (detail.user.browserLimit ?? 2)) * 100
+                    )
+                  "
+                ></i
+              ></span>
+            }
           </dd>
         </div>
         <div>
           <dt>
-            <strong>Ожидающие задачи</strong
-            ><small>Очередь, ChatGPT или участие пользователя</small>
+            <strong>Подготовленные задачи в ожидании</strong
+            ><small>Назначено: {{ detail.user.waitingLimit ?? 'без ограничения' }}</small>
           </dt>
-          <dd>
-            {{ detail.user.waitingCount }}<span> / {{ detail.user.waitingLimit ?? '∞' }}</span>
+          <dd
+            class="admin-quota-cell"
+            [class.over-limit]="
+              detail.user.waitingLimit !== null &&
+              detail.user.waitingCount > detail.user.waitingLimit
+            "
+          >
+            <strong>Ожидают: {{ detail.user.waitingCount }}</strong
+            ><small>{{
+              detail.user.waitingLimit === null
+                ? 'Лимит не задан'
+                : 'Лимит: ' + detail.user.waitingLimit
+            }}</small>
+            @if (detail.user.waitingLimit !== null) {
+              <span class="quota-bar" aria-hidden="true"
+                ><i
+                  [style.width.%]="
+                    Math.min(
+                      100,
+                      (detail.user.waitingCount / Math.max(1, detail.user.waitingLimit)) * 100
+                    )
+                  "
+                ></i
+              ></span>
+            }
           </dd>
-        </div>
-        <div>
-          <dt>
-            <strong>Незавершённые операции</strong
-            ><small>Операции, результат которых ещё уточняется</small>
-          </dt>
-          <dd>{{ detail.user.pendingOperations }}</dd>
         </div>
       </dl>
+      <p class="quota-note">
+        @if (
+          detail.user.browserCount !== null &&
+          detail.user.browserLimitMode !== 'UNLIMITED' &&
+          detail.user.browserCount > (detail.user.browserLimit ?? 2)
+        ) {
+          <strong>Новый предел ниже текущего числа браузеров. Принятая работа сохраняется.</strong>
+        }
+        @if (
+          detail.user.waitingLimit !== null && detail.user.waitingCount > detail.user.waitingLimit
+        ) {
+          <strong
+            >Принятых ожидающих задач больше нового предела. Новые задачи ждут освобождения
+            квоты.</strong
+          >
+        }
+        Очередь, ожидание ChatGPT и участия пользователя учитываются вместе. Черновики не
+        учитываются. Отсутствие индивидуального лимита не даёт приоритета.
+      </p>
     </section>
     <section class="card admin-usage-card">
-      <div class="section-heading">
-        <h2>Использование за 7 дней</h2>
-        <small>Последние 7 календарных дней</small>
-      </div>
+      <div class="section-heading padded"><h2>Использование за 7 суток</h2></div>
+      <p class="admin-usage-period">
+        {{ usageDate(detail.usage.from) }} – {{ usageDate(detail.usage.to) }}
+      </p>
       <div class="admin-usage-values">
         <div>
-          <span>Задачи</span><strong>{{ detail.usage.totalTasks }}</strong
-          ><small>{{ detail.usage.successfulTasks }} успешно</small>
+          <span
+            hgTooltip="Зарегистрированные команды браузера, включая ожидающие подтверждения. Повтор одного запроса не увеличивает счётчик."
+            >Команды</span
+          ><strong>{{ detail.usage.commands }}</strong
+          ><small>Учтены за 7 суток</small>
         </div>
         <div>
           <span>Время браузера</span
-          ><strong>{{ detail.usage.usage.browserSeconds | duration }}</strong
-          ><small>Выполнение: {{ detail.usage.usage.executionSeconds | duration }}</small>
+          ><strong
+            >{{ detail.usage.incompleteDays ? '≥ ' : ''
+            }}{{ detail.usage.usage.browserSeconds | duration }}</strong
+          ><small>{{
+            detail.usage.incompleteDays ? 'Есть неполные измерения' : 'Измерения за 7 суток'
+          }}</small>
         </div>
       </div>
+      <details class="admin-usage-days">
+        <summary>Показать измерения по дням</summary>
+        <div class="table-tools"><hg-column-picker [view]="daysTable" /></div>
+        <hg-data-table
+          [view]="daysTable"
+          [rows]="detail.usage.days.items"
+          label="Измерения по дням"
+          rowKey="date"
+        >
+          <ng-template hgCell="date" [hgCellOf]="detail.usage.days.items" let-day>{{
+            day.date | date: 'dd.MM.yyyy'
+          }}</ng-template>
+          <ng-template hgCell="commands" [hgCellOf]="detail.usage.days.items" let-day>{{
+            day.commands
+          }}</ng-template>
+          <ng-template hgCell="browserSeconds" [hgCellOf]="detail.usage.days.items" let-day
+            >{{ day.incomplete ? '≥ ' : '' }}{{ day.browserSeconds | duration }}</ng-template
+          > </hg-data-table
+        ><hg-pager
+          [page]="detail.usage.days.page"
+          [size]="detail.usage.days.pageSize"
+          [total]="detail.usage.days.total"
+          (pageChange)="query.set({ usagePage: $event }, false)"
+          (sizeChange)="query.set({ usagePageSize: $event, usagePage: null }, false)"
+        />
+      </details>
       <p class="admin-usage-note">
         {{
-          detail.usage.usage.incomplete
-            ? 'Часть измерений ещё не подтверждена. Неизвестные значения не считаются нулём.'
+          detail.usage.incompleteDays
+            ? '«≥» показывает известную часть. Отсутствующие измерения не считаются нулём.'
             : 'Измеренные показатели не являются счётом к оплате.'
         }}
       </p>
@@ -169,7 +316,7 @@
       @for (operation of detail.operations; track operation.id) {
         <div class="file-row">
           <code>{{ operation.id }}</code
-          ><span>{{ operation.description }}</span
+          ><span>{{ actionLabel(operation.description) }}</span
           ><span class="spacer"></span><hg-status [value]="operation.status" />
         </div>
       }
@@ -177,55 +324,66 @@
   }
   <section class="card table-card">
     <div class="section-heading padded">
-      <h2>Последние 50 задач</h2>
-      <span class="muted">Только служебные сведения</span>
+      <h2>Последние задачи</h2>
+      <span class="muted">До 50 записей · только служебные сведения</span>
     </div>
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>ID задачи</th>
-            <th>Состояние</th>
-            <th>ID браузера</th>
-            <th>Причина ожидания</th>
-            <th>Создана</th>
-            <th><span class="sr-only">Действие</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (task of detail.tasks.items; track task.id) {
-            <tr>
-              <td>
-                <code>{{ task.id }}</code>
-              </td>
-              <td><hg-status [value]="task.status" /></td>
-              <td>
-                <code>{{ task.browserId || '—' }}</code>
-              </td>
-              <td>{{ task.reason | label }}</td>
-              <td>{{ task.createdAt | date: 'dd.MM HH:mm' }}</td>
-              <td>
-                @if (
-                  task.browserId &&
-                  !['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'STOPPED', 'FAILED'].includes(
+    <div class="table-tools"><hg-column-picker [view]="taskTable" /></div>
+    @if (!detail.tasks.items.length) {
+      <hg-empty
+        title="Задач пока нет"
+        description="Служебные записи появятся после создания задач."
+      />
+    }
+    <hg-data-table [view]="taskTable" [rows]="detail.tasks.items" label="Последние задачи">
+      <ng-template hgCell="id" [hgCellOf]="detail.tasks.items" let-task>
+        <code [hgTooltip]="task.id">{{ task.id.slice(0, 8) }}</code>
+      </ng-template>
+      <ng-template hgCell="status" [hgCellOf]="detail.tasks.items" let-task
+        ><hg-status [value]="task.status"
+      /></ng-template>
+      <ng-template hgCell="browserId" [hgCellOf]="detail.tasks.items" let-task>
+        <code [hgTooltip]="task.browserId || ''">{{
+          task.browserId ? task.browserId.slice(0, 8) : 'Не занят'
+        }}</code>
+      </ng-template>
+      <ng-template hgCell="reason" [hgCellOf]="detail.tasks.items" let-task>{{
+        task.reason | label
+      }}</ng-template>
+      <ng-template hgCell="createdAt" [hgCellOf]="detail.tasks.items" let-task>{{
+        task.createdAt | date: 'dd.MM HH:mm'
+      }}</ng-template>
+      <ng-template hgCell="actions" [hgCellOf]="detail.tasks.items" let-task>
+        <button
+          class="button small danger-soft"
+          [attr.aria-label]="'Остановить задачу #' + task.id.slice(0, 8)"
+          [hgTooltip]="
+            task.status === 'STOPPING'
+              ? 'Остановка уже запрошена'
+              : ['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'STOPPED', 'FAILED', 'DRAFT'].includes(
                     task.status
                   )
-                ) {
-                  <button
-                    class="icon-button danger-text"
-                    aria-label="Остановить браузер задачи"
-                    title="Остановить браузер задачи"
-                    (click)="stop(task.browserId, task.id)"
-                  >
-                    <hg-icon name="stop" />
-                  </button>
-                }
-              </td>
-            </tr>
-          }
-        </tbody>
-      </table>
-    </div>
+                ? 'Задача не выполняется'
+                : 'Остановить задачу и закрыть её браузер'
+          "
+          [disabled]="
+            busy() ||
+            unavailable() ||
+            [
+              'SUCCEEDED',
+              'PARTIAL',
+              'NOT_ACHIEVED',
+              'STOPPED',
+              'FAILED',
+              'DRAFT',
+              'STOPPING',
+            ].includes(task.status)
+          "
+          (click)="stop(task.id)"
+        >
+          <hg-icon name="stop" />Остановить
+        </button>
+      </ng-template>
+    </hg-data-table>
     <hg-pager
       [page]="detail.tasks.page"
       [size]="detail.tasks.pageSize"
@@ -234,32 +392,21 @@
       (sizeChange)="taskSizeChange($event)"
     />
   </section>
-  <section class="card table-card">
-    <div class="section-heading padded"><h2>Аудит пользователя</h2></div>
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>Время</th>
-            <th>Администратор</th>
-            <th>Действие</th>
-            <th>Причина</th>
-            <th>Результат</th>
-          </tr>
-        </thead>
-        <tbody>
-          @for (event of detail.audit.items; track event.id) {
-            <tr>
-              <td>{{ event.createdAt | date: 'dd.MM HH:mm' }}</td>
-              <td>{{ event.actor }}</td>
-              <td>{{ event.action }}</td>
-              <td>{{ event.reason || '—' }}</td>
-              <td><hg-status [value]="event.status" /></td>
-            </tr>
-          }
-        </tbody>
-      </table>
+  <section class="card table-card" id="user-audit">
+    <div class="section-heading padded">
+      <h2>Действия с пользователем</h2>
+      <a
+        class="button quiet small"
+        routerLink="/admin/audit"
+        [queryParams]="{ user: detail.user.id, return: returnUrl() }"
+        >Весь журнал пользователя<hg-icon name="chevron-right"
+      /></a>
     </div>
+    <hg-admin-audit-table
+      [items]="detail.audit.items"
+      [view]="auditTable"
+      [returnUrl]="returnUrl()"
+    />
     <hg-pager
       [page]="detail.audit.page"
       [size]="detail.audit.pageSize"
@@ -268,6 +415,13 @@
       (sizeChange)="auditSizeChange($event)"
     />
   </section>
+  <p class="admin-privacy-note">
+    <hg-icon name="shield" /><span
+      >Только служебные сведения. Содержимое задач, результаты, документы и секреты пользователей
+      здесь недоступны. Административные действия выполняются только из веб-кабинета, не через
+      MCP.</span
+    >
+  </p>
 } @else if (!error()) {
   <div class="loading" role="status">Загружаем пользователя…</div>
 }

@@ -38,7 +38,7 @@ import ru.helmglass.api.usage.UsageService;
 public class AccountService {
   private static final Logger log = LoggerFactory.getLogger(AccountService.class);
   private static final String USER_SELECT =
-      """
+"""
 SELECT a.*,
   (SELECT count(*) FROM browser_sessions b WHERE b.owner_id=a.id AND b.status NOT IN ('CLOSED','QUEUED')) browser_count,
   (SELECT count(*) FROM tasks t WHERE t.owner_id=a.id AND t.status IN ('QUEUED','WAITING_CHATGPT','WAITING_USER')) waiting_count,
@@ -97,20 +97,31 @@ FROM accounts a
       throw ApiException.conflict(
           "NO_TASK", "У браузера нет задачи. Используйте остановку всей работы пользователя.");
     }
-    tasks.lockOwner(reference.ownerId());
-    String previous = tasks.get(reference.ownerId(), reference.taskId()).status();
-    tasks.requestStop(reference.ownerId(), reference.taskId());
-    String current = tasks.get(reference.ownerId(), reference.taskId()).status();
+    return stopTask(actor, reference.ownerId(), reference.taskId());
+  }
+
+  @Transactional
+  public Map<String, Object> stopTask(Actor actor, UUID owner, UUID task) {
+    if (!actor.administrator()) {
+      throw Identity.denied("Нет административных прав.");
+    }
+    tasks.lockOwner(owner);
+    String previous = tasks.get(owner, task).status();
+    if (Set.of("DRAFT", "SUCCEEDED", "PARTIAL", "NOT_ACHIEVED", "FAILED").contains(previous)) {
+      throw ApiException.conflict("TASK_STATE", "Задача не выполняется.");
+    }
+    tasks.requestStop(owner, task);
+    String current = tasks.get(owner, task).status();
     writeAudit(
         actor.id(),
-        reference.taskId(),
-        reference.ownerId(),
+        task,
+        owner,
         "STOP_TASK",
         null,
         Map.of("status", previous),
         Map.of("status", current),
         "STOPPING".equals(current) ? "PENDING" : "SUCCEEDED");
-    return Map.of("status", current, "taskId", reference.taskId());
+    return Map.of("status", current, "taskId", task);
   }
 
   public Contracts.Me me(Actor actor) {
@@ -327,7 +338,7 @@ FROM accounts a
                     + " ORDER BY "
                     + order
                     + (query.ascending() ? " ASC" : " DESC")
-                    + ",a.id LIMIT :limit OFFSET :offset")
+                    + " NULLS LAST,a.id LIMIT :limit OFFSET :offset")
             .params(parameters)
             .param("limit", query.pageSize())
             .param("offset", query.offset())
@@ -345,13 +356,23 @@ FROM accounts a
   }
 
   public AdminDetail detail(
-      UUID id, int taskPage, int auditPage, int taskPageSize, int auditPageSize, String timezone) {
+      UUID id,
+      int taskPage,
+      int auditPage,
+      int taskPageSize,
+      int auditPageSize,
+      String timezone,
+      String taskSort,
+      boolean taskAscending,
+      String auditSort,
+      boolean auditAscending,
+      ListQuery usageQuery) {
     if (taskPage < 1
         || auditPage < 1
         || taskPage > 1000000
         || auditPage > 1000000
-        || !Set.of(10, 20, 50).contains(taskPageSize)
-        || !Set.of(10, 20, 50).contains(auditPageSize)) {
+        || !Set.of(3, 5, 10, 20, 25, 50).contains(taskPageSize)
+        || !Set.of(3, 5, 10, 20, 25, 50).contains(auditPageSize)) {
       throw ApiException.invalid("page", "Некорректная страница.");
     }
     AdminUser user = user(id);
@@ -363,10 +384,22 @@ FROM accounts a
             .param("id", id)
             .query(Long.class)
             .single();
+    String order =
+        switch (taskSort == null ? "" : taskSort) {
+          case "id" -> "id";
+          case "status" -> "status";
+          case "browserId" -> "browser_session_id";
+          case "reason" -> "wait_reason";
+          default -> "created_at";
+        };
     var recentTasks =
         jdbc.sql(
-                "SELECT id,status,browser_session_id,wait_reason,created_at FROM tasks WHERE"
-                    + " owner_id=:id ORDER BY created_at DESC,id LIMIT :limit OFFSET :offset")
+                "SELECT * FROM (SELECT id,status,browser_session_id,wait_reason,created_at FROM"
+                    + " tasks WHERE owner_id=:id ORDER BY created_at DESC,id LIMIT 50) recent ORDER"
+                    + " BY "
+                    + order
+                    + (taskAscending ? " ASC" : " DESC")
+                    + " NULLS LAST,id LIMIT :limit OFFSET :offset")
             .param("id", id)
             .param(
                 "limit",
@@ -399,7 +432,7 @@ FROM accounts a
             .list();
     return new AdminDetail(
         user,
-        usage.administration(id, start, end),
+        usage.administration(id, start, end, zone.getId(), usageQuery),
         new Contracts.Page<>(recentTasks, taskCount, taskPage, taskPageSize),
         jobs,
         audit(
@@ -411,10 +444,11 @@ FROM accounts a
                 List.of(),
                 null,
                 null,
-                null,
-                false,
+                auditSort,
+                auditAscending,
                 auditPage,
-                auditPageSize)));
+                auditPageSize,
+                null)));
   }
 
   @Transactional
@@ -568,39 +602,65 @@ FROM accounts a
   }
 
   public Contracts.Page<Audit> audit(UUID user, ListQuery query, List<String> actions) {
-    List<String> clauses = new ArrayList<>(List.of("created_at>=now()-interval '365 days'"));
+    String tables =
+        " FROM administrative_audit d LEFT JOIN accounts actor ON actor.id=d.actor_id"
+            + " LEFT JOIN accounts target ON target.id=d.target_id"
+            + " LEFT JOIN browser_nodes node ON node.id=d.target_id";
+    List<String> clauses = new ArrayList<>(List.of("d.created_at>=now()-interval '365 days'"));
     Map<String, Object> parameters = new HashMap<>();
     if (user != null) {
-      clauses.add("owner_id=:user");
+      clauses.add("d.owner_id=:user");
       parameters.put("user", user);
     }
     if (query.search() != null && !query.search().isBlank()) {
       clauses.add(
-          "(action ILIKE :search OR reason ILIKE :search OR actor_id::text ILIKE :search OR"
-              + " target_id::text ILIKE :search)");
+          "(d.action ILIKE :search OR d.reason ILIKE :search OR d.actor_id::text ILIKE :search OR"
+              + " d.target_id::text ILIKE :search OR actor.name ILIKE :search"
+              + " OR actor.email ILIKE :search OR target.name ILIKE :search"
+              + " OR target.email ILIKE :search OR node.name ILIKE :search)");
       parameters.put("search", "%" + query.search() + "%");
     }
-    ListQuery.addList(clauses, parameters, "status", "status", query.status());
-    ListQuery.addList(clauses, parameters, "action", "action", actions);
+    ListQuery.addList(clauses, parameters, "d.status", "status", query.status());
+    ListQuery.addList(clauses, parameters, "d.action", "action", actions);
     if (query.from() != null) {
-      clauses.add("created_at>=:from");
+      clauses.add("d.created_at>=:from");
       parameters.put("from", java.sql.Timestamp.from(query.from()));
     }
     if (query.to() != null) {
-      clauses.add("created_at<:to");
+      clauses.add("d.created_at<:to");
       parameters.put("to", java.sql.Timestamp.from(query.to()));
     }
     String where = String.join(" AND ", clauses);
     long total =
-        jdbc.sql("SELECT count(*) FROM administrative_audit WHERE " + where)
+        jdbc.sql("SELECT count(*)" + tables + " WHERE " + where)
             .params(parameters)
             .query(Long.class)
             .single();
+    String order =
+        switch (query.sort() == null ? "" : query.sort()) {
+          case "actor" -> "actor_name";
+          case "target" -> "target_name";
+          case "action" -> "d.action";
+          case "reason" -> "d.reason";
+          default -> "d.created_at";
+        };
     var rows =
         jdbc.sql(
-                "SELECT * FROM administrative_audit WHERE "
+                "SELECT d.*,coalesce(actor.name,'Система') actor_name,"
+                    + " CASE WHEN d.target_id='00000000-0000-0000-0000-000000000000'::uuid"
+                    + " THEN 'Запуск браузеров' ELSE coalesce(target.name,node.name,"
+                    + " 'Задача #'||left(d.target_id::text,8)) END target_name,"
+                    + " CASE WHEN target.id IS NOT NULL THEN 'USER'"
+                    + " WHEN node.id IS NOT NULL THEN 'NODE'"
+                    + " WHEN d.target_id='00000000-0000-0000-0000-000000000000'::uuid"
+                    + " THEN 'PLATFORM' ELSE 'TASK' END target_type"
+                    + tables
+                    + " WHERE "
                     + where
-                    + " ORDER BY created_at DESC,id LIMIT :limit OFFSET :offset")
+                    + " ORDER BY "
+                    + order
+                    + (query.ascending() ? " ASC" : " DESC")
+                    + " NULLS LAST,d.id LIMIT :limit OFFSET :offset")
             .params(parameters)
             .param("limit", query.pageSize())
             .param("offset", query.offset())
@@ -615,7 +675,10 @@ FROM accounts a
                         row.getString("reason"),
                         row.getString("before_value"),
                         row.getString("after_value"),
-                        row.getString("status")))
+                        row.getString("status"),
+                        row.getString("actor_name"),
+                        row.getString("target_name"),
+                        row.getString("target_type")))
             .list();
     return new Contracts.Page<>(rows, total, query.page(), query.pageSize());
   }
@@ -897,6 +960,7 @@ FROM accounts a
                   "result_rows",
                   "task_requests",
                   "operations",
+                  "task_steps",
                   "usage_intervals")) {
             jdbc.sql("DELETE FROM " + table + " WHERE owner_id=:owner")
                 .param("owner", owner)
@@ -988,7 +1052,10 @@ FROM accounts a
       String reason,
       String before,
       String after,
-      String status) {}
+      String status,
+      String actorName,
+      String targetName,
+      String targetType) {}
 
   public record AdminOperation(UUID id, String status, String description) {}
 

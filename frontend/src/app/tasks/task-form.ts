@@ -2,12 +2,15 @@ import { Icon } from '../shared/icon';
 import { Component, DestroyRef, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
-import { ActivatedRoute, Router, RouterLink } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
 import * as z from 'zod/mini';
 import { Api, ApiError, errorMessage } from '../core/api';
 import { Task, taskSchema } from '../core/models';
 import { ConnectionPicker } from '../connections/connection-picker';
 import { Session } from '../core/session';
+import { PageContext, pageReturnLabel, pageReturnUrl } from '../core/page-context';
+import { Tooltip } from '../shared/tooltip';
+import { combineLatest, distinctUntilChanged, map } from 'rxjs';
 
 const pendingFormSchema = z.object({
   phase: z.enum(['CREATE', 'AMEND', 'PREPARE']),
@@ -22,54 +25,45 @@ const draftFormSchema = z.object({
     goal: true,
     startUrl: true,
     outputFormat: true,
-    requireConfirmation: true,
     preferredConnectionIds: true,
   }),
 });
 
 @Component({
   selector: 'hg-task-form',
-  imports: [Icon, ReactiveFormsModule, RouterLink, ConnectionPicker],
+  imports: [Icon, ReactiveFormsModule, ConnectionPicker, Tooltip],
   templateUrl: './task-form.html',
+  styleUrl: './task-form.css',
   host: { '(window:beforeunload)': 'beforeUnload($event)' },
 })
 export class TaskForm {
   private readonly api = inject(Api);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
+  private readonly pageContext = inject(PageContext);
   private readonly destroy = inject(DestroyRef);
   private generation = 0;
   readonly form = inject(FormBuilder).nonNullable.group({
     goal: ['', [Validators.maxLength(20000)]],
     startUrl: ['', [Validators.maxLength(4096), Validators.pattern(/^$|^https?:\/\/[^\s]+$/i)]],
     outputFormat: ['TABLE'],
-    requireConfirmation: [true],
     preferredConnectionIds: [[] as string[]],
   });
   readonly task = signal<Task | null>(null);
   private readonly baseVersion = signal<number | null>(null);
   readonly versionConflict = computed(
-    () => this.mode !== 'similar' && !!this.task() && this.baseVersion() !== this.task()?.version,
+    () => !!this.task() && this.baseVersion() !== this.task()?.version,
   );
   readonly error = signal('');
   readonly fieldErrors = signal<Record<string, string>>({});
   readonly busy = signal(false);
   readonly loading = signal(true);
   readonly loaded = signal(false);
-  readonly mode =
-    this.route.snapshot.data['mode'] === 'refine'
-      ? 'refine'
-      : this.route.snapshot.data['mode'] === 'similar'
-        ? 'similar'
-        : 'edit';
   get title() {
-    return this.mode === 'refine'
-      ? 'Уточнить задачу'
-      : this.mode === 'similar'
-        ? 'Похожая задача'
-        : this.route.snapshot.paramMap.has('id')
-          ? 'Редактировать черновик'
-          : 'Новая задача';
+    return this.route.snapshot.paramMap.has('id') ? 'Редактировать черновик' : 'Новая задача';
+  }
+  get returnLabel() {
+    return pageReturnLabel(pageReturnUrl(this.route, this.router, '/tasks').toString());
   }
   private readonly session = inject(Session);
   private get inputKey() {
@@ -77,9 +71,13 @@ export class TaskForm {
       'helm-input:' +
       this.session.user()?.id +
       ':' +
-      this.mode +
+      'edit' +
       ':' +
-      (this.route.snapshot.paramMap.get('id') ?? 'new')
+      (this.route.snapshot.paramMap.get('id') ??
+        'new' +
+          (this.route.snapshot.queryParamMap.get('copy')
+            ? ':copy:' + this.route.snapshot.queryParamMap.get('copy')
+            : ''))
     );
   }
   readonly pending = signal<z.infer<typeof pendingFormSchema> | null>(null);
@@ -116,27 +114,32 @@ export class TaskForm {
     this.form.valueChanges.pipe(takeUntilDestroyed()).subscribe(() => {
       if (this.form.dirty) this.preserveInput();
     });
-    this.route.paramMap.pipe(takeUntilDestroyed()).subscribe(() => {
-      this.task.set(null);
-      this.baseVersion.set(null);
-      this.pending.set(null);
-      this.busy.set(false);
-      this.loading.set(true);
-      this.loaded.set(false);
-      this.fieldErrors.set({});
-      this.form.reset(
-        {
-          goal: '',
-          startUrl: '',
-          outputFormat: 'TABLE',
-          requireConfirmation: true,
-          preferredConnectionIds: [],
-        },
-        { emitEvent: false },
-      );
-      this.form.enable({ emitEvent: false });
-      void this.load();
-    });
+    combineLatest([this.route.paramMap, this.route.queryParamMap])
+      .pipe(
+        map(([params, query]) => [params.get('id'), query.get('copy')].join(':')),
+        distinctUntilChanged(),
+        takeUntilDestroyed(),
+      )
+      .subscribe(() => {
+        this.task.set(null);
+        this.baseVersion.set(null);
+        this.pending.set(null);
+        this.busy.set(false);
+        this.loading.set(true);
+        this.loaded.set(false);
+        this.fieldErrors.set({});
+        this.form.reset(
+          {
+            goal: '',
+            startUrl: '',
+            outputFormat: 'TABLE',
+            preferredConnectionIds: [],
+          },
+          { emitEvent: false },
+        );
+        this.form.enable({ emitEvent: false });
+        void this.load();
+      });
   }
   hasChanges() {
     return this.form.dirty;
@@ -145,18 +148,40 @@ export class TaskForm {
     if (this.hasChanges() && this.session.user()) event.preventDefault();
   }
   back() {
-    const context = this.route.snapshot.queryParamMap.get('back');
-    void this.router.navigateByUrl('/tasks' + (context ? '?' + context : ''));
+    void this.router.navigateByUrl(pageReturnUrl(this.route, this.router, '/tasks'));
   }
   async load() {
     const generation = ++this.generation;
     try {
       const id = this.route.snapshot.paramMap.get('id');
-      const task = id ? await this.api.get('/api/tasks/' + id, taskSchema) : null;
+      const copy = id ? null : this.route.snapshot.queryParamMap.get('copy');
+      const source = id ?? copy;
+      const parameters = source ? await this.api.get('/api/tasks/' + source, taskSchema) : null;
+      const task = id ? parameters : null;
       if (generation !== this.generation) return;
+      if (task && task.status !== 'DRAFT') {
+        await this.router.navigate(['/tasks', task.id], {
+          queryParams: {
+            tab: 'overview',
+            back: this.route.snapshot.queryParamMap.get('back'),
+            return: this.route.snapshot.queryParamMap.get('return'),
+          },
+          replaceUrl: true,
+        });
+        return;
+      }
       this.task.set(task);
       this.baseVersion.set(task?.version ?? null);
-      if (task) this.form.patchValue({ ...task, startUrl: task.startUrl ?? '' });
+      if (task) this.pageContext.setResource('tasks', task.id, task.title);
+      if (parameters) {
+        this.form.patchValue({
+          goal: parameters.goal,
+          startUrl: parameters.startUrl ?? '',
+          outputFormat: parameters.outputFormat,
+          preferredConnectionIds: parameters.preferredConnectionIds,
+        });
+        if (copy) this.form.markAsDirty();
+      }
       const input = sessionStorage.getItem(this.inputKey);
       if (input) {
         const parsed = draftFormSchema.safeParse(JSON.parse(input));
@@ -194,7 +219,7 @@ export class TaskForm {
     if (!this.canSubmit(prepare)) return;
     this.form.markAllAsTouched();
     const fields: Record<string, string> = {};
-    if (prepare || this.mode === 'refine') {
+    if (prepare) {
       if (!this.form.controls.goal.value.trim()) fields['goal'] = 'Опишите цель задачи.';
       if (!this.form.controls.startUrl.value.trim())
         fields['startUrl'] = 'Укажите начальный сайт для подготовки задачи.';
@@ -215,7 +240,7 @@ export class TaskForm {
       this.preserveInput();
       if (!this.pending())
         this.rememberPending({
-          phase: original && this.mode !== 'similar' ? 'AMEND' : 'CREATE',
+          phase: original ? 'AMEND' : 'CREATE',
           prepare,
           taskId: original?.id ?? null,
           version: this.baseVersion() ?? 0,
@@ -257,7 +282,12 @@ export class TaskForm {
       sessionStorage.removeItem(this.inputKey);
       this.rememberPending(null);
       this.form.markAsPristine();
-      await this.router.navigate(['/tasks', saved.id], { queryParamsHandling: 'preserve' });
+      await this.router.navigate(['/tasks', saved.id], {
+        queryParams: {
+          back: this.route.snapshot.queryParamMap.get('back'),
+          return: this.route.snapshot.queryParamMap.get('return'),
+        },
+      });
     } catch (error: unknown) {
       if (generation !== this.generation) return;
       this.error.set(errorMessage(error));

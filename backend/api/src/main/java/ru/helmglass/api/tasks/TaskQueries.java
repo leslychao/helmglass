@@ -1,6 +1,7 @@
 package ru.helmglass.api.tasks;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -49,9 +50,9 @@ public class TaskQueries {
             .single();
     var items =
         jdbc.sql(
-                "SELECT DISTINCT site FROM tasks WHERE "
+                "SELECT site FROM tasks WHERE "
                     + where
-                    + " ORDER BY site LIMIT :limit OFFSET :offset")
+                    + " GROUP BY site ORDER BY max(updated_at) DESC,site LIMIT :limit OFFSET :offset")
             .params(parameters)
             .param("limit", query.pageSize())
             .param("offset", query.offset())
@@ -114,17 +115,20 @@ public class TaskQueries {
     }
     String order = "id";
     if (query.sort() != null) {
-      boolean allowed = false;
       if (task.result() != null) {
         for (JsonNode column : task.result().path("columns")) {
           if (query.sort().equals(column.path("key").asString())) {
-            allowed = true;
+            order =
+                switch (column.path("type").asString().toLowerCase(Locale.ROOT)) {
+                  case "number" -> "(cells ->> :sort)::numeric";
+                  case "date" -> "(cells ->> :sort)::date";
+                  case "boolean" -> "(cells ->> :sort)::boolean";
+                  default -> "cells ->> :sort";
+                };
+            parameters.put("sort", query.sort());
+            break;
           }
         }
-      }
-      if (allowed) {
-        order = "cells -> :sort";
-        parameters.put("sort", query.sort());
       }
     }
     long total =

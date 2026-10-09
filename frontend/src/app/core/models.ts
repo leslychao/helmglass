@@ -43,6 +43,12 @@ export const browserSchema = z.object({
   canView: z.boolean(),
   canControl: z.boolean(),
   version: z.number(),
+  profileSaveError: z.nullable(z.string()),
+  taskId: z.nullable(z.string()),
+  connectionId: z.nullable(z.string()),
+  loginConfirmed: z.boolean(),
+  startedAt: z.nullable(z.string()),
+  closedAt: z.nullable(z.string()),
 });
 export type BrowserSession = z.infer<typeof browserSchema>;
 export const artifactSchema = z.object({
@@ -66,8 +72,21 @@ export const requestSchema = z.object({
   type: z.string(),
   prompt: z.string(),
   version: z.number(),
+  instructionRevision: z.number(),
   options: z.array(z.object({ id: z.string(), label: z.string() })),
   operationId: z.optional(z.nullable(z.string())),
+});
+export const responseSchema = z.object({
+  requestId: z.string(),
+  requestVersion: z.number(),
+  instructionRevision: z.number(),
+  type: z.string(),
+  prompt: z.string(),
+  operationId: z.nullable(z.string()),
+  command: z.enum(['ANSWER', 'CONFIRM', 'REJECT', 'CHOOSE_CONNECTION']),
+  text: z.nullable(z.string()),
+  connectionId: z.nullable(z.string()),
+  answeredAt: z.string(),
 });
 export const taskSchema = z.object({
   id: z.string(),
@@ -76,7 +95,7 @@ export const taskSchema = z.object({
   goal: z.string(),
   startUrl: z.nullable(z.string()),
   outputFormat: z.string(),
-  requireConfirmation: z.boolean(),
+  chatBound: z.boolean(),
   preferredConnectionIds: z.array(z.string()),
   status: z.string(),
   outcome: z.nullable(z.string()),
@@ -84,15 +103,16 @@ export const taskSchema = z.object({
   source: z.string(),
   site: z.nullable(z.string()),
   request: z.nullable(requestSchema),
+  lastResponse: z.nullable(responseSchema),
   browser: z.nullable(browserSchema),
   result: z.nullable(resultSchema),
   createdAt: z.string(),
   updatedAt: z.string(),
   usage: usageSchema,
   allowedCommands: z.array(z.string()),
+  stepCount: z.number(),
   instructionRevision: z.number(),
-  summary: z.string(),
-  chatUrl: z.optional(z.nullable(z.string())),
+  summary: z.nullable(z.string()),
 });
 export type Task = z.infer<typeof taskSchema>;
 export const connectionSchema = z.object({
@@ -108,16 +128,21 @@ export const connectionSchema = z.object({
   browser: z.nullable(browserSchema),
   createdAt: z.string(),
   updatedAt: z.string(),
+  profileRevision: z.number(),
+  profileSavedAt: z.nullable(z.string()),
+  profileSaveError: z.nullable(z.string()),
+  authorizedOrigins: z.array(z.string()),
 });
 export type Connection = z.infer<typeof connectionSchema>;
-export const eventSchema = z.object({
-  id: z.string(),
-  sequence: z.number(),
-  type: z.string(),
-  title: z.string(),
-  detail: z.nullable(z.string()),
-  createdAt: z.string(),
+export const stepSchema = z.object({
+  id: z.string(), taskId: z.string(), sequence: z.number(), version: z.number(),
+  title: z.string(), status: z.enum(['PLANNED', 'RUNNING', 'WAITING', 'SUCCEEDED', 'PARTIAL', 'FAILED', 'UNKNOWN', 'SKIPPED']),
+  result: z.nullable(z.string()), createdAt: z.string(), updatedAt: z.string(),
 });
+export const stepLabels: Readonly<Record<z.infer<typeof stepSchema>['status'], string>> = {
+  PLANNED: 'Запланирован', RUNNING: 'Выполняется', WAITING: 'Ожидает', SUCCEEDED: 'Выполнен',
+  PARTIAL: 'Частично выполнен', FAILED: 'Не выполнен', UNKNOWN: 'Результат неизвестен', SKIPPED: 'Пропущен',
+};
 export const notificationSchema = z.object({
   id: z.string(),
   sequence: z.number(),
@@ -198,6 +223,8 @@ export const adminBrowserSchema = z.object({
   taskId: z.nullable(z.string()),
   ownerId: z.string(),
   ownerName: z.string(),
+  ownerEmail: z.string(),
+  taskStatus: z.nullable(z.string()),
   status: z.string(),
 });
 export const nodeSchema = z.object({
@@ -215,6 +242,9 @@ export const auditSchema = z.object({
   createdAt: z.string(),
   actor: z.string(),
   target: z.string(),
+  actorName: z.string(),
+  targetName: z.string(),
+  targetType: z.enum(['USER', 'NODE', 'TASK', 'PLATFORM']),
   action: z.string(),
   reason: z.nullable(z.string()),
   before: z.nullable(z.string()),
@@ -232,6 +262,14 @@ export const adminUsageSchema = z.strictObject({
   completedTasks: z.number(),
   successRate: nullableNumber,
   usage: usageSchema,
+  commands: z.int().check(z.gte(0)),
+  from: z.string(),
+  to: z.string(),
+  incompleteDays: z.int().check(z.gte(0), z.lte(7)),
+  days: pageSchema(z.object({
+    date: z.string(), commands: z.int().check(z.gte(0)),
+    browserSeconds: nullableNumber, incomplete: z.boolean(),
+  })),
 });
 export const adminDetailSchema = z.object({
   user: adminUserSchema,
@@ -258,7 +296,6 @@ export interface TaskInput {
   goal: string;
   startUrl: string;
   outputFormat: string;
-  requireConfirmation: boolean;
   preferredConnectionIds: string[];
 }
 export interface Command {
@@ -275,7 +312,6 @@ export interface Command {
   goal?: string;
   startUrl?: string;
   outputFormat?: string;
-  requireConfirmation?: boolean;
   preferredConnectionIds?: string[];
   accountLabel?: string;
   accountSubject?: string;

@@ -41,6 +41,8 @@ export class Api {
       success = true;
       return value;
     } catch (error: unknown) {
+      // An authoritative access/absence response is current, not a lost synchronization.
+      success = error instanceof HttpErrorResponse && [403, 404].includes(error.status);
       throw this.failure(error, false);
     } finally {
       this.live.endRefresh(tracked, success);
@@ -83,6 +85,52 @@ export class Api {
         sessionStorage.removeItem(storageKey);
       }
       throw failure;
+    }
+  }
+
+  async readTextPreview(path: string, signal: AbortSignal) {
+    const limit = 64 * 1024;
+    try {
+      const response = await fetch(path, {
+        credentials: 'same-origin',
+        redirect: 'error',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new HttpErrorResponse({ status: response.status });
+      }
+      if (response.headers.get('Content-Type')?.split(';')[0].trim() !== 'text/plain') {
+        await response.body?.cancel();
+        throw new Error('Этот файл нельзя просмотреть как обычный текст.');
+      }
+      if (!response.body) throw new Error('Содержимое файла не получено.');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let bytes = 0;
+      let text = '';
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) return { text: text + decoder.decode(), truncated: false };
+          const remaining = limit - bytes;
+          text += decoder.decode(value.subarray(0, remaining), { stream: true });
+          bytes += value.byteLength;
+          if (bytes > limit) {
+            await reader.cancel();
+            return { text, truncated: true };
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === 'TimeoutError') {
+        throw new Error('Не удалось загрузить текст за 15 секунд. Повторите попытку.');
+      }
+      if (error instanceof TypeError)
+        throw this.failure(new HttpErrorResponse({ status: 0 }), false);
+      throw this.failure(error, false);
     }
   }
 

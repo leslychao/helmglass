@@ -6,6 +6,8 @@ import { NavigationEnd, Router } from '@angular/router';
 import * as z from 'zod/mini';
 import { Session } from '../core/session';
 import { Icon } from './icon';
+import { Tooltip } from './tooltip';
+import { Status } from './ui';
 
 export interface DialogField {
   key: string;
@@ -16,6 +18,16 @@ export interface DialogField {
   min?: number;
   max?: number;
   options?: { value: string; label: string }[];
+  visibleWhen?: { key: string; value: string };
+  group?: string;
+  placeholder?: string;
+}
+export interface DialogPresentation {
+  subject?: { name: string; detail: string };
+  groups?: { key: string; label: string; caption: string }[];
+  note?: string;
+  facts?: { label: string; value: string; status?: string }[];
+  compact?: boolean;
 }
 interface DialogRequest {
   title: string;
@@ -30,6 +42,9 @@ interface DialogRequest {
   currentVersion?: number;
   currentFields: DialogField[];
   conflict: boolean;
+  kind: 'confirmation' | 'information';
+  presentation: DialogPresentation;
+  sections: { key: string; label: string; caption: string; fields: DialogField[] }[];
 }
 const draftSchema = z.object({
   values: z.record(z.string(), z.string()),
@@ -62,6 +77,7 @@ export class Dialog {
     danger = false,
     subject = '',
     currentVersion?: number,
+    presentation: DialogPresentation = {},
   ): Promise<Record<string, string> | null> {
     if (this.current()) return Promise.resolve(null);
     const draftKey = fields.length
@@ -97,8 +113,29 @@ export class Dialog {
         currentVersion,
         currentFields,
         conflict: currentVersion !== undefined && baseVersion !== currentVersion,
+        kind: 'confirmation',
+        presentation,
+        sections: [
+          ...(presentation.groups ?? []).map((group) => ({
+            ...group,
+            fields: fields.filter((field) => field.group === group.key),
+          })),
+          {
+            key: 'fields',
+            label: '',
+            caption: '',
+            fields: fields.filter(
+              (field) => !presentation.groups?.some((group) => group.key === field.group),
+            ),
+          },
+        ],
       }),
     );
+  }
+  info(title: string, text: string, presentation: DialogPresentation = {}): void {
+    if (this.current()) return;
+    void this.ask(title, text, 'Закрыть', [], false, '', undefined, presentation);
+    this.current.update((request) => (request ? { ...request, kind: 'information' } : null));
   }
   close(value: Record<string, string> | null) {
     const request = this.current();
@@ -119,9 +156,15 @@ export class Dialog {
     const key = this.current()?.draftKey;
     if (!key) return;
     const values: Record<string, string> = {};
-    new FormData(form).forEach((value, name) => {
-      if (typeof value === 'string') values[name] = value;
-    });
+    for (const control of Array.from(form.elements)) {
+      if (
+        (control instanceof HTMLInputElement ||
+          control instanceof HTMLSelectElement ||
+          control instanceof HTMLTextAreaElement) &&
+        control.name
+      )
+        values[control.name] = control.value;
+    }
     sessionStorage.setItem(
       key,
       JSON.stringify({ values, baseVersion: this.current()?.baseVersion }),
@@ -144,29 +187,61 @@ export class Dialog {
 }
 @Component({
   selector: 'hg-dialog',
-  imports: [FormsModule, A11yModule, Icon],
+  imports: [FormsModule, A11yModule, Icon, Tooltip, Status],
+  styleUrl: './dialog.css',
   template: ` @if (dialog.current(); as request) {
     <div class="modal-shade" (keydown.escape)="dialog.close(null)">
       <section
         class="dialog"
+        [class.dialog-compact]="request.presentation.compact"
         role="dialog"
         aria-modal="true"
         aria-labelledby="dialog-title"
+        [attr.aria-describedby]="request.text ? 'dialog-description' : null"
         cdkTrapFocus
         [cdkTrapFocusAutoCapture]="true"
       >
         <header>
           <h2 id="dialog-title">{{ request.title }}</h2>
-          <button
-            class="icon-button"
-            aria-label="Закрыть"
-            title="Закрыть"
-            (click)="dialog.close(null)"
-          >
-            <hg-icon name="close" />
-          </button>
+          @if (!request.presentation.compact) {
+            <button
+              class="icon-button"
+              aria-label="Закрыть"
+              hgTooltip="Закрыть"
+              (click)="dialog.close(null)"
+            >
+              <hg-icon name="close" />
+            </button>
+          }
         </header>
-        <p class="muted">{{ request.text }}</p>
+        @if (request.presentation.subject; as subject) {
+          <div class="dialog-subject">
+            <span class="dialog-subject-avatar">{{ initials(subject.name) }}</span>
+            <div>
+              <strong>{{ subject.name }}</strong
+              ><small>{{ subject.detail }}</small>
+            </div>
+          </div>
+        }
+        @if (request.text) {
+          <p id="dialog-description" class="muted">{{ request.text }}</p>
+        }
+        @if (request.presentation.facts?.length) {
+          <dl class="dialog-facts">
+            @for (fact of request.presentation.facts; track fact.label) {
+              <div>
+                <dt>{{ fact.label }}</dt>
+                <dd>
+                  @if (fact.status) {
+                    <hg-status [value]="fact.status" />
+                  } @else {
+                    {{ fact.value }}
+                  }
+                </dd>
+              </div>
+            }
+          </dl>
+        }
         <form
           #form
           (submit)="submit($event, form)"
@@ -190,52 +265,89 @@ export class Dialog {
               </button>
             </div>
           }
-          @for (field of request.fields; track field.key) {
-            <label class="field"
-              >{{ field.label }}
-              @switch (field.type) {
-                @case ('textarea') {
-                  <textarea
-                    [name]="field.key"
-                    [value]="field.value ?? ''"
-                    [required]="field.required ?? false"
-                    [maxLength]="field.max ?? 20000"
-                    rows="4"
-                  ></textarea>
-                }
-                @case ('select') {
-                  <select [name]="field.key" [required]="field.required ?? false">
-                    @for (option of field.options; track option.value) {
-                      <option [value]="option.value" [selected]="option.value === field.value">
-                        {{ option.label }}
-                      </option>
-                    }
-                  </select>
-                }
-                @default {
-                  <input
-                    [type]="field.type ?? 'text'"
-                    [name]="field.key"
-                    [value]="field.value ?? ''"
-                    [required]="field.required ?? false"
-                    [min]="field.min ?? null"
-                    [max]="field.type === 'number' ? (field.max ?? null) : null"
-                    [maxLength]="field.type === 'number' ? 30 : (field.max ?? 4096)"
-                  />
-                }
+          @for (section of request.sections; track section.key) {
+            @if (section.key === 'fields' && request.presentation.note) {
+              <p class="dialog-note">{{ request.presentation.note }}</p>
+            }
+            <fieldset class="dialog-field-group" [class.grouped]="!!section.label">
+              @if (section.label) {
+                <legend>{{ section.label }}</legend>
               }
-            </label>
+              <div class="dialog-field-grid" [class.paired]="!!section.label">
+                @for (field of section.fields; track field.key) {
+                  <label class="field" [hidden]="!visible(field, form)"
+                    >{{ field.label }}
+                    @switch (field.type) {
+                      @case ('textarea') {
+                        <textarea
+                          [name]="field.key"
+                          [value]="field.value ?? ''"
+                          [required]="field.required ?? false"
+                          [disabled]="!visible(field, form)"
+                          [maxLength]="field.max ?? 20000"
+                          rows="4"
+                        ></textarea>
+                      }
+                      @case ('select') {
+                        <select
+                          [name]="field.key"
+                          [required]="field.required ?? false"
+                          [disabled]="!visible(field, form)"
+                        >
+                          @for (option of field.options; track option.value) {
+                            <option
+                              [value]="option.value"
+                              [selected]="option.value === field.value"
+                            >
+                              {{ option.label }}
+                            </option>
+                          }
+                        </select>
+                      }
+                      @default {
+                        <input
+                          [type]="field.type ?? 'text'"
+                          [name]="field.key"
+                          [value]="field.value ?? ''"
+                          [required]="field.required ?? false"
+                          [disabled]="!visible(field, form)"
+                          [min]="field.min ?? null"
+                          [max]="field.type === 'number' ? (field.max ?? null) : null"
+                          [maxLength]="field.type === 'number' ? 30 : (field.max ?? 4096)"
+                          [placeholder]="field.placeholder ?? ''"
+                        />
+                      }
+                    }
+                  </label>
+                }
+              </div>
+              @if (section.caption) {
+                <p class="dialog-group-caption">{{ section.caption }}</p>
+              }
+            </fieldset>
           }
           <footer class="actions">
-            <button type="button" class="button" (click)="dialog.close(null)">Отмена</button
-            ><button
-              class="button primary"
-              [class.danger]="request.danger"
-              type="submit"
-              [disabled]="request.conflict"
-            >
-              {{ request.confirm }}
-            </button>
+            @if (request.kind === 'information') {
+              <button type="button" class="button primary" (click)="dialog.close(null)">
+                Закрыть
+              </button>
+            } @else {
+              <button
+                type="button"
+                class="button"
+                [attr.cdkFocusInitial]="request.presentation.compact ? '' : null"
+                (click)="dialog.close(null)"
+              >
+                Отмена</button
+              ><button
+                class="button primary"
+                [class.danger]="request.danger"
+                type="submit"
+                [disabled]="request.conflict"
+              >
+                {{ request.confirm }}
+              </button>
+            }
           </footer>
         </form>
       </section>
@@ -244,6 +356,26 @@ export class Dialog {
 })
 export class DialogHost {
   readonly dialog = inject(Dialog);
+  initials(name: string) {
+    return name
+      .trim()
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part.slice(0, 1))
+      .join('')
+      .toUpperCase();
+  }
+  visible(field: DialogField, form: HTMLFormElement): boolean {
+    if (!field.visibleWhen) return true;
+    const control = form.elements.namedItem(field.visibleWhen.key);
+    const value =
+      control instanceof HTMLInputElement ||
+      control instanceof HTMLSelectElement ||
+      control instanceof HTMLTextAreaElement
+        ? control.value
+        : this.dialog.current()?.fields.find((item) => item.key === field.visibleWhen?.key)?.value;
+    return value === field.visibleWhen.value;
+  }
   clearValidity(event: Event) {
     const target = event.target;
     if (
@@ -262,7 +394,7 @@ export class DialogHost {
       if (typeof value === 'string') values[key] = value.trim();
     });
     for (const field of this.dialog.current()?.fields ?? []) {
-      if (field.required && !values[field.key]) {
+      if (this.visible(field, form) && field.required && !values[field.key]) {
         const control = form.elements.namedItem(field.key);
         if (
           control instanceof HTMLInputElement ||

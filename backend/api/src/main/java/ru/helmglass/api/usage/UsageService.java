@@ -5,6 +5,7 @@ import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -12,6 +13,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Contracts;
+import ru.helmglass.api.ListQuery;
 
 @Service
 public class UsageService {
@@ -23,7 +25,7 @@ public class UsageService {
 
   public Report report(
       UUID owner, Instant from, Instant to, boolean administration, String timezone) {
-    return report(owner, from, to, administration, timezone, 1, 1, 10);
+    return report(owner, from, to, administration, timezone, 1, 1, 10, 10, "site", true);
   }
 
   public Report report(
@@ -34,14 +36,12 @@ public class UsageService {
       String timezone,
       int daysPage,
       int sitesPage,
-      int pageSize) {
-    if (daysPage < 1
-        || sitesPage < 1
-        || daysPage > 1000000
-        || sitesPage > 1000000
-        || !java.util.Set.of(10, 20, 50).contains(pageSize)) {
-      throw ApiException.invalid("page", "Недопустимая страница или размер страницы статистики.");
-    }
+      int pageSize,
+      int sitesPageSize,
+      String sitesSort,
+      boolean sitesAscending) {
+    ListQuery.validatePage(daysPage, pageSize);
+    ListQuery.validatePage(sitesPage, sitesPageSize);
     ZoneId zone = zone(timezone);
     Instant start = from == null ? Instant.EPOCH : from;
     Instant end = to == null ? Instant.now().plusSeconds(1) : to;
@@ -57,7 +57,7 @@ public class UsageService {
             java.sql.Timestamp.from(end),
             "timezone",
             zone.getId());
-    AdminUsage totals = totals(owner, start, end, administration);
+    Totals totals = totals(owner, start, end, administration);
     List<Day> days =
         jdbc.sql(
                 """
@@ -77,6 +77,13 @@ FROM tasks t WHERE
                         row.getLong("tasks"),
                         row.getBigDecimal("seconds")))
             .list();
+    String siteOrder = switch (sitesSort == null ? "" : sitesSort) {
+      case "browserSeconds" -> "browser";
+      case "tasks" -> "tasks";
+      case "mediaSeconds" -> "media_seconds";
+      case "mediaBytes" -> "media_bytes";
+      default -> "t.site";
+    };
     List<Site> sites =
         jdbc.sql(
                 """
@@ -87,10 +94,12 @@ SELECT t.site,count(*) tasks,
 FROM tasks t WHERE
 """
                     + cohort
-                    + " GROUP BY t.site ORDER BY t.site NULLS LAST LIMIT :limit OFFSET :offset")
+                    + " GROUP BY t.site ORDER BY " + siteOrder
+                    + (sitesAscending ? " ASC" : " DESC")
+                    + " NULLS LAST,t.site NULLS LAST LIMIT :limit OFFSET :offset")
             .params(parameters)
-            .param("limit", pageSize)
-            .param("offset", (long) (sitesPage - 1) * pageSize)
+            .param("limit", sitesPageSize)
+            .param("offset", (long) (sitesPage - 1) * sitesPageSize)
             .query(
                 (row, index) ->
                     new Site(
@@ -130,15 +139,74 @@ FROM tasks t WHERE
         totals.successRate(),
         totals.usage(),
         new Contracts.Page<>(days, dayCount, daysPage, pageSize),
-        new Contracts.Page<>(sites, siteCount, sitesPage, pageSize),
+        new Contracts.Page<>(sites, siteCount, sitesPage, sitesPageSize),
         statuses);
   }
 
-  public AdminUsage administration(UUID owner, Instant from, Instant to) {
-    return totals(owner, from, to, true);
+  public AdminUsage administration(
+      UUID owner, Instant from, Instant to, String timezone, ListQuery query) {
+    ListQuery.validatePage(query.page(), query.pageSize());
+    ZoneId zone = zone(timezone);
+    LocalDate last = to.atZone(zone).toLocalDate();
+    LocalDate first = last.minusDays(6);
+    Totals totals = totals(owner, from, to, true);
+    List<AdminDay> days =
+        jdbc.sql(
+                """
+WITH days AS (
+  SELECT CAST(:first AS date)+day_offset AS usage_date,
+    (CAST(:first AS date)+day_offset)::timestamp AT TIME ZONE :timezone AS start_at,
+    (CAST(:first AS date)+day_offset+1)::timestamp AT TIME ZONE :timezone AS end_at
+  FROM generate_series(0,6) day_offset
+), commands AS (
+  SELECT (created_at AT TIME ZONE :timezone)::date AS usage_date,count(*) AS commands
+  FROM operations WHERE owner_id=:owner AND created_at>=:start AND created_at<:end
+  GROUP BY usage_date
+), browser AS (
+  SELECT d.usage_date,
+    sum(greatest(0,extract(epoch FROM
+      least(coalesce(u.ended_at,:end),d.end_at,:end)-greatest(u.started_at,d.start_at,:start))))
+      FILTER(WHERE u.id IS NOT NULL) AS seconds,
+    coalesce(bool_or(u.incomplete),false) AS incomplete
+  FROM days d LEFT JOIN usage_intervals u ON u.owner_id=:owner AND u.kind='BROWSER'
+    AND u.started_at<least(d.end_at,:end) AND coalesce(u.ended_at,:end)>d.start_at
+  GROUP BY d.usage_date
+)
+SELECT d.usage_date,coalesce(c.commands,0) AS commands,
+  coalesce(b.seconds,0) AS seconds,b.incomplete
+FROM days d LEFT JOIN commands c USING(usage_date) LEFT JOIN browser b USING(usage_date)
+ORDER BY d.usage_date
+""")
+            .param("owner", owner)
+            .param("first", first.toString())
+            .param("timezone", zone.getId())
+            .param("start", java.sql.Timestamp.from(from))
+            .param("end", java.sql.Timestamp.from(to))
+            .query((row, index) -> new AdminDay(
+                row.getObject("usage_date", LocalDate.class).toString(),
+                row.getLong("commands"), row.getBigDecimal("seconds"),
+                row.getBoolean("incomplete")))
+            .list();
+    long commands = days.stream().mapToLong(AdminDay::commands).sum();
+    long incompleteDays = days.stream().filter(AdminDay::incomplete).count();
+    Comparator<AdminDay> order = switch (query.sort() == null ? "" : query.sort()) {
+      case "commands" -> Comparator.comparing(AdminDay::commands,
+          query.ascending() ? Comparator.naturalOrder() : Comparator.reverseOrder());
+      case "browserSeconds" -> Comparator.comparing(AdminDay::browserSeconds,
+          Comparator.nullsLast(query.ascending()
+              ? Comparator.<BigDecimal>naturalOrder() : Comparator.<BigDecimal>reverseOrder()));
+      default -> Comparator.comparing(AdminDay::date,
+          query.ascending() ? Comparator.naturalOrder() : Comparator.reverseOrder());
+    };
+    // The seven calendar days are bounded; totals above always cover the complete period.
+    List<AdminDay> page = days.stream().sorted(order.thenComparing(AdminDay::date))
+        .skip(query.offset()).limit(query.pageSize()).toList();
+    return new AdminUsage(totals.totalTasks(), totals.successfulTasks(), totals.completedTasks(),
+        totals.successRate(), totals.usage(), commands, first.toString(), last.toString(),
+        incompleteDays, new Contracts.Page<>(page, days.size(), query.page(), query.pageSize()));
   }
 
-  private AdminUsage totals(UUID owner, Instant start, Instant end, boolean administration) {
+  private Totals totals(UUID owner, Instant start, Instant end, boolean administration) {
     String cohort =
         "owner_id=:owner AND status<>'DRAFT' AND created_at>=:start AND created_at<:end";
     Map<String, Object> parameters =
@@ -220,7 +288,7 @@ FROM tasks t WHERE
             times.incomplete() || media.incomplete());
     Double successRate =
         counts.completed() == 0 ? null : (double) counts.successful() / counts.completed();
-    return new AdminUsage(
+    return new Totals(
         counts.total(), counts.successful(), counts.completed(), successRate, usage);
   }
 
@@ -229,7 +297,17 @@ FROM tasks t WHERE
       long successfulTasks,
       long completedTasks,
       Double successRate,
-      Usage usage) {}
+      Usage usage,
+      long commands,
+      String from,
+      String to,
+      long incompleteDays,
+      Contracts.Page<AdminDay> days) {}
+
+  public record AdminDay(String date, long commands, BigDecimal browserSeconds, boolean incomplete) {}
+
+  private record Totals(long totalTasks, long successfulTasks, long completedTasks,
+      Double successRate, Usage usage) {}
 
   public static ZoneId zone(String timezone) {
     try {

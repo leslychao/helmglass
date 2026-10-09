@@ -1,0 +1,134 @@
+<div #viewport class="hg-grid-scroll" tabindex="0" [attr.aria-label]="label()">
+  <table class="hg-grid" [style.width.px]="width()" [style.min-width.px]="width()">
+    <caption class="sr-only">
+      {{
+        label()
+      }}
+    </caption>
+    <colgroup>
+      @for (cell of geometry(); track cell.column.key) {
+        <col [style.width.px]="cell.width" />
+      }
+    </colgroup>
+    <thead>
+      <tr>
+        @for (cell of geometry(); track cell.column.key) {
+          <th
+            scope="col"
+            [attr.data-column]="cell.column.key"
+            [attr.aria-sort]="cell.column.action ? null : view().ariaSort(cell.column.key)"
+            [class.hg-action-cell]="cell.column.action"
+            [class.hg-drag-source]="moving() === cell.column.key"
+            [class.hg-drop-before]="drop()?.key === cell.column.key && !drop()?.after"
+            [class.hg-drop-after]="drop()?.key === cell.column.key && drop()?.after"
+          >
+            @if (cell.column.action) {
+              <span class="sr-only">{{ cell.column.label }}</span>
+            } @else {
+              <div class="hg-grid-heading">
+                <button
+                  type="button"
+                  class="hg-column-grip"
+                  [attr.aria-label]="'Переместить столбец: ' + cell.column.label"
+                  hgTooltip="Перетащить столбец · ← → на клавиатуре"
+                  (pointerdown)="drag($event, cell.column)"
+                  (keydown)="moveKey($event, cell.column)"
+                >
+                  <hg-icon name="grip" />
+                </button>
+                <button
+                  type="button"
+                  class="hg-sort"
+                  (click)="view().sort(cell.column.key)"
+                  [hgTooltip]="'Сортировать: ' + cell.column.label"
+                >
+                  <span>{{ cell.column.label }}</span
+                  ><hg-icon
+                    [name]="
+                      view().ariaSort(cell.column.key) === 'ascending'
+                        ? 'arrow-up'
+                        : view().ariaSort(cell.column.key) === 'descending'
+                          ? 'arrow-down'
+                          : 'sort'
+                    "
+                  />
+                </button>
+                @if (cell.column.help) {
+                  <button
+                    type="button"
+                    class="hg-header-help"
+                    [hgTooltip]="cell.column.help || ''"
+                    [attr.aria-label]="'О столбце: ' + cell.column.label"
+                  >
+                    <hg-icon name="info" />
+                  </button>
+                }
+              </div>
+              <button
+                type="button"
+                class="hg-column-resizer"
+                role="separator"
+                aria-orientation="vertical"
+                [attr.aria-label]="'Изменить ширину: ' + cell.column.label"
+                [attr.aria-valuemin]="cell.column.minWidth || 100"
+                [attr.aria-valuemax]="cell.width > 700 ? cell.width : 700"
+                [attr.aria-valuenow]="cell.width"
+                (pointerdown)="resize($event, cell.column, cell.width)"
+                (keydown)="resizeKey($event, cell.column, cell.width)"
+              ></button>
+            }
+          </th>
+        }
+      </tr>
+    </thead>
+    <tbody>
+      @for (row of rows(); track identity(row)) {
+        <tr>
+          @for (column of view().visible(); track column.key) {
+            <td [class]="column.className || ''" [class.hg-action-cell]="column.action">
+              @if (templates().get(column.key); as template) {
+                <ng-container
+                  [ngTemplateOutlet]="template"
+                  [ngTemplateOutletContext]="{ $implicit: row }"
+                />
+              }
+            </td>
+          }
+        </tr>
+        @if (isExpanded(row)) {
+          @if (templates().get('detail'); as template) {
+            <tr>
+              <td class="hg-detail-cell" [attr.colspan]="view().visible().length">
+                <div class="hg-detail-content" [style.width.px]="available() - 32">
+                  <ng-container
+                    [ngTemplateOutlet]="template"
+                    [ngTemplateOutletContext]="{ $implicit: row }"
+                  />
+                </div>
+              </td>
+            </tr>
+          }
+        }
+      }
+    </tbody>
+  </table>
+</div>
+<span class="sr-only" aria-live="polite">{{ announcement() }}</span>
+@if (dragLabel(); as label) {
+  <div class="hg-drag-label" aria-hidden="true" [style.left.px]="label.x" [style.top.px]="label.y">
+    <hg-icon name="grip" />{{ label.label }}
+  </div>
+}
+@if (marker(); as position) {
+  <div
+    class="hg-drag-marker"
+    aria-hidden="true"
+    [style.left.px]="position.x"
+    [style.top.px]="position.y"
+    [style.height.px]="position.height"
+  >
+    <span [style.left.px]="position.x < 120 ? 110 : position.x > available() - 120 ? -110 : 0">{{
+      position.label
+    }}</span>
+  </div>
+}

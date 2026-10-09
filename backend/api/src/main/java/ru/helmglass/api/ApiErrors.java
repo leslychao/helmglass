@@ -16,14 +16,7 @@ public class ApiErrors {
   @ExceptionHandler(ApiException.class)
   ResponseEntity<Map<String, Object>> application(ApiException exception) {
     return ResponseEntity.status(exception.status())
-        .body(
-            Map.of(
-                "code",
-                exception.code(),
-                "message",
-                exception.getMessage(),
-                "fieldErrors",
-                exception.fieldErrors()));
+        .body(exception.response());
   }
 
   @ExceptionHandler({

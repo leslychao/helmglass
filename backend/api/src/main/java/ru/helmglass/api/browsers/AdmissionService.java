@@ -11,7 +11,10 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import ru.helmglass.api.ApiException;
+import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.artifacts.ArtifactService;
+import ru.helmglass.api.auth.Actor;
+import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.events.EventService;
 import ru.helmglass.api.tasks.TaskService;
 import tools.jackson.databind.JsonNode;
@@ -26,6 +29,8 @@ public class AdmissionService {
   private final TransactionTemplate transactions;
   private final ArtifactService artifacts;
   private final EventService events;
+  private final JsonSupport json;
+  private static final UUID PLATFORM_ID = new UUID(0, 0);
 
   public AdmissionService(
       JdbcClient jdbc,
@@ -34,6 +39,7 @@ public class AdmissionService {
       TaskService tasks,
       ArtifactService artifacts,
       EventService events,
+      JsonSupport json,
       org.springframework.transaction.PlatformTransactionManager manager) {
     this.jdbc = jdbc;
     this.worker = worker;
@@ -41,17 +47,75 @@ public class AdmissionService {
     this.tasks = tasks;
     this.artifacts = artifacts;
     this.events = events;
+    this.json = json;
     this.transactions = new TransactionTemplate(manager);
   }
 
   @org.springframework.transaction.annotation.Transactional
   public void drain(boolean drain) {
     jdbc.sql("UPDATE scheduler_state SET drain=:drain WHERE id=1").param("drain", drain).update();
+    events.emitAdministrators("admission", PLATFORM_ID, 0);
+  }
+
+  public AdmissionState administrationState() {
+    return jdbc.sql("SELECT admin_paused,drain,admin_version FROM scheduler_state WHERE id=1")
+        .query(
+            (row, index) ->
+                new AdmissionState(
+                    row.getBoolean("admin_paused"),
+                    row.getBoolean("drain"),
+                    row.getLong("admin_version")))
+        .single();
+  }
+
+  @org.springframework.transaction.annotation.Transactional
+  public AdmissionState administrationCommand(Actor actor, AdmissionCommand input) {
+    if (!actor.administrator()) {
+      throw Identity.denied("Нет административных прав.");
+    }
+    String reason = TaskService.required(input.reason(), "reason", 1000);
+    String type = TaskService.required(input.type(), "type", 50);
+    if (!Set.of("PAUSE", "RESUME").contains(type)) {
+      throw ApiException.invalid("type", "Неизвестная команда запуска браузеров.");
+    }
+    if (input.expectedVersion() == null) {
+      throw ApiException.invalid("expectedVersion", "Укажите версию состояния запуска.");
+    }
+    jdbc.sql("SELECT id FROM scheduler_state WHERE id=1 FOR UPDATE").query(Integer.class).single();
+    AdmissionState previous = administrationState();
+    if (previous.version() != input.expectedVersion()) {
+      throw ApiException.conflict(
+          "VERSION_CONFLICT", "Состояние запуска изменилось. Обновите данные.");
+    }
+    boolean paused = "PAUSE".equals(type);
+    jdbc.sql(
+            "UPDATE scheduler_state SET admin_paused=:paused,admin_version=admin_version+1 WHERE"
+                + " id=1")
+        .param("paused", paused)
+        .update();
+    AdmissionState current = administrationState();
+    jdbc.sql(
+            """
+            INSERT INTO administrative_audit
+              (id,actor_id,target_id,action,reason,before_value,after_value,status)
+            VALUES (:id,:actor,:target,:action,:reason,CAST(:before AS jsonb),CAST(:after AS jsonb),'SUCCEEDED')
+            """)
+        .param("id", UUID.randomUUID())
+        .param("actor", actor.id())
+        .param("target", PLATFORM_ID)
+        .param("action", paused ? "PAUSE_ADMISSION" : "RESUME_ADMISSION")
+        .param("reason", reason)
+        .param("before", json.write(Map.of("paused", previous.paused())))
+        .param("after", json.write(Map.of("paused", current.paused())))
+        .update();
+    events.emitAdministrators("admission", PLATFORM_ID, current.version());
+    events.emitAdministrators("admin-audit", PLATFORM_ID, 0);
+    return current;
   }
 
   public Object drainState() {
     return jdbc.sql(
-            """
+"""
 SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED','QUEUED')) occupied,
   (SELECT count(*) FROM browser_nodes WHERE NOT reachable) unreachable_nodes FROM scheduler_state WHERE id=1
 """)
@@ -177,6 +241,7 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
     payload.put("startUrl", allocation.url());
     if (allocation.connection() != null) {
       payload.put("connectionId", allocation.connection());
+      payload.put("restoreProfile", allocation.restoreProfile());
     }
     try {
       browsers.reconcile(allocation.id(), worker.call("POST", "/sessions", payload));
@@ -190,7 +255,8 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
   private Allocation claim() {
     var scheduler =
         jdbc.sql(
-                "SELECT last_owner_id,drain FROM scheduler_state WHERE id=1 FOR UPDATE SKIP LOCKED")
+                "SELECT last_owner_id,(drain OR admin_paused) AS drain FROM scheduler_state"
+                    + " WHERE id=1 FOR UPDATE SKIP LOCKED")
             .query(
                 (row, index) ->
                     new Scheduler(
@@ -201,7 +267,7 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
     }
     var node =
         jdbc.sql(
-                """
+"""
 SELECT n.id FROM browser_nodes n WHERE n.reachable AND n.accepts_new
   AND n.last_seen_at>now()-interval '15 seconds'
   AND (SELECT count(*) FROM browser_sessions b WHERE b.node_id=n.id AND b.status NOT IN ('CLOSED','QUEUED'))<n.capacity
@@ -214,13 +280,14 @@ ORDER BY n.id LIMIT 1 FOR UPDATE SKIP LOCKED
     }
     var candidate =
         jdbc.sql(
-                """
-SELECT b.*,CASE WHEN EXISTS(SELECT 1 FROM connections c WHERE c.id=b.connection_id AND c.status='READY')
- THEN b.connection_id END profile_connection_id FROM browser_sessions b JOIN accounts a ON a.id=b.owner_id
+"""
+SELECT b.*,EXISTS(SELECT 1 FROM connections c WHERE c.id=b.connection_id AND c.status='READY')
+ restore_profile FROM browser_sessions b JOIN accounts a ON a.id=b.owner_id
         WHERE b.status='QUEUED' AND NOT b.close_requested AND a.status='ACTIVE'
           AND (b.task_id IS NULL OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=b.task_id
             AND (t.status IN ('QUEUED','STARTING','WAITING_CHATGPT','RUNNING')
-              OR (t.status='WAITING_USER' AND t.wait_reason='LOGIN'))))
+              OR (t.status='WAITING_USER' AND t.wait_reason='LOGIN')
+              OR (t.status='PAUSED' AND t.wait_reason='BROWSER_OPEN_REQUESTED'))))
   AND (a.browser_limit_mode='UNLIMITED' OR (SELECT count(*) FROM browser_sessions busy
   WHERE busy.owner_id=a.id AND busy.status NOT IN ('QUEUED','CLOSED'))
   < CASE WHEN a.browser_limit_mode='CUSTOM' THEN a.browser_limit ELSE 2 END)
@@ -234,7 +301,8 @@ ORDER BY CASE WHEN CAST(:last AS uuid) IS NULL OR b.owner_id>CAST(:last AS uuid)
                         row.getObject("id", UUID.class),
                         row.getObject("owner_id", UUID.class),
                         row.getObject("task_id", UUID.class),
-                        row.getObject("profile_connection_id", UUID.class),
+                        row.getObject("connection_id", UUID.class),
+                        row.getBoolean("restore_profile"),
                         row.getString("current_url")))
             .optional();
     if (candidate.isEmpty()) {
@@ -249,16 +317,22 @@ ORDER BY CASE WHEN CAST(:last AS uuid) IS NULL OR b.owner_id>CAST(:last AS uuid)
         .param("owner", allocation.owner())
         .update();
     if (allocation.task() != null
-        && !"WAITING_USER".equals(tasks.get(allocation.owner(), allocation.task()).status())) {
+        && !Set.of("WAITING_USER", "PAUSED")
+            .contains(tasks.get(allocation.owner(), allocation.task()).status())) {
       tasks.change(allocation.owner(), allocation.task(), "STARTING", null, "Запускается браузер");
     }
     events.emitAdministrators("node", node.get(), 0);
     return allocation;
   }
 
-  private record Allocation(UUID id, UUID owner, UUID task, UUID connection, String url) {}
+  private record Allocation(
+      UUID id, UUID owner, UUID task, UUID connection, boolean restoreProfile, String url) {}
 
   private record Pending(UUID id, boolean close) {}
 
   private record Scheduler(UUID lastOwner, boolean drain) {}
+
+  public record AdmissionState(boolean paused, boolean deploymentDrain, long version) {}
+
+  public record AdmissionCommand(String type, String reason, Long expectedVersion) {}
 }

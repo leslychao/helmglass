@@ -38,7 +38,7 @@ class TaskConsoleTest(unittest.TestCase):
         error, presentation, _ = self.admin.tool("tasks.create", {
             "operationKey": create_key, "task": {
                 "title": marker, "goal": "Observe UNKNOWN verification and pending STOP",
-                "startUrl": "https://example.com", "prepare": True, "requireConfirmation": False}})
+                "startUrl": "https://example.com", "prepare": True}})
         self.assertFalse(error, presentation)
         task_id = str(uuid.UUID(presentation["task"]["id"]))
         path = "/api/tasks/" + task_id
@@ -73,7 +73,7 @@ class TaskConsoleTest(unittest.TestCase):
                       "instructionRevision": task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"] = task["browser"]["controlEpoch"]
-            error, receipt, _ = self.admin.tool("browser.execute", {"taskId": task_id, "action": action})
+            error, receipt, _ = self.admin.execute_in_scenario_step({"taskId": task_id, "action": action})
             self.assertFalse(error, receipt)
             return self.wait_operation(operation, self.admin)
 

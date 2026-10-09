@@ -9,19 +9,24 @@ import {
   viewChild,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Icon } from '../shared/icon';
 import { Api, errorMessage } from './api';
 import { Me, meSchema } from './models';
 import { Session } from './session';
+import { pageReturnLabel, pageReturnUrl } from './page-context';
+import { Tooltip } from '../shared/tooltip';
 
 @Component({
   selector: 'hg-profile',
-  imports: [FormsModule, Icon],
+  imports: [FormsModule, Icon, RouterLink, Tooltip],
   templateUrl: './profile.html',
   styleUrl: './profile.css',
   host: { '(window:beforeunload)': 'beforeUnload($event)' },
 })
 export class Profile {
+  readonly returnUrl = pageReturnUrl(inject(ActivatedRoute), inject(Router), '/tasks');
+  readonly returnLabel = pageReturnLabel(this.returnUrl.toString());
   readonly session = inject(Session);
   private readonly api = inject(Api);
   private original: Me | null = null;

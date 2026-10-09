@@ -54,6 +54,9 @@ class DevClient:
         self.password_key = password_key
         self.token = None
         self.chat = "helm-dev-" + str(uuid.uuid4())
+        self.mcp_session = None
+        self.mcp_capabilities = {"elicitation": {"form": {}}}
+        self.elicitation_handler = None
 
     def request(self, url, method="GET", data=None, headers=None):
         request = Request(url, data=data, method=method, headers=headers or {})
@@ -88,6 +91,7 @@ class DevClient:
         return me
 
     def login_mcp(self):
+        self.close_mcp()
         status, raw, _ = self.request(self.base + "/.well-known/oauth-protected-resource/mcp")
         if status != 200:
             raise AssertionError(f"Protected resource discovery returned {status}")
@@ -142,21 +146,86 @@ class DevClient:
                                       None if body is None else json.dumps(body).encode(), headers)
         return status, json.loads(raw) if raw and raw[:1] in (b"{", b"[") else {}
 
-    def rpc(self, method, params):
+    def mcp_headers(self):
+        headers = {"Authorization": "Bearer " + self.token,
+                   "Accept": "application/json, text/event-stream",
+                   "Content-Type": "application/json", "MCP-Protocol-Version": "2025-11-25"}
+        if self.mcp_session:
+            headers["Mcp-Session-Id"] = self.mcp_session
+        return headers
+
+    def close_mcp(self):
+        if self.mcp_session:
+            self.request(self.base + "/mcp", "DELETE", headers=self.mcp_headers())
+            self.mcp_session = None
+
+    def rpc(self, method, params, *, reinitialize=True):
+        if method != "initialize" and self.mcp_session is None:
+            self.rpc("initialize", {"protocolVersion": "2025-11-25",
+                "capabilities": self.mcp_capabilities,
+                "clientInfo": {"name": "helm-dev-contract", "version": "1"}})
+            self.request(self.base + "/mcp", "POST", json.dumps({"jsonrpc": "2.0",
+                "method": "notifications/initialized"}).encode(), self.mcp_headers())
         body = {"jsonrpc": "2.0", "id": str(uuid.uuid4()), "method": method, "params": params}
-        status, raw, _ = self.request(self.base + "/mcp", "POST", json.dumps(body).encode(),
-                                      {"Authorization": "Bearer " + self.token,
-                                       "Accept": "application/json, text/event-stream",
-                                       "Content-Type": "application/json",
-                                       "MCP-Protocol-Version": "2025-11-25"})
-        if status != 200:
-            raise AssertionError(f"MCP {method} returned HTTP {status}")
-        if raw.startswith(b"event:") or raw.startswith(b"data:"):
-            raw = b"\n".join(line[5:].strip() for line in raw.splitlines() if line.startswith(b"data:"))
-        response = json.loads(raw)
+        request = Request(self.base + "/mcp", data=json.dumps(body).encode(), method="POST",
+                          headers=self.mcp_headers())
+        try:
+            opened = self.http.open(request, timeout=55)
+        except HTTPError as error:
+            opened = error
+        with opened:
+            if opened.status == 404 and self.mcp_session and method != 'initialize' and reinitialize:
+                # Streamable HTTP requires a fresh transport after an expired server session.
+                # The tool operation identity stays unchanged; timeouts are never replayed.
+                opened.close()
+                self.mcp_session = None
+                return self.rpc(method, params, reinitialize=False)
+            if opened.status != 200:
+                raise AssertionError(f"MCP {method} returned HTTP {opened.status}")
+            if method == "initialize":
+                self.mcp_session = opened.headers.get("Mcp-Session-Id")
+                if not self.mcp_session:
+                    raise AssertionError("MCP initialize omitted transport session")
+            if "text/event-stream" not in opened.headers.get("Content-Type", ""):
+                response = json.load(opened)
+            else:
+                response = None
+                data = []
+                for line in opened:
+                    if line.startswith(b"data:"):
+                        data.append(line[5:].strip())
+                    elif line.strip() == b"" and data:
+                        message = json.loads(b"\n".join(data))
+                        data = []
+                        if message.get("method") == "elicitation/create":
+                            if self.elicitation_handler is None:
+                                answer = {"action": "cancel"}
+                            else:
+                                answer = self.elicitation_handler(message["params"])
+                            status, _, _ = self.request(self.base + "/mcp", "POST",
+                                json.dumps({"jsonrpc": "2.0", "id": message["id"],
+                                            "result": answer}).encode(), self.mcp_headers())
+                            if status != 202:
+                                raise AssertionError(f"MCP host response returned HTTP {status}")
+                        elif message.get("id") == body["id"]:
+                            response = message
+                            break
+                if response is None:
+                    raise AssertionError("MCP stream ended without the request result")
         if "error" in response:
             raise AssertionError(f"MCP {method} returned protocol error {response['error']['code']}")
         return response["result"]
+
+    def respond(self, task, content=None, action="accept", operation_key=None):
+        pending = task["request"]
+        arguments = {"taskId": task["id"], "requestId": pending["id"],
+            "requestVersion": pending["version"], "operationKey": operation_key or str(uuid.uuid4())}
+        previous = self.elicitation_handler
+        self.elicitation_handler = lambda form: {"action": action, **({"content": content} if content is not None else {})}
+        try:
+            return self.tool("tasks.respond", arguments)
+        finally:
+            self.elicitation_handler = previous
 
     def refresh_mcp(self):
         data = urlencode({"grant_type": "refresh_token", "client_id": "helmglass-chatgpt",
@@ -168,6 +237,63 @@ class DevClient:
             self.token = value["access_token"]
             self.refresh_token = value.get("refresh_token", self.refresh_token)
         return status
+
+    def scenario_step(self, task_id):
+        """Explicit business-step fixture for pre-existing browser acceptance scenarios."""
+        error, page, _ = self.tool("steps.list", {"taskId": task_id})
+        if error:
+            raise AssertionError(f"Cannot read scenario step: {page}")
+        step = next((item for item in page["items"]
+                     if item["operationKey"] == "verify-acceptance-scenario"), None)
+        error, task, _ = self.tool("tasks.get", {"taskId": task_id})
+        if error:
+            raise AssertionError(f"Cannot read scenario task: {task}")
+
+        def command(kind, **fields):
+            error, result, _ = self.tool("steps.command", {
+                "taskId": task_id, "operationKey": str(uuid.uuid4()), "command": {
+                    "type": kind, "instructionRevision": task["instructionRevision"], **fields}})
+            if error:
+                raise AssertionError(f"Cannot {kind} scenario step: {result}")
+            return result
+
+        if step is None:
+            step = command("DECLARE", operationKey="verify-acceptance-scenario", objectKey=task_id,
+                           title="Проверить условия сценария приёмки",
+                           completionCriterion="Результаты действий соответствуют проверяемому сценарию")
+        if task["status"] in ("QUEUED", "RUNNING", "STARTING", "WAITING_CHATGPT"):
+            if step["status"] == "PLANNED":
+                step = command("START", stepId=step["id"], expectedVersion=step["version"])
+            elif step["status"] in ("FAILED", "PARTIAL", "SKIPPED"):
+                step = command("RETRY", stepId=step["id"], expectedVersion=step["version"])
+        return step
+
+    def execute_in_scenario_step(self, arguments):
+        action = arguments["action"]
+        if "stepId" not in action:
+            action["stepId"] = self.scenario_step(arguments["taskId"])["id"]
+            if "controlEpoch" not in action:
+                error, task, _ = self.tool("tasks.get", {"taskId": arguments["taskId"]})
+                if error:
+                    raise AssertionError(f"Cannot read scenario browser: {task}")
+                if task.get("browser"):
+                    action["controlEpoch"] = task["browser"]["controlEpoch"]
+        return self.tool("browser.execute", arguments)
+
+    def complete_scenario_step(self, task_id, operation_id, outcome="SUCCEEDED"):
+        step = self.scenario_step(task_id)
+        error, task, _ = self.tool("tasks.get", {"taskId": task_id})
+        if error:
+            raise AssertionError(f"Cannot read scenario task: {task}")
+        error, result, _ = self.tool("steps.command", {
+            "taskId": task_id, "operationKey": str(uuid.uuid4()), "command": {
+                "type": "COMPLETE", "stepId": step["id"], "expectedVersion": step["version"],
+                "instructionRevision": task["instructionRevision"], "outcome": outcome,
+                "result": "Результат проверяемого действия зафиксирован",
+                "evidence": [{"type": "OPERATION", "operationId": operation_id}]}})
+        if error:
+            raise AssertionError(f"Cannot complete scenario step: {result}")
+        return result
 
     def tool(self, name, arguments):
         result = self.rpc("tools/call", {"name": name, "arguments": arguments,
@@ -246,6 +372,9 @@ class DevContractTest(unittest.TestCase):
         cls.me = cls.user.login_web()
         cls.admin.login_web()
         cls.user.login_mcp()
+
+    def setUp(self):
+        self.user.chat = "helm-dev-" + str(uuid.uuid4())
 
     def test_owner_authorization_idempotency_and_draft(self):
         self.assertEqual(403, self.user.api("/api/admin/users")[0])
@@ -504,7 +633,7 @@ class DevContractTest(unittest.TestCase):
                     client.token = primary.token
                     error,presentation,_ = client.tool("tasks.create",{"operationKey":str(uuid.uuid4()),"task":{
                         "title":"FIFO task " + str(index),"goal":"Verify bounded admission without site changes",
-                        "startUrl":"https://example.com","requireConfirmation":False,"prepare":True}})
+                        "startUrl":"https://example.com","prepare":True}})
                     self.assertFalse(error,presentation)
                     entry = {"client":client,"task":presentation["task"],"primary":primary,"operationId":str(uuid.uuid4())}
                     entries.append(entry)
@@ -513,7 +642,7 @@ class DevContractTest(unittest.TestCase):
 
             def enqueue(queue):
                 for entry in queue:
-                    error,receipt,_ = entry["client"].tool("browser.execute",{"taskId":entry["task"]["id"],"action":{
+                    error,receipt,_ = entry["client"].execute_in_scenario_step({"taskId":entry["task"]["id"],"action":{
                         "operationId":entry["operationId"],"type":"observe","arguments":{},
                         "instructionRevision":entry["task"]["instructionRevision"]}})
                     self.assertFalse(error,receipt)
@@ -568,7 +697,7 @@ class DevContractTest(unittest.TestCase):
             else:
                 self.fail("Disposable concurrent fixtures were not purged")
 
-    def test_mcp_revision_and_stopped_resume_consent(self):
+    def test_mcp_revision_and_final_stop(self):
         initialized = self.user.rpc("initialize", {"protocolVersion": "2025-11-25",
                                                    "capabilities": {}, "clientInfo": {"name": "helm-dev-regression", "version": "1"}})
         self.assertIn("serverInfo", initialized)
@@ -576,7 +705,7 @@ class DevContractTest(unittest.TestCase):
         self.assertIn("browser.execute", {item["name"] for item in tools["tools"]})
         error, presentation, _ = self.user.tool("tasks.create", {"operationKey": str(uuid.uuid4()),
             "task": {"title": "Dev regression task", "goal": "Verify revisions and stop consent",
-                     "startUrl": "https://example.com", "requireConfirmation": False, "prepare": True}})
+                     "startUrl": "https://example.com", "prepare": True}})
         self.assertFalse(error)
         task = presentation.get("task", presentation)
         self.assertIn("id", task)
@@ -601,7 +730,7 @@ class DevContractTest(unittest.TestCase):
             status, refusal = self.user.api("/api/tasks/" + task_id + "/commands", "POST",
                 {"type": "RESUME", "expectedVersion": stopped["version"]})
             self.assertEqual(409, status)
-            self.assertEqual("BROWSER_REPLACEMENT_CONSENT", refusal["code"])
+            self.assertEqual("ACTION_UNAVAILABLE", refusal["code"])
 
     def wait_task(self, task_id, predicate, seconds=100):
         deadline = time.monotonic() + seconds
@@ -627,46 +756,46 @@ class DevContractTest(unittest.TestCase):
     def test_confirmation_is_bound_to_current_instruction_and_operation(self):
         error, state, _ = self.user.tool("tasks.create", {"operationKey": str(uuid.uuid4()),
             "task": {"title": "Confirmation regression", "goal": "Open exactly one approved extra tab",
-                     "startUrl": "https://example.com", "requireConfirmation": True, "prepare": True}})
+                     "startUrl": "https://example.com", "prepare": True}})
         self.assertFalse(error)
         task = state["task"]
         task_id = task["id"]
         try:
             old_id = str(uuid.uuid4())
-            error, pending, _ = self.user.tool("browser.execute", {"taskId": task_id,
-                "action": {"operationId": old_id, "type": "newTab", "arguments": {"url": "https://example.com"},
+            error, pending, _ = self.user.execute_in_scenario_step({"taskId": task_id,
+                "action": {"operationId": old_id, "type": "newTab", "confirmationPrompt": "Open the additional tab?", "arguments": {"url": "https://example.com"},
                            "instructionRevision": task["instructionRevision"]}})
             self.assertFalse(error)
             self.assertEqual("AWAITING_CONFIRMATION", pending["status"])
             _, task = self.user.api("/api/tasks/" + task_id)
             old_request = task["request"]
-            self.assertIsNone(task["browser"], "An unapproved first mutation does not start or change the site")
-            status, task = self.user.api("/api/tasks/" + task_id + "/commands", "POST", {
+            self.assertIsNotNone(task["browser"], "Task creation prepares the browser before a decision")
+            error, task, _ = self.user.tool("tasks.command", {"taskId": task_id,
+                "operationKey": str(uuid.uuid4()), "command": {
                 "type": "AMEND", "expectedVersion": task["version"], "title": task["title"],
                 "goal": "Revised instruction: open one approved tab", "startUrl": "https://example.com",
-                "requireConfirmation": True, "preferredConnectionIds": []})
-            self.assertEqual(200, status)
-            status, refusal = self.user.api("/api/tasks/" + task_id + "/commands", "POST", {
-                "type": "CONFIRM", "expectedVersion": task["version"], "requestId": old_request["id"],
+                "preferredConnectionIds": []}})
+            self.assertFalse(error, task)
+            error, refusal, _ = self.user.tool("tasks.respond", {"taskId": task_id,
+                "operationKey": str(uuid.uuid4()), "requestId": old_request["id"],
                 "requestVersion": old_request["version"]})
-            self.assertEqual(409, status)
+            self.assertTrue(error)
             self.assertEqual("STALE_REQUEST", refusal["code"])
             error, cancelled, _ = self.user.tool("operations.get", {"operationId": old_id})
             self.assertFalse(error)
             self.assertEqual("CANCELLED", cancelled["status"])
             new_id = str(uuid.uuid4())
-            error, pending, _ = self.user.tool("browser.execute", {"taskId": task_id,
-                "action": {"operationId": new_id, "type": "newTab", "arguments": {"url": "https://example.com"},
+            error, pending, _ = self.user.execute_in_scenario_step({"taskId": task_id,
+                "action": {"operationId": new_id, "type": "newTab", "confirmationPrompt": "Open the additional tab?", "arguments": {"url": "https://example.com"},
                            "instructionRevision": task["instructionRevision"]}})
             self.assertFalse(error)
             self.assertEqual("AWAITING_CONFIRMATION", pending["status"])
             _, task = self.user.api("/api/tasks/" + task_id)
             current = task["request"]
-            approval = {"type": "CONFIRM", "expectedVersion": task["version"], "requestId": current["id"],
-                        "requestVersion": current["version"]}
             key = str(uuid.uuid4())
-            self.assertEqual(200, self.user.api("/api/tasks/" + task_id + "/commands", "POST", approval, key)[0])
-            self.assertEqual(200, self.user.api("/api/tasks/" + task_id + "/commands", "POST", approval, key)[0])
+            self.assertFalse(self.user.respond(task, {"proceed": True}, operation_key=key)[0])
+            self.assertFalse(self.user.tool("tasks.respond", {"taskId": task_id,
+                "requestId": current["id"], "requestVersion": current["version"], "operationKey": key})[0])
             task = self.wait_task(task_id, lambda value: value.get("browser") is not None
                 and value["browser"]["status"] == "LIVE" and value["status"] == "WAITING_CHATGPT")
             deadline = time.monotonic() + 30
@@ -679,7 +808,7 @@ class DevContractTest(unittest.TestCase):
             self.assertEqual("SUCCEEDED", receipt["status"])
             _, task = self.user.api("/api/tasks/" + task_id)
             observation_id = str(uuid.uuid4())
-            error, _, _ = self.user.tool("browser.execute", {"taskId": task_id, "action": {
+            error, _, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": {
                 "operationId": observation_id, "type": "observe", "arguments": {},
                 "instructionRevision": task["instructionRevision"], "controlEpoch": task["browser"]["controlEpoch"]}})
             self.assertFalse(error)
@@ -688,31 +817,18 @@ class DevContractTest(unittest.TestCase):
             self.assertEqual(2, len(observed["result"]["tabs"]))
             _, task = self.user.api("/api/tasks/" + task_id)
             old_browser = task["browser"]["id"]
-            self.assertIn("END_SESSION", task["allowedCommands"])
-            status, task = self.user.api("/api/tasks/" + task_id + "/commands", "POST", {
-                "type": "END_SESSION", "expectedVersion": task["version"]})
+            self.assertNotIn("END_SESSION", task["allowedCommands"])
+            status, stopped = self.user.api("/api/tasks/" + task_id + "/commands", "POST", {
+                "type": "STOP", "expectedVersion": task["version"]})
             self.assertEqual(200, status)
-            task = self.wait_task(task_id, lambda value: value["browser"]["status"] == "CLOSED")
-            self.assertEqual("PAUSED", task["status"])
-            self.assertEqual(task_id, task["id"])
+            task = self.wait_task(task_id, lambda value: value["status"] == "STOPPED")
+            self.assertEqual("CLOSED", task["browser"]["status"])
             self.assertEqual(409, self.user.api("/api/browser-sessions/" + old_browser + "/ticket", "POST",
                 {"role": "VIEWER", "viewerId": str(uuid.uuid4())})[0])
-            status, refusal = self.user.api("/api/tasks/" + task_id + "/commands", "POST", {
-                "type": "RESUME", "expectedVersion": task["version"]})
-            self.assertEqual(409, status)
-            self.assertEqual("BROWSER_REPLACEMENT_CONSENT", refusal["code"])
-            status, task = self.user.api("/api/tasks/" + task_id + "/commands", "POST", {
-                "type": "RESUME", "expectedVersion": task["version"], "confirmBrowserLoss": True})
-            self.assertEqual(200, status)
-            replacement_observe = str(uuid.uuid4())
-            error, _, _ = self.user.tool("browser.execute", {"taskId": task_id, "action": {
-                "operationId": replacement_observe, "type": "observe", "arguments": {},
-                "instructionRevision": task["instructionRevision"]}})
-            self.assertFalse(error)
-            self.assertEqual("SUCCEEDED", self.wait_operation(replacement_observe)["status"])
-            _, task = self.user.api("/api/tasks/" + task_id)
-            self.assertNotEqual(old_browser, task["browser"]["id"])
-            self.assertEqual(task_id, task["id"])
+            for consent in (False, True):
+                status, refusal = self.user.api("/api/tasks/" + task_id + "/commands", "POST", {
+                    "type": "RESUME", "expectedVersion": task["version"], "confirmBrowserLoss": consent})
+                self.assertEqual((409, "ACTION_UNAVAILABLE"), (status, refusal["code"]))
 
         finally:
             _, task = self.user.api("/api/tasks/" + task_id)
@@ -723,7 +839,7 @@ class DevContractTest(unittest.TestCase):
     def test_browser_control_private_unknown_and_widget_generation(self):
         error, state, _ = self.user.tool("tasks.create", {"operationKey": str(uuid.uuid4()),
             "task": {"title": "Dev regression browser", "goal": "Verify shared browser safety on example.com",
-                     "startUrl": "https://example.com", "requireConfirmation": False, "prepare": True}})
+                     "startUrl": "https://example.com", "prepare": True}})
         self.assertFalse(error)
         task = state["task"]
         task_id = task["id"]
@@ -741,7 +857,7 @@ class DevContractTest(unittest.TestCase):
             observation_id = str(uuid.uuid4())
             action = {"operationId": observation_id, "type": "observe", "arguments": {},
                       "instructionRevision": task["instructionRevision"]}
-            error, _, _ = self.user.tool("browser.execute", {"taskId": task_id, "action": action})
+            error, _, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": action})
             self.assertFalse(error)
             task = self.wait_task(task_id, lambda value: value.get("browser") is not None
                 and value["browser"]["status"] == "LIVE" and value["status"] == "WAITING_CHATGPT")
@@ -780,7 +896,7 @@ class DevContractTest(unittest.TestCase):
             self.assertEqual(200, status)
             self.assertEqual("READY", connection["status"])
             self.assertEqual(original_browser, connection["browser"]["id"])
-            error, stale, _ = self.user.tool("browser.execute", {"taskId": task_id,
+            error, stale, _ = self.user.execute_in_scenario_step({"taskId": task_id,
                 "action": {"operationId": str(uuid.uuid4()), "type": "observe", "arguments": {},
                            "instructionRevision": task["instructionRevision"], "controlEpoch": original_epoch}})
             self.assertTrue(error)
@@ -788,14 +904,14 @@ class DevContractTest(unittest.TestCase):
             missing = {"operationId": str(uuid.uuid4()), "type": "click",
                        "arguments": {"selector": "[data-helm-dev-regression-never-present]"},
                        "instructionRevision": task["instructionRevision"], "controlEpoch": task["browser"]["controlEpoch"]}
-            error, _, _ = self.user.tool("browser.execute", {"taskId": task_id, "action": missing})
+            error, _, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": missing})
             self.assertFalse(error)
             task = self.wait_task(task_id, lambda value: value.get("request") is not None
                                   and value["request"]["type"] == "UNKNOWN_RESULT")
-            error, receipt, _ = self.user.tool("browser.execute", {"taskId": task_id, "action": missing})
+            error, receipt, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": missing})
             self.assertFalse(error)
             self.assertEqual("UNKNOWN", receipt["status"])
-            error, blocked, _ = self.user.tool("browser.execute", {"taskId": task_id,
+            error, blocked, _ = self.user.execute_in_scenario_step({"taskId": task_id,
                 "action": {**missing, "operationId": str(uuid.uuid4()), "type": "navigate",
                            "arguments": {"url": "https://example.com"}}})
             self.assertTrue(error)

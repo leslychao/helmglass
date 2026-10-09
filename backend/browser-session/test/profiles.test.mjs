@@ -42,7 +42,8 @@ test('bounded saved profiles retain structured IDB and reject oversize without r
     await apply(profileA, 'a'); await apply(profileB, 'b'); await apply(profileA, 'a');
     for (const type of ['oversize', 'unsupported']) {
       await command('click', { selector: '#profile-' + type }); await waitForText('Stored ' + type);
-      assert.equal((await save(profileA)).status, 413, 'Large or unsupported records must fail before a complete profile reaches Node');
+      assert.equal((await save(profileA)).status, type === 'oversize' ? 413 : 422,
+        'Size limits and unsupported values must remain distinct without replacing the saved profile');
       await apply(profileA, 'a');
     }
     assert.equal((await request(base + '/profile/export', { connectionId: profileA, ownerId: randomUUID(), origins: [new URL(fixture).origin] })).status, 403);

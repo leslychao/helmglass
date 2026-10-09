@@ -14,7 +14,7 @@
       <button
         class="icon-button mobile-close"
         aria-label="Закрыть меню"
-        title="Закрыть меню"
+        hgTooltip="Закрыть меню"
         (click)="closeMenu()"
       >
         <hg-icon name="close" />
@@ -47,7 +47,7 @@
         id="mobile-navigation-button"
         class="icon-button mobile-toggle"
         aria-label="Открыть меню"
-        title="Меню"
+        hgTooltip="Меню"
         [attr.aria-expanded]="mobile()"
         (click)="mobile.set(!mobile())"
       >
@@ -55,7 +55,7 @@
       </button>
       <nav class="breadcrumbs" aria-label="Хлебные крошки">
         <ol>
-          @for (item of breadcrumbs(); track item.url; let last = $last) {
+          @for (item of breadcrumbs(); track item.url.toString(); let last = $last) {
             <li>
               @if (!last) {
                 <a [routerLink]="item.url">{{ item.label }}</a
@@ -68,76 +68,35 @@
         </ol>
       </nav>
       <span class="spacer"></span>
-      @if (live.state() !== 'ready' && live.state() !== 'unavailable') {
-        <span class="sync-indicator" role="status">Восстанавливаем актуальность данных…</span>
-      }
-      <div class="notification-owner">
-        <button
-          #bell
-          class="icon-button bell"
-          aria-label="Уведомления"
-          title="Уведомления"
-          [attr.aria-expanded]="notificationsOpen()"
-          (click)="notificationsOpen.set(!notificationsOpen())"
-        >
-          <hg-icon name="bell" />
-          @if (notifications()?.total) {
-            <b>{{ notifications()?.total }}</b>
-          }
-        </button>
-        @if (notificationsOpen()) {
-          <section
-            class="notification-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Уведомления"
-            cdkTrapFocus
-            [cdkTrapFocusAutoCapture]="true"
-            (keydown.escape)="closeNotifications()"
-          >
-            <header>
-              <h2 #notificationHeading tabindex="-1">Уведомления</h2>
-              <button
-                class="icon-button"
-                aria-label="Закрыть уведомления"
-                title="Закрыть"
-                (click)="closeNotifications()"
-              >
-                <hg-icon name="close" />
-              </button>
-            </header>
-            @if (notificationError()) {
-              <p class="error-banner" role="alert">
-                {{ notificationError() }}<button (click)="loadNotifications()">Повторить</button>
-              </p>
-            }
-            @if (notifications()?.items?.length) {
-              <div class="notification-items">
-                @for (item of notifications()?.items; track item.id) {
-                  <button class="notification-item" [disabled]="reading()" (click)="read(item)">
-                    <strong>{{ item.title }}</strong
-                    ><hg-status [value]="item.status" /><time>{{
-                      item.createdAt | date: 'dd.MM HH:mm'
-                    }}</time>
-                  </button>
-                }
-              </div>
-              <button class="notification-read-all" [disabled]="reading()" (click)="readAll()">
-                Пометить все как прочитанные
-              </button>
-            } @else if (notifications()) {
-              <div class="empty-small">Новых уведомлений нет</div>
-            } @else {
-              <div class="empty-small" role="status">Загрузка…</div>
-            }
-          </section>
-        }
-      </div>
       <button
+        #bell
+        cdkOverlayOrigin
+        #bellOrigin="cdkOverlayOrigin"
+        class="icon-button bell"
+        aria-label="Уведомления"
+        hgTooltip="Уведомления"
+        aria-haspopup="dialog"
+        [attr.aria-expanded]="notificationsOpen()"
+        [attr.aria-controls]="notificationsOpen() ? 'topbar-popover' : null"
+        (click)="togglePopup('notifications')"
+      >
+        <hg-icon name="bell" />
+        @if (notifications()?.total) {
+          <b>{{ notifications()?.total }}</b>
+        }
+      </button>
+      <button
+        #profileButton
+        cdkOverlayOrigin
+        #profileOrigin="cdkOverlayOrigin"
         class="profile-trigger"
-        title="Профиль"
+        hgTooltip="Профиль"
         aria-label="Меню профиля"
-        [cdkMenuTriggerFor]="profileMenu"
+        aria-haspopup="menu"
+        [attr.aria-expanded]="popup() === 'profile'"
+        [attr.aria-controls]="popup() === 'profile' ? 'topbar-popover' : null"
+        (click)="togglePopup('profile')"
+        (keydown.arrowdown)="$event.preventDefault(); popup.set('profile')"
       >
         <span class="avatar avatar-small">
           @if (session.user()?.avatarUrl; as avatar) {
@@ -148,17 +107,84 @@
         </span>
         <hg-icon name="chevron-down" />
       </button>
-      <ng-template #profileMenu>
-        <div cdkMenu class="profile-menu" aria-label="Меню профиля">
-          <a cdkMenuItem routerLink="/profile"><hg-icon name="user" />Профиль</a>
-          <button
-            cdkMenuItem
-            class="danger-text"
-            [disabled]="session.signingOut()"
-            (cdkMenuItemTriggered)="logout()"
-          >
-            <hg-icon name="logout" />{{ session.logoutPending() ? 'Завершить выход' : 'Выйти' }}
-          </button>
+      <ng-template
+        cdkConnectedOverlay
+        #topbarOverlay="cdkConnectedOverlay"
+        [cdkConnectedOverlayOrigin]="notificationsOpen() ? bellOrigin : profileOrigin"
+        [cdkConnectedOverlayOpen]="popup() !== null"
+        [cdkConnectedOverlayPositions]="popupPositions"
+        [cdkConnectedOverlayViewportMargin]="12"
+        [cdkConnectedOverlayPush]="true"
+        [cdkConnectedOverlayFlexibleDimensions]="false"
+        [cdkConnectedOverlayDisableClose]="true"
+        (positionChange)="positionPopup($event)"
+        (overlayOutsideClick)="outsidePopup($event)"
+        (overlayKeydown)="popupKeydown($event)"
+      >
+        <div
+          #popover
+          id="topbar-popover"
+          class="topbar-popover"
+          [class.notification-panel]="notificationsOpen()"
+          [class.profile-popover]="popup() === 'profile'"
+          [class.above]="popupAbove()"
+          [style.--anchor-x.px]="popupAnchorX()"
+          [style.max-width.px]="popupMaxWidth()"
+          (keydown.escape)="$event.stopPropagation(); closePopup()"
+        >
+          @if (notificationsOpen()) {
+            <section role="dialog" aria-label="Уведомления">
+              <header>
+                <h2 #notificationHeading tabindex="-1">Уведомления</h2>
+                <button
+                  class="icon-button"
+                  aria-label="Закрыть уведомления"
+                  hgTooltip="Закрыть"
+                  (click)="closePopup()"
+                >
+                  <hg-icon name="close" />
+                </button>
+              </header>
+              @if (notificationError()) {
+                <p class="error-banner" role="alert">
+                  {{ notificationError() }}<button (click)="loadNotifications()">Повторить</button>
+                </p>
+              }
+              @if (notifications()?.items?.length) {
+                <div class="notification-items">
+                  @for (item of notifications()?.items; track item.id) {
+                    <button class="notification-item" [disabled]="reading()" (click)="read(item)">
+                      <strong>{{ item.title }}</strong
+                      ><hg-status [value]="item.status" /><time>{{
+                        item.createdAt | date: 'dd.MM HH:mm'
+                      }}</time>
+                    </button>
+                  }
+                </div>
+                <button class="notification-read-all" [disabled]="reading()" (click)="readAll()">
+                  Пометить все как прочитанные
+                </button>
+              } @else if (notifications()) {
+                <div class="empty-small">Новых уведомлений нет</div>
+              } @else {
+                <div class="empty-small" role="status">Загрузка…</div>
+              }
+            </section>
+          } @else {
+            <div cdkMenu class="profile-menu" aria-label="Меню профиля">
+              <a #profileLink cdkMenuItem [routerLink]="profileUrl()" (click)="popup.set(null)"
+                ><hg-icon name="user" />Профиль</a
+              >
+              <button
+                cdkMenuItem
+                class="danger-text"
+                [disabled]="session.signingOut()"
+                (cdkMenuItemTriggered)="logout()"
+              >
+                <hg-icon name="logout" />{{ session.logoutPending() ? 'Завершить выход' : 'Выйти' }}
+              </button>
+            </div>
+          }
         </div>
       </ng-template>
     </header>
@@ -192,5 +218,6 @@
       </div>
     }
     <main #main id="main-content" class="main-content" tabindex="-1"><router-outlet /></main>
+    <footer class="app-footer">Helm Glass</footer>
   </div>
 </div>

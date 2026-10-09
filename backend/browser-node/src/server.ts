@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -8,6 +8,8 @@ import { pipeline } from "node:stream/promises";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocket, WebSocketServer, createWebSocketStream } from "ws";
 import { z } from "zod";
+import { CredentialConflict, ConnectionStore } from "./connection-store.js";
+import { StorageError, Vault } from "./vault.js";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -23,24 +25,27 @@ const config = {
   publicOrigin: new URL(z.url().parse(required("PUBLIC_URL"))).origin,
   data: process.env["DATA_DIR"] ?? "/data", assets: process.env["NOVNC_DIR"] ?? "/opt/novnc",
 };
-const encryptionKey = Buffer.from(required("PROFILE_ENCRYPTION_KEY"), "base64");
-if (encryptionKey.length !== 32) throw new Error("PROFILE_ENCRYPTION_KEY must encode 32 bytes");
+const vault = new Vault(required("VAULT_ADDR"), required("VAULT_ROLE_ID"), required("VAULT_SECRET_ID"));
 const seccompProfile = JSON.stringify(JSON.parse(await readFile(new URL("../seccomp-profile.json", import.meta.url), "utf8")));
 await mkdir(config.data, { recursive: true });
 const db = new DatabaseSync(path.join(config.data, "node.sqlite"));
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, document TEXT NOT NULL); CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY, owner TEXT NOT NULL, encrypted BLOB NOT NULL); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, value TEXT NOT NULL);");
+db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, document TEXT NOT NULL); CREATE TABLE IF NOT EXISTS settings (id TEXT PRIMARY KEY, value TEXT NOT NULL);");
+const credentials = new ConnectionStore(db, vault, config.data);
 
 const Policy = z.object({ controlEpoch: z.number().int().nonnegative(), owner: z.enum(["CHATGPT", "USER", "NONE"]), privateMode: z.boolean(), controllerId: z.string().max(200).optional() });
 const Session = z.object({
   id: z.uuid(), ownerId: z.string().min(1).max(200), taskId: z.string().max(200).optional(),
   startUrl: z.string().max(8192), connectionId: z.string().max(200).optional(), token: z.string(),
+  restoreProfile: z.boolean().optional(),
   status: z.enum(["STARTING", "LIVE", "CLOSING", "CLOSED", "UNKNOWN", "LOST"]),
   networkId: z.string().optional(), containerId: z.string().optional(), egressId: z.string().optional(),
   address: z.string().optional(), policy: Policy,
+  profileRevision: z.number().int().nonnegative().optional(), profileSavedAt: z.string().optional(),
+  profileSaveError: z.string().optional(),
 });
 type Session = z.infer<typeof Session>;
 type Policy = z.infer<typeof Policy>;
-const CreateSession = z.object({ sessionId: z.uuid(), ownerId: z.string().min(1).max(200), taskId: z.string().max(200).optional(), startUrl: z.string().max(8192), connectionId: z.string().max(200).optional() }).strict();
+const CreateSession = z.object({ sessionId: z.uuid(), ownerId: z.string().min(1).max(200), taskId: z.string().max(200).optional(), startUrl: z.string().max(8192), connectionId: z.string().max(200).optional(), restoreProfile: z.boolean().default(true) }).strict();
 const DockerIdentity = z.object({ Id: z.string() });
 const DockerInspect = z.object({ Id: z.string(), State: z.object({ Running: z.boolean() }), NetworkSettings: z.object({ Networks: z.record(z.string(), z.object({ IPAddress: z.string() })) }) });
 const RuntimeState = z.object({ status: z.enum(["STARTING", "LIVE", "LOST"]), currentUrl: z.string().optional(), navigationError: z.string().optional(), controlEpoch: z.number().int().nonnegative(), controlOwner: z.enum(["CHATGPT", "USER", "NONE"]), privateMode: z.boolean(), controllerId: z.string().optional() });
@@ -51,6 +56,8 @@ const tickets = new Map<string, Ticket & { sessionId: string }>();
 const viewers = new Map<string, Set<{ socket: WebSocket; upstream: WebSocket; viewerId: string; role: string; access: z.infer<typeof AccessBinding> }>>();
 const starting = new Map<string, Promise<Session>>();
 const closing = new Map<string, Promise<Session>>();
+const savingProfiles = new Set<string>();
+const changingCredentials = new Set<string>();
 
 class HttpError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -87,7 +94,9 @@ function summaries(): Session[] {
   return db.prepare("SELECT document FROM sessions WHERE json_extract(document,'$.status') != 'CLOSED'").all().map((row) => Session.parse(JSON.parse(z.string().parse(row["document"]))));
 }
 function summary(session: Session): object {
-  return { id: session.id, ownerId: session.ownerId, taskId: session.taskId, nodeId: config.nodeId, status: session.status, controlEpoch: session.policy.controlEpoch, controlOwner: session.policy.owner, privateMode: session.policy.privateMode };
+  return { id: session.id, ownerId: session.ownerId, taskId: session.taskId, nodeId: config.nodeId, status: session.status, controlEpoch: session.policy.controlEpoch, controlOwner: session.policy.owner, privateMode: session.policy.privateMode,
+    profileConnectionId: session.connectionId, profileRevision: session.profileRevision,
+    profileSavedAt: session.profileSavedAt, profileSaveError: session.profileSaveError ?? null };
 }
 async function docker(endpoint: string, method = "GET", value?: unknown): Promise<Response> {
   const response = await fetch(config.docker + endpoint, {
@@ -108,7 +117,7 @@ async function sessionRequest(session: Session, endpoint: string, method = "GET"
   if (!session.address) throw new HttpError(409, "Browser unavailable");
   const response = await fetch(`http://${session.address}:8080${endpoint}`, {
     method, headers: { "X-Worker-Token": session.token, "Content-Type": "application/json" },
-    ...(value === undefined ? {} : { body: JSON.stringify(value) }), signal: AbortSignal.timeout(endpoint.startsWith("/artifacts/") ? 600_000 : endpoint.startsWith("/commands") ? 90_000 : 30_000),
+    ...(value === undefined ? {} : { body: JSON.stringify(value) }), signal: AbortSignal.timeout(endpoint.startsWith("/artifacts/") ? 600_000 : endpoint.startsWith("/profile") ? 300_000 : endpoint.startsWith("/commands") ? 90_000 : 30_000),
   });
   return response;
 }
@@ -120,14 +129,55 @@ async function sessionJson(session: Session, endpoint: string, method = "GET", v
   }
   return response.json();
 }
-function decryptProfile(id: string, owner: string): unknown {
-  const row = db.prepare("SELECT encrypted FROM profiles WHERE id=? AND owner=?").get(id, owner);
-  if (!row || !(row["encrypted"] instanceof Uint8Array)) throw new HttpError(409, "Saved profile unavailable");
-  const encoded = Buffer.from(row["encrypted"]);
-  const decipher = createDecipheriv("aes-256-gcm", encryptionKey, encoded.subarray(0, 12));
-  decipher.setAAD(Buffer.from(`${owner}:${id}`));
-  decipher.setAuthTag(encoded.subarray(12, 28));
-  return JSON.parse(Buffer.concat([decipher.update(encoded.subarray(28)), decipher.final()]).toString("utf8"));
+async function prepareProfile(session: Session, connectionId: string, importId: string, origins?: string[]): Promise<void> {
+  const endpoint = `/profile/import/${importId}`;
+  const existing = await sessionRequest(session, endpoint);
+  await existing.body?.cancel();
+  if (existing.ok) return;
+  if (existing.status !== 404) throw new HttpError(409, "Profile import unavailable");
+  const source = await credentials.stream(connectionId, session.ownerId);
+  const request = http.request({ hostname: session.address, port: 8080,
+    path: endpoint + (origins ? "?origins=" + encodeURIComponent(JSON.stringify(origins)) : ""), method: "POST",
+    headers: { "X-Worker-Token": session.token, "Content-Type": "application/x-ndjson" } });
+  request.setTimeout(300_000, () => request.destroy(new Error("Profile import timed out")));
+  const result = new Promise<void>((resolve, reject) => {
+    request.on("error", reject);
+    request.on("response", (response) => {
+      response.resume();
+      response.on("error", reject);
+      response.on("end", () => response.statusCode === 200 ? resolve() : reject(new StorageError("PROFILE_INVALID", 422)));
+    });
+  });
+  try { await Promise.all([pipeline(source.input, request), source.completion, result]); }
+  catch (error) { source.input.destroy(); request.destroy(); throw error; }
+}
+
+async function exportSavedProfile(session: Session, connectionId: string, origins: string[], includeLoginOrigins = false, requestedOperationId?: string): Promise<object> {
+  if (savingProfiles.has(session.id) || changingCredentials.has(session.id)) throw new HttpError(409, "Profile save in progress");
+  savingProfiles.add(session.id);
+  const operationId = requestedOperationId ?? (includeLoginOrigins ? session.id + ":" + session.policy.controlEpoch : randomUUID());
+  try {
+    let profile = await credentials.saved(connectionId, session.ownerId, operationId);
+    if (!profile) {
+      const exported = await sessionRequest(session, "/profile/export", "POST", { origins, includeLoginOrigins });
+      if (!exported.ok || !exported.body) {
+        await exported.body?.cancel(); throw new StorageError("PROFILE_SAVE_FAILED", exported.status);
+      }
+      profile = await credentials.save(connectionId, session.ownerId, operationId, Readable.fromWeb(exported.body));
+    }
+    save({ ...saved(session.id), connectionId, profileRevision: profile.revision, profileSavedAt: profile.savedAt, profileSaveError: undefined });
+    return { profileRef: connectionId, saved: true, revision: profile.revision, savedAt: profile.savedAt, origins: profile.origins };
+  } finally { savingProfiles.delete(session.id); }
+}
+
+function reconcileAppliedConnection(sessionId: string, result: unknown): void {
+  const applied = z.object({ status: z.literal("SUCCEEDED"), result: z.object({ switched: z.literal(true), connectionId: z.string() }) }).safeParse(result);
+  if (applied.success) {
+    const current = saved(sessionId);
+    if (current.connectionId !== applied.data.result.connectionId) save({ ...current,
+      connectionId: applied.data.result.connectionId, profileRevision: undefined,
+      profileSavedAt: undefined, profileSaveError: undefined });
+  }
 }
 async function createSession(input: z.infer<typeof CreateSession>): Promise<Session> {
   let session: Session;
@@ -140,7 +190,7 @@ async function createSession(input: z.infer<typeof CreateSession>): Promise<Sess
     if (db.prepare("SELECT value FROM settings WHERE id='draining'").get()?.["value"] === "true") throw new HttpError(409, "Node does not accept new browsers");
     if (summaries().length >= config.capacity) throw new HttpError(409, "Browser capacity reached");
     if (input.startUrl !== "about:blank" && !["http:", "https:"].includes(new URL(input.startUrl).protocol)) throw new HttpError(400, "Invalid start URL");
-    session = save({ id: input.sessionId, ownerId: input.ownerId, taskId: input.taskId, startUrl: input.startUrl, connectionId: input.connectionId, token: randomBytes(32).toString("base64url"), status: "STARTING", policy: { controlEpoch: 0, owner: "NONE", privateMode: false } });
+    session = save({ id: input.sessionId, ownerId: input.ownerId, taskId: input.taskId, startUrl: input.startUrl, connectionId: input.connectionId, restoreProfile: input.restoreProfile, token: randomBytes(32).toString("base64url"), status: "STARTING", policy: { controlEpoch: 0, owner: "NONE", privateMode: false } });
   }
   const prefix = `helm-browser-${session.id}`;
   if (!session.networkId) {
@@ -200,8 +250,12 @@ async function createSession(input: z.infer<typeof CreateSession>): Promise<Sess
   session = save({ ...session, containerId: container.Id, egressId: egress.Id, address });
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
-      const profile = session.connectionId ? decryptProfile(session.connectionId, session.ownerId) : undefined;
-      const result = z.object({ status: z.enum(["LIVE", "LOST"]) }).parse(await sessionJson(session, "/initialize", "POST", { startUrl: session.startUrl, profile }));
+      const restore = session.connectionId && session.restoreProfile !== false;
+      let result = z.object({ status: z.enum(["LIVE", "LOST"]) }).parse(await sessionJson(session, "/initialize", "POST", { startUrl: restore ? "about:blank" : session.startUrl }));
+      if (restore && session.connectionId && result.status === "LIVE") {
+        await prepareProfile(session, session.connectionId, session.id);
+        result = z.object({ status: z.enum(["LIVE", "LOST"]) }).parse(await sessionJson(session, "/profile/activate", "POST", { id: session.id, startUrl: session.startUrl }));
+      }
       return save({ ...session, status: result.status });
     } catch (error) {
       if (error instanceof HttpError && error.status < 500) throw error;
@@ -228,7 +282,8 @@ async function finishClose(id: string): Promise<Session> {
   try { await starting.get(id); } catch { /* Clean up the creator's partial resources. */ }
   let session = saved(id);
   if (session.status === "CLOSED") return session;
-  session = save({ ...session, status: "CLOSING" });
+  // Closing releases the browser; only an explicit save replaces its connection profile.
+  session = save({ ...saved(session.id), status: "CLOSING" });
   disconnectViewers(session.id);
   try {
     const container = await inspect(session.containerId ?? `helm-browser-${session.id}`);
@@ -283,37 +338,63 @@ async function assets(url: URL, response: ServerResponse): Promise<void> {
     const parent = new URL(requestedParent);
     const trustedParent = requestedParent === config.publicOrigin || (requestedParent === parent.origin && parent.protocol === "https:" && !parent.port && parent.hostname.endsWith(".oaiusercontent.com"));
     if (!trustedParent) throw new HttpError(403, "Viewer parent origin denied");
-    const html = (await readFile(filename, "utf8")).replace("UI.start({", `const parentOrigin = ${JSON.stringify(parent.origin)};
-        const report = state => window.parent.postMessage({type:'helm-viewer',state}, parentOrigin);
-        let pendingTransport;
-        const connectTransport = () => {
-          if (!pendingTransport || UI.rfb) return;
-          const next = pendingTransport; pendingTransport = undefined;
-          UI.forceSetting('path', next.path);
-          UI.forceSetting('view_only', next.viewOnly);
-          UI.forceSetting('host', window.location.hostname);
-          UI.forceSetting('port', window.location.port);
-          UI.forceSetting('encrypt', window.location.protocol === 'https:');
-          UI.connect();
-        };
-        window.addEventListener('message', event => {
-          if (event.source !== window.parent || event.origin !== parentOrigin || event.data?.type !== 'helm-viewer-reconnect' || typeof event.data.url !== 'string') return;
-          try {
-            const next = new URL(event.data.url, window.location.href);
-            if (next.origin !== window.location.origin || next.pathname !== window.location.pathname) return;
-            const rawPath = next.searchParams.get('path');
-            if (!rawPath) return;
-            const transport = new URL(rawPath, window.location.origin + '/');
-            const prefix = window.location.pathname.slice(0, window.location.pathname.indexOf('/novnc/'));
-            if (transport.origin !== window.location.origin || !transport.pathname.startsWith(prefix + '/sessions/') || !transport.pathname.endsWith('/view') || !transport.searchParams.has('ticket')) return;
-            pendingTransport = {path: transport.pathname.slice(1) + transport.search, viewOnly: next.searchParams.get('view_only') === '1'};
-            if (UI.rfb) UI.disconnect(); else connectTransport();
-          } catch { report('error'); }
+    const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Helm Glass browser</title><style>html,body,#screen{width:100%;height:100%;margin:0;background:#111827;overflow:hidden}canvas{outline:none}</style></head><body><div id="screen"></div><script type="module">
+      import RFB from './core/rfb.js';
+      const parentOrigin = ${JSON.stringify(parent.origin)};
+      let rfb, pending, activeEpoch, generation = 0;
+      const report = (state, epoch) => {
+        const canvas = document.querySelector('#screen canvas');
+        window.parent.postMessage({type:'helm-viewer',state,viewerEpoch:epoch,width:canvas?.width,height:canvas?.height}, parentOrigin);
+      };
+      function connect(next) {
+        const rawPath = next.searchParams.get('path');
+        if (!rawPath) throw new Error('Missing transport');
+        const transport = new URL(rawPath, window.location.origin + '/');
+        const prefix = window.location.pathname.slice(0, window.location.pathname.indexOf('/novnc/'));
+        if (transport.origin !== window.location.origin || !transport.pathname.startsWith(prefix + '/sessions/') || !transport.pathname.endsWith('/view') || !transport.searchParams.has('ticket')) throw new Error('Invalid transport');
+        transport.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ownGeneration = ++generation, epoch = next.searchParams.get('viewerEpoch') ?? '';
+        activeEpoch = epoch;
+        const connection = new RFB(document.getElementById('screen'), transport.href);
+        rfb = connection;
+        connection.viewOnly = next.searchParams.get('view_only') === '1';
+        connection.scaleViewport = true; connection.resizeSession = false;
+        const dimensions = new MutationObserver(() => { if (ownGeneration === generation) report('resized', epoch); });
+        dimensions.observe(document.getElementById('screen'), {subtree:true,childList:true,attributes:true,attributeFilter:['width','height']});
+        connection.addEventListener('connect', () => { if (ownGeneration === generation) report('connected', epoch); });
+        connection.addEventListener('securityfailure', () => { if (ownGeneration === generation) report('error', epoch); });
+        connection.addEventListener('disconnect', () => {
+          dimensions.disconnect();
+          if (ownGeneration !== generation) return;
+          rfb = undefined;
+          if (pending) { const target = pending; pending = undefined; connect(target); }
+          else report('disconnected', epoch);
         });
-        const connected = UI.connectFinished; UI.connectFinished = function(...args) { connected.apply(UI, args); report('connected'); };
-        const disconnected = UI.disconnectFinished; UI.disconnectFinished = function(...args) { disconnected.apply(UI, args); if (pendingTransport) connectTransport(); else report('disconnected'); };
-        mandatory.reconnect = false;
-        UI.start({`);
+      }
+      window.addEventListener('message', event => {
+        if (event.source !== window.parent || event.origin !== parentOrigin || typeof event.data?.url !== 'string') return;
+        if (event.data.type === 'helm-viewer-navigate') {
+          if (!rfb || rfb.viewOnly || event.data.viewerEpoch !== activeEpoch) return;
+          try {
+            const target = new URL(event.data.url);
+            if (!['https:', 'http:'].includes(target.protocol) || target.username || target.password || target.href.length > 4096) return;
+            rfb.sendKey(0xffe3, 'ControlLeft', true);
+            rfb.sendKey(0x6c, 'KeyL');
+            rfb.sendKey(0xffe3, 'ControlLeft', false);
+            for (const character of target.href) rfb.sendKey(character.codePointAt(0));
+            rfb.sendKey(0xff0d, 'Enter');
+          } catch { report('error', activeEpoch); }
+          return;
+        }
+        if (event.data.type !== 'helm-viewer-reconnect') return;
+        try {
+          const next = new URL(event.data.url, location.href);
+          if (next.origin !== location.origin || next.pathname !== location.pathname) return;
+          if (rfb) { pending = next; rfb.disconnect(); } else connect(next);
+        } catch { report('error', ''); }
+      });
+      try { connect(new URL(location.href)); } catch { report('error', new URL(location.href).searchParams.get('viewerEpoch') ?? ''); }
+    </script></body></html>`;
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); response.end(html); return;
   }
   const info = await stat(filename);
@@ -345,7 +426,7 @@ const server = http.createServer(async (request, response) => {
       reply(response, 200, { draining: input.enabled }); return;
     }
     if (segments[0] === "profiles" && segments[1] && request.method === "DELETE") {
-      db.prepare("DELETE FROM profiles WHERE id=?").run(segments[1]); reply(response, 200, { deleted: true }); return;
+      await credentials.remove(segments[1]); reply(response, 200, { deleted: true }); return;
     }
     if (segments[0] === "owners" && segments[1] && segments[2] === "viewers" && segments[3] === "revoke" && request.method === "POST") {
       const ownerId = z.string().min(1).max(200).parse(segments[1]);
@@ -387,6 +468,49 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     if (session.status === "CLOSED" || session.status === "CLOSING") throw new HttpError(409, "Session closed");
+    if (segments[2] === "bind" && request.method === "POST") {
+      const input = z.object({ ownerId: z.string(), taskId: z.uuid() }).strict().parse(await body(request));
+      if (input.ownerId !== session.ownerId || (session.taskId && session.taskId !== input.taskId)
+          || session.policy.privateMode || !["NONE", "CHATGPT"].includes(session.policy.owner)) throw new HttpError(409, "Browser cannot be assigned");
+      session = save({ ...session, taskId: input.taskId }); reply(response, 200, summary(session)); return;
+    }
+    if (segments[2] === "login-context" && request.method === "POST") {
+      const input = z.object({ ownerId: z.string(), connectionId: z.string(), startUrl: z.url() }).strict().parse(await body(request));
+      if (input.ownerId !== session.ownerId || !session.policy.privateMode || session.policy.owner !== "NONE") throw new HttpError(403, "Protected login required");
+      await sessionJson(session, "/login-context", "POST", { startUrl: input.startUrl });
+      session = save({ ...session, connectionId: input.connectionId, startUrl: input.startUrl,
+        profileRevision: undefined, profileSavedAt: undefined, profileSaveError: undefined });
+      reply(response, 200, summary(session)); return;
+    }
+    if (segments[2] === "credentials" && request.method === "POST") {
+      const input = z.object({ action: z.enum(["STATUS", "CONSENT", "DELETE"]), ownerId: z.string(), viewerId: z.string(),
+        connectionId: z.string().optional(), operationId: z.string().min(8).max(128).optional(), expectedRevision: z.number().int().nonnegative().optional(),
+        enabled: z.boolean().optional(), expectedCaptureRevision: z.number().int().nonnegative().optional() }).strict().parse(await body(request, 4096));
+      if (input.ownerId !== session.ownerId || !session.policy.privateMode || session.policy.owner !== "USER"
+          || input.viewerId !== session.policy.controllerId
+          || (session.connectionId && input.connectionId !== session.connectionId)) throw new HttpError(403, "Private controller required");
+      if (input.action !== "STATUS" && savingProfiles.has(session.id)) throw new HttpError(409, "Profile save in progress");
+      const mutating = input.action !== "STATUS";
+      if (mutating && changingCredentials.has(session.id)) throw new HttpError(409, "Credential change in progress");
+      if (mutating) changingCredentials.add(session.id);
+      try {
+      if (input.action === "CONSENT") {
+        if (input.enabled === undefined || input.expectedCaptureRevision === undefined || !input.operationId) throw new HttpError(400, "Consent operation incomplete");
+        const storedRevision = input.connectionId ? (await credentials.metadata(input.connectionId, input.ownerId)).revision : 0;
+        await sessionJson(session, "/credentials/consent", "POST", { viewerId: input.viewerId, enabled: input.enabled,
+          operationId: input.operationId, expectedCaptureRevision: input.expectedCaptureRevision, storedRevision });
+      }
+      if (input.action === "DELETE") {
+        if (!input.connectionId || !input.operationId || input.expectedRevision === undefined) throw new HttpError(400, "Credential operation incomplete");
+        await credentials.write(input.connectionId, input.ownerId, input.operationId, input.expectedRevision, null);
+        await sessionJson(session, "/credentials/clear", "POST", {});
+      }
+      const page = z.object({ origin: z.string().nullable(), captureEnabled: z.boolean(), captureRevision: z.number().int().nonnegative(), captureOrigin: z.string().nullable(),
+        captureStatus: z.enum(["DISABLED", "ARMED", "CAPTURED", "UNSUPPORTED"]) }).parse(await sessionJson(session, "/credentials/context", "POST", { viewerId: input.viewerId }));
+      reply(response, 200, { ...(input.connectionId ? await credentials.metadata(input.connectionId, input.ownerId) : { available: false, revision: 0, origin: null }),
+        currentOrigin: page.origin, captureEnabled: page.captureEnabled, captureRevision: page.captureRevision, captureOrigin: page.captureOrigin, captureStatus: page.captureStatus }); return;
+      } finally { if (mutating) changingCredentials.delete(session.id); }
+    }
     if (segments[2] === "control" && request.method === "POST") {
       const policy = Policy.parse(await body(request));
       if (policy.controlEpoch < session.policy.controlEpoch) throw new HttpError(409, "Stale control epoch");
@@ -396,6 +520,16 @@ const server = http.createServer(async (request, response) => {
       const result = await sessionJson(session, "/control", "POST", policy);
       const current = saved(session.id);
       if (current.policy.controlEpoch <= policy.controlEpoch) save({ ...current, policy });
+      if (policy.owner === "USER" && policy.privateMode && current.connectionId) {
+        try {
+          const value = await credentials.read(current.connectionId, current.ownerId);
+          if (value) await sessionJson(saved(session.id), "/credentials/fill", "POST", { viewerId: policy.controllerId, ...value });
+        } catch (error) {
+          if (!(error instanceof StorageError) || error.code !== "PROFILE_STORAGE_UNAVAILABLE") throw error;
+          // The control transition succeeded. Storage failure only prevents optional autofill.
+          save({ ...saved(session.id), profileSaveError: error.code });
+        }
+      }
       reply(response, 200, result); return;
     }
     if (segments[2] === "ticket" && request.method === "POST") {
@@ -408,17 +542,14 @@ const server = http.createServer(async (request, response) => {
       tickets.set(ticket.ticket, { ...ticket, sessionId: session.id }); reply(response, 200, { registered: true }); return;
     }
     if (segments[2] === "profile" && segments[3] === "export" && request.method === "POST") {
-      const input = z.object({ connectionId: z.string().min(1).max(200), ownerId: z.string().min(1).max(200), origins: z.array(z.url()).min(1).max(50) }).parse(await body(request));
+      const input = z.object({ connectionId: z.string().min(1).max(200), ownerId: z.string().min(1).max(200), origins: z.array(z.url()).min(1).max(50), includeLoginOrigins: z.boolean().default(false), operationId: z.string().min(1).max(200).optional() }).parse(await body(request));
       if (input.ownerId !== session.ownerId) throw new HttpError(403, "Profile owner mismatch");
-      const value = await sessionJson(session, "/profile/export", "POST", { origins: input.origins });
-      const bytes = Buffer.from(JSON.stringify(value));
-      if (bytes.length > 8_388_608) throw new HttpError(413, "Profile exceeds storage limit");
-      const nonce = randomBytes(12); const cipher = createCipheriv("aes-256-gcm", encryptionKey, nonce);
-      cipher.setAAD(Buffer.from(`${input.ownerId}:${input.connectionId}`));
-      const encrypted = Buffer.concat([cipher.update(bytes), cipher.final()]);
-      const changed = db.prepare("INSERT INTO profiles(id,owner,encrypted) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET encrypted=excluded.encrypted WHERE profiles.owner=excluded.owner").run(input.connectionId, input.ownerId, Buffer.concat([nonce, cipher.getAuthTag(), encrypted]));
-      if (changed.changes !== 1) throw new HttpError(403, "Profile owner mismatch");
-      reply(response, 200, { profileRef: input.connectionId, saved: true }); return;
+      try { reply(response, 200, await exportSavedProfile(session, input.connectionId, input.origins, input.includeLoginOrigins, input.operationId)); }
+      catch (error) {
+        const code = error instanceof StorageError ? error.code : "PROFILE_SAVE_FAILED";
+        save({ ...saved(session.id), profileSaveError: code }); throw error;
+      }
+      return;
     }
     if (segments[2] === "artifacts" && segments[3] && request.method === "GET") {
       const archive = url.searchParams.get("archive") === "true" ? "?archive=true" : "";
@@ -439,21 +570,28 @@ const server = http.createServer(async (request, response) => {
         const command = z.object({ operationId: z.uuid(), type: z.string(), arguments: z.record(z.string(), z.unknown()) }).passthrough().parse(input);
         if (command.type === "applyConnection") {
           const existing = await sessionRequest(session, `/commands/${command.operationId}`);
-          if (existing.ok) { reply(response, 200, await existing.json()); return; }
+          if (existing.ok) {
+            const result: unknown = await existing.json();
+            reconcileAppliedConnection(session.id, result);
+            reply(response, 200, result); return;
+          }
           await existing.body?.cancel();
           if (existing.status !== 404) throw new HttpError(502, "Account switch receipt unavailable");
           const args = z.object({ connectionId: z.string().min(1).max(200), ownerId: z.string().min(1).max(200), origins: z.array(z.url()).min(1).max(50), url: z.url() }).strict().parse(command.arguments);
           if (args.ownerId !== session.ownerId) throw new HttpError(403, "Profile owner mismatch");
           disconnectViewers(session.id);
-          input = { ...command, arguments: { ...args, profile: decryptProfile(args.connectionId, args.ownerId) } };
+          await prepareProfile(session, args.connectionId, command.operationId, args.origins);
+          input = { ...command, arguments: { ...args, profileId: command.operationId } };
         }
       }
-      reply(response, 200, await sessionJson(session, endpoint, request.method ?? "GET", input)); return;
+      const result = await sessionJson(session, endpoint, request.method ?? "GET", input);
+      reconcileAppliedConnection(session.id, result);
+      reply(response, 200, result); return;
     }
     throw new HttpError(404, "Route not found");
   } catch (error) {
     if (response.headersSent) { response.destroy(); return; }
-    reply(response, error instanceof HttpError ? error.status : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 502, { error: error instanceof HttpError ? error.message : "Operation unavailable" });
+    reply(response, error instanceof HttpError || error instanceof StorageError ? error.status : error instanceof CredentialConflict ? 409 : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 502, { error: error instanceof HttpError || error instanceof StorageError ? error.message : "Operation unavailable", ...(error instanceof StorageError ? { code: error.code } : {}) });
   }
 });
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1_048_576, perMessageDeflate: false });

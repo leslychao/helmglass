@@ -1,4 +1,7 @@
 <h1 class="sr-only">Профиль</h1>
+<a class="back-link" hgTooltip="Вернуться на исходную страницу" [routerLink]="returnUrl"
+  ><hg-icon name="arrow-left" />{{ returnLabel }}</a
+>
 <form (ngSubmit)="save()">
   <section class="card profile-card">
     <div class="profile-hero">

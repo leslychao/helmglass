@@ -57,7 +57,7 @@ class LostArchiveTest(unittest.TestCase):
                   "instructionRevision": current["instructionRevision"]}
         if current.get("browser") and current["browser"]["status"] == "LIVE":
             action["controlEpoch"] = current["browser"]["controlEpoch"]
-        error, result, _ = client.tool("browser.execute", {"taskId": task["id"], "action": action})
+        error, result, _ = client.execute_in_scenario_step({"taskId": task["id"], "action": action})
         self.assertFalse(error, result)
         receipt = self.wait_operation(action["operationId"], client)
         self.assertEqual("SUCCEEDED", receipt["status"])
@@ -69,8 +69,7 @@ class LostArchiveTest(unittest.TestCase):
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "LOST archive acceptance", "goal": "Preserve an original before cleanup",
-                "startUrl": os.environ["TEST_FIXTURE_URL"], "prepare": True,
-                "requireConfirmation": False}})
+                "startUrl": os.environ["TEST_FIXTURE_URL"], "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         container = None
@@ -161,8 +160,7 @@ process.kill(pids[0],'SIGKILL');"""
             error, shown, _ = neighbor_client.tool("tasks.create", {
                 "operationKey": str(uuid.uuid4()), "task": {
                     "title": "Progress beside a failed archive", "goal": "Read a public page",
-                    "startUrl": "https://example.com", "prepare": True,
-                    "requireConfirmation": False}})
+                    "startUrl": "https://example.com", "prepare": True}})
             self.assertFalse(error, shown)
             neighbor_task = shown["task"]
             self.execute(neighbor_task, "observe", {}, neighbor_client)

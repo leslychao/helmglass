@@ -8,14 +8,20 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Set;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import ru.helmglass.api.JsonSupport;
+import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 
 @Component
 public class WorkerClient {
   private static final int MAXIMUM_REPLY_BYTES = 2 * 1024 * 1024;
+  private static final Set<String> PROFILE_ERRORS = Set.of(
+      "PROFILE_TOO_LARGE", "PROFILE_RECORD_TOO_LARGE", "PROFILE_COMPLEXITY_LIMIT",
+      "PROFILE_STORAGE_UNAVAILABLE", "PROFILE_INVALID", "PROFILE_SNAPSHOT_CHANGED",
+      "PROFILE_REVISION_CHANGED", "PROFILE_UNSUPPORTED_VALUE", "PROFILE_SAVE_FAILED");
   private final HttpClient http =
       HttpClient.newBuilder()
           .connectTimeout(Duration.ofSeconds(5))
@@ -50,6 +56,17 @@ public class WorkerClient {
           throw new WorkerException("WORKER_REPLY_TOO_LARGE", response.statusCode());
         }
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
+          if (bytes.length > 0) {
+            try {
+              String code = json.read(new String(bytes, StandardCharsets.UTF_8))
+                  .path("code").asString("");
+              if (PROFILE_ERRORS.contains(code)) {
+                throw new WorkerException(code, response.statusCode());
+              }
+            } catch (JacksonException exception) {
+              // A proxy may return HTML; preserve its HTTP failure without exposing the body.
+            }
+          }
           throw new WorkerException("WORKER_HTTP_" + response.statusCode(), response.statusCode());
         }
         return bytes.length == 0

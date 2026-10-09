@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import org.springframework.util.MultiValueMap;
 
 public record ListQuery(
@@ -19,7 +20,8 @@ public record ListQuery(
     String sort,
     boolean ascending,
     int page,
-    int pageSize) {
+    int pageSize,
+    UUID taskId) {
   public static ListQuery from(MultiValueMap<String, String> values) {
     String search = values.getFirst("search");
     if (search != null && search.length() > 300) {
@@ -27,8 +29,19 @@ public record ListQuery(
     }
     int page = number(values.getFirst("page"), 1);
     int size = number(values.getFirst("pageSize"), 20);
-    if (page < 1 || page > 1000000 || !List.of(10, 20, 50).contains(size)) {
-      throw ApiException.invalid("page", "Недопустимые параметры страницы.");
+    validatePage(page, size);
+    if ("true".equals(values.getFirst("suggestions"))) {
+      page = 1;
+      size = 3;
+    }
+    UUID taskId = null;
+    String selectedTask = values.getFirst("taskId");
+    if (selectedTask != null && !selectedTask.isBlank()) {
+      try {
+        taskId = UUID.fromString(selectedTask);
+      } catch (IllegalArgumentException exception) {
+        throw ApiException.invalid("taskId", "Недопустимый номер задачи.");
+      }
     }
     return new ListQuery(
         search,
@@ -40,14 +53,18 @@ public record ListQuery(
         values.getFirst("sort"),
         "asc".equals(values.getFirst("direction")),
         page,
-        size);
+        size,
+        taskId);
   }
 
   public Filter tasks(UUIDOwner owner, boolean states) {
     List<String> clauses = new ArrayList<>(List.of("t.owner_id=:owner"));
     Map<String, Object> parameters = new HashMap<>();
     parameters.put("owner", owner.id());
-    if (search != null && !search.isBlank()) {
+    if (taskId != null) {
+      clauses.add("t.id=:taskId");
+      parameters.put("taskId", taskId);
+    } else if (search != null && !search.isBlank()) {
       clauses.add("(t.title ILIKE :search OR t.goal ILIKE :search OR t.id::text ILIKE :search)");
       parameters.put("search", "%" + search + "%");
     }
@@ -65,17 +82,10 @@ public record ListQuery(
     return new Filter(String.join(" AND ", clauses), parameters);
   }
 
-  public String taskOrder() {
-    String column =
-        switch (sort == null ? "" : sort) {
-          case "title" -> "t.title";
-          case "status" -> "t.status";
-          case "site" -> "t.site";
-          case "source" -> "t.source";
-          case "createdAt" -> "t.created_at";
-          default -> "t.updated_at";
-        };
-    return column + (ascending ? " ASC" : " DESC") + ",t.id";
+  public static void validatePage(int page, int size) {
+    if (page < 1 || page > 1000000 || !List.of(3, 5, 10, 20, 25, 50).contains(size)) {
+      throw ApiException.invalid("page", "Недопустимые параметры страницы.");
+    }
   }
 
   public long offset() {

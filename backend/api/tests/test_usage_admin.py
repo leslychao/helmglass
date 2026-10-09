@@ -57,6 +57,26 @@ class UsageAdministrationTest(unittest.TestCase):
     def command(self, task, kind, **fields):
         status, current = self.client.api("/api/tasks/" + task["id"])
         self.assertEqual(200, status, current)
+        if kind in ("ANSWER", "CONFIRM", "REJECT", "CHOOSE_CONNECTION"):
+            request = current["request"]
+            if request["type"] == "UNKNOWN_RESULT":
+                content = {"outcome": "SUCCEEDED" if kind == "CONFIRM" else "FAILED",
+                           "evidence": fields["text"]}
+            elif kind == "ANSWER":
+                content = {"answer": fields["text"]}
+            elif kind == "CHOOSE_CONNECTION":
+                content = {"connectionId": fields["connectionId"]}
+            else:
+                content = {"proceed": kind == "CONFIRM"}
+            error, result, _ = self.client.respond(current, content)
+            self.assertFalse(error, result)
+            return result
+        if kind == "AMEND" and current["status"] != "DRAFT":
+            error, result, _ = self.client.tool("tasks.command", {"taskId": task["id"],
+                "operationKey": str(uuid.uuid4()), "command": {
+                    "type": kind, "expectedVersion": current["version"], **fields}})
+            self.assertFalse(error, result)
+            return result
         status, result = self.client.api("/api/tasks/" + task["id"] + "/commands", "POST", {
             "type": kind, "expectedVersion": current["version"], **fields})
         self.assertEqual(200, status, result)
@@ -357,6 +377,111 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(0,report["usage"]["manualSeconds"])
         self.assertEqual(500,report["usage"]["mediaBytes"])
 
+    def test_table_sorting_precedes_paging_and_keeps_numeric_null_and_owner_boundaries(self):
+        amounts = [2, 10, 10, 0, 100, 1, 50, 7, 3, 20, 4, 8]
+        tasks = [self.create("Table fixture " + str(i), prepare=False,
+                             site=f"table-{i:02}.example.com") for i in range(12)]
+        for i, task in enumerate(tasks):
+            self.sql(f"UPDATE tasks SET status='SUCCEEDED',created_at='2026-07-01',"
+                     f"updated_at='2026-07-01'::timestamptz+interval '{i} seconds' "
+                     f"WHERE owner_id=:owner AND id='{task['id']}';")
+            self.interval(task, 'EXECUTION', '2026-07-01', amounts[i])
+            self.interval(task, 'MANUAL', '2026-07-01', amounts[i])
+            self.interval(task, 'BROWSER', '2026-07-01', amounts[i])
+            self.artifact(task, amounts[i], None if i == 4 else amounts[i], '2026-07-01')
+        ties = sorted([tasks[1]['id'], tasks[2]['id']])
+        expected = [tasks[i]['id'] for i in [3, 5, 0, 8, 10, 7, 11]] + ties
+        expected += [tasks[i]['id'] for i in [9, 6, 4]]
+
+        def all_pages(endpoint, sort, direction):
+            rows = []
+            for page in [1, 2, 3]:
+                status, value = self.client.api(endpoint + '?' + urlencode({
+                    'sort': sort, 'direction': direction, 'page': page, 'pageSize': 5}))
+                self.assertEqual(200, status, value)
+                self.assertEqual((12, page, 5), (value['total'], value['page'], value['pageSize']))
+                rows.extend(value['items'])
+            return rows
+
+        for field in ['executionSeconds', 'manualSeconds', 'mediaBytes']:
+            self.assertEqual(expected, [row['id'] for row in all_pages('/api/tasks', field, 'asc')])
+            descending = list(reversed(expected))
+            descending[3:5] = ties
+            self.assertEqual(descending, [row['id'] for row in all_pages('/api/tasks', field, 'desc')])
+        media_desc = [tasks[i]['id'] for i in [6, 9]] + ties
+        media_desc += [tasks[i]['id'] for i in [11, 7, 10, 8, 0, 5, 3, 4]]
+        self.assertEqual(media_desc, [row['id'] for row in all_pages('/api/tasks', 'mediaSeconds', 'desc')])
+        self.assertEqual(expected, [row['id'] for row in all_pages('/api/tasks', 'mediaSeconds', 'asc')])
+        self.assertEqual([task['id'] for task in tasks],
+                         [row['id'] for row in all_pages('/api/tasks', 'updatedAt', 'asc')])
+        baseline = self.client.api('/api/tasks?pageSize=25')[1]
+        self.assertEqual([task['id'] for task in reversed(tasks)], [row['id'] for row in baseline['items']])
+        for size in [3, 5, 10, 20, 25, 50]:
+            status, page = self.client.api('/api/tasks?pageSize=' + str(size))
+            self.assertEqual(200, status, page)
+            self.assertEqual((size, 12, min(size, 12)), (page['pageSize'], page['total'], len(page['items'])))
+        self.assertEqual(400, self.client.api('/api/tasks?pageSize=7')[0])
+        self.assertEqual(0, self.admin.api('/api/tasks?taskId=' + tasks[0]['id'] + '&sort=mediaBytes')[1]['total'])
+        self.assertEqual(404, self.admin.api('/api/tasks/' + tasks[0]['id'])[0])
+        report = self.usage(sitesSort='browserSeconds', sitesDirection='asc', sitesPage=2,
+                            sitesPageSize=5, daysPage=1, pageSize=3)
+        self.assertEqual((12, 2, 5), (report['sites']['total'], report['sites']['page'], report['sites']['pageSize']))
+        self.assertEqual([7, 8, 10, 10, 20], [row['browserSeconds'] for row in report['sites']['items']])
+        self.assertEqual((1, 3), (report['days']['page'], report['days']['pageSize']))
+        self.assertEqual(12, report['totalTasks'])
+        unknown = self.usage(sitesSort='mediaSeconds', sitesDirection='desc', sitesPage=3, sitesPageSize=5)
+        self.assertEqual([0, None], [row['mediaSeconds'] for row in unknown['sites']['items']])
+
+    def test_user_detail_tables_page_independently_but_totals_cover_seven_days(self):
+        endpoint = '/api/admin/users/' + self.identity.id
+        start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+        for i, seconds in enumerate([20, 2, 100, 0, 2, 10, 1]):
+            self.interval(None, 'BROWSER', (start + timedelta(days=i)).isoformat(), seconds, i == 2)
+        status, original = self.admin.api(endpoint + '?timezone=UTC&taskPageSize=5&auditPageSize=5')
+        self.assertEqual(200, status, original)
+        usage = original['usage']
+        self.assertEqual((7, 5, 5), (usage['days']['total'], usage['days']['pageSize'], len(usage['days']['items'])))
+        self.assertEqual(135, usage['usage']['browserSeconds'])
+        self.assertEqual(1, usage['incompleteDays'])
+        status, changed = self.admin.api(endpoint + '?timezone=UTC&usageSort=browserSeconds&usageDirection=desc'
+            '&usagePage=2&usagePageSize=3&taskPage=2&taskPageSize=25&auditPage=3&auditPageSize=10')
+        self.assertEqual(200, status, changed)
+        self.assertEqual([2, 2, 1], [day['browserSeconds'] for day in changed['usage']['days']['items']])
+        self.assertEqual([ (start + timedelta(days=i)).date().isoformat() for i in [1, 4, 6]],
+                         [day['date'] for day in changed['usage']['days']['items']])
+        self.assertEqual({key: value for key, value in usage.items() if key != 'days'},
+                         {key: value for key, value in changed['usage'].items() if key != 'days'})
+        self.assertEqual((2, 25, 3, 10), (changed['tasks']['page'], changed['tasks']['pageSize'],
+                                         changed['audit']['page'], changed['audit']['pageSize']))
+        self.assertEqual(403, self.client.api(endpoint + '?usageSort=commands')[0])
+        self.assertEqual(400, self.admin.api(endpoint + '?usagePageSize=7')[0])
+
+    def test_connection_sorting_uses_status_and_last_used_with_nulls_last(self):
+        records = []
+        for i in range(6):
+            status, connection = self.client.api('/api/connections', 'POST', {
+                'name': 'Table connection ' + str(i), 'site': 'example.com', 'startUrl': 'https://example.com'})
+            self.assertEqual(200, status, connection)
+            records.append(connection['id'])
+            last_used = 'NULL' if i in [1, 4] else "'2026-07-01'::timestamptz+interval '" + str(i) + " seconds'"
+            self.sql(f"UPDATE connections SET status='{'READY' if i % 2 else 'LOGIN_REQUIRED'}',"
+                     f"last_used_at={last_used},updated_at='2026-07-01'::timestamptz+interval '{i} seconds' "
+                     f"WHERE id='{connection['id']}' AND owner_id=:owner;")
+        nulls = sorted([records[1], records[4]])
+        for direction, order in [('asc', [0, 2, 3, 5]), ('desc', [5, 3, 2, 0])]:
+            actual = []
+            for page in [1, 2]:
+                status, result = self.client.api('/api/connections?' + urlencode({
+                    'sort': 'lastUsedAt', 'direction': direction, 'pageSize': 3, 'page': page}))
+                self.assertEqual(200, status, result)
+                self.assertEqual(6, result['total'])
+                actual.extend(row['id'] for row in result['items'])
+            self.assertEqual([records[i] for i in order] + nulls, actual)
+        status_order = self.client.api('/api/connections?sort=status&direction=asc&pageSize=25')[1]
+        self.assertEqual(['LOGIN_REQUIRED'] * 3 + ['READY'] * 3, [row['status'] for row in status_order['items']])
+        self.assertEqual(list(reversed(records)), [row['id'] for row in self.client.api('/api/connections?pageSize=25')[1]['items']])
+        self.assertEqual(404, self.admin.api('/api/connections/' + records[0])[0])
+
     def test_admin_limits_search_recent_fifty_and_stop_all_cutoff(self):
         endpoint = "/api/admin/users/" + self.identity.id
         status, detail = self.admin.api(endpoint)
@@ -456,7 +581,7 @@ class UsageAdministrationTest(unittest.TestCase):
             "operationKey":str(uuid.uuid4()),"task":{
                 "title":"Pause and saved result contract","goal":"Verify known outcomes before pausing",
                 "startUrl":"https://example.com","outputFormat":"TABLE",
-                "prepare":True,"requireConfirmation":False}})
+                "prepare":True}})
         self.assertFalse(error,presentation)
         task=presentation["task"]
         task_id=task["id"]
@@ -473,7 +598,7 @@ class UsageAdministrationTest(unittest.TestCase):
                     "instructionRevision":task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"]=task["browser"]["controlEpoch"]
-            error,receipt,_=self.client.tool("browser.execute",{"taskId":task_id,"action":action})
+            error,receipt,_=self.client.execute_in_scenario_step({"taskId":task_id,"action":action})
             self.assertFalse(error,receipt)
             return operation
 
@@ -510,7 +635,7 @@ class UsageAdministrationTest(unittest.TestCase):
         pausing=self.command(task,"PAUSE")
         self.assertEqual("PAUSING",pausing["status"])
         self.assertEqual(browser,pausing["browser"]["id"])
-        self.assertEqual("CANCELLED",self.wait_operation(queued,self.client)["status"])
+        self.assertEqual("ACCEPTED",self.client.tool("operations.get",{"operationId":queued})[1]["status"])
         self.assertEqual("FAILED",self.wait_operation(pending,self.client)["status"])
         paused=current()
         self.assertEqual("PAUSED",paused["status"])
@@ -520,6 +645,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(elapsed,current()["usage"]["executionSeconds"],"Paused time is not execution time")
         self.assertGreater(current()["usage"]["browserSeconds"],paused["usage"]["browserSeconds"])
         self.command(task,"RESUME")
+        self.assertEqual("SUCCEEDED",self.wait_operation(queued,self.client)["status"])
         unknown=execute("click",{"selector":"[data-acceptance-never-visible]"})
         self.assertEqual("UNKNOWN",self.wait_operation(unknown,self.client)["status"])
         task=current()
@@ -564,11 +690,11 @@ class UsageAdministrationTest(unittest.TestCase):
             transport.token=self.client.token
             error,state,_=transport.tool("tasks.create",{"operationKey":str(uuid.uuid4()),"task":{
                 "title":title,"goal":"Verify browser capacity accounting","startUrl":"https://example.org",
-                "prepare":True,"requireConfirmation":False}})
+                "prepare":True}})
             self.assertFalse(error,state)
             task=state["task"]
             operation=str(uuid.uuid4())
-            error,receipt,_=transport.tool("browser.execute",{"taskId":task["id"],"action":{
+            error,receipt,_=transport.execute_in_scenario_step({"taskId":task["id"],"action":{
                 "operationId":operation,"type":"observe","arguments":{},"instructionRevision":task["instructionRevision"]}})
             self.assertFalse(error,receipt)
             return transport,task,operation
@@ -603,7 +729,7 @@ class UsageAdministrationTest(unittest.TestCase):
         listed=[browser for node in nodes for browser in node["browsers"] if browser["ownerId"]==self.identity.id]
         self.assertEqual(3,len(listed))
         self.assertEqual(2,sum(browser["taskId"] is None for browser in listed))
-        self.assertTrue(all(set(browser)=={"id","taskId","ownerId","ownerName","status"} for browser in listed))
+        self.assertTrue(all(set(browser)=={"id","taskId","ownerId","ownerName","ownerEmail","status","taskStatus"} for browser in listed))
         draft=self.create("Stop all keeps draft",prepare=False)
         self.assertEqual(200,self.admin_command("STOP_ALL",reason=None)[0])
         deadline=time.monotonic()+45
@@ -624,10 +750,10 @@ class UsageAdministrationTest(unittest.TestCase):
     def test_paused_manual_control_can_return_without_resuming(self):
         self.client.login_mcp()
         task=self.create("Manual control preserves an explicit pause")
-        error,_,_=self.client.tool("tasks.view",{"taskId":task["id"],"operationKey":str(uuid.uuid4())})
+        error,_,_=self.client.tool("tasks.bind",{"taskId":task["id"],"operationKey":str(uuid.uuid4())})
         self.assertFalse(error)
         operation=str(uuid.uuid4())
-        error,receipt,_=self.client.tool("browser.execute",{"taskId":task["id"],"action":{
+        error,receipt,_=self.client.execute_in_scenario_step({"taskId":task["id"],"action":{
             "operationId":operation,"type":"observe","arguments":{},"instructionRevision":task["instructionRevision"]}})
         self.assertFalse(error,receipt)
         completed=self.wait_operation(operation,self.client)
@@ -660,7 +786,7 @@ class UsageAdministrationTest(unittest.TestCase):
             "startUrl":"https://example.org","prepare":True}})
         self.assertFalse(error,queued_state)
         queued_task=queued_state["task"]
-        error,receipt,_=queued_client.tool("browser.execute",{"taskId":queued_task["id"],"action":{
+        error,receipt,_=queued_client.execute_in_scenario_step({"taskId":queued_task["id"],"action":{
             "operationId":str(uuid.uuid4()),"type":"observe","arguments":{},"instructionRevision":queued_task["instructionRevision"]}})
         self.assertFalse(error,receipt)
         deadline=time.monotonic()+10
@@ -682,7 +808,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(browser,current["browser"]["id"])
         self.assertEqual("LIVE",current["browser"]["status"])
         self.assertEqual(1,self.admin.api(endpoint)[1]["user"]["waitingCount"])
-        error,refusal,_=self.client.tool("browser.execute",{"taskId":task["id"],"action":{
+        error,refusal,_=self.client.execute_in_scenario_step({"taskId":task["id"],"action":{
             "operationId":str(uuid.uuid4()),"type":"observe","arguments":{},
             "instructionRevision":current["instructionRevision"],"controlEpoch":current["browser"]["controlEpoch"]}})
         self.assertTrue(error)

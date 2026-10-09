@@ -30,7 +30,6 @@ public final class Contracts {
       String goal,
       String startUrl,
       String outputFormat,
-      Boolean requireConfirmation,
       List<UUID> preferredConnectionIds,
       Boolean prepare) {}
 
@@ -50,10 +49,17 @@ public final class Contracts {
       String goal,
       String startUrl,
       String outputFormat,
-      Boolean requireConfirmation,
       List<UUID> preferredConnectionIds,
       String accountLabel,
-      String accountSubject) {}
+      String accountSubject) {
+    public TaskCommand {
+      if (type == null || !Set.of("PREPARE", "AMEND", "PAUSE", "RESUME", "STOP", "ANSWER",
+          "CONFIRM", "REJECT", "CHOOSE_CONNECTION", "FINISH", "TAKE_CONTROL", "RETURN_CONTROL",
+          "BEGIN_LOGIN", "FINISH_LOGIN", "REQUIRE_LOGIN", "CLOSE_BROWSER", "OPEN_BROWSER").contains(type)) {
+        throw ApiException.invalid("type", "Неизвестная команда задачи.");
+      }
+    }
+  }
 
   public record Task(
       UUID id,
@@ -64,7 +70,7 @@ public final class Contracts {
       String startUrl,
       String site,
       String outputFormat,
-      boolean requireConfirmation,
+      boolean chatBound,
       List<UUID> preferredConnectionIds,
       String source,
       String status,
@@ -72,15 +78,35 @@ public final class Contracts {
       String waitReason,
       String summary,
       InteractionRequest request,
+      InteractionResponse lastResponse,
       Browser browser,
       JsonNode result,
       Map<String, Object> usage,
       List<String> allowedCommands,
+      long stepCount,
       Instant createdAt,
       Instant updatedAt) {}
 
   public record InteractionRequest(
-      UUID id, String type, String prompt, long version, JsonNode options, UUID operationId) {}
+      UUID id,
+      String type,
+      String prompt,
+      long version,
+      long instructionRevision,
+      JsonNode options,
+      UUID operationId) {}
+
+  public record InteractionResponse(
+      UUID requestId,
+      long requestVersion,
+      long instructionRevision,
+      String type,
+      String prompt,
+      UUID operationId,
+      String command,
+      String text,
+      UUID connectionId,
+      Instant answeredAt) {}
 
   public record Browser(
       UUID id,
@@ -92,7 +118,13 @@ public final class Contracts {
       String currentUrl,
       boolean canView,
       boolean canControl,
-      long version) {}
+      long version,
+      String profileSaveError,
+      UUID taskId,
+      UUID connectionId,
+      boolean loginConfirmed,
+      Instant startedAt,
+      Instant closedAt) {}
 
   public record Connection(
       UUID id,
@@ -106,7 +138,11 @@ public final class Contracts {
       Instant lastUsedAt,
       Browser browser,
       Instant createdAt,
-      Instant updatedAt) {}
+      Instant updatedAt,
+      long profileRevision,
+      Instant profileSavedAt,
+      String profileSaveError,
+      List<String> authorizedOrigins) {}
 
   public record ConnectionInput(String name, String site, String startUrl) {}
 
@@ -122,7 +158,13 @@ public final class Contracts {
       Boolean saveConnection,
       UUID connectionId,
       String accountLabel,
-      String accountSubject) {}
+      String accountSubject,
+      Long controlEpoch) {
+    public ControlInput(String type, String viewerId, Boolean resume, Boolean saveConnection,
+        UUID connectionId, String accountLabel, String accountSubject) {
+      this(type, viewerId, resume, saveConnection, connectionId, accountLabel, accountSubject, null);
+    }
+  }
 
   public record TicketInput(String role, String viewerId) {}
 
@@ -138,18 +180,37 @@ public final class Contracts {
       Integer waitingLimit,
       Long expectedVersion) {}
 
-  public record NodeCommand(String type, String reason) {}
+  public record NodeCommand(String type, String reason, Long expectedVersion) {}
 
   public record BrowserAction(
       UUID operationId,
+      UUID stepId,
       String type,
       JsonNode arguments,
       long instructionRevision,
-      Long controlEpoch) {}
+      Long controlEpoch,
+      String confirmationPrompt) {}
+
+  public record StepSource(String title, String url) {}
+
+  public record StepEvidence(
+      String type, UUID operationId, UUID artifactId, String text, List<StepSource> sources) {}
+
+  public record StepCommand(
+      String type, UUID stepId, Long expectedVersion, long instructionRevision,
+      String operationKey, String objectKey, String title, String completionCriterion,
+      String outcome, String result, List<StepEvidence> evidence) {}
+
+  public record TaskStep(
+      UUID id, UUID taskId, long sequence, String operationKey, String objectKey,
+      String title, String completionCriterion, String status, long version, String result,
+      JsonNode evidence, Instant createdAt, Instant updatedAt, Instant startedAt,
+      Instant completedAt) {}
 
   public record Operation(
       UUID id,
       UUID taskId,
+      UUID stepId,
       String type,
       String status,
       JsonNode result,
@@ -157,6 +218,9 @@ public final class Contracts {
       String errorMessage,
       Instant createdAt,
       Instant completedAt) {}
+
+  public record OperationSummary(
+      UUID id, UUID taskId, UUID stepId, String type, String status, Instant createdAt) {}
 
   public record WorkerResult(String status, JsonNode result, JsonNode error) {}
 

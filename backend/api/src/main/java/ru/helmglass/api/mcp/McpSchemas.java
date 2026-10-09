@@ -34,7 +34,7 @@ final class McpSchemas {
                 Map.entry("startUrl", nullable(string())),
                 Map.entry("site", nullable(string())),
                 Map.entry("outputFormat", string()),
-                Map.entry("requireConfirmation", Map.of("type", "boolean")),
+                Map.entry("chatBound", Map.of("type", "boolean")),
                 Map.entry("preferredConnectionIds", array(string())),
                 Map.entry("source", string()),
                 Map.entry("status", string()),
@@ -42,10 +42,12 @@ final class McpSchemas {
                 Map.entry("waitReason", nullable(string())),
                 Map.entry("summary", nullable(string())),
                 Map.entry("request", nullable(request())),
+                Map.entry("lastResponse", nullable(response())),
                 Map.entry("browser", nullable(browser())),
                 Map.entry("result", nullable(Map.of("type", "object"))),
                 Map.entry("usage", Map.of("type", "object")),
                 Map.entry("allowedCommands", array(string())),
+                Map.entry("stepCount", integer()),
                 Map.entry("createdAt", string()),
                 Map.entry("updatedAt", string())));
     return object(
@@ -75,6 +77,8 @@ final class McpSchemas {
             string(),
             "version",
             integer(),
+            "instructionRevision",
+            integer(),
             "options",
             Map.of(),
             "operationId",
@@ -93,7 +97,30 @@ final class McpSchemas {
             Map.entry("currentUrl", nullable(string())),
             Map.entry("canView", Map.of("type", "boolean")),
             Map.entry("canControl", Map.of("type", "boolean")),
-            Map.entry("version", integer())));
+            Map.entry("version", integer()),
+            Map.entry("profileSaveError", nullable(string())),
+            Map.entry("taskId", nullable(string())),
+            Map.entry("connectionId", nullable(string())),
+            Map.entry("loginConfirmed", Map.of("type", "boolean")),
+            Map.entry("startedAt", nullable(string())),
+            Map.entry("closedAt", nullable(string()))));
+  }
+
+  private static Map<String, Object> response() {
+    return object(
+        Map.ofEntries(
+            Map.entry("requestId", string()),
+            Map.entry("requestVersion", integer()),
+            Map.entry("instructionRevision", integer()),
+            Map.entry("type", string()),
+            Map.entry("prompt", string()),
+            Map.entry("operationId", nullable(string())),
+            Map.entry("command",
+                Map.of("type", "string", "enum",
+                    List.of("ANSWER", "CONFIRM", "REJECT", "CHOOSE_CONNECTION"))),
+            Map.entry("text", nullable(string())),
+            Map.entry("connectionId", nullable(string())),
+            Map.entry("answeredAt", string())));
   }
 
   private static Map<String, Object> object(Map<String, Object> properties) {

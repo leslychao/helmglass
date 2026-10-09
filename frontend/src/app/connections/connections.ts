@@ -1,28 +1,53 @@
+import { ColumnPicker } from '../shared/column-picker';
+import { TableViews, TableColumn } from '../shared/table-view';
+import { DataTable, TableCell } from '../shared/data-table';
 import { Icon } from '../shared/icon';
-import { SearchInput } from '../shared/search-input';
+import { FilterReset } from '../shared/filter-reset';
+import { Autocomplete, AutocompleteOption } from '../shared/autocomplete';
 import { DatePipe } from '@angular/common';
+import { CdkMenuModule } from '@angular/cdk/menu';
 import { Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router } from '@angular/router';
 import * as z from 'zod/mini';
-import { browserViewerId } from '../browser/viewer';
 import { Api, errorMessage } from '../core/api';
 import { LiveEvents } from '../core/live-events';
 import { Connection, Page, connectionSchema, integrationSchema, pageSchema } from '../core/models';
 import { Dialog } from '../shared/dialog';
 import { MultiFilter } from '../shared/multi-filter';
 import { QueryState } from '../shared/query-state';
+import { Tooltip } from '../shared/tooltip';
 import { Empty, Pager, Status } from '../shared/ui';
 
 @Component({
   selector: 'hg-connections',
-  imports: [Icon, SearchInput, DatePipe, MultiFilter, Empty, Pager, Status],
+  imports: [
+    DataTable,
+    TableCell,
+    ColumnPicker,
+    Icon,
+    FilterReset,
+    Autocomplete,
+    DatePipe,
+    CdkMenuModule,
+    MultiFilter,
+    Empty,
+    Pager,
+    Status,
+    Tooltip,
+  ],
   providers: [QueryState],
   template: `
     <h1 class="sr-only">Подключения</h1>
     <header class="page-actions">
-      <button class="button primary" (click)="create()">
-        <hg-icon name="plus" />Добавить подключение
+      <button
+        class="button primary page-create-action"
+        (click)="create()"
+        aria-label="Добавить подключение"
+        hgTooltip="Добавить подключение"
+      >
+        <span class="page-create-icon"><hg-icon name="plus" /></span>
+        Добавить подключение
       </button>
     </header>
     @if (error()) {
@@ -45,124 +70,96 @@ import { Empty, Pager, Status } from '../shared/ui';
         </div>
       }
       <div class="toolbar">
-        <label class="search"
-          ><hg-icon name="search" /><input
-            hgSearch
-            aria-label="Поиск подключений"
-            placeholder="Название или сайт"
-            [value]="query.text('search')"
-            (searchChange)="query.set({ search: $event || null })" /></label
-        ><hg-multi-filter
+        <hg-autocomplete
+          label="Сайт"
+          [multiple]="true"
+          [selected]="query.values('site')"
+          [load]="siteSuggestions"
+          (picked)="selectSite($event)"
+        />
+        <hg-multi-filter
           label="Состояние"
           [options]="statuses"
           [value]="query.values('status')"
           (changed)="query.set({ status: $event })"
         />
-        <hg-multi-filter
-          label="Сайт"
-          remotePath="/api/connections/sites"
-          [value]="query.values('site')"
-          (changed)="query.set({ site: $event })"
-        />
+        <hg-filter-reset [keys]="['status', 'site']" /><hg-column-picker [view]="table" />
       </div>
       @if (data(); as page) {
         @if (page.items.length) {
-          <div class="table-scroll">
-            <table class="connections-table">
-              <thead>
-                <tr>
-                  <th [attr.aria-sort]="query.ariaSort('name')">
-                    <button (click)="query.sort('name')">
-                      Подключение <hg-icon name="chevron-down" />
+          <hg-data-table [view]="table" [rows]="page.items" label="Подключения">
+            <ng-template hgCell="name" [hgCellOf]="page.items" let-connection>
+              <button class="connection-title" (click)="login(connection)">
+                <span class="service-mark"><hg-icon name="globe" /></span
+                ><span
+                  ><strong>{{ connection.name }}</strong
+                  ><small
+                    >{{ connection.site }}
+                    @if (connection.accountLabel) {
+                      · {{ connection.accountLabel }}
+                    }
+                  </small></span
+                >
+              </button>
+            </ng-template>
+            <ng-template hgCell="status" [hgCellOf]="page.items" let-connection>
+              <hg-status
+                [value]="connection.status === 'READY' ? 'CONNECTION_READY' : connection.status"
+              />
+            </ng-template>
+            <ng-template hgCell="lastUsedAt" [hgCellOf]="page.items" let-connection>
+              {{
+                connection.lastUsedAt
+                  ? (connection.lastUsedAt | date: 'dd.MM.yyyy HH:mm')
+                  : 'Ещё не использовалось'
+              }}
+            </ng-template>
+            <ng-template hgCell="actions" [hgCellOf]="page.items" let-connection>
+              <div class="actions">
+                <button
+                  class="icon-button"
+                  aria-label="Открыть браузер"
+                  hgTooltip="Открыть браузер"
+                  [disabled]="busy() === connection.id"
+                  (click)="login(connection)"
+                >
+                  <hg-icon name="browser" />
+                </button>
+                <button
+                  class="icon-button"
+                  aria-label="Действия с подключением"
+                  hgTooltip="Действия"
+                  [cdkMenuTriggerFor]="connectionMenu"
+                >
+                  <hg-icon name="more" />
+                </button>
+                <ng-template #connectionMenu>
+                  <div cdkMenu class="menu-popover anchored-menu">
+                    <button cdkMenuItem (click)="rename(connection)">Переименовать…</button
+                    ><button cdkMenuItem class="danger-text" (click)="remove(connection)">
+                      Удалить подключение…
                     </button>
-                  </th>
-                  <th>Состояние</th>
-                  <th>Последнее использование</th>
-                  <th><span class="sr-only">Действия</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                @for (connection of page.items; track connection.id) {
-                  <tr>
-                    <td>
-                      <button class="connection-title" (click)="login(connection)">
-                        <span class="service-mark"><hg-icon name="globe" /></span
-                        ><span
-                          ><strong>{{ connection.name }}</strong
-                          ><small
-                            >{{ connection.site }}
-                            @if (connection.accountLabel) {
-                              · {{ connection.accountLabel }}
-                            }
-                          </small></span
-                        >
-                      </button>
-                    </td>
-                    <td>
-                      <hg-status
-                        [value]="
-                          connection.status === 'READY' ? 'CONNECTION_READY' : connection.status
-                        "
-                      />
-                    </td>
-                    <td>
-                      {{
-                        connection.lastUsedAt
-                          ? (connection.lastUsedAt | date: 'dd.MM.yyyy HH:mm')
-                          : 'Ещё не использовалось'
-                      }}
-                    </td>
-                    <td>
-                      <div class="actions">
-                        <button
-                          class="icon-button"
-                          [attr.aria-label]="
-                            connection.browser
-                              ? 'Продолжить вход'
-                              : connection.status === 'READY'
-                                ? 'Обновить вход'
-                                : 'Войти'
-                          "
-                          [title]="
-                            connection.browser
-                              ? 'Продолжить вход'
-                              : connection.status === 'READY'
-                                ? 'Обновить вход'
-                                : 'Войти'
-                          "
-                          [disabled]="busy() === connection.id"
-                          (click)="login(connection)"
-                        >
-                          <hg-icon [name]="connection.browser ? 'browser' : 'lock'" />
-                        </button>
-                        <details class="action-menu">
-                          <summary
-                            class="icon-button"
-                            aria-label="Действия с подключением"
-                            title="Действия"
-                          >
-                            <hg-icon name="more" />
-                          </summary>
-                          <div class="menu-popover">
-                            <button (click)="rename(connection)">Переименовать…</button
-                            ><button class="danger-text" (click)="remove(connection)">
-                              Удалить подключение…
-                            </button>
-                          </div>
-                        </details>
-                      </div>
-                    </td>
-                  </tr>
-                }
-              </tbody>
-            </table>
-          </div>
+                  </div>
+                </ng-template>
+              </div>
+            </ng-template>
+          </hg-data-table>
         } @else {
           <hg-empty
-            title="Подключений пока нет"
-            description="Добавьте сайт и выполните защищённый вход. Пароли вводятся только на сайте."
-            ><button class="button" (click)="create()">Добавить подключение</button></hg-empty
-          >
+            [title]="hasFilters() ? 'Подключения не найдены' : 'Подключений пока нет'"
+            [description]="
+              hasFilters()
+                ? 'Измените выбранные фильтры.'
+                : 'Добавьте сайт и сохраните вход в защищённом браузере.'
+            "
+            ><button
+              class="icon-button primary"
+              (click)="create()"
+              aria-label="Добавить подключение"
+              hgTooltip="Добавить подключение"
+            >
+              <hg-icon name="plus" /></button
+          ></hg-empty>
         }
         <hg-pager
           [page]="page.page"
@@ -257,6 +254,22 @@ export class Connections {
   readonly integration = signal<z.infer<typeof integrationSchema> | null>(null);
   readonly integrationError = signal('');
   readonly mcpUrl = computed(() => this.integration()?.endpoint ?? location.origin + '/mcp');
+  readonly hasFilters = computed(() => this.query.hasFilters(['status', 'site']));
+  readonly siteSuggestions = async (search: string) => {
+    const page = await this.api.get('/api/connections/sites', pageSchema(z.string()), {
+      search,
+      suggestions: 'true',
+    });
+    return { total: page.total, items: page.items.map((site) => ({ id: site, label: site })) };
+  };
+  selectSite(site: AutocompleteOption) {
+    const current = this.query.values('site');
+    this.query.set({
+      site: current.includes(site.id)
+        ? current.filter((value) => value !== site.id)
+        : [...current, site.id],
+    });
+  }
   readonly revoking = signal(false);
   readonly mcpMessage = signal('');
   selectAddress(event: Event) {
@@ -330,10 +343,21 @@ export class Connections {
     { id: 'READY', label: 'Вход сохранён' },
     { id: 'LOGIN_REQUIRED', label: 'Нужен вход' },
   ];
+  readonly tableColumns: readonly TableColumn[] = [
+    { key: 'name', label: 'Подключение', width: 340, required: true, className: 'entity-cell' },
+    { key: 'status', label: 'Состояние', width: 230 },
+    { key: 'lastUsedAt', label: 'Последнее использование', width: 240 },
+    { key: 'actions', label: 'Действия', width: 102, action: true },
+  ];
+  readonly table = inject(TableViews).create('connections', this.tableColumns, this.query);
   constructor() {
     void this.loadIntegration();
     effect(() => {
       this.query.params();
+      if (this.query.values('search').length) {
+        this.query.set({ search: null });
+        return;
+      }
       void this.load();
     });
     inject(LiveEvents)
@@ -355,13 +379,12 @@ export class Connections {
     if (show) this.loading.set(true);
     try {
       const data = await this.api.get('/api/connections', pageSchema(connectionSchema), {
-        search: this.query.text('search'),
         status: this.query.values('status'),
         site: this.query.values('site'),
         page: this.query.number('page', 1),
-        pageSize: this.query.number('pageSize', 20),
+        pageSize: this.query.number('pageSize', 5),
         sort: this.query.text('sort', 'updatedAt'),
-        direction: this.query.text('direction', 'desc'),
+        direction: this.table.direction('desc'),
       });
       if (generation === this.generation) {
         this.data.set(data);
@@ -408,15 +431,6 @@ export class Connections {
     if (this.busy()) return;
     this.busy.set(connection.id);
     try {
-      const updated = connection.browser
-        ? connection
-        : await this.api.mutate(
-            '/api/connections/' + connection.id + '/login',
-            { action: 'START', viewerId: browserViewerId() },
-            connectionSchema,
-          );
-      if (!connection.browser && updated.browser)
-        sessionStorage.setItem('helm-controller:' + updated.browser.id, 'true');
       await this.router.navigate(['/connections', connection.id, 'login'], {
         queryParams: { back: this.query.context() },
       });

@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 export DISPLAY=:99
-Xvfb :99 -screen 0 1440x900x24 -nolisten tcp &
+export BROWSER_SCREEN_WIDTH=1440
+export BROWSER_SCREEN_HEIGHT=900
+Xvfb :99 -screen 0 "${BROWSER_SCREEN_WIDTH}x${BROWSER_SCREEN_HEIGHT}x24" -nolisten tcp &
 display_pid=$!
 cleanup() {
   kill "$display_pid" "${view_pid:-}" "${control_pid:-}" "${node_pid:-}" 2>/dev/null || true

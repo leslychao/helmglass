@@ -71,7 +71,7 @@ class ViewerRevocationTest(unittest.TestCase):
         client = identity.client(); client.login_web(); client.login_mcp()
         error, presentation, _ = client.tool("tasks.create", {"operationKey": str(uuid.uuid4()),
             "task": {"title": "Viewer grant revocation contract", "goal": "Verify selective live socket revocation",
-                     "startUrl": "https://example.com", "requireConfirmation": False, "prepare": True}})
+                     "startUrl": "https://example.com", "prepare": True}})
         self.assertFalse(error); task_id = presentation["task"]["id"]
         viewers = []; cleanup_client = client; logout = None
 
@@ -93,7 +93,7 @@ class ViewerRevocationTest(unittest.TestCase):
 
         try:
             observation_id = str(uuid.uuid4())
-            error, _, _ = client.tool("browser.execute", {"taskId": task_id, "action": {
+            error, _, _ = client.execute_in_scenario_step({"taskId": task_id, "action": {
                 "operationId": observation_id, "type": "observe", "arguments": {},
                 "instructionRevision": presentation["task"]["instructionRevision"]}})
             self.assertFalse(error)

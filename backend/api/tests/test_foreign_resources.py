@@ -32,7 +32,7 @@ class ForeignResourceTest(unittest.TestCase):
         error, presentation, _ = owner.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()),
             "task": {"title": "Owned resource authorization", "goal": "Check access without changing another owner",
-                     "startUrl": "https://example.com", "requireConfirmation": False, "prepare": True}})
+                     "startUrl": "https://example.com", "prepare": True}})
         self.assertFalse(error)
         task_id = presentation["task"]["id"]
         task_path = "/api/tasks/" + task_id
@@ -66,7 +66,7 @@ class ForeignResourceTest(unittest.TestCase):
                       "instructionRevision": task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"] = task["browser"]["controlEpoch"]
-            error, receipt, _ = owner.tool("browser.execute", {"taskId": task_id, "action": action})
+            error, receipt, _ = owner.execute_in_scenario_step({"taskId": task_id, "action": action})
             return error, receipt, action["operationId"]
 
         def complete(kind):

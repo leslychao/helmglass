@@ -2,6 +2,20 @@ import { Injectable, inject } from '@angular/core';
 import { ActivatedRoute, Router } from '@angular/router';
 import { toSignal } from '@angular/core/rxjs-interop';
 
+export interface TableQueryKeys {
+  sort: string;
+  direction: string;
+  page: string;
+  size: string;
+}
+
+export const tableQueryKeys: TableQueryKeys = {
+  sort: 'sort',
+  direction: 'direction',
+  page: 'page',
+  size: 'pageSize',
+};
+
 @Injectable()
 export class QueryState {
   private readonly route = inject(ActivatedRoute);
@@ -15,6 +29,14 @@ export class QueryState {
   values(key: string) {
     return this.params().getAll(key);
   }
+  hasFilters(keys: readonly string[]) {
+    return keys.some((key) => this.values(key).some((value) => value !== ''));
+  }
+  clearFilters(keys: readonly string[], pageKey = 'page') {
+    const values: Record<string, null> = { [pageKey]: null };
+    for (const key of keys) values[key] = null;
+    this.set(values, false);
+  }
   context() {
     const params = new URLSearchParams();
     for (const key of this.params().keys)
@@ -25,22 +47,21 @@ export class QueryState {
     const value = Number(this.text(key));
     return Number.isSafeInteger(value) && value > 0 ? value : fallback;
   }
-  sort(key: string, defaultKey = 'updatedAt', defaultDirection = 'desc') {
-    this.set({
-      sort: key,
-      direction:
-        this.text('sort', defaultKey) === key && this.text('direction', defaultDirection) === 'asc'
-          ? 'desc'
-          : 'asc',
-    });
+  sort(key: string, keys = tableQueryKeys) {
+    const current = this.ariaSort(key, keys);
+    this.set(
+      {
+        [keys.sort]: current === 'descending' ? null : key,
+        [keys.direction]:
+          current === 'descending' ? null : current === 'ascending' ? 'desc' : 'asc',
+        [keys.page]: null,
+      },
+      false,
+    );
   }
-  ariaSort(
-    key: string,
-    defaultKey = 'updatedAt',
-    defaultDirection = 'desc',
-  ): 'ascending' | 'descending' | 'none' {
-    return this.text('sort', defaultKey) === key
-      ? this.text('direction', defaultDirection) === 'asc'
+  ariaSort(key: string, keys = tableQueryKeys): 'ascending' | 'descending' | 'none' {
+    return this.text(keys.sort) === key
+      ? this.text(keys.direction, 'asc') === 'asc'
         ? 'ascending'
         : 'descending'
       : 'none';

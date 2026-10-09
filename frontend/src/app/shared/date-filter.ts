@@ -3,7 +3,7 @@ import {
   Component,
   ElementRef,
   afterRenderEffect,
-  effect,
+  computed,
   inject,
   input,
   output,
@@ -12,22 +12,32 @@ import {
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Icon } from './icon';
+import { Tooltip } from './tooltip';
 
 export type DateRange = { from: string | null; to: string | null };
 
 @Component({
   selector: 'hg-date-filter',
-  imports: [A11yModule, FormsModule, Icon],
+  imports: [A11yModule, FormsModule, Icon, Tooltip],
   host: { '(document:click)': 'outside($event)', '(keydown.escape)': 'close()' },
   template: `<button
       type="button"
-      class="filter"
-      [class.selected]="from() || to()"
+      [class]="appearance() === 'caption' ? 'date-range-caption' : 'filter'"
+      [class.selected]="
+        appearance() !== 'caption' && (presetDays() !== null ? presetDays() !== 7 : from() || to())
+      "
+      [hgTooltip]="appearance() === 'caption' ? 'Выбрать диапазон дат' : label()"
       [attr.aria-expanded]="open()"
       aria-haspopup="dialog"
       (click)="toggle($event)"
     >
-      {{ label() }} <hg-icon name="chevron-down" />
+      @if (appearance() !== 'caption') {
+        <hg-icon name="calendar" />
+      }
+      {{ captionText() || caption() }}
+      @if (appearance() !== 'caption') {
+        <hg-icon name="chevron-down" />
+      }
     </button>
     @if (open()) {
       <section
@@ -38,10 +48,44 @@ export type DateRange = { from: string | null; to: string | null };
         (click)="$event.stopPropagation()"
       >
         <form (ngSubmit)="apply()">
-          <label class="field"
-            >С <input #startInput name="from" type="date" [(ngModel)]="start"
-          /></label>
-          <label class="field">По <input name="to" type="date" [(ngModel)]="end" /></label>
+          @if (presetDays() !== null) {
+            <div class="date-presets" aria-label="Быстрый выбор периода">
+              <button
+                #firstPreset
+                type="button"
+                class="button"
+                [class.selected]="draftDays === 7"
+                [attr.aria-pressed]="draftDays === 7"
+                (click)="draftDays = 7"
+              >
+                7 дней
+              </button>
+              <button
+                type="button"
+                class="button"
+                [class.selected]="draftDays === 30"
+                [attr.aria-pressed]="draftDays === 30"
+                (click)="draftDays = 30"
+              >
+                30 дней
+              </button>
+              <button
+                type="button"
+                class="button"
+                [class.selected]="draftDays === 0"
+                [attr.aria-pressed]="draftDays === 0"
+                (click)="draftDays = 0"
+              >
+                Выбрать даты
+              </button>
+            </div>
+          }
+          @if (presetDays() === null || draftDays === 0) {
+            <label class="field"
+              >С <input #startInput name="from" type="date" [(ngModel)]="start"
+            /></label>
+            <label class="field">По <input name="to" type="date" [(ngModel)]="end" /></label>
+          }
           @if (error()) {
             <p class="field-error" role="alert">{{ error() }}</p>
           }
@@ -55,26 +99,35 @@ export type DateRange = { from: string | null; to: string | null };
 })
 export class DateFilter {
   readonly label = input('Период');
+  readonly appearance = input<'filter' | 'caption'>('filter');
+  readonly captionText = input('');
   readonly from = input('');
   readonly to = input('');
+  readonly presetDays = input<number | null>(null);
+  readonly presetSelected = output<number>();
   readonly changed = output<DateRange>();
   readonly open = signal(false);
   readonly error = signal('');
   start = '';
   end = '';
+  draftDays = 0;
+  readonly caption = computed(() => {
+    const days = this.presetDays();
+    if (days === null) return this.label();
+    if (days === 7 || days === 30) return `Последние ${days} дней`;
+    const from = this.calendarDate(this.from(), false).split('-').reverse().join('.');
+    const to = this.calendarDate(this.to(), true).split('-').reverse().join('.');
+    return from && to ? `${from} — ${to}` : from ? `С ${from}` : to ? `По ${to}` : 'Все даты';
+  });
   private trigger: HTMLElement | null = null;
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly startInput = viewChild<ElementRef<HTMLInputElement>>('startInput');
+  private readonly firstPreset = viewChild<ElementRef<HTMLButtonElement>>('firstPreset');
 
   constructor() {
     afterRenderEffect(() => {
-      const field = this.startInput();
+      const field = this.startInput() ?? this.firstPreset();
       if (this.open()) field?.nativeElement.focus();
-    });
-    effect(() => {
-      this.start = this.calendarDate(this.from(), false);
-      this.end = this.calendarDate(this.to(), true);
-      this.error.set('');
     });
   }
 
@@ -89,10 +142,22 @@ export class DateFilter {
 
   toggle(event: MouseEvent) {
     this.trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
-    this.open.update((value) => !value);
+    if (this.open()) this.close();
+    else {
+      this.start = this.calendarDate(this.from(), false);
+      this.end = this.calendarDate(this.to(), true);
+      this.draftDays = this.presetDays() ?? 0;
+      this.error.set('');
+      this.open.set(true);
+    }
   }
 
   apply() {
+    if (this.presetDays() !== null && (this.draftDays === 7 || this.draftDays === 30)) {
+      this.presetSelected.emit(this.draftDays);
+      this.close();
+      return;
+    }
     if (this.start && this.end && this.start > this.end) {
       this.error.set('Дата начала должна быть не позже даты окончания.');
       return;

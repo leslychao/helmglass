@@ -1,6 +1,12 @@
+import { TableViews, TableColumn } from '../shared/table-view';
+import { DataTable, TableCell } from '../shared/data-table';
 import { Icon } from '../shared/icon';
-import { SearchInput } from '../shared/search-input';
+import { ColumnPicker } from '../shared/column-picker';
+import { FilterReset } from '../shared/filter-reset';
+import { KpiSection } from '../shared/kpi-section';
+import { Autocomplete, AutocompleteOption } from '../shared/autocomplete';
 import { DatePipe } from '@angular/common';
+import { CdkMenuModule } from '@angular/cdk/menu';
 import { Component, DestroyRef, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DateFilter } from '../shared/date-filter';
@@ -11,13 +17,20 @@ import { LiveEvents } from '../core/live-events';
 import { Page, Task, kpiSchema, pageSchema, taskSchema } from '../core/models';
 import { MultiFilter, Option } from '../shared/multi-filter';
 import { QueryState } from '../shared/query-state';
+import { Tooltip } from '../shared/tooltip';
 import { DurationPipe, Empty, Pager, Status, states } from '../shared/ui';
 
 @Component({
   selector: 'hg-task-list',
   imports: [
+    DataTable,
+    TableCell,
+    CdkMenuModule,
+    ColumnPicker,
+    FilterReset,
+    KpiSection,
     Icon,
-    SearchInput,
+    Autocomplete,
     DatePipe,
     DateFilter,
     RouterLink,
@@ -26,6 +39,7 @@ import { DurationPipe, Empty, Pager, Status, states } from '../shared/ui';
     Empty,
     Pager,
     Status,
+    Tooltip,
   ],
   providers: [QueryState],
   templateUrl: './task-list.html',
@@ -41,7 +55,7 @@ export class TaskList {
   private summaryFilters = '';
   readonly error = signal('');
   readonly loading = signal(true);
-  readonly columns = signal(['site', 'executionSeconds', 'updatedAt', 'summary']);
+  readonly filterKeys = ['search', 'taskId', 'status', 'site', 'source', 'from', 'to'];
   readonly stateOptions: Option[] = [
     'DRAFT',
     'WAITING_CHATGPT',
@@ -58,15 +72,6 @@ export class TaskList {
     'STOPPED',
     'FAILED',
   ].map((id) => ({ id, label: states[id] ?? id }));
-  readonly columnOptions: Option[] = [
-    { id: 'site', label: 'Сайт' },
-    { id: 'executionSeconds', label: 'Выполнение' },
-    { id: 'manualSeconds', label: 'Управление человеком' },
-    { id: 'mediaSeconds', label: 'Медиа' },
-    { id: 'mediaBytes', label: 'Объём медиа' },
-    { id: 'updatedAt', label: 'Обновлена' },
-    { id: 'summary', label: 'Краткий итог' },
-  ];
   readonly sourceOptions: Option[] = [
     { id: 'WEB', label: 'Веб-интерфейс' },
     { id: 'MCP', label: 'ChatGPT' },
@@ -74,6 +79,40 @@ export class TaskList {
   readonly activeStates = ['STARTING', 'RUNNING', 'PAUSING', 'STOPPING'];
   readonly successStates = ['SUCCEEDED'];
   readonly attentionStates = ['WAITING_USER'];
+  readonly taskSuggestions = async (search: string) => {
+    const page = await this.api.get('/api/tasks', pageSchema(taskSchema), {
+      search,
+      suggestions: 'true',
+      sort: 'updatedAt',
+      direction: 'desc',
+    });
+    return {
+      total: page.total,
+      items: page.items.map((task) => ({
+        id: task.id,
+        label: task.title || task.goal || 'Черновик без названия',
+        detail: task.id,
+      })),
+    };
+  };
+  readonly siteSuggestions = async (search: string) => {
+    const page = await this.api.get('/api/tasks/sites', pageSchema(z.string()), {
+      search,
+      suggestions: 'true',
+    });
+    return { total: page.total, items: page.items.map((site) => ({ id: site, label: site })) };
+  };
+  selectTask(task: AutocompleteOption) {
+    this.query.set({ taskId: task.id, search: task.label });
+  }
+  selectSite(site: AutocompleteOption) {
+    const current = this.query.values('site');
+    this.query.set({
+      site: current.includes(site.id)
+        ? current.filter((value) => value !== site.id)
+        : [...current, site.id],
+    });
+  }
   selectedCard(states: readonly string[]) {
     const current = this.query.values('status');
     return current.length === states.length && states.every((state) => current.includes(state));
@@ -84,6 +123,19 @@ export class TaskList {
   removeSite(site: string) {
     this.query.set({ site: this.query.values('site').filter((value) => value !== site) });
   }
+  readonly tableColumns: readonly TableColumn[] = [
+    { key: 'title', label: 'Задача', width: 300, required: true, className: 'task-name' },
+    { key: 'site', label: 'Сайт', width: 210 },
+    { key: 'status', label: 'Состояние', width: 190, required: true },
+    { key: 'executionSeconds', label: 'Время выполнения', width: 180 },
+    { key: 'manualSeconds', label: 'Человек', width: 150, hidden: true },
+    { key: 'mediaSeconds', label: 'Медиа', width: 150, hidden: true },
+    { key: 'mediaBytes', label: 'Байты медиа', width: 160, hidden: true },
+    { key: 'updatedAt', label: 'Обновлено', width: 190 },
+    { key: 'summary', label: 'Текущий шаг / итог', width: 300, className: 'summary-cell' },
+    { key: 'actions', label: 'Действия', width: 58, action: true },
+  ];
+  readonly table = inject(TableViews).create('tasks', this.tableColumns, this.query);
   constructor() {
     effect(() => {
       this.query.params();
@@ -102,6 +154,7 @@ export class TaskList {
     if (show) this.loading.set(true);
     const filters = {
       search: this.query.text('search'),
+      taskId: this.query.text('taskId'),
       site: this.query.values('site'),
       source: this.query.values('source'),
       from: this.query.text('from'),
@@ -119,9 +172,9 @@ export class TaskList {
           ...filters,
           status: this.query.values('status'),
           page: this.query.number('page', 1),
-          pageSize: this.query.number('pageSize', 20),
+          pageSize: this.query.number('pageSize', 5),
           sort: this.query.text('sort', 'updatedAt'),
-          direction: this.query.text('direction', 'desc'),
+          direction: this.table.direction('desc'),
         }),
         refreshSummary
           ? this.api.get('/api/tasks/summary', kpiSchema, filters)
@@ -136,8 +189,5 @@ export class TaskList {
     } finally {
       if (generation === this.generation) this.loading.set(false);
     }
-  }
-  clear() {
-    this.query.set({ search: null, status: null, site: null, source: null, from: null, to: null });
   }
 }

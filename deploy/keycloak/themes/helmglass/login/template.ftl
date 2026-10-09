@@ -5,21 +5,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Helm Glass — вход</title>
-  <link rel="stylesheet" href="${url.resourcesPath}/css/helmglass.css">
+  <#-- Keycloak keeps the resource URL across custom theme updates and caches CSS for 30 days. -->
+  <link rel="stylesheet" href="${url.resourcesPath}/css/helmglass.css?v=20261008">
 </head>
 <body>
   <main class="auth-layout">
     <section class="auth-product" aria-label="Helm Glass">
-      <a class="brand" href="${url.loginUrl}"><span class="brand-mark">H</span>Helm Glass</a>
-      <div class="product-copy"><div class="eyebrow">ВАШ БРАУЗЕР ДЛЯ CHATGPT</div>
-        <h1>Задайте цель.<br>Наблюдайте за работой.</h1>
-        <p>ChatGPT выбирает шаги, Helm выполняет их в браузере. Вы видите ход работы и подключаетесь, когда нужно ваше участие.</p>
-        <div class="product-features"><span>Один браузер задачи</span><span>Защищённый вход</span><span>Результаты с источниками</span></div>
-      </div><small>Helm Glass · Управление остаётся у вас</small>
+      <a class="brand" href="${url.loginUrl}"><img src="/helm-logo.png" alt="" width="42" height="42">Helm Glass</a>
+      <div class="product-copy">
+        <h1>Задайте цель.<br>Следите за результатом.</h1>
+        <p>Задачи, сайты и история в личном кабинете. ChatGPT управляет выполнением через MCP.</p>
+      </div><small>Helm Glass Service · Задачи в браузере из ChatGPT</small>
     </section>
     <section class="auth-form-side">
       <div class="auth-form">
-        <a class="brand mobile-brand" href="${url.loginUrl}"><span class="brand-mark">H</span>Helm Glass</a>
+        <a class="brand mobile-brand" href="${url.loginUrl}"><img src="/helm-logo.png" alt="" width="42" height="42">Helm Glass</a>
         <h2><#nested "header"></h2>
         <p class="form-intro">Продолжите работу в своём кабинете.</p>
         <#if displayMessage && message?has_content && !messagesPerField.existsError('username','password')>

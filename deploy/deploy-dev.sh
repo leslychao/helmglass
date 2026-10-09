@@ -11,15 +11,45 @@ unset EDGE_BIND_ADDRESS EDGE_HTTP_PORT EDGE_NETWORK EDGE_NETWORK_ADDRESS
 unset POSTGRES_PASSWORD DATABASE_PASSWORD KEYCLOAK_DATABASE_PASSWORD KEYCLOAK_BOOTSTRAP_PASSWORD
 unset KEYCLOAK_TEST_PASSWORD KEYCLOAK_APP_ADMIN_PASSWORD KEYCLOAK_LIFECYCLE_SECRET
 unset OAUTH2_CLIENT_SECRET OAUTH2_COOKIE_SECRET REDIS_PASSWORD WORKER_TOKEN PROFILE_ENCRYPTION_KEY
+unset VAULT_UNSEAL_KEY VAULT_ROLE_ID VAULT_SECRET_ID
 set -a
 . "$ENV_FILE"
 set +a
 : "${DEV_HOST:?DEV_HOST is required}"
 : "${GLOBAL_NGINX_HOST:?GLOBAL_NGINX_HOST is required}"
 export DOCKER_HOST="tcp://$DEV_HOST:2375"
+# Container paths must not be rewritten by Git Bash on Windows.
+export MSYS2_ARG_CONV_EXCL='/usr/local/;/vault/'
 unset DOCKER_TLS_VERIFY DOCKER_CERT_PATH COMPOSE_PROFILES COMPOSE_FILE
 cd "$PROJECT_DIR"
 compose() { docker compose --env-file "$ENV_FILE" -f "$SCRIPT_DIR/docker-compose.yml" "$@"; }
+if [ "${2:-}" = '--vault-init' ]; then
+  if [ -n "${VAULT_UNSEAL_KEY:-}" ] && [ -n "${VAULT_ROLE_ID:-}" ] && [ -n "${VAULT_SECRET_ID:-}" ]; then
+    printf '%s\n' 'Vault credentials already exist; initialization was not repeated.'
+    exit 0
+  fi
+  compose config --quiet
+  compose build vault
+  compose up -d --no-deps vault
+  attempt=0
+  until compose exec -T vault sh -c 'VAULT_ADDR=https://vault:8200 VAULT_CACERT=/vault/ca/ca.crt vault status -format=json 2>/dev/null | jq -e .initialized!=null >/dev/null'; do
+    attempt=$((attempt + 1)); [ "$attempt" -lt 60 ] || exit 1; sleep 1
+  done
+  compose exec -T vault /usr/local/bin/bootstrap.sh
+  umask 077
+  awk '!/^VAULT_(UNSEAL_KEY|ROLE_ID|SECRET_ID)=/' "$ENV_FILE" > "$ENV_FILE.vault-init"
+  printf '\n' >> "$ENV_FILE.vault-init"
+  compose exec -T vault cat /vault/data/bootstrap.env >> "$ENV_FILE.vault-init"
+  mv "$ENV_FILE.vault-init" "$ENV_FILE"
+  set -a; . "$ENV_FILE"; set +a
+  compose up -d --no-deps vault
+  compose exec -T vault rm -f /vault/data/bootstrap.env /vault/data/bootstrap-complete
+  printf '%s\n' 'Vault initialized; its application and unseal credentials are stored in the selected env file.'
+  exit 0
+fi
+: "${VAULT_UNSEAL_KEY:?Initialize Vault with --vault-init first}"
+: "${VAULT_ROLE_ID:?VAULT_ROLE_ID is required}"
+: "${VAULT_SECRET_ID:?VAULT_SECRET_ID is required}"
 compose config --quiet
 if [ "${2:-}" = '--config-only' ]; then exit 0; fi
 docker info --format '{{.OSType}}' | grep -qx linux
@@ -56,6 +86,19 @@ if [ -n "$manager" ]; then
     [ "$attempts" -lt 120 ] || { printf '%s\n' 'Browser drain timed out; occupied browsers were preserved.' >&2; exit 1; }
     sleep 5
   done
+fi
+compose up -d --no-deps vault
+attempt=0
+until compose exec -T vault sh -c 'VAULT_ADDR=https://vault:8200 VAULT_CACERT=/vault/ca/ca.crt vault status >/dev/null'; do
+  attempt=$((attempt + 1)); [ "$attempt" -lt 60 ] || exit 1; sleep 2
+done
+if [ -n "${PROFILE_ENCRYPTION_KEY:-}" ]; then
+  compose stop browser-node
+  compose run --rm --no-deps -e PROFILE_ENCRYPTION_KEY browser-node node dist/migrate-profiles.js
+  umask 077
+  awk '!/^PROFILE_ENCRYPTION_KEY=/' "$ENV_FILE" > "$ENV_FILE.vault-migration"
+  mv "$ENV_FILE.vault-migration" "$ENV_FILE"
+  unset PROFILE_ENCRYPTION_KEY
 fi
 compose up -d
 compose run --rm --no-deps provisioning

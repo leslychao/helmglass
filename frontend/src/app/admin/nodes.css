@@ -1,0 +1,130 @@
+.admin-nodes-page .admin-page-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 20px;
+}
+.admin-nodes-page .admin-page-actions .button {
+  min-height: 34px;
+  font-size: 12px;
+}
+.admin-nodes-page .admin-node-panel {
+  overflow: hidden;
+  border-radius: 9px;
+}
+.admin-nodes-page .node-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px 0;
+  background: transparent;
+  border: 0;
+  font-size: 12px;
+  font-weight: 550;
+  color: #354963;
+  text-align: left;
+}
+.admin-nodes-page .node-name > hg-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: #8193ac;
+}
+.admin-nodes-page .node-name span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.admin-nodes-page .node-name:hover {
+  color: #195bff;
+}
+.admin-nodes-page .node-capacity {
+  font-size: 13px;
+  font-weight: 550;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: #344862;
+}
+.admin-nodes-page .node-capacity span {
+  font-weight: 400;
+  color: #8a98ad;
+}
+.admin-nodes-page .nested-frame {
+  border: 1px solid #e1e8f2;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #fff;
+  min-width: 0;
+}
+.admin-nodes-page .nested-frame code {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  color: #344762;
+  white-space: nowrap;
+}
+.admin-nodes-page .browser-task-id {
+  display: inline-block;
+  font-size: 10px;
+  line-height: 1.5;
+  color: #7c8ba2;
+  margin-top: 4px;
+}
+.admin-nodes-page .nested-frame .badge {
+  font-size: 10px;
+  padding: 4px 7px;
+  border-radius: 5px;
+  white-space: normal;
+  line-height: 1.4;
+  gap: 5px;
+}
+.admin-nodes-page .nested-frame .badge i {
+  flex: none;
+}
+.admin-nodes-page .stop-task {
+  color: #b42318;
+  background: #fff6f5;
+  border: 1px solid #f0ceca;
+  box-shadow: none;
+  border-radius: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+.admin-nodes-page .stop-task hg-icon {
+  width: 13px;
+  height: 13px;
+}
+.admin-nodes-page .stop-task:hover:not(:disabled) {
+  background: #ffebe8;
+  border-color: #dda59e;
+  color: #971b12;
+}
+.admin-nodes-page .stop-task:disabled {
+  background: #f7f8fa;
+  color: #9ba4b2;
+  border-color: #e5e9ef;
+  opacity: 1;
+}
+@media (max-width: 700px) {
+  .admin-nodes-page .node-name {
+    font-size: 11px;
+    gap: 6px;
+  }
+  .admin-nodes-page .node-name > hg-icon {
+    width: 12px;
+    height: 12px;
+  }
+  .admin-nodes-page .node-capacity {
+    font-size: 12px;
+  }
+  .admin-nodes-page .nested-frame code {
+    font-size: 10px;
+  }
+  .admin-nodes-page .browser-task-id {
+    font-size: 9px;
+  }
+}

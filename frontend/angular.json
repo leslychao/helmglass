@@ -49,7 +49,7 @@
                 "input": "public"
               }
             ],
-            "styles": ["src/styles.css", "src/page-styles.css"]
+            "styles": ["src/styles.css", "src/page-styles.css", "src/app/shared/table.css"]
           },
           "configurations": {
             "production": {

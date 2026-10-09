@@ -3,7 +3,9 @@ package ru.helmglass.api.tasks;
 import java.net.URI;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -16,9 +18,11 @@ import ru.helmglass.api.Contracts;
 import ru.helmglass.api.Database;
 import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.ListQuery;
+import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.browsers.WorkerClient;
 import ru.helmglass.api.events.EventService;
+import ru.helmglass.api.mcp.ChatBindings;
 import tools.jackson.databind.JsonNode;
 
 @Service
@@ -28,15 +32,33 @@ public class TaskService {
   public static final String SELECT =
       """
 SELECT t.*,
-  coalesce(t.result->>'summary',(SELECT h.title FROM task_history h WHERE h.task_id=t.id ORDER BY h.sequence DESC LIMIT 1)) task_summary,
+  (SELECT count(*) FROM task_steps s WHERE s.task_id=t.id) step_count,
+  EXISTS(SELECT 1 FROM operations o WHERE o.task_id=t.id AND o.status='UNKNOWN') unknown_action,
+  EXISTS(SELECT 1 FROM mcp_task_chats c WHERE c.task_id=t.id) chat_bound,
+  coalesce((SELECT coalesce(s.result,s.title) FROM task_steps s WHERE s.task_id=t.id
+    AND s.status IN ('RUNNING','WAITING','UNKNOWN') LIMIT 1),t.result->>'summary',
+    (SELECT coalesce(s.result,s.title) FROM task_steps s WHERE s.task_id=t.id
+    ORDER BY s.updated_at DESC,s.sequence DESC LIMIT 1)) task_summary,
   (SELECT jsonb_build_object('id',r.id,'type',r.type,'prompt',r.prompt,'version',r.version,
+    'instructionRevision',r.instruction_revision,
     'options',r.options,'operationId',r.operation_id) FROM task_requests r
     WHERE r.task_id=t.id AND r.status='PENDING')::text request_json,
+  (SELECT jsonb_build_object('requestId',r.id,'requestVersion',r.version,
+    'instructionRevision',r.instruction_revision,'type',r.type,'prompt',r.prompt,
+    'operationId',r.operation_id,'command',r.answer_command,'text',r.answer,
+    'connectionId',r.answer_connection_id,'answeredAt',r.answered_at)
+    FROM task_requests r WHERE r.task_id=t.id AND r.status='ANSWERED'
+      AND r.instruction_revision=t.instruction_revision AND r.answer_command IS NOT NULL
+    ORDER BY r.answered_at DESC,r.id DESC LIMIT 1)::text response_json,
   (SELECT jsonb_build_object('id',b.id,'status',b.status,'nodeId',b.node_id,
     'controlOwner',b.control_owner,'controlEpoch',b.control_epoch,'privateMode',b.private_mode,
     'currentUrl',CASE WHEN b.private_mode THEN NULL ELSE b.current_url END,
-    'canView',b.status='LIVE','canControl',b.status='LIVE','version',b.version)
-    FROM browser_sessions b WHERE b.id=t.browser_session_id)::text browser_json,
+    'canView',b.status='LIVE','canControl',b.status='LIVE','version',b.version,
+    'profileSaveError',c.profile_save_error,'taskId',b.task_id,'connectionId',b.connection_id,
+    'loginConfirmed',b.login_confirmed,'startedAt',b.started_at,'closedAt',b.closed_at)
+    FROM browser_sessions b
+    LEFT JOIN connections c ON c.id=coalesce(b.pending_connection_id,b.connection_id)
+    WHERE b.id=t.browser_session_id)::text browser_json,
   (SELECT jsonb_build_object(
     'browserSeconds',coalesce(sum(extract(epoch FROM coalesce(u.ended_at,now())-u.started_at)) FILTER(WHERE u.kind='BROWSER'),0),
     'executionSeconds',coalesce(sum(extract(epoch FROM coalesce(u.ended_at,now())-u.started_at)) FILTER(WHERE u.kind='EXECUTION'),0),
@@ -54,18 +76,24 @@ FROM tasks t
   private final EventService events;
   private final Identity identity;
   private final WorkerClient worker;
+  private final ChatBindings chats;
+  private final TaskStepService steps;
 
   public TaskService(
       JdbcClient jdbc,
       JsonSupport json,
       EventService events,
       Identity identity,
-      WorkerClient worker) {
+      WorkerClient worker,
+      ChatBindings chats,
+      TaskStepService steps) {
     this.jdbc = jdbc;
     this.json = json;
     this.events = events;
     this.identity = identity;
     this.worker = worker;
+    this.chats = chats;
+    this.steps = steps;
   }
 
   public Contracts.Task get(UUID owner, UUID id) {
@@ -84,13 +112,27 @@ FROM tasks t
             .params(filter.parameters())
             .query(Long.class)
             .single();
+    String order = switch (query.sort() == null ? "" : query.sort()) {
+      case "title" -> "coalesce(nullif(title,''),nullif(goal,''),'Черновик без названия')";
+      case "status" -> "coalesce(outcome,status)";
+      case "site" -> "site";
+      case "source" -> "source";
+      case "createdAt" -> "created_at";
+      case "summary" -> "task_summary";
+      case "executionSeconds" -> "(usage_json::jsonb->>'executionSeconds')::numeric";
+      case "manualSeconds" -> "(usage_json::jsonb->>'manualSeconds')::numeric";
+      case "mediaBytes" -> "(artifact_totals_json::jsonb->>'mediaBytes')::bigint";
+      case "mediaSeconds" -> "CASE WHEN (artifact_totals_json::jsonb->>'durationKnown')::boolean"
+          + " THEN (artifact_totals_json::jsonb->>'mediaSeconds')::numeric END";
+      default -> "updated_at";
+    };
     var items =
         jdbc.sql(
-                SELECT
+                "SELECT listed.* FROM (" + SELECT
                     + " WHERE "
                     + filter.where()
-                    + " ORDER BY "
-                    + query.taskOrder()
+                    + ") listed ORDER BY " + order
+                    + (query.ascending() ? " ASC" : " DESC") + " NULLS LAST,id"
                     + " LIMIT :limit OFFSET :offset")
             .params(filter.parameters())
             .param("limit", query.pageSize())
@@ -122,7 +164,7 @@ FROM tasks t
     if (!"DRAFT".equals(get(owner, id).status())) {
       throw ApiException.conflict("NOT_A_DRAFT", "Удалить можно только черновик.");
     }
-    for (String table : List.of("mcp_chats", "mcp_task_chats", "task_history")) {
+    for (String table : List.of("mcp_chats", "mcp_task_chats", "task_history", "task_steps")) {
       jdbc.sql("DELETE FROM " + table + " WHERE task_id=:id AND owner_id=:owner")
           .param("id", id)
           .param("owner", owner)
@@ -156,9 +198,9 @@ FROM tasks t
     long sequence = events.emit(owner, "task", id, 1);
     jdbc.sql(
             """
-INSERT INTO tasks(id,owner_id,title,goal,start_url,site,output_format,require_confirmation,
+INSERT INTO tasks(id,owner_id,title,goal,start_url,site,output_format,
   preferred_connection_ids,source,status,accepted_at,accepted_sequence)
-VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS jsonb),
+VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
   :source,:status,CASE WHEN :prepare THEN now() ELSE NULL END,:sequence)
 """)
         .param("id", id)
@@ -168,7 +210,6 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
         .param("url", url)
         .param("site", site(url))
         .param("format", format(input.outputFormat()))
-        .param("confirm", input.requireConfirmation() == null || input.requireConfirmation())
         .param(
             "connections",
             json.write(
@@ -193,16 +234,21 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
   }
 
   @Transactional
-  public Contracts.Task command(UUID owner, UUID id, Contracts.TaskCommand command) {
+  public Contracts.Task command(Actor actor, UUID id, Contracts.TaskCommand command) {
+    UUID owner = actor.id();
     identity.requireActive(owner);
     lockOwner(owner);
     lockTask(owner, id);
     Contracts.Task task = get(owner, id);
+    String type = required(command.type(), "type", 60);
+    if (Set.of("ANSWER", "CONFIRM", "REJECT", "CHOOSE_CONNECTION").contains(type)) {
+      throw ApiException.conflict("HOST_RESPONSE_REQUIRED",
+          "Ответ принимается только через запрос пользователя в исходном чате GPT.");
+    }
     if (command.expectedVersion() == null || command.expectedVersion() != task.version()) {
       throw ApiException.conflict(
           "STALE_VERSION", "Задача изменилась. Проверьте актуальное поручение.");
     }
-    String type = required(command.type(), "type", 60);
     switch (type) {
       case "PREPARE" -> {
         if (!"DRAFT".equals(task.status())) {
@@ -214,7 +260,6 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
                 task.goal(),
                 task.startUrl(),
                 task.outputFormat(),
-                task.requireConfirmation(),
                 task.preferredConnectionIds(),
                 true),
             true);
@@ -226,19 +271,11 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
             .update();
         change(owner, id, "WAITING_CHATGPT", null, "Задача подготовлена для ChatGPT");
       }
-      case "AMEND" -> amend(owner, task, command);
-      case "COPY" -> {
-        return create(
-            owner,
-            new Contracts.TaskInput(
-                task.title(),
-                task.goal(),
-                task.startUrl(),
-                task.outputFormat(),
-                task.requireConfirmation(),
-                task.preferredConnectionIds(),
-                false),
-            "WEB");
+      case "AMEND" -> {
+        if ("WEB".equals(actor.channel()) && !"DRAFT".equals(task.status())) {
+          throw ApiException.conflict("ORIGINAL_CHAT_REQUIRED", "Уточните задачу в исходном чате GPT.");
+        }
+        amend(owner, task, command);
       }
       case "PAUSE" -> {
         if (TERMINAL.contains(task.status())
@@ -246,14 +283,17 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
             || "STOPPING".equals(task.status())) {
           throw unavailable();
         }
-        cancelQueued(id);
         jdbc.sql("UPDATE tasks SET paused_explicitly=true WHERE id=:id").param("id", id).update();
         change(owner, id, hasDispatched(id) ? "PAUSING" : "PAUSED", null, "Запрошена пауза");
       }
       case "RESUME" -> resume(owner, task, command);
       case "STOP" -> requestStop(owner, id);
-      case "END_SESSION" -> endSession(owner, task);
-      case "ANSWER", "CONFIRM", "REJECT", "CHOOSE_CONNECTION" -> answer(owner, task, command);
+      case "CLOSE_BROWSER" -> {
+        if (!"WEB".equals(actor.channel())) {
+          throw Identity.denied("Закрытие браузера доступно в кабинете.");
+        }
+        closeBrowser(owner, id);
+      }
       case "FINISH" -> finish(owner, task, command.outcome(), command.text());
       default -> throw ApiException.invalid("type", "Неизвестная команда задачи.");
     }
@@ -261,17 +301,43 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
   }
 
   @Transactional
+  public void closeBrowser(UUID owner, UUID id) {
+    identity.requireActive(owner);
+    lockOwner(owner);
+    lockTask(owner, id);
+    Contracts.Task task = get(owner, id);
+    if (task.browser() == null || "DRAFT".equals(task.status())
+        || "STOPPING".equals(task.status())) {
+      throw unavailable();
+    }
+    if (Set.of("CLOSED", "LOST").contains(task.browser().status())) {
+      return;
+    }
+    if (!TERMINAL.contains(task.status())) {
+      jdbc.sql("UPDATE tasks SET paused_explicitly=true WHERE id=:id").param("id", id).update();
+      cancelQueued(id);
+      change(owner, id, hasDispatched(id) ? "PAUSING" : "PAUSED", task.waitReason(),
+          "Закрытие браузера запрошено. Задача остаётся на паузе.");
+    }
+    jdbc.sql("UPDATE browser_sessions SET close_requested=true,version=version+1 WHERE id=:id")
+        .param("id", task.browser().id()).update();
+    events.emit(owner, "browser", task.browser().id(), 0);
+  }
+
+  @Transactional
   public Contracts.Task selectConnection(
-      UUID owner, UUID taskId, long instructionRevision, UUID connectionId) {
+      UUID owner, UUID taskId, long instructionRevision, UUID connectionId, String confirmationPrompt) {
     identity.requireActive(owner);
     lockOwner(owner);
     lockTask(owner, taskId);
     Contracts.Task task = get(owner, taskId);
+    String confirmation = confirmationPrompt == null ? null
+        : required(confirmationPrompt, "confirmationPrompt", 4000);
     if (task.instructionRevision() != instructionRevision) {
       throw ApiException.conflict("STALE_INSTRUCTION", "Поручение изменилось.");
     }
     if (TERMINAL.contains(task.status())
-        || Set.of("DRAFT", "PAUSED", "PAUSING", "STOPPING").contains(task.status())
+        || Set.of("DRAFT", "PAUSING", "STOPPING").contains(task.status())
         || task.request() != null
         || hasDispatched(taskId)
         || hasUnknown(taskId)) {
@@ -280,28 +346,33 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
     }
     validateConnections(owner, List.of(connectionId));
     String url =
-        jdbc.sql("SELECT start_url FROM connections WHERE id=:id AND status='READY'")
+        jdbc.sql("SELECT start_url FROM connections WHERE id=:id AND owner_id=:owner AND deleted_at IS NULL")
             .param("id", connectionId)
+            .param("owner", owner)
             .query(String.class)
             .optional()
-            .orElseThrow(
-                () ->
-                    ApiException.conflict(
-                        "LOGIN_REQUIRED", "Сначала выполните вход в выбранное подключение."));
-    if (task.browser() == null || Set.of("CLOSED", "LOST").contains(task.browser().status())) {
+            .orElseThrow(ApiException::notFound);
+    if (!java.util.Objects.equals(task.site(), site(url))) {
+      throw ApiException.invalid("connectionId", "Подключение не относится к сайту задачи.");
+    }
+    boolean loginRequired = !jdbc.sql("SELECT status='READY' FROM connections WHERE id=:id")
+        .param("id", connectionId).query(Boolean.class).single();
+    boolean existingBrowser = task.browser() != null
+        && !Set.of("CLOSED", "LOST").contains(task.browser().status());
+    if ((!existingBrowser || loginRequired) && confirmation == null) {
       jdbc.sql("UPDATE tasks SET selected_connection_id=:connection WHERE id=:task")
           .param("connection", connectionId)
           .param("task", taskId)
           .update();
       return get(owner, taskId);
     }
-    if (!"LIVE".equals(task.browser().status())
+    if (existingBrowser && (!"LIVE".equals(task.browser().status())
         || !"CHATGPT".equals(task.browser().controlOwner())
-        || task.browser().privateMode()) {
+        || task.browser().privateMode())) {
       throw ApiException.conflict(
           "BROWSER_UNAVAILABLE", "Дождитесь доступного браузера под управлением ChatGPT.");
     }
-    UUID current =
+    UUID current = !existingBrowser ? null :
         jdbc.sql("SELECT connection_id FROM browser_sessions WHERE id=:id")
             .param("id", task.browser().id())
             .query((row, index) -> row.getObject("connection_id", UUID.class))
@@ -310,7 +381,14 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
     if (connectionId.equals(current)) {
       return task;
     }
-    java.net.URI parsed = java.net.URI.create(url);
+    URI parsed = URI.create(url);
+    JsonNode savedOrigins = json.read(jdbc.sql("SELECT authorized_origins::text FROM connections WHERE id=:id")
+        .param("id", connectionId).query(String.class).single());
+    List<String> origins = new ArrayList<>();
+    savedOrigins.forEach(origin -> origins.add(origin.asString()));
+    if (origins.isEmpty()) {
+      origins.add(parsed.getScheme() + "://" + parsed.getAuthority());
+    }
     var arguments =
         Map.of(
             "connectionId",
@@ -318,30 +396,35 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,:confirm,CAST(:connections AS
             "ownerId",
             owner,
             "origins",
-            List.of(parsed.getScheme() + "://" + parsed.getAuthority()),
+            origins,
             "url",
             url);
     UUID operation = UUID.randomUUID();
+    Map<String, Object> instruction = new HashMap<>();
+    instruction.put("revision", instructionRevision);
+    instruction.put("title", task.title());
+    instruction.put("goal", task.goal());
+    if (confirmation != null) {
+      instruction.put("confirmationPrompt", confirmation);
+    }
     jdbc.sql(
             """
-INSERT INTO operations(id,owner_id,task_id,type,arguments,status,mutating,instruction_revision,control_epoch)
-VALUES (:id,:owner,:task,'applyConnection',CAST(:arguments AS jsonb),'AWAITING_CONFIRMATION',true,:revision,:epoch)
+INSERT INTO operations(id,owner_id,task_id,type,arguments,status,mutating,instruction_revision,control_epoch,instruction_snapshot)
+VALUES (:id,:owner,:task,'applyConnection',CAST(:arguments AS jsonb),:status,true,:revision,:epoch,CAST(:instruction AS jsonb))
 """)
         .param("id", operation)
         .param("owner", owner)
         .param("task", taskId)
         .param("arguments", json.write(arguments))
+        .param("status", confirmation == null ? "ACCEPTED" : "AWAITING_CONFIRMATION")
         .param("revision", instructionRevision)
-        .param("epoch", task.browser().controlEpoch())
+        .param("epoch", existingBrowser ? task.browser().controlEpoch() : null)
+        .param("instruction", json.write(instruction))
         .update();
-    request(
-        owner,
-        taskId,
-        "CONFIRMATION",
-        "Переключить аккаунт в текущем браузере? Страницы этого сайта будут закрыты; несохранённые"
-            + " формы будут потеряны.",
-        operation,
-        null);
+    if (confirmation != null) {
+      request(owner, taskId, "CONFIRMATION",
+          confirmation, operation, null);
+    }
     return get(owner, taskId);
   }
 
@@ -352,7 +435,6 @@ VALUES (:id,:owner,:task,'applyConnection',CAST(:arguments AS jsonb),'AWAITING_C
             command.goal(),
             command.startUrl(),
             command.outputFormat(),
-            command.requireConfirmation(),
             command.preferredConnectionIds(),
             false);
     validate(input, !"DRAFT".equals(task.status()));
@@ -363,7 +445,7 @@ VALUES (:id,:owner,:task,'applyConnection',CAST(:arguments AS jsonb),'AWAITING_C
     jdbc.sql(
             """
 UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format=:format,
-  require_confirmation=:confirm,preferred_connection_ids=CAST(:connections AS jsonb),
+  preferred_connection_ids=CAST(:connections AS jsonb),
   instruction_revision=instruction_revision+1 WHERE id=:id
 """)
         .param("goal", value(input.goal()))
@@ -371,11 +453,6 @@ UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format
         .param("url", blankNull(input.startUrl()))
         .param("site", site(blankNull(input.startUrl())))
         .param("format", format(input.outputFormat()))
-        .param(
-            "confirm",
-            input.requireConfirmation() == null
-                ? task.requireConfirmation()
-                : input.requireConfirmation())
         .param(
             "connections",
             json.write(
@@ -410,39 +487,156 @@ UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format
   }
 
   private void resume(UUID owner, Contracts.Task task, Contracts.TaskCommand command) {
+    if (Set.of("STOPPED", "STOPPING", "PAUSING", "DRAFT").contains(task.status())) {
+      throw unavailable();
+    }
     if (hasUnknown(task.id())) {
       throw ApiException.conflict("UNKNOWN_RESULT", "Сначала проверьте неизвестный результат.");
     }
-    if ("STOPPING".equals(task.status()) || "DRAFT".equals(task.status())) {
+    if (!TERMINAL.contains(task.status()) && !"PAUSED".equals(task.status())
+        && !(task.request() != null && "BROWSER_LOST".equals(task.request().type()))) {
       throw unavailable();
     }
-    if (TERMINAL.contains(task.status())
-        && !"STOPPED".equals(task.status())
-        && !"FAILED".equals(task.status())) {
-      throw unavailable();
+    if (hasDispatched(task.id()) || task.browser() != null
+        && "CLOSING".equals(task.browser().status())) {
+      throw ApiException.conflict("BROWSER_CLOSING", "Дождитесь завершения действия и закрытия браузера.");
     }
-    if (("STOPPED".equals(task.status())
-            || task.browser() != null && Set.of("LOST", "CLOSED").contains(task.browser().status()))
+    chats.activate(owner, task.id());
+    if (task.browser() != null && Set.of("LOST", "CLOSED").contains(task.browser().status())
         && !Boolean.TRUE.equals(command.confirmBrowserLoss())) {
       throw ApiException.conflict(
           "BROWSER_REPLACEMENT_CONSENT",
           "Продолжение откроет новый браузер. Несохранённая страница утрачена.");
     }
-    jdbc.sql("UPDATE tasks SET paused_explicitly=false,outcome=NULL,completed_at=NULL WHERE id=:id")
+    jdbc.sql("""
+        UPDATE tasks SET paused_explicitly=false,outcome=NULL,completed_at=NULL,
+          instruction_revision=instruction_revision+CASE WHEN status IN
+            ('SUCCEEDED','PARTIAL','NOT_ACHIEVED','FAILED') THEN 1 ELSE 0 END WHERE id=:id
+        """)
         .param("id", task.id())
         .update();
     if (task.request() != null && "BROWSER_LOST".equals(task.request().type())) {
       cancelRequest(task.id());
     }
-    change(owner, task.id(), "WAITING_CHATGPT", null, "Разрешено продолжить исходную задачу");
+    boolean waitingUser = task.request() != null && !"BROWSER_LOST".equals(task.request().type());
+    change(owner, task.id(), waitingUser ? "WAITING_USER" : "WAITING_CHATGPT",
+        waitingUser ? task.request().type() : null, "Разрешено продолжить исходную задачу");
     requestContinuation(task.id());
   }
 
-  private void answer(UUID owner, Contracts.Task task, Contracts.TaskCommand command) {
+  @Transactional
+  public ElicitationClaim claimResponse(Actor actor, UUID taskId, String chat, UUID requestId,
+      long requestVersion, String operationKey) {
+    identity.requireGrant(actor);
+    UUID owner = actor.id();
+    lockOwner(owner);
+    lockTask(owner, taskId);
+    chats.requireCurrent(owner, taskId, chat);
+    required(operationKey, "operationKey", 128);
+    if (operationKey.length() < 8) {
+      throw ApiException.invalid("operationKey", "Ключ операции слишком короткий.");
+    }
+    var previous = jdbc.sql("""
+        SELECT status,version,elicitation_operation_key,elicitation_deadline
+        FROM task_requests WHERE id=:request AND task_id=:task AND owner_id=:owner
+        """)
+        .param("request", requestId).param("task", taskId).param("owner", owner)
+        .query((row, index) -> new ResponseAttempt(row.getString("status"), row.getLong("version"),
+            row.getString("elicitation_operation_key"), Database.instant(row, "elicitation_deadline")))
+        .optional().orElseThrow(ApiException::notFound);
+    if (previous.version() != requestVersion) {
+      throw ApiException.conflict("STALE_REQUEST", "Этот запрос участия больше не актуален.");
+    }
+    if (jdbc.sql("SELECT EXISTS(SELECT 1 FROM task_requests WHERE owner_id=:owner"
+            + " AND elicitation_operation_key=:key AND id<>:id)")
+        .param("owner", owner).param("key", operationKey).param("id", requestId)
+        .query(Boolean.class).single()) {
+      throw ApiException.conflict("IDEMPOTENCY_CONFLICT", "Ключ уже использован другим запросом.");
+    }
+    if (operationKey.equals(previous.operationKey()) && "ANSWERED".equals(previous.status())) {
+      return null;
+    }
+    Contracts.Task task = get(owner, taskId);
+    Contracts.InteractionRequest request = task.request();
+    if (request == null || !request.id().equals(requestId) || request.version() != requestVersion
+        || request.instructionRevision() != task.instructionRevision()) {
+      throw ApiException.conflict("STALE_REQUEST", "Этот запрос участия больше не актуален.");
+    }
+    if (!Set.of("QUESTION", "CONFIRMATION", "ACCOUNT_CHOICE", "UNKNOWN_RESULT").contains(request.type())) {
+      throw ApiException.conflict("HOST_RESPONSE_UNAVAILABLE", "Этот шаг выполняется в браузере задачи.");
+    }
+    if (previous.deadline() != null && previous.deadline().isAfter(Instant.now())) {
+      throw ApiException.conflict("ELICITATION_IN_PROGRESS", "Запрос уже показан пользователю.");
+    }
+    if (operationKey.equals(previous.operationKey())) {
+      throw ApiException.conflict("ELICITATION_NOT_REPLAYED", "Прежний запрос закрыт. Новый показ требует нового обращения пользователя.");
+    }
+    UUID attempt = UUID.randomUUID();
+    Instant deadline = Instant.now().plusSeconds(300);
+    if (actor.expiresAt().isBefore(deadline)) {
+      deadline = actor.expiresAt();
+    }
+    jdbc.sql("""
+        UPDATE task_requests SET elicitation_attempt_id=:attempt,
+          elicitation_operation_key=:key,elicitation_deadline=:deadline WHERE id=:request
+        """)
+        .param("attempt", attempt).param("key", operationKey)
+        .param("deadline", java.sql.Timestamp.from(deadline)).param("request", requestId).update();
+    return new ElicitationClaim(taskId, request, attempt,
+        task.browser() == null ? null : task.browser().controlEpoch());
+  }
+
+  @Transactional
+  public Contracts.Task respond(Actor actor, String chat, ElicitationClaim claim,
+      String command, String text, UUID connection) {
+    identity.requireGrant(actor);
+    lockOwner(actor.id());
+    lockTask(actor.id(), claim.taskId());
+    chats.requireCurrent(actor.id(), claim.taskId(), chat);
+    boolean claimed = jdbc.sql("""
+        SELECT EXISTS(SELECT 1 FROM task_requests WHERE id=:request AND owner_id=:owner
+          AND elicitation_attempt_id=:attempt AND elicitation_deadline>now() AND status='PENDING')
+        """).param("request", claim.request().id()).param("owner", actor.id())
+        .param("attempt", claim.attemptId()).query(Boolean.class).single();
+    if (!claimed) {
+      throw ApiException.conflict("STALE_REQUEST", "Запрос уже закрыт или устарел.");
+    }
+    Contracts.Task task = get(actor.id(), claim.taskId());
+    Long epoch = task.browser() == null ? null : task.browser().controlEpoch();
+    if (!java.util.Objects.equals(epoch, claim.controlEpoch())) {
+      throw ApiException.conflict("STALE_CONTROL", "Управление браузером изменилось.");
+    }
+    answer(actor, task, new RequestAnswer(claim.request().id(), claim.request().version(),
+        command, text, connection));
+    jdbc.sql("UPDATE task_requests SET answer_source='MCP_ELICITATION',elicitation_attempt_id=NULL,"
+            + " elicitation_deadline=NULL WHERE id=:id")
+        .param("id", claim.request().id()).update();
+    chats.acceptCommand(actor.id(), claim.taskId(), chat);
+    return get(actor.id(), claim.taskId());
+  }
+
+  @Transactional
+  public void releaseResponse(UUID owner, ElicitationClaim claim) {
+    jdbc.sql("UPDATE task_requests SET elicitation_attempt_id=NULL,elicitation_deadline=NULL"
+            + " WHERE id=:id AND owner_id=:owner AND elicitation_attempt_id=:attempt")
+        .param("id", claim.request().id()).param("owner", owner)
+        .param("attempt", claim.attemptId()).update();
+  }
+
+  public record ElicitationClaim(UUID taskId, Contracts.InteractionRequest request,
+      UUID attemptId, Long controlEpoch) {}
+
+  private record ResponseAttempt(String status, long version, String operationKey, Instant deadline) {}
+
+  private record RequestAnswer(UUID requestId, long requestVersion, String type,
+      String text, UUID connectionId) {}
+
+  private void answer(Actor actor, Contracts.Task task, RequestAnswer command) {
+    UUID owner = actor.id();
     Contracts.InteractionRequest request = task.request();
     if (request == null
         || !request.id().equals(command.requestId())
-        || command.requestVersion() == null
+        || request.instructionRevision() != task.instructionRevision()
         || request.version() != command.requestVersion()) {
       throw ApiException.conflict("STALE_REQUEST", "Этот запрос участия больше не актуален.");
     }
@@ -497,12 +691,17 @@ completed_at=now() WHERE id=:id AND status='UNKNOWN'
       if (!Set.of("CONFIRM", "REJECT").contains(command.type())) {
         throw ApiException.invalid("type", "Подтвердите или отклоните конкретное действие.");
       }
-      jdbc.sql(
-              "UPDATE operations SET status=:status WHERE id=:id AND"
-                  + " status='AWAITING_CONFIRMATION'")
+      int accepted = jdbc.sql(
+              "UPDATE operations SET status=:status WHERE id=:id AND task_id=:task"
+                  + " AND instruction_revision=:revision AND status='AWAITING_CONFIRMATION'")
           .param("status", "CONFIRM".equals(command.type()) ? "ACCEPTED" : "CANCELLED")
           .param("id", request.operationId())
+          .param("task", task.id())
+          .param("revision", task.instructionRevision())
           .update();
+      if (accepted != 1) {
+        throw ApiException.conflict("STALE_REQUEST", "Операция подтверждения больше не актуальна.");
+      }
     } else if ("CHOOSE_CONNECTION".equals(command.type())) {
       if (command.connectionId() == null) {
         throw ApiException.invalid("connectionId", "Выберите подключение.");
@@ -535,12 +734,19 @@ completed_at=now() WHERE id=:id AND status='UNKNOWN'
             "connectionId", "Подключение не относится к этому запросу выбора.");
       }
     } else {
+      if (!"QUESTION".equals(request.type()) || !"ANSWER".equals(command.type())) {
+        throw ApiException.invalid("type", "Ответ не соответствует ожидаемому участию.");
+      }
       required(command.text(), "text", 20000);
     }
     jdbc.sql(
-            "UPDATE task_requests SET status='ANSWERED',answer=:answer,answered_at=now() WHERE"
+            "UPDATE task_requests SET status='ANSWERED',answer=:answer,"
+                + " answer_command=:command,answer_connection_id=:connection,answered_at=now() WHERE"
                 + " id=:id")
         .param("answer", command.text())
+        .param("command", command.type())
+        .param("connection",
+            "CHOOSE_CONNECTION".equals(command.type()) ? command.connectionId() : null)
         .param("id", request.id())
         .update();
     boolean paused =
@@ -554,43 +760,9 @@ completed_at=now() WHERE id=:id AND status='UNKNOWN'
     }
     change(owner, task.id(), next, null, "Ответ пользователя принят");
     if ("CHOOSE_CONNECTION".equals(command.type())) {
-      if (task.browser() == null || Set.of("CLOSED", "LOST").contains(task.browser().status())) {
-        jdbc.sql("UPDATE tasks SET selected_connection_id=:connection WHERE id=:id")
-            .param("connection", command.connectionId())
-            .param("id", task.id())
-            .update();
-      } else {
-        selectConnection(owner, task.id(), task.instructionRevision(), command.connectionId());
-      }
+      jdbc.sql("UPDATE tasks SET selected_connection_id=:connection WHERE id=:id")
+          .param("connection", command.connectionId()).param("id", task.id()).update();
     }
-    requestContinuation(task.id());
-  }
-
-  private void endSession(UUID owner, Contracts.Task task) {
-    if (task.browser() == null || Set.of("CLOSED", "LOST").contains(task.browser().status())) {
-      throw unavailable();
-    }
-    cancelQueued(task.id());
-    jdbc.sql("UPDATE tasks SET paused_explicitly=true WHERE id=:id")
-        .param("id", task.id())
-        .update();
-    jdbc.sql(
-            """
-UPDATE browser_sessions SET close_requested=true,pending_control=NULL,
- status=CASE WHEN status='QUEUED' THEN 'CLOSED' ELSE 'CLOSING' END,version=version+1,
- closed_at=CASE WHEN status='QUEUED' THEN now() ELSE closed_at END WHERE id=:id
-""")
-        .param("id", task.browser().id())
-        .update();
-    if (!TERMINAL.contains(task.status()) && !"STOPPING".equals(task.status())) {
-      change(
-          owner,
-          task.id(),
-          hasDispatched(task.id()) ? "PAUSING" : "PAUSED",
-          null,
-          "Сессия браузера завершается; результаты и задача сохранены");
-    }
-    events.emit(owner, "browser", task.browser().id(), task.browser().version() + 1);
   }
 
   @Transactional
@@ -601,26 +773,14 @@ UPDATE browser_sessions SET close_requested=true,pending_control=NULL,
             .param("id", id)
             .query(String.class)
             .single();
-    if ("DRAFT".equals(status)) {
-      throw unavailable();
-    }
-    if (TERMINAL.contains(status) || "STOPPING".equals(status)) {
+    if (Set.of("STOPPED", "STOPPING").contains(status)) {
       return;
     }
     cancelQueued(id);
     if (!hasUnknown(id)) {
       cancelRequest(id);
     }
-    jdbc.sql(
-            "UPDATE browser_sessions SET close_requested=true WHERE task_id=:id AND"
-                + " status<>'CLOSED'")
-        .param("id", id)
-        .update();
-    jdbc.sql(
-            "UPDATE browser_sessions SET status='CLOSED',closed_at=now(),control_owner='NONE' WHERE"
-                + " task_id=:id AND status='QUEUED'")
-        .param("id", id)
-        .update();
+    closeTaskBrowsers(id);
     boolean live =
         jdbc.sql(
                 "SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE task_id=:id AND"
@@ -630,6 +790,21 @@ UPDATE browser_sessions SET close_requested=true,pending_control=NULL,
             .single();
     change(
         owner, id, live || hasDispatched(id) ? "STOPPING" : "STOPPED", null, "Запрошена остановка");
+  }
+
+  @Transactional
+  public void settleStop(UUID owner, UUID id) {
+    lockTask(owner, id);
+    boolean settled = jdbc.sql("""
+        SELECT status='STOPPING'
+          AND NOT EXISTS(SELECT 1 FROM operations WHERE task_id=:id AND status='DISPATCHED')
+          AND NOT EXISTS(SELECT 1 FROM browser_sessions WHERE task_id=:id AND status<>'CLOSED')
+        FROM tasks WHERE id=:id AND owner_id=:owner
+        """)
+        .param("id", id).param("owner", owner).query(Boolean.class).single();
+    if (settled) {
+      change(owner, id, "STOPPED", null, "Действие завершено, браузер закрыт, задача остановлена");
+    }
   }
 
   @Transactional
@@ -648,6 +823,7 @@ UPDATE browser_sessions SET close_requested=true,pending_control=NULL,
     if (hasUnknown(task.id()) || hasDispatched(task.id())) {
       throw unavailable();
     }
+    steps.requireSettled(owner, task.id(), outcome);
     required(summary, "summary", 20000);
     jdbc.sql(
             "UPDATE tasks SET"
@@ -657,12 +833,23 @@ UPDATE browser_sessions SET close_requested=true,pending_control=NULL,
         .param("outcome", outcome)
         .param("id", task.id())
         .update();
-    jdbc.sql(
-            "UPDATE browser_sessions SET close_requested=true WHERE task_id=:id AND"
-                + " status<>'CLOSED'")
-        .param("id", task.id())
-        .update();
+    if ("SUCCEEDED".equals(outcome)) {
+      closeTaskBrowsers(task.id());
+    }
     change(owner, task.id(), outcome, null, "Результат задачи сохранён");
+  }
+
+  private void closeTaskBrowsers(UUID task) {
+    // An unallocated browser has no worker to acknowledge closure.
+    jdbc.sql("""
+            UPDATE browser_sessions SET close_requested=true,
+              closed_at=CASE WHEN status='QUEUED' THEN now() ELSE closed_at END,
+              control_owner=CASE WHEN status='QUEUED' THEN 'NONE' ELSE control_owner END,
+              status=CASE WHEN status='QUEUED' THEN 'CLOSED' ELSE status END
+            WHERE task_id=:task AND status<>'CLOSED'
+            """)
+        .param("task", task)
+        .update();
   }
 
   @Transactional
@@ -678,8 +865,10 @@ UPDATE browser_sessions SET close_requested=true,pending_control=NULL,
     cancelRequest(task);
     jdbc.sql(
             """
-            INSERT INTO task_requests(id,task_id,owner_id,type,prompt,operation_id,options)
-            VALUES (:id,:task,:owner,:type,:prompt,:operation,CAST(:options AS jsonb))
+            INSERT INTO task_requests(
+              id,task_id,owner_id,type,prompt,operation_id,options,instruction_revision)
+            SELECT :id,id,:owner,:type,:prompt,:operation,CAST(:options AS jsonb),instruction_revision
+              FROM tasks WHERE id=:task
             """)
         .param("id", UUID.randomUUID())
         .param("task", task)
@@ -736,6 +925,7 @@ WHERE id=:id AND owner_id=:owner RETURNING version
     events.emit(owner, "usage", id, version);
     events.emitAdministrators("admin-user", owner, version);
     history(owner, id, status, description, null);
+    steps.taskState(owner, id, status, description);
     if (TERMINAL.contains(status) || "WAITING_USER".equals(status)) {
       jdbc.sql(
               """
@@ -944,17 +1134,18 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
 
   private Contracts.Task map(ResultSet row, int index) throws SQLException {
     String status = row.getString("status");
-    List<String> commands = new ArrayList<>(List.of("COPY", "AMEND"));
+    List<String> commands = new ArrayList<>();
     if ("DRAFT".equals(status)) {
-      commands.add("PREPARE");
+      commands.addAll(List.of("AMEND", "PREPARE", "STOP"));
     } else if ("PAUSED".equals(status)) {
       commands.addAll(List.of("RESUME", "STOP", "TAKE_CONTROL", "BEGIN_LOGIN"));
-    } else if (Set.of("STOPPED", "FAILED").contains(status)) {
+    } else if (TERMINAL.contains(status) && !"STOPPED".equals(status)) {
       commands.add("RESUME");
     } else if (!TERMINAL.contains(status) && !"STOPPING".equals(status)) {
       commands.addAll(List.of("PAUSE", "STOP", "TAKE_CONTROL", "BEGIN_LOGIN"));
     }
     String request = row.getString("request_json");
+    String response = row.getString("response_json");
     String browser = row.getString("browser_json");
     Contracts.InteractionRequest interaction =
         request == null
@@ -962,24 +1153,32 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
             : json.convert(json.read(request), Contracts.InteractionRequest.class);
     Contracts.Browser browserState =
         browser == null ? null : json.convert(json.read(browser), Contracts.Browser.class);
-    if (interaction != null) {
-      switch (interaction.type()) {
-        case "CONFIRMATION", "UNKNOWN_RESULT" -> commands.addAll(List.of("CONFIRM", "REJECT"));
-        case "ACCOUNT_CHOICE" -> commands.add("CHOOSE_CONNECTION");
-        case "BROWSER_LOST" -> commands.add("RESUME");
-        default -> commands.add("ANSWER");
-      }
+    if (TERMINAL.contains(status) && !"STOPPED".equals(status)
+        && browserState != null && !"CLOSED".equals(browserState.status())) {
+      commands.add("STOP");
+    }
+    if (interaction != null && "BROWSER_LOST".equals(interaction.type())
+        && !Set.of("STOPPED", "STOPPING").contains(status)) {
+      commands.add("RESUME");
     }
     if (browserState == null
         || !"LIVE".equals(browserState.status())
         || "TRANSFERRING".equals(browserState.controlOwner())) {
       commands.removeAll(List.of("TAKE_CONTROL", "BEGIN_LOGIN"));
     } else if ("USER".equals(browserState.controlOwner())) {
-      commands.add(browserState.privateMode() ? "FINISH_LOGIN" : "RETURN_CONTROL");
+      commands.add("RETURN_CONTROL");
+      if (browserState.privateMode()) {
+        commands.add("FINISH_LOGIN");
+      }
     }
-    if (browserState != null
+    if (browserState != null && !Set.of("DRAFT", "STOPPING").contains(status)
         && !Set.of("CLOSED", "LOST", "CLOSING").contains(browserState.status())) {
-      commands.add("END_SESSION");
+      commands.add("CLOSE_BROWSER");
+    }
+    if ("PAUSED".equals(status) && browserState != null
+        && Set.of("CLOSED", "LOST").contains(browserState.status())
+        && !row.getBoolean("unknown_action")) {
+      commands.add("OPEN_BROWSER");
     }
     JsonNode usage = json.read(row.getString("usage_json"));
     JsonNode result = json.read(row.getString("result"));
@@ -1009,7 +1208,7 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
         row.getString("start_url"),
         row.getString("site"),
         row.getString("output_format"),
-        row.getBoolean("require_confirmation"),
+        row.getBoolean("chat_bound"),
         json.uuidList(row.getString("preferred_connection_ids")),
         row.getString("source"),
         status,
@@ -1017,10 +1216,14 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
         row.getString("wait_reason"),
         row.getString("task_summary"),
         interaction,
+        response == null
+            ? null
+            : json.convert(json.read(response), Contracts.InteractionResponse.class),
         browserState,
         result,
         usageMap(usage, artifactTotals),
         List.copyOf(commands),
+        row.getLong("step_count"),
         Database.instant(row, "created_at"),
         Database.instant(row, "updated_at"));
   }

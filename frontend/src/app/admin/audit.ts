@@ -1,63 +1,59 @@
-import { Icon } from '../shared/icon';
-import { SearchInput } from '../shared/search-input';
-import { DatePipe } from '@angular/common';
-import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
+import { TableViews } from '../shared/table-view';
+import {
+  Component,
+  DestroyRef,
+  computed,
+  effect,
+  inject,
+  input,
+  signal,
+  untracked,
+} from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { DateFilter } from '../shared/date-filter';
+import { Router, RouterLink } from '@angular/router';
 import * as z from 'zod/mini';
 import { Api, errorMessage } from '../core/api';
 import { LiveEvents } from '../core/live-events';
-import { Page, auditSchema, pageSchema } from '../core/models';
+import { Page, adminDetailSchema, auditSchema, pageSchema } from '../core/models';
 import { Dialog } from '../shared/dialog';
-import { MultiFilter } from '../shared/multi-filter';
+import { Icon } from '../shared/icon';
 import { QueryState } from '../shared/query-state';
-import { Empty, Pager, Status } from '../shared/ui';
+import { Pager } from '../shared/ui';
+import { AdminAuditTable, adminActionLabel, auditColumns } from './audit-table';
+export { adminActionLabel } from './audit-table';
 
 @Component({
   selector: 'hg-audit',
-  imports: [Icon, SearchInput, DatePipe, DateFilter, MultiFilter, Empty, Pager, Status],
+  imports: [Icon, RouterLink, Pager, AdminAuditTable],
   providers: [QueryState],
   template: `
     <section class="card table-card">
       <div class="section-heading padded">
         <h2>Журнал действий</h2>
-        <button
-          class="button small"
-          [attr.aria-expanded]="filtersOpen()"
-          (click)="filtersOpen.set(!filtersOpen())"
-        >
+        <button class="button quiet small" aria-haspopup="dialog" (click)="filters()">
           <hg-icon name="filter" />Поиск и фильтры
         </button>
       </div>
-      @if (filtersOpen()) {
-        <div class="toolbar">
-          <label class="search"
-            ><hg-icon name="search" /><input
-              hgSearch
-              aria-label="Поиск аудита"
-              placeholder="Администратор, объект или причина"
-              [value]="query.text('auditSearch')"
-              (searchChange)="
-                query.set({ auditSearch: $event || null, auditPage: null }, false)
-              " /></label
-          ><hg-multi-filter
-            label="Действие"
-            [options]="actions"
-            [value]="query.values('auditAction')"
-            (changed)="query.set({ auditAction: $event, auditPage: null }, false)"
-          /><hg-multi-filter
-            label="Результат"
-            [options]="statuses"
-            [value]="query.values('auditStatus')"
-            (changed)="query.set({ auditStatus: $event, auditPage: null }, false)"
-          />
-          <hg-date-filter
-            [from]="query.text('auditFrom')"
-            [to]="query.text('auditTo')"
-            (changed)="
-              query.set({ auditFrom: $event.from, auditTo: $event.to, auditPage: null }, false)
-            "
-          />
+      @if (query.text('user')) {
+        <div class="admin-filter-feedback">
+          Пользователь: {{ userName() || query.text('user') }}
+          <a class="text-button" routerLink="/admin/audit">Весь журнал</a>
+        </div>
+      }
+      @if (query.text('auditSearch') || query.values('auditAction').length) {
+        <div class="admin-filter-feedback">
+          @if (query.text('auditSearch')) {
+            <span class="chip">Поиск: {{ query.text('auditSearch') }}</span>
+          }
+          @for (action of query.values('auditAction'); track action) {
+            <span class="chip">{{ actionLabel(action) }}</span>
+          }
+          <button
+            class="text-button"
+            (click)="query.clearFilters(['auditSearch', 'auditAction'], 'auditPage')"
+          >
+            Сбросить
+          </button>
         </div>
       }
       @if (error()) {
@@ -66,52 +62,7 @@ import { Empty, Pager, Status } from '../shared/ui';
         </div>
       }
       @if (data(); as page) {
-        @if (page.items.length) {
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Время</th>
-                  <th>Администратор</th>
-                  <th>Объект</th>
-                  <th>Действие</th>
-                  <th>Причина</th>
-                  <th>Результат</th>
-                  <th><span class="sr-only">Подробнее</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                @for (event of page.items; track event.id) {
-                  <tr>
-                    <td class="nowrap">{{ event.createdAt | date: 'dd.MM.yyyy HH:mm' }}</td>
-                    <td>{{ event.actor }}</td>
-                    <td>
-                      <code>{{ event.target }}</code>
-                    </td>
-                    <td>{{ event.action }}</td>
-                    <td class="summary-cell">{{ event.reason || '—' }}</td>
-                    <td><hg-status [value]="event.status" /></td>
-                    <td>
-                      <button
-                        class="icon-button"
-                        aria-label="Подробности изменения"
-                        title="Подробности изменения"
-                        (click)="details(event)"
-                      >
-                        <hg-icon name="chevron-right" />
-                      </button>
-                    </td>
-                  </tr>
-                }
-              </tbody>
-            </table>
-          </div>
-        } @else {
-          <hg-empty
-            title="Записей не найдено"
-            description="Измените поиск или период. Журнал хранится 365 дней."
-          />
-        }
+        <hg-admin-audit-table [items]="page.items" [view]="table" [returnUrl]="returnUrl()" />
         <hg-pager
           [page]="page.page"
           [size]="page.pageSize"
@@ -120,25 +71,26 @@ import { Empty, Pager, Status } from '../shared/ui';
           (sizeChange)="query.set({ auditPageSize: $event, auditPage: null }, false)"
         />
       } @else if (!error()) {
-        <div class="loading" role="status">Загружаем аудит…</div>
+        <div class="loading" role="status">Загружаем журнал…</div>
       }
     </section>
   `,
 })
 export class Audit {
+  readonly actionLabel = adminActionLabel;
   readonly query = inject(QueryState);
+  readonly overview = input(false);
   private readonly api = inject(Api);
   private readonly dialog = inject(Dialog);
+  private readonly router = inject(Router);
   private generation = 0;
+  private nameOwner = '';
   readonly data = signal<Page<z.infer<typeof auditSchema>> | null>(null);
+  readonly userName = signal('');
   readonly error = signal('');
-  readonly filtersOpen = signal(
-    ['auditSearch', 'auditAction', 'auditStatus', 'auditFrom', 'auditTo'].some(
-      (key) => this.query.text(key) !== '',
-    ),
-  );
-  readonly filterKey = computed(() =>
+  private readonly filterKey = computed(() =>
     [
+      'user',
       'auditSearch',
       'auditAction',
       'auditStatus',
@@ -146,6 +98,8 @@ export class Audit {
       'auditTo',
       'auditPage',
       'auditPageSize',
+      'auditSort',
+      'auditDirection',
     ]
       .map((key) => this.query.values(key).join('\u0000'))
       .join('\u0001'),
@@ -160,16 +114,20 @@ export class Audit {
     'STOP_TASK',
     'DRAIN',
     'ENABLE',
-  ].map((id) => ({ id, label: id }));
-  readonly statuses = [
-    { id: 'PENDING', label: 'Ожидается' },
-    { id: 'SUCCEEDED', label: 'Подтверждено' },
-    { id: 'FAILED', label: 'Ошибка' },
-    { id: 'UNKNOWN', label: 'Неизвестно' },
-  ];
+    'PAUSE_ADMISSION',
+    'RESUME_ADMISSION',
+    'PURGE',
+  ].map((value) => ({ value, label: adminActionLabel(value) }));
+  readonly table = inject(TableViews).create(
+    () => 'audit:' + this.query.text('user'),
+    auditColumns,
+    this.query,
+    { sort: 'auditSort', direction: 'auditDirection', page: 'auditPage', size: 'auditPageSize' },
+  );
   constructor() {
     effect(() => {
       this.filterKey();
+      this.overview();
       untracked(() => void this.load());
     });
     inject(LiveEvents)
@@ -180,36 +138,74 @@ export class Audit {
       this.generation++;
     });
   }
+  returnUrl() {
+    return this.router.url;
+  }
   async load() {
     const generation = ++this.generation;
+    const user = this.query.text('user');
     try {
-      const data = await this.api.get('/api/admin/audit', pageSchema(auditSchema), {
-        search: this.query.text('auditSearch'),
-        action: this.query.values('auditAction'),
-        status: this.query.values('auditStatus'),
-        from: this.query.text('auditFrom'),
-        to: this.query.text('auditTo'),
-        page: this.query.number('auditPage', 1),
-        pageSize: this.query.number('auditPageSize', 20),
-      });
-      if (generation === this.generation) {
-        this.data.set(data);
-        this.error.set('');
+      const [data, detail] = await Promise.all([
+        this.api.get('/api/admin/audit', pageSchema(auditSchema), {
+          user,
+          search: this.query.text('auditSearch'),
+          action: this.query.values('auditAction'),
+          status: this.query.values('auditStatus'),
+          from: this.query.text('auditFrom'),
+          to: this.query.text('auditTo'),
+          sort: this.query.text('auditSort', 'createdAt'),
+          direction: this.table.direction('desc'),
+          page: this.query.number('auditPage', 1),
+          pageSize: this.query.number('auditPageSize', 5),
+        }),
+        user && this.nameOwner !== user
+          ? this.api.get('/api/admin/users/' + user, adminDetailSchema)
+          : Promise.resolve(null),
+      ]);
+      if (generation !== this.generation) return;
+      this.data.set(data);
+      this.error.set('');
+      if (detail) {
+        this.userName.set(detail.user.name);
+        this.nameOwner = user;
+      }
+      if (!user) {
+        this.userName.set('');
+        this.nameOwner = '';
       }
     } catch (error: unknown) {
       if (generation === this.generation) this.error.set(errorMessage(error));
     }
   }
-  details(event: z.infer<typeof auditSchema>) {
-    void this.dialog.ask(
-      'Изменение ' + event.action,
-      'Причина: ' +
-        (event.reason ?? '—') +
-        '\n\nДо:\n' +
-        (event.before ?? '—') +
-        '\n\nПосле:\n' +
-        (event.after ?? '—'),
-      'Закрыть',
+  async filters() {
+    const values = await this.dialog.ask('Поиск и фильтры журнала', '', 'Применить', [
+      {
+        key: 'search',
+        label: 'Поиск',
+        placeholder: 'Имя, причина, название узла или ID',
+        value: this.query.text('auditSearch'),
+        max: 300,
+      },
+      {
+        key: 'action',
+        label: 'Действие',
+        type: 'select',
+        value: this.query.text('auditAction'),
+        options: [{ value: '', label: 'Все действия' }, ...this.actions],
+      },
+    ]);
+    if (!values) return;
+    this.dialog.complete(values);
+    this.query.set(
+      {
+        auditSearch: values['search'] || null,
+        auditAction: values['action'] || null,
+        auditStatus: null,
+        auditFrom: null,
+        auditTo: null,
+        auditPage: null,
+      },
+      false,
     );
   }
 }

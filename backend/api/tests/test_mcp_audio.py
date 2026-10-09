@@ -49,7 +49,7 @@ class McpOriginalAudioTest(unittest.TestCase):
                   "instructionRevision": task["instructionRevision"]}
         if task.get("browser"):
             action["controlEpoch"] = task["browser"]["controlEpoch"]
-        error, _, _ = self.client.tool("browser.execute", {"taskId": task_id, "action": action})
+        error, _, _ = self.client.execute_in_scenario_step({"taskId": task_id, "action": action})
         self.assertFalse(error, "MCP browser action must be accepted")
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
@@ -82,7 +82,7 @@ class McpOriginalAudioTest(unittest.TestCase):
         goal = "Preserve original bytes and their assignment; acoustic understanding is not tested here."
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {"title": title, "goal": goal,
-                "startUrl": original_url, "requireConfirmation": False, "prepare": True}})
+                "startUrl": original_url, "prepare": True}})
         self.assertFalse(error)
         task_id = presentation["task"]["id"]
         source_context = {"assignmentId": "synthetic-audio-transport-" + str(uuid.uuid4()),
@@ -161,7 +161,7 @@ class McpOriginalAudioTest(unittest.TestCase):
             status, changed = self.client.api("/api/tasks/" + task_id + "/commands", "POST", {
                 "type": "AMEND", "expectedVersion": task["version"], "title": "Revised current task",
                 "goal": "A later instruction must not rewrite an already saved audio assignment.",
-                "startUrl": original_url, "requireConfirmation": False})
+                "startUrl": original_url})
             self.assertEqual(200, status)
             self.assertGreater(changed["instructionRevision"], revision)
             self.assertEqual(first, read_audio())

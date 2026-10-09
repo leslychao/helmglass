@@ -66,16 +66,19 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertIsNone(reported["continuationRevision"])
         self.assertIsNone(reported["continuationId"])
         self.assertFalse(self.client.tool("widget.claim", attempt)[1]["claimed"])
-        self.command(task, "RESUME", confirmBrowserLoss=True)
-        pending = self.client.tool("widget.state", widget)[1]
-        replacement = {**widget, "continuationId": pending["continuationId"]}
-        self.assertNotEqual(attempt["continuationId"], replacement["continuationId"])
-        self.assertFalse(self.client.tool("widget.claim", attempt)[1]["claimed"])
-        self.assertTrue(self.client.tool("widget.claim", replacement)[1]["claimed"])
-        late = self.client.tool("widget.continuation", {**attempt, "sent": True})[1]
-        self.assertEqual("SENDING", late["continuationStatus"])
-        self.assertEqual(replacement["continuationId"], late["continuationId"])
-        self.assertEqual("MESSAGE_SENT", self.client.tool("widget.continuation", {**replacement, "sent": True})[1]["continuationStatus"])
+        status, refusal = self.client.api("/api/tasks/" + task["id"] + "/commands", "POST", {
+            "type": "RESUME", "expectedVersion": reported["task"]["version"], "confirmBrowserLoss": True})
+        self.assertEqual((409, "ACTION_UNAVAILABLE"), (status, refusal["code"]))
+
+    def test_continuation_revision_and_reply_are_not_replayed(self):
+        self.client.login_mcp()
+        error, presentation, _ = self.client.tool("tasks.create", {
+            "operationKey": str(uuid.uuid4()), "task": {
+                "title": "Continuation revisions", "goal": "Observe only",
+                "startUrl": "https://example.com", "prepare": True}})
+        self.assertFalse(error, presentation)
+        task = presentation["task"]
+        widget = {"taskId": task["id"], "generation": presentation["generation"]}
         self.command(task, "PAUSE")
         amended = self.command(task, "AMEND", title=task["title"], goal="Paused revision",
                                startUrl="https://example.com")
@@ -101,8 +104,7 @@ class TaskContinuationTest(unittest.TestCase):
         self.command(task, "ANSWER", requestId=question["request"]["id"],
                      requestVersion=question["request"]["version"], text="Confirmed current question")
         answered = self.client.tool("widget.state", widget)[1]
-        self.assertEqual("PENDING", answered["continuationStatus"])
-        self.assertNotEqual(fresh["continuationId"], answered["continuationId"])
+        self.assertEqual("ACCEPTED", answered["continuationStatus"])
         publish = {"taskId": task["id"], "operationKey": str(uuid.uuid4()),
                    "instructionRevision": amended["instructionRevision"],
                    "result": {"summary": "A fresh result confirms continuation", "limitations": [],
@@ -112,7 +114,7 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertTrue(error, refusal)
         self.assertEqual("STALE_INSTRUCTION", refusal["code"])
         unchanged = self.client.tool("widget.state", widget)[1]
-        self.assertEqual(("PENDING", answered["continuationId"]),
+        self.assertEqual(("ACCEPTED", answered["continuationId"]),
                          (unchanged["continuationStatus"], unchanged["continuationId"]))
         error, saved, _ = self.client.tool("results.publish", publish)
         self.assertFalse(error, saved)
@@ -134,13 +136,13 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertEqual("SUCCEEDED", finished["status"])
         self.assertEqual("ACCEPTED", self.client.tool("widget.state", widget)[1]["continuationStatus"])
 
-    def test_amend_preserves_work_and_stopped_resume_requires_new_browser_consent(self):
+    def test_amend_preserves_work_and_stopped_task_is_final(self):
         self.client.login_mcp()
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Instruction and continuation acceptance", "goal": "Preserve collected work",
                 "startUrl": "https://example.com/#retained-page", "outputFormat": "TABLE",
-                "prepare": True, "requireConfirmation": False}})
+                "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         path = "/api/tasks/" + task["id"]
@@ -156,14 +158,14 @@ class TaskContinuationTest(unittest.TestCase):
                       "instructionRevision": value["instructionRevision"]}
             if value.get("browser") and value["browser"]["status"] == "LIVE":
                 action["controlEpoch"] = value["browser"]["controlEpoch"]
-            error, receipt, _ = self.client.tool("browser.execute", {"taskId": task["id"], "action": action})
+            error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": action})
             self.assertFalse(error, receipt)
             return action["operationId"]
 
         def amend(goal):
             return self.command(task, "AMEND", title=task["title"], goal=goal,
                                 startUrl="https://example.com/?amended-start=1", outputFormat="TABLE",
-                                requireConfirmation=False, preferredConnectionIds=[])
+                                preferredConnectionIds=[])
 
         screenshot = execute("screenshot", {})
         self.assertEqual("SUCCEEDED", self.wait_operation(screenshot, self.client)["status"])
@@ -222,15 +224,16 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertEqual(("STOPPED", "CLOSED"), (revised["status"], revised["browser"]["status"]))
         status, refusal = self.client.api(path + "/commands", "POST", {
             "type": "RESUME", "expectedVersion": revised["version"]})
-        self.assertEqual((409, "BROWSER_REPLACEMENT_CONSENT"), (status, refusal["code"]))
-        self.command(task, "RESUME", confirmBrowserLoss=True)
-        observed = self.wait_operation(execute("observe", {}), self.client)
-        self.assertEqual("SUCCEEDED", observed["status"], observed.get("errorCode"))
-        self.assertIn("?amended-start=1", observed["result"]["url"])
-        resumed = current()
-        self.assertEqual(task["id"], resumed["id"])
-        self.assertNotEqual(browser, resumed["browser"]["id"])
-        self.assertEqual(saved["result"], resumed["result"])
+        self.assertEqual((409, "ACTION_UNAVAILABLE"), (status, refusal["code"]))
+        status, refusal = self.client.api(path + "/commands", "POST", {
+            "type": "RESUME", "expectedVersion": revised["version"], "confirmBrowserLoss": True})
+        self.assertEqual((409, "ACTION_UNAVAILABLE"), (status, refusal["code"]))
+        error, refusal, _ = self.client.tool("tasks.command", {"taskId": task["id"],
+            "operationKey": str(uuid.uuid4()), "command": {"type": "RESUME",
+            "expectedVersion": revised["version"], "confirmBrowserLoss": True}})
+        self.assertTrue(error)
+        self.assertEqual("ACTION_UNAVAILABLE", refusal["code"])
+        self.assertEqual(saved["result"], current()["result"])
         self.assertEqual(rows, self.client.api(path + "/result/rows")[1])
         self.assertEqual(files, self.client.api(path + "/artifacts")[1])
         status, retained, _ = self.client.request(self.client.base + artifact["downloadUrl"])
@@ -238,18 +241,68 @@ class TaskContinuationTest(unittest.TestCase):
         retained_history = self.client.api(path + "/history?beforeSequence=" + str(history_cutoff))[1]
         self.assertEqual(history, retained_history)
 
+    def test_partial_result_retains_browser_for_resume_and_explicit_stop(self):
+        self.client.login_mcp()
+        error, presentation, _ = self.client.tool("tasks.create", {
+            "operationKey": str(uuid.uuid4()), "task": {
+                "title": "Retained partial result browser", "goal": "Observe only",
+                "startUrl": "https://example.com", "prepare": True}})
+        self.assertFalse(error, presentation)
+        task = presentation["task"]
+        path = "/api/tasks/" + task["id"]
+
+        def observe():
+            current = self.client.api(path)[1]
+            action = {"operationId": str(uuid.uuid4()), "type": "observe", "arguments": {},
+                      "instructionRevision": current["instructionRevision"]}
+            if current.get("browser"):
+                action["controlEpoch"] = current["browser"]["controlEpoch"]
+            error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": action})
+            self.assertFalse(error, receipt)
+            return self.wait_operation(action["operationId"], self.client)
+
+        initial_observation = observe()
+        self.assertEqual("SUCCEEDED", initial_observation["status"])
+        browser_id = self.client.api(path)[1]["browser"]["id"]
+        for outcome in ("PARTIAL", "NOT_ACHIEVED"):
+            with self.subTest(outcome=outcome):
+                self.client.complete_scenario_step(task["id"], initial_observation["id"], "PARTIAL")
+                finished = self.command(task, "FINISH", outcome=outcome, text="Retained result")
+                self.assertEqual(outcome, finished["status"])
+                self.assertIn("STOP", finished["allowedCommands"])
+                self.assertEqual("f", self.fixture_sql(self.identity,
+                    "SELECT close_requested FROM browser_sessions WHERE owner_id=:owner AND id='"
+                    + str(uuid.UUID(browser_id)) + "';"))
+                time.sleep(4)
+                retained = self.client.api(path)[1]
+                self.assertEqual((browser_id, "LIVE"), (retained["browser"]["id"], retained["browser"]["status"]))
+                if outcome == "PARTIAL":
+                    resumed = self.command(task, "RESUME")
+                    self.assertEqual(browser_id, resumed["browser"]["id"])
+                    result = observe()
+                    self.assertEqual("SUCCEEDED", result["status"])
+                    self.assertEqual(initial_observation["result"]["url"], result["result"]["url"])
+        self.command(task, "STOP")
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            stopped = self.client.api(path)[1]
+            if stopped["status"] == "STOPPED":
+                break
+            time.sleep(.2)
+        self.assertEqual(("STOPPED", "CLOSED"), (stopped["status"], stopped["browser"]["status"]))
+        self.assertEqual("Retained result", stopped["summary"])
+
     def test_amend_unknown_result_preserves_pause_and_stop(self):
         self.client.login_mcp()
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Uncertain amendment acceptance", "goal": "Preserve an explicit stop",
-                "startUrl": "https://example.com", "prepare": True,
-                "requireConfirmation": False}})
+                "startUrl": "https://example.com", "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         path = "/api/tasks/" + task["id"]
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.tool("browser.execute", {
+        error, receipt, _ = self.client.execute_in_scenario_step({
             "taskId": task["id"], "action": {
                 "operationId": operation, "type": "click",
                 "arguments": {"selector": "[data-amend-unknown-never-present]"},

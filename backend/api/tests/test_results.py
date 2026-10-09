@@ -28,6 +28,9 @@ class ResultContractTest(unittest.TestCase):
         cls.foreign.login_web()
         cls.user.login_mcp()
 
+    def setUp(self):
+        self.user.chat = "helm-dev-" + str(uuid.uuid4())
+
     def stop_task(self, task_id):
         for _ in range(5):
             status, latest = self.user.api("/api/tasks/" + task_id)
@@ -93,8 +96,14 @@ process.stdout.write(result.outputFiles[0].text);
             result = {"summary": "Twelve verified contract rows", "limitations": ["Synthetic acceptance data"],
                       "sources": [{"title": "Public source", "url": "https://example.com"}],
                       "columns": [{"key": "ordinal", "label": "Number", "type": "number"},
-                                  {"key": "caption", "label": "Text", "type": "string"}]}
+                                  {"key": "caption", "label": "Text", "type": "string"},
+                                  {"key": "measured", "label": "Optional number", "type": "number"},
+                                  {"key": "day", "label": "Date", "type": "date"}]}
             rows = [{"ordinal": index, "caption": "Row " + str(index)} for index in range(1, 13)]
+            for index, value in enumerate([None, 10, 2, 10, 0, -1, None, 100, 3, 20, 4, 8]):
+                rows[index]['day'] = f'2026-07-{12-index:02}'
+                if index != 6:
+                    rows[index]['measured'] = value
             publish = {"taskId": task_id, "instructionRevision": task["instructionRevision"],
                        "operationKey": str(uuid.uuid4()), "result": result, "rows": rows}
             error, saved, _ = self.user.tool("results.publish", publish)
@@ -136,6 +145,21 @@ process.stdout.write(result.outputFiles[0].text);
             status, reverse = self.user.api(path + "?pageSize=10&sort=ordinal&direction=desc")
             self.assertEqual(200, status)
             self.assertEqual(list(range(12, 2, -1)), [item["cells"]["ordinal"] for item in reverse["items"]])
+            for direction, expected in [
+                ('asc', [6, 5, 3, 9, 11, 12, 2, 4, 10, 8, 1, 7]),
+                ('desc', [8, 10, 2, 4, 12, 11, 9, 3, 5, 6, 1, 7]),
+            ]:
+                actual = []
+                for number in [1, 2, 3]:
+                    status, page = self.user.api(path + '?' + urlencode({
+                        'page': number, 'pageSize': 5, 'sort': 'measured', 'direction': direction}))
+                    self.assertEqual(200, status, page)
+                    self.assertEqual(12, page['total'])
+                    actual.extend(row['cells']['ordinal'] for row in page['items'])
+                self.assertEqual(expected, actual, 'Numbers, stable ties, JSON null and absent cells across pages')
+            dated = self.user.api(path + '?pageSize=25&sort=day&direction=asc')[1]
+            self.assertEqual(25, dated['pageSize'])
+            self.assertEqual(list(range(12, 0, -1)), [row['cells']['ordinal'] for row in dated['items']])
             self.assertEqual(404, self.foreign.api(path)[0])
             status, found = self.user.api(path + "?search=Row%2012")
             self.assertEqual(200, status)
@@ -205,14 +229,14 @@ process.stdout.write(result.outputFiles[0].text);
         error, presentation, _ = self.user.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {"title": "Continuation receipt contract",
             "goal": "Observe a public page without external changes", "startUrl": "https://example.org",
-            "requireConfirmation": False, "prepare": True}})
+            "prepare": True}})
         self.assertFalse(error)
         task_id = presentation["task"]["id"]
         widget = {"taskId": task_id, "generation": presentation["generation"]}
         original = {"operationId": str(uuid.uuid4()), "type": "observe", "arguments": {},
                     "instructionRevision": presentation["task"]["instructionRevision"]}
         try:
-            self.assertFalse(self.user.tool("browser.execute", {"taskId": task_id, "action": original})[0])
+            self.assertFalse(self.user.execute_in_scenario_step({"taskId": task_id, "action": original})[0])
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 error, receipt, _ = self.user.tool("operations.get", {"operationId": original["operationId"]})
@@ -227,7 +251,7 @@ process.stdout.write(result.outputFiles[0].text);
                                          {"type": command, "expectedVersion": task["version"]})
                 self.assertEqual(200, status)
             self.assertEqual("PENDING", self.user.tool("widget.state", widget)[1]["continuationStatus"])
-            self.assertFalse(self.user.tool("browser.execute", {"taskId": task_id, "action": original})[0])
+            self.assertFalse(self.user.execute_in_scenario_step({"taskId": task_id, "action": original})[0])
             self.assertEqual("PENDING", self.user.tool("widget.state", widget)[1]["continuationStatus"],
                              "Re-reading a completed operation must not claim a new step was accepted")
             pending = self.user.tool("widget.state", widget)[1]
@@ -240,7 +264,7 @@ process.stdout.write(result.outputFiles[0].text);
             current = self.user.api("/api/tasks/" + task_id)[1]
             next_action = {**original, "operationId": str(uuid.uuid4()),
                            "controlEpoch": current["browser"]["controlEpoch"]}
-            self.assertFalse(self.user.tool("browser.execute", {"taskId": task_id, "action": next_action})[0])
+            self.assertFalse(self.user.execute_in_scenario_step({"taskId": task_id, "action": next_action})[0])
             self.assertEqual("ACCEPTED", self.user.tool("widget.state", widget)[1]["continuationStatus"])
         finally:
             self.stop_task(task_id)

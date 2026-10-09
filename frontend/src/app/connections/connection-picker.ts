@@ -14,10 +14,11 @@ import { Connection, Page, connectionSchema, pageSchema } from '../core/models';
 import { Pager, Status } from '../shared/ui';
 import { SearchInput } from '../shared/search-input';
 import { Icon } from '../shared/icon';
+import { Tooltip } from '../shared/tooltip';
 
 @Component({
   selector: 'hg-connection-picker',
-  imports: [A11yModule, Icon, Pager, Status, SearchInput],
+  imports: [A11yModule, Icon, Pager, Status, SearchInput, Tooltip],
   template: ` <button
       type="button"
       class="button"
@@ -46,7 +47,7 @@ import { Icon } from '../shared/icon';
               type="button"
               class="icon-button"
               aria-label="Закрыть"
-              title="Закрыть"
+              hgTooltip="Закрыть"
               (click)="close()"
             >
               <hg-icon name="close" />

@@ -94,6 +94,8 @@ paths:
     get:
       operationId: tasks
       parameters:
+        - $ref: "#/components/parameters/TaskIdFilter"
+        - $ref: "#/components/parameters/Suggestions"
         - $ref: "#/components/parameters/Search"
         - $ref: "#/components/parameters/Status"
         - $ref: "#/components/parameters/Site"
@@ -158,6 +160,7 @@ paths:
         "500":
           $ref: "#/components/responses/ApplicationError"
       parameters:
+        - $ref: "#/components/parameters/TaskIdFilter"
         - $ref: "#/components/parameters/Search"
         - $ref: "#/components/parameters/Site"
         - $ref: "#/components/parameters/Source"
@@ -217,7 +220,7 @@ paths:
               $ref: "#/components/schemas/TaskCommand"
       responses:
         "200":
-          description: Updated Task; COPY returns a new draft.
+          description: Updated Task.
           content:
             application/json:
               schema:
@@ -229,6 +232,29 @@ paths:
         "409":
           $ref: "#/components/responses/ApplicationError"
         "500":
+          $ref: "#/components/responses/ApplicationError"
+  /tasks/{id}/steps:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      operationId: taskSteps
+      description: Durable business steps, newest declared first. Updates preserve identity and order. Page size is 10; beforeSequence fixes the viewed window, not step versions. Technical history is separate.
+      parameters:
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Page"
+        - name: beforeSequence
+          in: query
+          schema: {type: integer, format: int64, minimum: 1}
+      responses:
+        "200":
+          description: Registered business steps matching this query; total is not an estimated workload.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStepPage"
+        "400":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
           $ref: "#/components/responses/ApplicationError"
   /tasks/{id}/history:
     parameters:
@@ -473,7 +499,8 @@ paths:
                   maxLength: 500
               description:
                 Omitted or null action defaults to START. START uses the tab-specific viewerId. SAVE
-                requires viewerId and verified accountLabel/accountSubject. CLOSE terminates the
+                requires viewerId and user-declared accountLabel/accountSubject. This legacy save also
+                returns control; the v14 interface uses the independent browser login endpoint. CLOSE terminates the
                 standalone browser.
         required: true
       responses:
@@ -490,6 +517,84 @@ paths:
         "409":
           $ref: "#/components/responses/ApplicationError"
         "500":
+          $ref: "#/components/responses/ApplicationError"
+  /browser-sessions/{id}/credentials:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      operationId: credentialMetadata
+      description: WEB owner and current private controller only.
+      parameters:
+        - name: viewerId
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Safe metadata only; never returns username, password or browser state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialMetadata"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+    post:
+      operationId: setCredentialCapture
+      description: Explicit consent for the current private controller and exact HTTPS origin. Captures only an unambiguous login submitted in the protected browser. Never receives credentials from Helmglass frontend; persistence occurs with Save login.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CredentialCaptureInput"
+      responses:
+        "200":
+          description: Safe metadata only; never returns username, password or browser state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialMetadata"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+    delete:
+      operationId: deleteCredentials
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [viewerId, expectedRevision]
+              properties:
+                viewerId:
+                  type: string
+                  format: uuid
+                expectedRevision:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  maximum: 9007199254740991
+      responses:
+        "200":
+          description: Safe metadata only; never returns username, password or browser state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CredentialMetadata"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
           $ref: "#/components/responses/ApplicationError"
   /browser-sessions/{id}/ticket:
     parameters:
@@ -552,6 +657,8 @@ paths:
                     - RETURN
                     - BEGIN_LOGIN
                     - FINISH_LOGIN
+                    - CONFIRM_LOGIN
+                    - SAVE_SESSION
                 viewerId:
                   type: string
                   format: uuid
@@ -566,6 +673,10 @@ paths:
                   type: string
                 accountSubject:
                   type: string
+                controlEpoch:
+                  type: integer
+                  format: int64
+                  description: Optional for legacy commands; CONFIRM_LOGIN and SAVE_SESSION require the current epoch. SAVE_SESSION additionally requires saveConnection=true and a valid owned connectionId.
         required: true
       responses:
         "200":
@@ -581,6 +692,62 @@ paths:
         "409":
           $ref: "#/components/responses/ApplicationError"
         "500":
+          $ref: "#/components/responses/ApplicationError"
+  /browser-sessions/{id}/login:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      operationId: browserSessionLogin
+      description: >-
+        CONFIRM_LOGIN records the current private controller's declaration that login is complete;
+        it does not verify external authorization. SAVE_SESSION requires that declaration and
+        persists the canonical owned connection (creating the task's connection if needed).
+        A saved account subject cannot be replaced. Saving keeps the same browser, private USER
+        control, task pause and pending request. It neither closes the browser nor transfers control.
+        The durable intent remains TRANSFERRING until confirmed; loginConfirmed becomes false only
+        after successful persistence and control acknowledgement. An identical Idempotency-Key
+        returns the original receipt; read current browser state to observe completion.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, viewerId, controlEpoch]
+              properties:
+                type:
+                  type: string
+                  enum: [CONFIRM_LOGIN, SAVE_SESSION]
+                viewerId:
+                  type: string
+                  format: uuid
+                controlEpoch:
+                  type: integer
+                  format: int64
+                accountLabel:
+                  type: string
+                  maxLength: 300
+                  description: Optional account label. Omission preserves existing metadata; a first save needs no account fields.
+                accountSubject:
+                  type: string
+                  maxLength: 500
+                  description: Optional user-declared expected external account. Omission preserves existing metadata and does not claim a verified identity.
+      responses:
+        "200":
+          description: Browser with confirmed login marker or durable pending save intent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Browser"
+        "400":
+          $ref: "#/components/responses/ApplicationError"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
           $ref: "#/components/responses/ApplicationError"
   /artifacts/{id}/download:
     parameters:
@@ -680,8 +847,11 @@ paths:
           schema:
             type: integer
             enum:
+              - 3
+              - 5
               - 10
               - 20
+              - 25
               - 50
             default: 10
         - in: query
@@ -698,6 +868,16 @@ paths:
             minimum: 1
             default: 1
             maximum: 1000000
+        - name: sitesPageSize
+          in: query
+          description: Independent site table size. When omitted, uses pageSize for existing clients.
+          schema: {type: integer, enum: [3, 5, 10, 20, 25, 50]}
+        - name: sitesSort
+          in: query
+          schema: {type: string, enum: [site, tasks, browserSeconds, mediaSeconds, mediaBytes], default: site}
+        - name: sitesDirection
+          in: query
+          schema: {type: string, enum: [asc, desc], default: asc}
       responses:
         "200":
           description:
@@ -835,8 +1015,11 @@ paths:
           schema:
             type: integer
             enum:
+              - 3
+              - 5
               - 10
               - 20
+              - 25
               - 50
             default: 20
         - name: auditPageSize
@@ -844,10 +1027,37 @@ paths:
           schema:
             type: integer
             enum:
+              - 3
+              - 5
               - 10
               - 20
+              - 25
               - 50
             default: 20
+        - name: taskSort
+          in: query
+          schema: {type: string, enum: [id, status, browserId, reason, createdAt], default: createdAt}
+        - name: taskDirection
+          in: query
+          schema: {type: string, enum: [asc, desc], default: desc}
+        - name: auditSort
+          in: query
+          schema: {type: string, enum: [createdAt, actor, target, action, reason], default: createdAt}
+        - name: auditDirection
+          in: query
+          schema: {type: string, enum: [asc, desc], default: desc}
+        - name: usagePage
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 1000000, default: 1}
+        - name: usagePageSize
+          in: query
+          schema: {type: integer, enum: [3, 5, 10, 20, 25, 50], default: 5}
+        - name: usageSort
+          in: query
+          schema: {type: string, enum: [date, commands, browserSeconds], default: date}
+        - name: usageDirection
+          in: query
+          schema: {type: string, enum: [asc, desc], default: asc}
       responses:
         "200":
           description:
@@ -930,9 +1140,134 @@ paths:
           $ref: "#/components/responses/ApplicationError"
         "500":
           $ref: "#/components/responses/ApplicationError"
+  /admin/users/{id}/tasks/{task}/stop:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+      - name: task
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    post:
+      operationId: adminStopTask
+      description: Stops the specified user's accepted task, including one without a browser. Resolves owner and task together. Does not stop future work or delete drafts. No reason field is required.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Stop accepted; STOPPING and PENDING audit remain until actual browser closure is confirmed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopReceipt"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+  /admin/admission:
+    get:
+      operationId: adminAdmission
+      description: Administrator-only scheduler state; administrative pause and technical deployment drain are independent.
+      responses:
+        "200":
+          description: New assignment requires both paused=false and deploymentDrain=false, as well as the existing capacity and node rules.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdmissionState"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+  /admin/admission/commands:
+    post:
+      operationId: adminAdmissionCommand
+      description: Changes only the administrative pause. Running browsers remain active. A deployment never clears this flag; RESUME never clears the deployment drain. Emits administrative audit and existing SSE updates.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, reason, expectedVersion]
+              properties:
+                type: {type: string, enum: [PAUSE, RESUME]}
+                reason: {type: string, minLength: 1, maxLength: 1000}
+                expectedVersion: {type: integer, format: int64}
+      responses:
+        "200":
+          description: Confirmed administrative admission state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdmissionState"
+        "400":
+          $ref: "#/components/responses/ApplicationError"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+  /admin/nodes/page:
+    get:
+      operationId: adminNodePage
+      description: Administrator-only node list with server filtering and sorting before pagination. Search matches node name or ID. Nested browsers are loaded separately; items contain an empty browsers array.
+      parameters:
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+        - $ref: "#/components/parameters/Sort"
+        - $ref: "#/components/parameters/Direction"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Node page; sort keys name (default), status, occupied. Unknown occupied remains null.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Node"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+  /admin/nodes/{id}/browsers:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      operationId: adminNodeBrowsers
+      description: Administrator-only occupied browsers of one existing node. CLOSED and QUEUED are excluded. Contains service metadata, never private titles, URLs or browser content.
+      parameters:
+        - $ref: "#/components/parameters/Sort"
+        - $ref: "#/components/parameters/Direction"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Server-sorted browser page; sort keys id (default), ownerName, status (task state when bound).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/AdminBrowser"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
   /admin/nodes:
     get:
       operationId: adminNodes
+      description: Existing unpaged route is retained for compatible callers; the administration interface uses /admin/nodes/page and node browser pages.
       responses:
         "200":
           description: "[{id,name,status,occupied,capacity,browsers:[{id,taskId,ownerId,ownerName,status}]}]"
@@ -973,6 +1308,10 @@ paths:
                   type: string
                   minLength: 1
                   maxLength: 1000
+                expectedVersion:
+                  type: integer
+                  format: int64
+                  description: Supplied by the interface; stale versions are rejected. Omission remains supported for existing external callers.
         required: true
       responses:
         "200":
@@ -1014,6 +1353,7 @@ paths:
   /admin/audit:
     get:
       operationId: adminAudit
+      description: Search includes displayed actor/user/node names and email as well as IDs, action and reason. Sort keys createdAt (default), actor, target, action, reason are applied before pagination. The v14 filter dialog exposes search and action; existing status and date parameters remain supported.
       responses:
         "200":
           description: Page<{id,actor,target,action,reason,before,after,status,createdAt}>; 365-day retention.
@@ -1028,6 +1368,8 @@ paths:
         "500":
           $ref: "#/components/responses/ApplicationError"
       parameters:
+        - $ref: "#/components/parameters/Sort"
+        - $ref: "#/components/parameters/Direction"
         - name: action
           in: query
           description: Filter by one or more administrative actions; repeated or comma-separated values.
@@ -1046,6 +1388,7 @@ paths:
         - $ref: "#/components/parameters/PageSize"
         - name: user
           in: query
+          description: Restricts the journal to the affected owner, including task actions; does not select unrelated actions merely authored by that administrator.
           schema:
             type: string
             format: uuid
@@ -1053,6 +1396,7 @@ paths:
     get:
       operationId: connectionSites
       parameters:
+        - $ref: "#/components/parameters/Suggestions"
         - $ref: "#/components/parameters/Search"
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1073,6 +1417,7 @@ paths:
     get:
       operationId: taskSites
       parameters:
+        - $ref: "#/components/parameters/Suggestions"
         - $ref: "#/components/parameters/Search"
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -1277,8 +1622,13 @@ components:
       schema:
         type: string
       description:
-        Resource-specific sort key. Task list defaults to updatedAt, connections to updatedAt,
-        and admin users to lastAccessAt; unsupported keys use that resource default.
+        Resource-specific key, applied before pagination with a stable ID tie-breaker and nulls last
+        in both directions. Tasks support title, site, source, status, createdAt, updatedAt, summary,
+        executionSeconds, manualSeconds, mediaSeconds and mediaBytes (default updatedAt).
+        Connections support name, site, status, lastUsedAt and updatedAt (default updatedAt).
+        Users support name, email, status, browserCount, waitingCount and lastAccessAt (default lastAccessAt).
+        Unsupported keys use the resource default. Omitting the key means no user-selected sort;
+        the resource still uses its default order. The web UI explicitly requests 5 rows by default.
     Direction:
       name: direction
       in: query
@@ -1296,14 +1646,27 @@ components:
         minimum: 1
         default: 1
         maximum: 1000000
+    TaskIdFilter:
+      name: taskId
+      in: query
+      schema: {type: string, format: uuid}
+      description: Exact owned task selection. Overrides search text while preserving site, source and date filters (and status in the list). The same selection applies to task KPI. A foreign task yields an empty result, not its data.
+    Suggestions:
+      name: suggestions
+      in: query
+      schema: {type: boolean, default: false}
+      description: Forces page=1 and pageSize=3 for owner-scoped autocomplete suggestions; total still counts all matches. Sites are ordered by latest resource update and then site. Refine search to find remaining values.
     PageSize:
       name: pageSize
       in: query
       schema:
         type: integer
         enum:
+          - 3
+          - 5
           - 10
           - 20
+          - 25
           - 50
         default: 20
   schemas:
@@ -1326,6 +1689,8 @@ components:
         pageSize:
           type: integer
           enum:
+            - 3
+            - 5
             - 10
             - 20
             - 50
@@ -1389,9 +1754,6 @@ components:
             - REPORT
             - TEXT
           default: TABLE
-        requireConfirmation:
-          type: boolean
-          default: true
         preferredConnectionIds:
           type: array
           maxItems: 50
@@ -1422,6 +1784,47 @@ components:
               startUrl:
                 type: string
                 minLength: 1
+    CredentialMetadata:
+      type: object
+      additionalProperties: false
+      required: [available, revision, origin, currentOrigin, captureEnabled, captureRevision, captureStatus, captureOrigin]
+      properties:
+        available:
+          type: boolean
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+        origin:
+          type: [string, "null"]
+        currentOrigin:
+          type: [string, "null"]
+        captureEnabled:
+          type: boolean
+        captureRevision:
+          type: integer
+          minimum: 0
+        captureStatus:
+          type: string
+          enum: [DISABLED, ARMED, CAPTURED, UNSUPPORTED]
+        captureOrigin:
+          type: [string, "null"]
+          description: The exact origin authorized by the user; redirects never extend consent.
+    CredentialCaptureInput:
+      type: object
+      additionalProperties: false
+      required: [viewerId, enabled, expectedCaptureRevision]
+      properties:
+        viewerId:
+          type: string
+          format: uuid
+        enabled:
+          type: boolean
+        expectedCaptureRevision:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9007199254740991
     TaskCommand:
       type: object
       required:
@@ -1447,9 +1850,6 @@ components:
             - REPORT
             - TEXT
           default: TABLE
-        requireConfirmation:
-          type: boolean
-          default: true
         preferredConnectionIds:
           type: array
           maxItems: 50
@@ -1495,11 +1895,11 @@ components:
             - PARTIAL
             - NOT_ACHIEVED
       description:
-        expectedVersion is the observed Task version. Request responses require the current
-        requestId/requestVersion. CHOOSE_CONNECTION requires connectionId validated against the
-        persisted request scope. FINISH requires outcome and nonblank text. UNKNOWN_RESULT
-        confirmation/rejection requires evidence text of at most 4000 characters. Browser control
-        commands use the tab-specific viewerId. A stopped/closed/lost browser requires explicit
+        expectedVersion is the observed Task version. AMEND is accepted from the cabinet only
+        for DRAFT. Human responses are accepted solely via native MCP elicitation tasks.respond;
+        ANSWER, CONFIRM, REJECT and CHOOSE_CONNECTION from WEB or model arguments are rejected.
+        Browser control commands use the tab-specific viewerId. FINISH_LOGIN saves state, not
+        proof of external authentication. A stopped/closed/lost browser requires explicit
         confirmBrowserLoss before RESUME.
     Task:
       type: object
@@ -1512,7 +1912,7 @@ components:
         - startUrl
         - site
         - outputFormat
-        - requireConfirmation
+        - chatBound
         - preferredConnectionIds
         - source
         - status
@@ -1520,6 +1920,7 @@ components:
         - waitReason
         - summary
         - request
+        - lastResponse
         - browser
         - result
         - usage
@@ -1556,7 +1957,7 @@ components:
             - TABLE
             - REPORT
             - TEXT
-        requireConfirmation:
+        chatBound:
           type: boolean
         preferredConnectionIds:
           type: array
@@ -1584,10 +1985,15 @@ components:
             - string
             - "null"
         summary:
-          type: string
+          type: [string, "null"]
         request:
           anyOf:
             - $ref: "#/components/schemas/InteractionRequest"
+            - type: "null"
+        lastResponse:
+          description: Latest accepted user response for the current instruction revision. Null after amendment; historical decisions without a recorded revision are not inferred.
+          anyOf:
+            - $ref: "#/components/schemas/InteractionResponse"
             - type: "null"
         browser:
           anyOf:
@@ -1619,6 +2025,10 @@ components:
           type: string
         message:
           type: string
+        currentTaskId:
+          type: string
+          format: uuid
+          description: Current unfinished task when code is CHAT_TASK_IN_PROGRESS.
         fieldErrors:
           type: object
           additionalProperties:
@@ -1639,6 +2049,7 @@ components:
         - version
         - options
         - operationId
+        - instructionRevision
       properties:
         id:
           type: string
@@ -1675,9 +2086,51 @@ components:
             - string
             - "null"
           format: uuid
+        instructionRevision:
+          type: integer
+          format: int64
+          minimum: 0
+    InteractionResponse:
+      type: object
+      required: [requestId, requestVersion, instructionRevision, type, prompt, operationId, command, text, connectionId, answeredAt]
+      properties:
+        requestId:
+          type: string
+          format: uuid
+        requestVersion:
+          type: integer
+          format: int64
+          minimum: 1
+        instructionRevision:
+          type: integer
+          format: int64
+          minimum: 1
+        type:
+          type: string
+          enum: [QUESTION, CONFIRMATION, ACCOUNT_CHOICE, UNKNOWN_RESULT]
+        prompt:
+          type: string
+        operationId:
+          type: [string, "null"]
+          format: uuid
+        command:
+          type: string
+          enum: [ANSWER, CONFIRM, REJECT, CHOOSE_CONNECTION]
+        text:
+          type: [string, "null"]
+        connectionId:
+          type: [string, "null"]
+          format: uuid
+        answeredAt:
+          type: string
+          format: date-time
     Browser:
       type: object
       required:
+        - taskId
+        - connectionId
+        - loginConfirmed
+        - profileSaveError
         - id
         - nodeId
         - status
@@ -1689,6 +2142,20 @@ components:
         - canControl
         - version
       properties:
+        taskId:
+          type: [string, "null"]
+          format: uuid
+          description: Associated task. Task and connection pages use this same live browser.
+        connectionId:
+          type: [string, "null"]
+          format: uuid
+          description: Canonical saved-connection destination, if already associated.
+        loginConfirmed:
+          type: boolean
+          description: Server-persisted user declaration of a completed unsaved login. Cleared only after confirmed save; never an automatic external-authorization verdict.
+        profileSaveError:
+          type: [string, "null"]
+          description: Safe failure of persisting this browser's selected connection.
         id:
           type: string
           format: uuid
@@ -1768,7 +2235,25 @@ components:
         updatedAt:
           type: string
           format: date-time
+        profileRevision:
+          type: integer
+          format: int64
+          minimum: 0
+        profileSavedAt:
+          type: [string, "null"]
+          format: date-time
+        profileSaveError:
+          type: [string, "null"]
+        authorizedOrigins:
+          type: array
+          items:
+            type: string
+            format: uri
       required:
+        - profileRevision
+        - profileSavedAt
+        - profileSaveError
+        - authorizedOrigins
         - id
         - version
         - name
@@ -1915,6 +2400,11 @@ components:
         - completedTasks
         - successRate
         - usage
+        - commands
+        - from
+        - to
+        - days
+        - incompleteDays
       properties:
         totalTasks:
           type: integer
@@ -1936,6 +2426,53 @@ components:
           maximum: 1
         usage:
           $ref: "#/components/schemas/Usage"
+        commands:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Unique persisted browser operations by creation time in the seven local calendar days; includes commands awaiting confirmation, never counts idempotent retries twice.
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        incompleteDays:
+          type: integer
+          minimum: 0
+          maximum: 7
+          description: Count across all seven days, independent of the selected page.
+        days:
+          $ref: "#/components/schemas/AdminUsageDayPage"
+    AdminUsageDayPage:
+      allOf:
+        - $ref: "#/components/schemas/Page"
+        - type: object
+          properties:
+            total: {type: integer, const: 7}
+            items:
+              type: array
+              maxItems: 7
+              items:
+                $ref: "#/components/schemas/AdminUsageDay"
+    AdminUsageDay:
+      type: object
+      additionalProperties: false
+      required: [date, commands, browserSeconds, incomplete]
+      properties:
+        date:
+          type: string
+          format: date
+        commands:
+          type: integer
+          format: int64
+          minimum: 0
+        browserSeconds:
+          type: [number, "null"]
+          minimum: 0
+          description: Browser intervals clipped to this local day, including standalone login sessions.
+        incomplete:
+          type: boolean
     AdminUsersSummary:
       type: object
       additionalProperties: false
@@ -2024,6 +2561,15 @@ components:
     Audit:
       type: object
       properties:
+        actorName:
+          type: string
+          description: Display name of the administrator, or system label when not an account.
+        targetName:
+          type: string
+          description: User or node display name, platform label, or task ID label without private task title.
+        targetType:
+          type: string
+          enum: [USER, NODE, TASK, PLATFORM]
         id:
           type: string
           format: uuid
@@ -2031,13 +2577,11 @@ components:
           type: string
           format: date-time
         actor:
-          type:
-            - string
-            - "null"
+          type: string
+          format: uuid
         target:
-          type:
-            - string
-            - "null"
+          type: string
+          format: uuid
         action:
           type: string
         reason:
@@ -2057,6 +2601,9 @@ components:
         status:
           type: string
       required:
+        - actorName
+        - targetName
+        - targetType
         - id
         - createdAt
         - actor
@@ -2174,12 +2721,6 @@ components:
         - PAUSE
         - RESUME
         - STOP
-        - END_SESSION
-        - COPY
-        - ANSWER
-        - CONFIRM
-        - REJECT
-        - CHOOSE_CONNECTION
         - BEGIN_LOGIN
         - FINISH_LOGIN
         - TAKE_CONTROL
@@ -2408,8 +2949,18 @@ components:
           $ref: "#/components/schemas/AuditPage"
       description:
         Service metadata only. tasks covers the most recent 50 tasks and total is capped at 50.
-        operations contains at most 50 unfinished jobs. usage is aggregate-only, with no sites, days
-        or private task content.
+        operations contains at most 50 unfinished jobs. usage includes totals and seven local
+        calendar-day measurements, but no sites or private task content.
+    AdmissionState:
+      type: object
+      required: [paused, deploymentDrain, version]
+      properties:
+        paused: {type: boolean}
+        deploymentDrain: {type: boolean}
+        version:
+          type: integer
+          format: int64
+          description: Version of the administrative pause only; technical drain does not change it.
     AdminBrowser:
       type: object
       required:
@@ -2417,6 +2968,8 @@ components:
         - taskId
         - ownerId
         - ownerName
+        - ownerEmail
+        - taskStatus
         - status
       properties:
         id:
@@ -2432,6 +2985,11 @@ components:
           format: uuid
         ownerName:
           type: string
+        ownerEmail:
+          type: string
+        taskStatus:
+          type: [string, "null"]
+          description: Associated task state; absent for standalone connection browsers.
         status:
           $ref: "#/components/schemas/BrowserStatus"
     Node:
@@ -2534,6 +3092,81 @@ components:
         createdAt:
           type: string
           format: date-time
+    TaskStep:
+      type: object
+      required: [id, taskId, sequence, operationKey, objectKey, title, completionCriterion, status, version, result, evidence, createdAt, updatedAt, startedAt, completedAt]
+      properties:
+        id: {type: string, format: uuid}
+        taskId: {type: string, format: uuid}
+        sequence: {type: integer, format: int64}
+        operationKey: {type: string, maxLength: 128}
+        objectKey: {type: string, maxLength: 500}
+        title: {type: string, maxLength: 300}
+        completionCriterion: {type: string, maxLength: 2000}
+        status:
+          type: string
+          enum: [PLANNED, RUNNING, WAITING, SUCCEEDED, PARTIAL, FAILED, UNKNOWN, SKIPPED]
+        version: {type: integer, format: int64}
+        result: {type: [string, "null"], maxLength: 4000}
+        evidence:
+          type: array
+          description: References belong to this task and must be ready. Total serialized evidence is limited to 65536 characters.
+          maxItems: 20
+          items:
+            oneOf:
+              - type: object
+                required: [type, operationId]
+                additionalProperties: false
+                properties:
+                  type: {type: string, const: OPERATION}
+                  operationId: {type: string, format: uuid}
+                  artifactId: {type: "null"}
+                  text: {type: "null"}
+                  sources: {type: "null"}
+              - type: object
+                required: [type, artifactId]
+                additionalProperties: false
+                properties:
+                  type: {type: string, const: ARTIFACT}
+                  artifactId: {type: string, format: uuid}
+                  operationId: {type: "null"}
+                  text: {type: "null"}
+                  sources: {type: "null"}
+              - type: object
+                required: [type, text, sources]
+                additionalProperties: false
+                description: Attributed ChatGPT result, not independent server verification.
+                properties:
+                  type: {type: string, const: MODEL_RESULT}
+                  operationId: {type: "null"}
+                  artifactId: {type: "null"}
+                  text: {type: string, minLength: 1, maxLength: 4000}
+                  sources:
+                    type: array
+                    minItems: 1
+                    maxItems: 10
+                    items:
+                      type: object
+                      required: [title, url]
+                      additionalProperties: false
+                      properties:
+                        title: {type: string, minLength: 1, maxLength: 300}
+                        url: {type: string, format: uri, maxLength: 4096, pattern: '^https?://'}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+        startedAt: {type: [string, "null"], format: date-time}
+        completedAt: {type: [string, "null"], format: date-time}
+    TaskStepPage:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        items:
+          type: array
+          maxItems: 10
+          items: {$ref: "#/components/schemas/TaskStep"}
+        total: {type: integer, format: int64, minimum: 0}
+        page: {type: integer, minimum: 1}
+        pageSize: {type: integer, enum: [10]}
     HistoryPage:
       allOf:
         - $ref: "#/components/schemas/Page"
@@ -2745,6 +3378,7 @@ components:
             - sync
             - task
             - history
+            - step
             - browser
             - connection
             - notification

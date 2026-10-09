@@ -61,6 +61,117 @@ class AdministrativeAuditTest(unittest.TestCase):
         self.assertEqual(400, self.admin.api(both + "&" + urlencode({
             "action": ",".join("ACTION_" + str(index) for index in range(51))}))[0])
 
+    def test_v14_audit_display_names_owner_scope_and_server_order(self):
+        marker = "V14 audit " + str(uuid.uuid4())
+        for index, suffix in enumerate(("z", "a", "m", "b")):
+            status, _ = self.admin_command("LIMITS", browserLimitMode="CUSTOM",
+                                           browserLimit=index + 1, reason=marker + " " + suffix)
+            self.assertEqual(200, status)
+        base = "/api/admin/audit?" + urlencode({"user": self.identity.id, "search": marker,
+            "sort": "reason", "direction": "asc", "pageSize": 3})
+        first = self.admin.api(base)[1]
+        second = self.admin.api(base + "&page=2")[1]
+        self.assertEqual((4, 3, 1), (first["total"], len(first["items"]), len(second["items"])))
+        rows = first["items"] + second["items"]
+        self.assertEqual([marker + " " + suffix for suffix in ("a", "b", "m", "z")],
+                         [row["reason"] for row in rows])
+        me = self.admin.api("/api/me")[1]
+        target = self.admin.api("/api/admin/users/" + self.identity.id)[1]["user"]
+        self.assertTrue(all(row["actorName"] == me["name"] for row in rows))
+        self.assertTrue(all(row["targetName"] == target["name"] and row["targetType"] == "USER"
+                            and row["target"] == self.identity.id for row in rows))
+        for name in (me["name"], target["name"]):
+            by_name = self.admin.api("/api/admin/audit?" + urlencode({
+                "user": self.identity.id, "search": name, "action": "LIMITS"}))[1]
+            self.assertEqual(4, by_name["total"])
+        foreign = self.admin.api("/api/admin/audit?" + urlencode({
+            "user": me["id"], "search": marker}))[1]
+        self.assertEqual(0, foreign["total"])
+        self.assertEqual(403, self.client.api(base)[0])
+
+    def test_v14_admission_version_idempotency_and_deployment_independence(self):
+        path = "/api/admin/admission"
+        original = self.admin.api(path)[1]
+        self.assertEqual(403, self.client.api(path)[0])
+        self.assertEqual(403, self.client.api(path + "/commands", "POST", {
+            "type": "PAUSE", "reason": "Not an administrator", "expectedVersion": original["version"]})[0])
+        reason = "V14 admission " + str(uuid.uuid4())
+        try:
+            body = {"type": "PAUSE", "reason": reason, "expectedVersion": original["version"]}
+            key = str(uuid.uuid4())
+            status, paused = self.admin.api(path + "/commands", "POST", body, key)
+            self.assertEqual(200, status, paused)
+            self.assertTrue(paused["paused"])
+            self.assertEqual((200, paused), self.admin.api(path + "/commands", "POST", body, key))
+            self.assertEqual(409, self.admin.api(path + "/commands", "POST", {
+                "type": "RESUME", "reason": reason, "expectedVersion": original["version"]})[0])
+            self.assertEqual(400, self.admin.api(path + "/commands", "POST", {
+                "type": "RESUME", "reason": "", "expectedVersion": paused["version"]})[0])
+            # The deployment owner changes its own flag; an administrative resume must preserve it.
+            self.sql("UPDATE scheduler_state SET drain=true WHERE id=1;")
+            status, resumed = self.admin.api(path + "/commands", "POST", {
+                "type": "RESUME", "reason": reason, "expectedVersion": paused["version"]})
+            self.assertEqual(200, status, resumed)
+            self.assertFalse(resumed["paused"])
+            self.assertTrue(resumed["deploymentDrain"])
+            self.assertEqual("t", self.sql("SELECT drain OR admin_paused FROM scheduler_state WHERE id=1;"))
+            status, paused_again = self.admin.api(path + "/commands", "POST", {
+                "type": "PAUSE", "reason": reason, "expectedVersion": resumed["version"]})
+            self.assertEqual(200, status, paused_again)
+            self.sql("UPDATE scheduler_state SET drain=false WHERE id=1;")
+            self.assertTrue(self.admin.api(path)[1]["paused"])
+            self.assertEqual("t", self.sql("SELECT drain OR admin_paused FROM scheduler_state WHERE id=1;"))
+            audit = self.admin.api("/api/admin/audit?" + urlencode({"search": reason}))[1]
+            self.assertEqual(3, audit["total"], "An idempotent replay must not append an audit entry")
+            self.assertEqual({"PLATFORM"}, {row["targetType"] for row in audit["items"]})
+        finally:
+            self.sql("UPDATE scheduler_state SET drain=" + ("true" if original["deploymentDrain"] else "false") + " WHERE id=1;")
+            current = self.admin.api(path)[1]
+            if current["paused"] != original["paused"]:
+                restored = self.admin.api(path + "/commands", "POST", {
+                    "type": "PAUSE" if original["paused"] else "RESUME", "reason": "Restore admission after acceptance",
+                    "expectedVersion": current["version"]})
+                self.assertEqual(200, restored[0], restored[1])
+
+    def test_v14_node_pages_keep_server_filters_and_admin_boundary(self):
+        status, nodes = self.admin.api("/api/admin/nodes/page?sort=name&direction=asc&pageSize=3")
+        self.assertEqual(200, status, nodes)
+        self.assertLessEqual(len(nodes["items"]), 3)
+        self.assertTrue(all(node["browsers"] == [] for node in nodes["items"]))
+        self.assertEqual(403, self.client.api("/api/admin/nodes/page")[0])
+        for node in nodes["items"]:
+            filtered = self.admin.api("/api/admin/nodes/page?" + urlencode({"search": node["id"]}))[1]
+            self.assertEqual([node["id"]], [item["id"] for item in filtered["items"]])
+            self.assertEqual(0, self.admin.api("/api/admin/nodes/page?" + urlencode({
+                "search": node["id"], "status": "invalid-state"}))[1]["total"])
+            path = "/api/admin/nodes/" + node["id"] + "/browsers?pageSize=3&sort=id&direction=asc"
+            browsers = self.admin.api(path)[1]
+            self.assertLessEqual(len(browsers["items"]), 3)
+            self.assertEqual(sorted(row["id"] for row in browsers["items"]),
+                             [row["id"] for row in browsers["items"]])
+            self.assertEqual(403, self.client.api(path)[0])
+        self.assertEqual(404, self.admin.api("/api/admin/nodes/" + str(uuid.uuid4()) + "/browsers")[0])
+
+    def test_v14_stop_waiting_task_without_browser(self):
+        task = self.create("V14 stop prepared work before browser allocation")
+        self.assertIsNone(task.get("browser"))
+        path = "/api/admin/users/" + self.identity.id + "/tasks/" + task["id"] + "/stop"
+        self.assertEqual(403, self.client.api(path, "POST", {})[0])
+        other = self.admin.api("/api/me")[1]["id"]
+        self.assertEqual(404, self.admin.api("/api/admin/users/" + other + "/tasks/" + task["id"] + "/stop", "POST", {})[0])
+        key = str(uuid.uuid4())
+        status, stopped = self.admin.api(path, "POST", {}, key)
+        self.assertEqual(200, status, stopped)
+        self.assertEqual("STOPPED", stopped["status"])
+        self.assertEqual((200, stopped), self.admin.api(path, "POST", {}, key))
+        self.assertEqual("STOPPED", self.client.api("/api/tasks/" + task["id"])[1]["status"])
+        audit = self.admin.api("/api/admin/audit?user=" + self.identity.id + "&action=STOP_TASK")[1]
+        self.assertEqual(1, audit["total"])
+        self.assertEqual("SUCCEEDED", audit["items"][0]["status"])
+        draft = self.create("V14 stop must preserve draft", prepare=False)
+        self.assertEqual(409, self.admin.api("/api/admin/users/" + self.identity.id + "/tasks/" + draft["id"] + "/stop", "POST", {})[0])
+        self.assertEqual("DRAFT", self.client.api("/api/tasks/" + draft["id"])[1]["status"])
+
     def test_purge_resumes_after_owned_file_removal_failure(self):
         task = self.create("Disposable purge recovery", prepare=False)
         artifact_id = str(uuid.uuid4())
@@ -124,11 +235,11 @@ class AdministrativeAuditTest(unittest.TestCase):
     def test_stop_task_audit_settles_and_remains_in_owner_history(self):
         self.client.login_mcp()
         task = self.create("Administrative individual stop audit")
-        error, state, _ = self.client.tool("tasks.view", {
+        error, state, _ = self.client.tool("tasks.bind", {
             "taskId": task["id"], "operationKey": str(uuid.uuid4())})
         self.assertFalse(error, state)
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.tool("browser.execute", {"taskId": task["id"], "action": {
+        error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
             "operationId": operation, "type": "observe", "arguments": {},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)
@@ -223,7 +334,7 @@ class AdministrativeAuditTest(unittest.TestCase):
         self.assertFalse(error, state)
         task = state["task"]
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.tool("browser.execute", {"taskId": task["id"], "action": {
+        error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
             "operationId": operation, "type": "screenshot", "arguments": {},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)

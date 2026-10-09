@@ -1,37 +1,39 @@
-import { Icon } from '../shared/icon';
+import { Icon, IconName } from '../shared/icon';
 import { DatePipe } from '@angular/common';
+import { CdkMenuModule } from '@angular/cdk/menu';
 import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
-import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import * as z from 'zod/mini';
 import { BrowserViewer, browserViewerId } from '../browser/viewer';
-import { ConnectionPicker } from '../connections/connection-picker';
+import { Tooltip } from '../shared/tooltip';
+import { PageContext, pageReturnLabel, pageReturnUrl } from '../core/page-context';
 import { Api, ApiError, errorMessage } from '../core/api';
+import { ResourceUnavailable } from '../core/account';
 import { LiveEvents } from '../core/live-events';
 import {
+  BrowserSession,
   Command,
   Page,
   Task,
-  connectionSchema,
-  eventSchema,
+  stepLabels,
+  stepSchema,
   pageSchema,
   taskSchema,
 } from '../core/models';
 import { Dialog } from '../shared/dialog';
 import { DurationPipe, LabelPipe, Pager, Status } from '../shared/ui';
 import { ResultView } from './result-view';
-import { MultiFilter } from '../shared/multi-filter';
 import { SearchInput } from '../shared/search-input';
-import { Session } from '../core/session';
 import { QueryState } from '../shared/query-state';
 
 @Component({
   selector: 'hg-task-detail',
   imports: [
+    CdkMenuModule,
+    Tooltip,
     Icon,
     DatePipe,
-    FormsModule,
     RouterLink,
     BrowserViewer,
     ResultView,
@@ -39,11 +41,11 @@ import { QueryState } from '../shared/query-state';
     LabelPipe,
     Pager,
     Status,
-    MultiFilter,
     SearchInput,
-    ConnectionPicker,
+    ResourceUnavailable,
   ],
   templateUrl: './task-detail.html',
+  styleUrl: './task-detail.css',
   providers: [QueryState],
 })
 export class TaskDetail {
@@ -52,7 +54,7 @@ export class TaskDetail {
   private readonly api = inject(Api);
   private readonly dialog = inject(Dialog);
   private readonly destroy = inject(DestroyRef);
-  private readonly answerPrefix = 'helm-answer:' + inject(Session).user()?.id + ':';
+  private readonly pageContext = inject(PageContext);
   readonly query = inject(QueryState);
   private readonly params = toSignal(this.route.paramMap, {
     initialValue: this.route.snapshot.paramMap,
@@ -61,6 +63,7 @@ export class TaskDetail {
   private historyGeneration = 0;
   readonly task = signal<Task | null>(null);
   readonly error = signal('');
+  readonly unavailable = signal(false);
   readonly busy = signal(false);
   readonly loading = signal(true);
   readonly tab = computed(() =>
@@ -75,11 +78,7 @@ export class TaskDetail {
         : 'overview',
     ),
   );
-  private answerRequest = '';
-  private answerKey(task: Task) {
-    return this.answerPrefix + task.id + ':' + (task.request?.id ?? '');
-  }
-  readonly history = signal<Page<z.infer<typeof eventSchema>> | null>(null);
+  readonly history = signal<Page<z.infer<typeof stepSchema>> | null>(null);
   readonly historyPage = signal(1);
   readonly historyBefore = signal<number | undefined>(undefined);
   readonly historyOpen = signal(false);
@@ -87,35 +86,36 @@ export class TaskDetail {
   readonly historyError = signal('');
   readonly historyLoading = signal(false);
   readonly historySearch = signal('');
-  readonly historyTypes = signal<string[]>([]);
-  readonly historyOptions = [
-    { id: 'CREATED', label: 'Создание' },
-    { id: 'ACTION_SUCCEEDED', label: 'Выполненные действия' },
-    { id: 'ACTION_FAILED', label: 'Ошибки действий' },
-    { id: 'ACTION_UNKNOWN', label: 'Неизвестный исход' },
-    { id: 'WAITING_USER', label: 'Запросы участия' },
-    { id: 'WAITING_CHATGPT', label: 'Ожидание ChatGPT' },
-    { id: 'PAUSED', label: 'Пауза' },
-    { id: 'STOPPED', label: 'Остановка' },
-    { id: 'SUCCEEDED', label: 'Успешное завершение' },
-  ];
-  answer = '';
-  selectedConnection = '';
-  readonly loginConnections = signal<string[]>([]);
+  readonly stepLabels = stepLabels;
+  readonly historyIcons: Readonly<Record<string, IconName>> = {
+    PLANNED: 'info',
+    RUNNING: 'gpt',
+    SUCCEEDED: 'check',
+    FAILED: 'alert',
+    UNKNOWN: 'alert',
+    PARTIAL: 'alert',
+    WAITING: 'pause',
+    SKIPPED: 'stop',
+  };
   readonly viewerId = browserViewerId();
   readonly controller = signal(false);
+  get currentUrl() {
+    return this.router.url;
+  }
+  get returnLabel() {
+    return pageReturnLabel(pageReturnUrl(this.route, this.router, '/tasks').toString());
+  }
   constructor() {
     effect(() => {
-      const id = this.params().get('id');
+      this.params();
+      this.historyGeneration++;
       this.task.set(null);
-      const connection = sessionStorage.getItem(this.answerPrefix + id + ':save-connection');
-      this.loginConnections.set(connection ? [connection] : []);
-      this.answerRequest = '';
+      this.busy.set(false);
+      this.unavailable.set(false);
       this.historyPage.set(1);
       this.historyBefore.set(undefined);
       this.history.set(null);
       this.historySearch.set('');
-      this.historyTypes.set([]);
       this.loading.set(true);
       void this.load();
     });
@@ -123,11 +123,36 @@ export class TaskDetail {
       this.params();
       this.historyPage();
       this.historySearch();
-      this.historyTypes();
       if (this.historyOpen()) untracked(() => void this.loadHistory());
     });
+    effect(() => {
+      const task = this.task();
+      if (this.query.text('login') !== '1' || !task?.browser || this.busy()) return;
+      const browser = task.browser;
+      const needsLogin = task.request?.type === 'LOGIN' || task.waitReason === 'LOGIN';
+      if (
+        !needsLogin ||
+        browser.controlOwner === 'USER' ||
+        ['CLOSED', 'LOST'].includes(browser.status)
+      ) {
+        untracked(() => this.query.set({ login: null }, false));
+        return;
+      }
+      if (!this.can('BEGIN_LOGIN')) return;
+      const key = 'helm-login-intent:' + task.id + ':' + (task.request?.id ?? browser.id);
+      untracked(() => {
+        this.query.set({ login: null, tab: 'overview' }, false);
+        if (sessionStorage.getItem(key)) return;
+        sessionStorage.setItem(key, 'consumed');
+        void this.command('BEGIN_LOGIN', {
+          viewerId: this.viewerId,
+          requestId: task.request?.id,
+          requestVersion: task.request?.version,
+        });
+      });
+    });
     inject(LiveEvents)
-      .watch(['task', 'history', 'browser'])
+      .watch(['task', 'step', 'browser'])
       .pipe(takeUntilDestroyed())
       .subscribe((change) => {
         if (
@@ -135,10 +160,10 @@ export class TaskDetail {
           change.entityId === this.params().get('id') ||
           (change.resource === 'browser' && change.entityId === this.task()?.browser?.id)
         ) {
-          if (change.resource !== 'history') void this.load(false);
-          if (this.historyOpen() && ['sync', 'history'].includes(change.resource)) {
-            if (this.historyPage() === 1) void this.loadHistory();
-            else this.newEvents.set(true);
+          void this.load();
+          if (this.historyOpen() && ['sync', 'step'].includes(change.resource)) {
+            void this.loadHistory();
+            if (this.historyPage() > 1) this.newEvents.set(true);
           }
         }
       });
@@ -150,7 +175,7 @@ export class TaskDetail {
   can(type: string) {
     return this.task()?.allowedCommands.includes(type) ?? false;
   }
-  async load(initial = true) {
+  async load() {
     const generation = ++this.generation;
     const id = this.params().get('id');
     if (!id) return;
@@ -158,19 +183,17 @@ export class TaskDetail {
       const task = await this.api.get('/api/tasks/' + id, taskSchema);
       if (generation !== this.generation) return;
       const current = this.task();
-      if (!current || task.version >= current.version) this.task.set(task);
-      if (task.browser)
-        this.controller.set(
-          sessionStorage.getItem('helm-controller:' + task.browser.id) === 'true',
-        );
-      if (initial || this.answerRequest !== this.answerKey(task)) {
-        this.answerRequest = this.answerKey(task);
-        this.answer = sessionStorage.getItem(this.answerRequest) ?? '';
-        this.selectedConnection = sessionStorage.getItem(this.answerRequest + ':connection') ?? '';
+      if (!current || task.version >= current.version) {
+        this.applyTask(task);
       }
       this.error.set('');
+      this.unavailable.set(false);
     } catch (error: unknown) {
-      if (generation === this.generation) this.error.set(errorMessage(error));
+      if (generation === this.generation) {
+        this.error.set(errorMessage(error));
+        this.unavailable.set(error instanceof ApiError && [403, 404].includes(error.status));
+        if (this.unavailable()) this.task.set(null);
+      }
     } finally {
       if (generation === this.generation) this.loading.set(false);
     }
@@ -178,9 +201,8 @@ export class TaskDetail {
   async command(type: string, extra: Partial<Command> = {}) {
     const task = this.task();
     if (!task || this.busy()) return;
-    let submittedFields: Record<string, string> | null = null;
     if (
-      type === 'TAKE_CONTROL' &&
+      ['TAKE_CONTROL', 'BEGIN_LOGIN'].includes(type) &&
       task.browser?.controlOwner === 'USER' &&
       !this.controller() &&
       !(await this.dialog.ask(
@@ -190,65 +212,32 @@ export class TaskDetail {
       ))
     )
       return;
-    if (
-      type === 'END_SESSION' &&
-      !(await this.dialog.ask(
-        'Завершить браузерную сессию?',
-        'Браузер закроется. Задача останется на паузе; результаты и история сохранятся. Несохранённый вход и формы будут потеряны. Неизвестный результат действия потребуется проверить перед продолжением.',
-        'Завершить сессию',
-        [],
-        true,
-      ))
-    )
-      return;
+    if (type === 'CLOSE_BROWSER' && !(await this.dialog.ask(
+      'Закрыть браузер?',
+      'Задача останется на паузе. Шаги и результаты сохранятся. Несохранённый вход будет потерян.',
+      'Закрыть браузер', [], true,
+    ))) return;
+    if (type === 'OPEN_BROWSER' && !(await this.dialog.ask(
+      'Открыть новый браузер?',
+      'Будет использован последний сохранённый вход. Задача останется на паузе; прежние действия не повторятся.',
+      'Открыть браузер',
+    ))) return;
     if (
       type === 'STOP' &&
       !(await this.dialog.ask(
         'Остановить задачу?',
-        'Браузер будет закрыт после подтверждения остановки. Уже полученные результаты сохранятся.',
+        'После завершения отправленного действия браузер будет закрыт. Результаты сохранятся. Возобновить остановленную задачу нельзя.',
         'Остановить',
         [],
         true,
       ))
     )
       return;
-    if (type === 'FINISH_LOGIN' && extra.saveConnection) {
-      const connectionId = this.loginConnections()[0];
-      if (!connectionId) {
-        this.error.set('Выберите подключение, в котором нужно сохранить этот вход.');
-        return;
-      }
-      const values = await this.dialog.ask(
-        'Сохранить вход',
-        'Подтвердите конкретную учётную запись, видимую на сайте.',
-        'Сохранить',
-        [
-          { key: 'accountLabel', label: 'Название учётной записи', required: true, max: 200 },
-          { key: 'accountSubject', label: 'Логин или ID на сайте', required: true, max: 500 },
-        ],
-        false,
-        task.id + ':' + connectionId,
-        task.version,
-      );
-      if (!values) return;
-      submittedFields = values;
-      extra = {
-        ...extra,
-        expectedVersion: this.dialog.version(values) ?? task.version,
-        connectionId,
-        accountLabel: values['accountLabel'],
-        accountSubject: values['accountSubject'],
-      };
-    }
-    if (
-      type === 'RESUME' &&
-      (task.status === 'STOPPED' ||
-        ['LOST', 'CLOSED', 'OFFLINE'].includes(task.browser?.status ?? ''))
-    ) {
+    if (type === 'RESUME' && ['LOST', 'CLOSED', 'OFFLINE'].includes(task.browser?.status ?? '')) {
       if (
         !(await this.dialog.ask(
           'Открыть новый браузер?',
-          (task.status === 'STOPPED' || task.browser?.status === 'CLOSED'
+          (task.browser?.status === 'CLOSED'
             ? 'Предыдущий браузер закрыт.'
             : 'Предыдущий браузер потерян.') +
             ' Новый начнёт работу без его вкладок и несохранённого состояния.',
@@ -267,116 +256,65 @@ export class TaskDetail {
         taskSchema,
       );
       if (this.destroy.destroyed || this.params().get('id') !== task.id) return;
-      if (submittedFields) this.dialog.complete(submittedFields);
-      if (type === 'COPY') {
-        await this.router.navigate(['/tasks', updated.id, 'edit'], {
-          queryParams: { back: this.query.text('back') || null },
-        });
-        return;
-      }
+      this.generation++;
       if (this.task()?.id === updated.id && updated.version >= (this.task()?.version ?? 0))
-        this.task.set(updated);
-      if (
-        updated.browser &&
-        ['TAKE_CONTROL', 'BEGIN_LOGIN', 'RETURN_CONTROL', 'FINISH_LOGIN'].includes(type)
-      ) {
-        const acquired = ['TAKE_CONTROL', 'BEGIN_LOGIN'].includes(type);
-        this.controller.set(acquired);
-        if (acquired) sessionStorage.setItem('helm-controller:' + updated.browser.id, 'true');
-        else sessionStorage.removeItem('helm-controller:' + updated.browser.id);
-      }
-      if (['ANSWER', 'CONFIRM', 'REJECT', 'CHOOSE_CONNECTION'].includes(type)) {
-        this.answer = '';
-        sessionStorage.removeItem(this.answerKey(task));
-        sessionStorage.removeItem(this.answerKey(task) + ':connection');
+        this.applyTask(updated);
+      if (updated.browser && ['TAKE_CONTROL', 'BEGIN_LOGIN', 'RETURN_CONTROL'].includes(type)) {
+        if (['TAKE_CONTROL', 'BEGIN_LOGIN'].includes(type)) {
+          sessionStorage.setItem('helm-controller:' + updated.browser.id, 'true');
+        }
+        this.syncController(this.task() ?? updated);
       }
     } catch (error: unknown) {
       if (this.destroy.destroyed || this.params().get('id') !== task.id) return;
       this.error.set(errorMessage(error));
       if (error instanceof ApiError && error.status === 409) {
-        await this.load(false);
+        await this.load();
         this.error.set(
           ['STALE_VERSION', 'STALE_REQUEST'].includes(error.code)
-            ? 'Запрос или состояние задачи изменились. Проверьте актуальные данные и повторите действие. Ваш текст сохранён.'
+            ? 'Запрос или состояние задачи изменились. Проверьте актуальные данные и повторите действие.'
             : error.message,
         );
       }
     } finally {
-      this.busy.set(false);
+      if (!this.destroy.destroyed && this.params().get('id') === task.id) this.busy.set(false);
     }
-  }
-  respond(type: string) {
-    const request = this.task()?.request;
-    if (!request) return;
-    void this.command(type, {
-      requestId: request.id,
-      requestVersion: request.version,
-      ...(type === 'ANSWER' || request.type === 'UNKNOWN_RESULT' ? { text: this.answer } : {}),
-      ...(type === 'CHOOSE_CONNECTION' ? { connectionId: this.selectedConnection } : {}),
-    });
-  }
-  loginConnectionChanged(ids: string[]) {
-    this.loginConnections.set(ids);
-    const key = this.answerPrefix + this.params().get('id') + ':save-connection';
-    if (ids[0]) sessionStorage.setItem(key, ids[0]);
-    else sessionStorage.removeItem(key);
-  }
-  async createLoginConnection() {
-    const task = this.task();
-    if (!task || this.busy()) return;
-    const values = await this.dialog.ask(
-      'Новое подключение для входа',
-      'Вход будет сохранён из текущего браузера задачи. Для другого аккаунта создайте отдельное подключение.',
-      'Создать подключение',
-      [
-        { key: 'name', label: 'Название подключения', required: true, max: 200 },
-        {
-          key: 'startUrl',
-          label: 'Адрес сайта (https://…)',
-          value: task.browser?.currentUrl ?? task.startUrl ?? '',
-          required: true,
-          max: 4096,
-        },
-      ],
-      false,
-      task.id,
-    );
-    if (!values || this.destroy.destroyed || this.params().get('id') !== task.id) return;
-    const url = URL.parse(values['startUrl'] ?? '');
-    if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-      this.error.set('Укажите полный HTTP(S) адрес сайта без логина и пароля.');
-      return;
-    }
-    this.busy.set(true);
-    this.error.set('');
-    try {
-      const connection = await this.api.mutate(
-        '/api/connections',
-        { name: values['name'], startUrl: url.href, site: url.hostname },
-        connectionSchema,
-      );
-      this.dialog.complete(values);
-      if (!this.destroy.destroyed && this.params().get('id') === task.id)
-        this.loginConnectionChanged([connection.id]);
-    } catch (error: unknown) {
-      if (!this.destroy.destroyed && this.params().get('id') === task.id)
-        this.error.set(errorMessage(error));
-    } finally {
-      this.busy.set(false);
-    }
-  }
-  answerChanged(value: string) {
-    this.answer = value;
-    const task = this.task();
-    if (task) sessionStorage.setItem(this.answerKey(task), value);
-  }
-  connectionChanged(value: string) {
-    this.selectedConnection = value;
-    const task = this.task();
-    if (task) sessionStorage.setItem(this.answerKey(task) + ':connection', value);
   }
   openHistory() {
     this.historyOpen.set(!this.historyOpen());
+  }
+  sessionChanged(browser: BrowserSession) {
+    this.generation++;
+    this.task.update((task) =>
+      task && task.browser?.id === browser.id && task.browser.version <= browser.version
+        ? { ...task, browser }
+        : task,
+    );
+  }
+  private applyTask(incoming: Task) {
+    const current = this.task();
+    const browser =
+      current?.browser &&
+      current.browser.id === incoming.browser?.id &&
+      current.browser.version > incoming.browser.version
+        ? current.browser
+        : incoming.browser;
+    const task = { ...incoming, browser };
+    this.task.set(task);
+    this.pageContext.setResource('tasks', task.id, task.title || 'Задача без названия');
+    this.syncController(task);
+  }
+  private syncController(task: Task) {
+    const browser = task.browser;
+    if (!browser) {
+      this.controller.set(false);
+      return;
+    }
+    const key = 'helm-controller:' + browser.id;
+    if (browser.controlOwner !== 'USER' && browser.controlOwner !== 'TRANSFERRING') {
+      sessionStorage.removeItem(key);
+    }
+    this.controller.set(browser.controlOwner === 'USER' && sessionStorage.getItem(key) === 'true');
   }
   async loadHistory() {
     const id = this.params().get('id');
@@ -384,14 +322,13 @@ export class TaskDetail {
     const generation = ++this.historyGeneration;
     this.historyLoading.set(true);
     try {
-      const data = await this.api.get('/api/tasks/' + id + '/history', pageSchema(eventSchema), {
+      const data = await this.api.get('/api/tasks/' + id + '/steps', pageSchema(stepSchema), {
         page: this.historyPage(),
         pageSize: 10,
         beforeSequence: this.historyPage() > 1 ? this.historyBefore() : undefined,
         search: this.historySearch(),
-        type: this.historyTypes(),
       });
-      if (generation !== this.historyGeneration) return;
+      if (generation !== this.historyGeneration || id !== this.params().get('id')) return;
       this.history.set(data);
       if (this.historyPage() === 1) {
         this.historyBefore.set(data.items[0]?.sequence);
@@ -408,15 +345,13 @@ export class TaskDetail {
     this.historyPage.set(1);
     this.historyBefore.set(undefined);
   }
-  filterHistory(search: string, types: string[]) {
+  filterHistory(search: string) {
     this.historySearch.set(search);
-    this.historyTypes.set(types);
     this.historyPage.set(1);
     this.historyBefore.set(undefined);
   }
   back() {
-    const raw = this.route.snapshot.queryParamMap.get('back');
-    void this.router.navigateByUrl(raw ? '/tasks?' + raw : '/tasks');
+    void this.router.navigateByUrl(pageReturnUrl(this.route, this.router, '/tasks'));
   }
   async deleteDraft() {
     const task = this.task();

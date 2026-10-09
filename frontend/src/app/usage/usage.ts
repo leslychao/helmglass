@@ -1,3 +1,6 @@
+import { ColumnPicker } from '../shared/column-picker';
+import { TableViews, TableColumn } from '../shared/table-view';
+import { DataTable, TableCell } from '../shared/data-table';
 import { Icon } from '../shared/icon';
 import { DecimalPipe } from '@angular/common';
 import { Component, DestroyRef, computed, effect, inject, signal } from '@angular/core';
@@ -9,29 +12,74 @@ import { LiveEvents } from '../core/live-events';
 import { usageReportSchema } from '../core/models';
 import { QueryState } from '../shared/query-state';
 import { DurationPipe, Empty, Pager } from '../shared/ui';
+import { Dialog } from '../shared/dialog';
+import { Tooltip } from '../shared/tooltip';
 
 @Component({
   selector: 'hg-usage',
-  imports: [Icon, DecimalPipe, DateFilter, DurationPipe, Empty, Pager],
+  imports: [
+    DataTable,
+    TableCell,
+    ColumnPicker,
+    Icon,
+    DecimalPipe,
+    DateFilter,
+    DurationPipe,
+    Empty,
+    Pager,
+    Tooltip,
+  ],
   providers: [QueryState],
   template: `
     <h1 class="sr-only">Использование</h1>
     <div class="usage-period">
-      <div class="period-options">
-        <button [class.selected]="query.text('period', '7') === '7'" (click)="period(7)">
-          7 дней</button
-        ><button [class.selected]="query.text('period') === '30'" (click)="period(30)">
-          30 дней</button
-        ><hg-date-filter
-          label="Свой период"
-          [from]="query.text('from')"
-          [to]="query.text('to')"
-          (changed)="dates($event)"
-        />
+      <div class="usage-period-presets" role="group" aria-label="Период использования">
+        <button
+          type="button"
+          [class.active]="activePeriod() === 1"
+          [attr.aria-pressed]="activePeriod() === 1"
+          hgTooltip="Сегодня"
+          (click)="period(1)"
+        >
+          {{ todayLabel }}
+        </button>
+        <button
+          type="button"
+          [class.active]="activePeriod() === 7"
+          [attr.aria-pressed]="activePeriod() === 7"
+          hgTooltip="Последние 7 дней"
+          (click)="period(7)"
+        >
+          7 дней
+        </button>
+        <button
+          type="button"
+          [class.active]="activePeriod() === 30"
+          [attr.aria-pressed]="activePeriod() === 30"
+          hgTooltip="Последние 30 дней"
+          (click)="period(30)"
+        >
+          30 дней
+        </button>
       </div>
-      <span class="usage-period-description"
-        ><hg-icon name="info" />Расход задач, созданных за выбранный период</span
+      <hg-date-filter
+        class="usage-date-range"
+        appearance="caption"
+        label="Период создания задач"
+        [captionText]="rangeLabel()"
+        [from]="range().from"
+        [to]="range().to"
+        (changed)="dates($event)"
+      />
+      <button
+        type="button"
+        class="icon-button usage-help"
+        aria-label="Как считаются показатели"
+        hgTooltip="Как считаются показатели"
+        (click)="showHelp()"
       >
+        <hg-icon name="info" />
+      </button>
     </div>
     @if (error()) {
       <div class="error-banner" role="alert">
@@ -39,11 +87,6 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
       </div>
     }
     @if (data(); as report) {
-      @if (report.usage.incomplete) {
-        <div class="notice warning">
-          Некоторые измерения ещё не подтверждены. Неизвестные значения показаны отдельно от нуля.
-        </div>
-      }
       <section class="metric-grid usage-kpis" aria-label="Сводка использования">
         <div class="metric">
           <div class="metric-top">
@@ -95,9 +138,25 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
           </p>
         </div>
       </section>
+      @if (report.usage.incomplete) {
+        <p class="notice warning" role="status">
+          Часть измерений неполная. Итоговый расход может уточниться.
+        </p>
+      }
       <div class="usage-charts">
         <section class="card usage-chart-card">
-          <h2>Задачи по состояниям</h2>
+          <div class="section-heading">
+            <h2>Задачи по состояниям</h2>
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Определения состояний"
+              hgTooltip="Определения состояний"
+              (click)="showStatuses()"
+            >
+              <hg-icon name="info" />
+            </button>
+          </div>
           <svg
             class="usage-svg status-svg"
             viewBox="0 0 480 210"
@@ -124,9 +183,10 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
                 [attr.height]="(group.tasks / maxStatusTasks()) * 130"
                 rx="3"
                 [attr.fill]="group.color"
-              >
-                <title>{{ group.label }}: {{ group.tasks }}</title>
-              </rect>
+                [hgTooltip]="group.label + ': ' + group.tasks"
+                [attr.aria-label]="group.label + ': ' + group.tasks"
+                tabindex="0"
+              />
               <text
                 [attr.x]="60 + i * 72"
                 [attr.y]="148 - (group.tasks / maxStatusTasks()) * 130"
@@ -202,9 +262,15 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
                 }
                 @for (point of timePoints(); track point.date) {
                   @if (point.y !== null) {
-                    <circle [attr.cx]="point.x" [attr.cy]="point.y" r="3" fill="#4285ff">
-                      <title>{{ point.date }}: {{ point.seconds | duration }}</title>
-                    </circle>
+                    <circle
+                      [attr.cx]="point.x"
+                      [attr.cy]="point.y"
+                      r="3"
+                      fill="#4285ff"
+                      [hgTooltip]="point.date + ': ' + (point.seconds | duration)"
+                      [attr.aria-label]="point.date + ': ' + (point.seconds | duration)"
+                      tabindex="0"
+                    />
                   } @else {
                     <text [attr.x]="point.x" y="130" text-anchor="middle" class="chart-axis-label">
                       Нет данных
@@ -238,56 +304,45 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
           <h2 id="usage-sites-title">Использование по сайтам</h2>
         </div>
         @if (report.sites.items.length) {
-          <div class="table-scroll">
-            <table class="usage-sites-table">
-              <thead>
-                <tr>
-                  <th>Сайт</th>
-                  <th>Время браузера</th>
-                  <th>Задачи</th>
-                  <th>Медиа</th>
-                  <th>Объём медиа</th>
-                </tr>
-              </thead>
-              <tbody>
-                @for (site of report.sites.items; track site.site) {
-                  <tr>
-                    <td>
-                      <span class="site-cell"
-                        ><span class="service-mark"><hg-icon name="globe" /></span
-                        >{{ site.site || 'Без сайта' }}</span
-                      >
-                    </td>
-                    <td>
-                      <div class="site-usage">
-                        <span>{{ site.browserSeconds | duration }}</span>
-                        @if (site.browserSeconds !== null && report.usage.browserSeconds !== null) {
-                          <i
-                            ><b
-                              [style.width.%]="
-                                report.usage.browserSeconds
-                                  ? (site.browserSeconds / report.usage.browserSeconds) * 100
-                                  : 0
-                              "
-                            ></b
-                          ></i>
-                        }
-                      </div>
-                    </td>
-                    <td>{{ site.tasks }}</td>
-                    <td>{{ site.mediaSeconds | duration }}</td>
-                    <td>
-                      {{
-                        site.mediaBytes === null
-                          ? 'Нет данных'
-                          : (site.mediaBytes | number) + ' байт'
-                      }}
-                    </td>
-                  </tr>
+          <div class="table-tools"><hg-column-picker [view]="table" /></div>
+          <hg-data-table
+            [view]="table"
+            [rows]="report.sites.items"
+            label="Использование по сайтам"
+            rowKey="site"
+          >
+            <ng-template hgCell="site" [hgCellOf]="report.sites.items" let-site>
+              <span class="site-cell"
+                ><span class="service-mark"><hg-icon name="globe" /></span
+                >{{ site.site || 'Без сайта' }}</span
+              >
+            </ng-template>
+            <ng-template hgCell="browserSeconds" [hgCellOf]="report.sites.items" let-site>
+              <div class="site-usage">
+                <span>{{ site.browserSeconds | duration }}</span>
+                @if (site.browserSeconds !== null && report.usage.browserSeconds !== null) {
+                  <i
+                    ><b
+                      [style.width.%]="
+                        report.usage.browserSeconds
+                          ? (site.browserSeconds / report.usage.browserSeconds) * 100
+                          : 0
+                      "
+                    ></b
+                  ></i>
                 }
-              </tbody>
-            </table>
-          </div>
+              </div>
+            </ng-template>
+            <ng-template hgCell="tasks" [hgCellOf]="report.sites.items" let-site>{{
+              site.tasks
+            }}</ng-template>
+            <ng-template hgCell="mediaSeconds" [hgCellOf]="report.sites.items" let-site>{{
+              site.mediaSeconds | duration
+            }}</ng-template>
+            <ng-template hgCell="mediaBytes" [hgCellOf]="report.sites.items" let-site>
+              {{ site.mediaBytes === null ? 'Нет данных' : (site.mediaBytes | number) + ' байт' }}
+            </ng-template>
+          </hg-data-table>
         } @else {
           <hg-empty
             [title]="
@@ -305,7 +360,7 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
           [size]="report.sites.pageSize"
           [total]="report.sites.total"
           (pageChange)="query.set({ sitesPage: $event }, false)"
-          (sizeChange)="pageSize($event)"
+          (sizeChange)="query.set({ sitesPageSize: $event, sitesPage: null }, false)"
         />
       </section>
       <p class="usage-footnote">
@@ -321,6 +376,41 @@ import { DurationPipe, Empty, Pager } from '../shared/ui';
 export class Usage {
   readonly query = inject(QueryState);
   private readonly api = inject(Api);
+  private readonly dialog = inject(Dialog);
+  readonly todayLabel = new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'long' }).format(
+    new Date(),
+  );
+  readonly activePeriod = computed(() => {
+    if (this.query.text('period') === 'custom') return 0;
+    const days = this.query.number('period', 30);
+    return [1, 7, 30].includes(days) ? days : 30;
+  });
+  readonly range = computed(() => {
+    if (!this.activePeriod()) return { from: this.query.text('from'), to: this.query.text('to') };
+    const from = new Date();
+    from.setHours(0, 0, 0, 0);
+    const to = new Date(from);
+    to.setDate(to.getDate() + 1);
+    from.setDate(from.getDate() - this.activePeriod() + 1);
+    return { from: from.toISOString(), to: to.toISOString() };
+  });
+  readonly rangeLabel = computed(() => {
+    const { from, to } = this.range();
+    const start = from ? new Date(from) : null;
+    const end = to ? new Date(new Date(to).getTime() - 1) : null;
+    if ((start && !Number.isFinite(start.getTime())) || (end && !Number.isFinite(end.getTime())))
+      return 'Выбрать даты';
+    if (start && end && start > end) return 'Выбрать даты';
+    const format = new Intl.DateTimeFormat('ru', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
+    if (start && end) return format.formatRange(start, end);
+    if (start) return 'С ' + format.format(start);
+    if (end) return 'По ' + format.format(end);
+    return 'Все даты';
+  });
   private generation = 0;
   readonly data = signal<z.infer<typeof usageReportSchema> | null>(null);
   readonly error = signal('');
@@ -415,6 +505,19 @@ export class Usage {
     finish();
     return segments;
   });
+  readonly tableColumns: readonly TableColumn[] = [
+    { key: 'site', label: 'Сайт', width: 260, required: true, className: 'entity-cell' },
+    { key: 'browserSeconds', label: 'Время браузера', width: 200 },
+    { key: 'tasks', label: 'Задачи', width: 140 },
+    { key: 'mediaSeconds', label: 'Медиа', width: 170 },
+    { key: 'mediaBytes', label: 'Объём медиа', width: 180 },
+  ];
+  readonly table = inject(TableViews).create('usage-sites', this.tableColumns, this.query, {
+    sort: 'sitesSort',
+    direction: 'sitesDirection',
+    page: 'sitesPage',
+    size: 'sitesPageSize',
+  });
   constructor() {
     effect(() => {
       this.query.params();
@@ -431,30 +534,44 @@ export class Usage {
   period(days: number) {
     this.query.set({ period: days, from: null, to: null, daysPage: null, sitesPage: null }, false);
   }
+  showHelp() {
+    this.dialog.info(
+      'Как считаются показатели',
+      'Период относится к дате создания задачи в вашем часовом поясе. Черновики не учитываются. ' +
+        'График времени группирует накопленный расход выбранных задач по дате их создания, а не по времени отдельных действий.\n\n' +
+        'Успешность — отношение числа полностью успешных задач к числу завершённых с известным исходом: полный успех, частичный результат, недостигнутая цель, ошибка или остановка. ' +
+        'Задачи с операцией неизвестного исхода не входят в число завершённых для этого расчёта.\n\n' +
+        'Задача и весь её расход относятся к стартовому сайту. Это не измерение посещений отдельных доменов. Таблица сайтов и общие показатели используют один набор задач.\n\n' +
+        'Время браузера включает ожидания. Ручное управление может пересекаться с другими категориями времени. Медиа учитывает готовые переданные файлы, а не их анализ. ' +
+        'Неизвестные измерения показаны как «Нет данных» или «—»; неполные измерения отдельно отмечены.',
+    );
+  }
+  showStatuses() {
+    this.dialog.info(
+      'Определения состояний',
+      'Готово — задача полностью выполнена. Частично — получен частичный результат. Без успеха — цель не достигнута. Ошибка — выполнение завершилось с ошибкой. Остановлено — задача остановлена.\n\n' +
+        'В работе — все незавершённые задачи, включая ожидание ChatGPT, очередь, запуск, выполнение, паузу, ожидание пользователя и остановку в процессе. Каждая задача относится к одной группе.',
+    );
+  }
   dates(range: DateRange) {
     this.query.set({ period: 'custom', ...range, daysPage: null, sitesPage: null }, false);
   }
   pageSize(size: number) {
-    this.query.set({ pageSize: size, daysPage: null, sitesPage: null }, false);
+    this.query.set({ pageSize: size, daysPage: null }, false);
   }
   async load(show = true) {
     const generation = ++this.generation;
     if (show) this.loading.set(true);
-    const days = this.query.number('period', 7);
-    const beginning = new Date();
-    beginning.setHours(0, 0, 0, 0);
-    beginning.setDate(beginning.getDate() - days + 1);
     try {
       const data = await this.api.get('/api/usage', usageReportSchema, {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         daysPage: this.query.number('daysPage', 1),
         sitesPage: this.query.number('sitesPage', 1),
         pageSize: this.query.number('pageSize', 10),
-        from: this.query.text(
-          'from',
-          this.query.text('period') === 'custom' ? '' : beginning.toISOString(),
-        ),
-        to: this.query.text('to'),
+        sitesPageSize: this.query.number('sitesPageSize', 5),
+        sitesSort: this.query.text('sitesSort', 'site'),
+        sitesDirection: this.table.direction(),
+        ...this.range(),
       });
       if (generation === this.generation) {
         this.data.set(data);

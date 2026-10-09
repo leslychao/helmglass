@@ -42,6 +42,8 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $public_scheme;
         proxy_set_header X-Auth-Request-Redirect ${PUBLIC_URL}/tasks;
+        proxy_intercept_errors on;
+        error_page 400 401 403 500 502 503 504 =303 ${PUBLIC_URL}/sign-in-error;
         proxy_pass http://helm_auth;
     }
     # RFC 8414 places the issuer path after the well-known name; Keycloak uses a suffix.

@@ -1,0 +1,221 @@
+<h1 class="sr-only">Браузеры</h1>
+<div class="admin-page-actions">
+  <button
+    class="button"
+    [disabled]="!admission() || !available() || !!admissionError() || !!busy()"
+    (click)="changeAdmission()"
+  >
+    <hg-icon [name]="admission()?.paused ? 'play' : 'pause'" />{{
+      admission()?.paused ? 'Разрешить запуски' : 'Приостановить запуски'
+    }}
+  </button>
+</div>
+@if (admissionError()) {
+  <div class="error-banner" role="alert">
+    {{ admissionError() }}<button class="text-button" (click)="loadAdmission()">Повторить</button>
+  </div>
+}
+@if (admission()?.paused || admission()?.deploymentDrain) {
+  <div class="notice warning">
+    <strong>Новые запуски приостановлены</strong>
+    <p>
+      {{
+        admission()?.paused
+          ? 'Работающие браузеры не остановлены.'
+          : 'Выполняется техническое обслуживание.'
+      }}
+      @if (admission()?.paused && admission()?.deploymentDrain) {
+        Также действует техническая пауза развёртывания.
+      }
+    </p>
+  </div>
+}
+@if (error()) {
+  <div class="error-banner" role="alert">
+    {{ error() }}<button class="text-button" (click)="load()">Повторить</button>
+  </div>
+}
+<section class="card table-card admin-node-panel">
+  <div class="toolbar">
+    <label class="search"
+      ><hg-icon name="search" /><input
+        hgSearch
+        aria-label="Поиск по названию или ID узла"
+        placeholder="Поиск узлов"
+        [value]="query.text('search')"
+        (searchChange)="query.set({ search: $event || null })"
+    /></label>
+    <hg-multi-filter
+      label="Состояние"
+      [options]="statuses"
+      [value]="query.values('status')"
+      (changed)="query.set({ status: $event })"
+    />
+    <hg-filter-reset [keys]="['search', 'status']" /><hg-column-picker [view]="table" />
+  </div>
+  @if (data(); as page) {
+    @if (page.items.length) {
+      <hg-data-table
+        [view]="table"
+        [rows]="page.items"
+        label="Узлы и браузеры"
+        [expanded]="expanded()"
+      >
+        <ng-template hgCell="name" [hgCellOf]="page.items" let-node>
+          <button
+            class="node-name"
+            [attr.aria-expanded]="expanded().includes(node.id)"
+            [attr.aria-controls]="'node-browsers-' + node.id"
+            (click)="toggle(node.id)"
+            [hgTooltip]="node.id"
+          >
+            <hg-icon
+              [name]="expanded().includes(node.id) ? 'chevron-down' : 'chevron-right'"
+            /><span>{{ node.name }}</span>
+          </button>
+        </ng-template>
+        <ng-template hgCell="status" [hgCellOf]="page.items" let-node
+          ><hg-status [value]="node.status"
+        /></ng-template>
+        <ng-template hgCell="occupied" [hgCellOf]="page.items" let-node>
+          <span
+            class="node-capacity"
+            [hgTooltip]="
+              node.occupied === null
+                ? 'Нет связи. Занятость не подтверждена.'
+                : 'Занято ' + node.occupied + ' из ' + node.capacity + ' мест'
+            "
+            >{{ node.occupied ?? '—' }}<span> / {{ node.capacity }}</span></span
+          >
+        </ng-template>
+        <ng-template hgCell="actions" [hgCellOf]="page.items" let-node>
+          <button
+            class="icon-button"
+            [attr.aria-label]="'Действия узла ' + node.name"
+            hgTooltip="Действия узла"
+            [cdkMenuTriggerFor]="nodeMenu"
+          >
+            <hg-icon name="more" />
+          </button>
+          <ng-template #nodeMenu
+            ><div cdkMenu class="menu-popover anchored-menu">
+              <button cdkMenuItem (click)="info(node)">Сведения об узле</button>
+              <button
+                cdkMenuItem
+                [cdkMenuItemDisabled]="!available() || !!busy() || node.status === 'OFFLINE'"
+                [disabled]="!available() || !!busy() || node.status === 'OFFLINE'"
+                [hgTooltip]="node.status === 'OFFLINE' ? 'Нет подтверждения доступности узла' : ''"
+                (click)="command(node, node.status === 'DRAINING' ? 'ENABLE' : 'DRAIN')"
+              >
+                {{
+                  node.status === 'DRAINING'
+                    ? 'Разрешить новые запуски'
+                    : 'Не принимать новые запуски'
+                }}
+              </button>
+            </div></ng-template
+          >
+        </ng-template>
+        <ng-template hgCell="detail" [hgCellOf]="page.items" let-node
+          ><div [id]="'node-browsers-' + node.id">
+            <div class="nested-frame">
+              @if (browserErrors()[node.id]) {
+                <div class="error-banner" role="alert">
+                  {{ browserErrors()[node.id]
+                  }}<button class="text-button" (click)="loadBrowsers(node.id)">Повторить</button>
+                </div>
+              }
+              @if (browserPages()[node.id]; as browsers) {
+                @if (browsers.items.length) {
+                  <div class="table-tools"><hg-column-picker [view]="browserView(node.id)" /></div>
+                  <hg-data-table
+                    [view]="browserView(node.id)"
+                    [rows]="browsers.items"
+                    label="Браузеры узла"
+                  >
+                    <ng-template hgCell="id" [hgCellOf]="browsers.items" let-browser>
+                      <code [hgTooltip]="browser.id">{{ browser.id.slice(0, 8) }}</code>
+                      <a
+                        class="browser-task-id"
+                        [routerLink]="['/admin/users', browser.ownerId]"
+                        [queryParams]="{ return: returnUrl() }"
+                        [hgTooltip]="
+                          browser.taskId
+                            ? 'Служебные сведения о задаче ' + browser.taskId
+                            : 'Отдельный вход на сайт'
+                        "
+                        >{{
+                          browser.taskId
+                            ? 'Задача #' + browser.taskId.slice(0, 8)
+                            : 'Отдельный вход на сайт'
+                        }}</a
+                      >
+                    </ng-template>
+                    <ng-template hgCell="ownerName" [hgCellOf]="browsers.items" let-browser>
+                      <a
+                        [routerLink]="['/admin/users', browser.ownerId]"
+                        [queryParams]="{ return: returnUrl() }"
+                        [hgTooltip]="browser.ownerEmail"
+                        >{{ browser.ownerName }}</a
+                      >
+                    </ng-template>
+                    <ng-template hgCell="status" [hgCellOf]="browsers.items" let-browser
+                      ><hg-status [value]="browserState(node, browser)"
+                    /></ng-template>
+                    <ng-template hgCell="actions" [hgCellOf]="browsers.items" let-browser>
+                      @if (browser.taskId) {
+                        <button
+                          class="button small danger-soft stop-task"
+                          [attr.aria-label]="'Остановить задачу #' + browser.taskId.slice(0, 8)"
+                          [hgTooltip]="
+                            stopped(browser)
+                              ? 'Остановка уже запрошена или задача завершена'
+                              : 'Остановить задачу и закрыть её браузер'
+                          "
+                          [disabled]="!!busy() || !available() || stopped(browser)"
+                          (click)="stop(browser, node.id)"
+                        >
+                          <hg-icon name="stop" />Остановить
+                        </button>
+                      } @else {
+                        <span
+                          tabindex="0"
+                          hgTooltip="Для отдельного входа используйте «Остановить все задачи» в карточке пользователя"
+                          ><button class="button small danger-soft stop-task" disabled>
+                            <hg-icon name="stop" />Остановить
+                          </button></span
+                        >
+                      }
+                    </ng-template>
+                  </hg-data-table>
+                } @else {
+                  <p class="empty-small">Браузеров нет</p>
+                }
+                <hg-pager
+                  [page]="browsers.page"
+                  [size]="browsers.pageSize"
+                  [total]="browsers.total"
+                  (pageChange)="browserPage(node.id, $event)"
+                  (sizeChange)="browserSize(node.id, $event)"
+                />
+              } @else if (!browserErrors()[node.id]) {
+                <div class="loading" role="status">Загружаем браузеры…</div>
+              }
+            </div>
+          </div></ng-template
+        >
+      </hg-data-table>
+    } @else {
+      <hg-empty title="Узлы не найдены" description="Измените фильтры." />
+    }
+    <hg-pager
+      [page]="page.page"
+      [size]="page.pageSize"
+      [total]="page.total"
+      (pageChange)="query.set({ page: $event }, false)"
+      (sizeChange)="query.set({ pageSize: $event })"
+    />
+  } @else if (!error()) {
+    <div class="loading" role="status">Загружаем узлы…</div>
+  }
+</section>

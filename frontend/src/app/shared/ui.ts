@@ -1,6 +1,7 @@
 import { Component, Pipe, PipeTransform, computed, input, output } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Icon } from './icon';
+import { Icon, IconName } from './icon';
+import { Tooltip } from './tooltip';
 
 export const states: Record<string, string> = {
   BROWSER_CAPACITY: 'Ожидание свободного браузера или освобождения лимита',
@@ -19,6 +20,7 @@ export const states: Record<string, string> = {
   SUCCEEDED: 'Успешно выполнена',
   STOPPED: 'Остановлено',
   LIVE: 'Открыт',
+  CLOSING: 'Закрывается',
   TRANSFERRING: 'Передача управления',
   CHATGPT: 'ChatGPT',
   USER: 'Пользователь',
@@ -90,12 +92,32 @@ export class DurationPipe implements PipeTransform {
 }
 @Component({
   selector: 'hg-status',
-  imports: [LabelPipe],
+  imports: [LabelPipe, Tooltip],
   template:
-    '<span class="badge" [class.success]="success()" [class.warning]="warning()" [class.error]="error()"><i></i>{{ value() | label }}</span>',
+    '<span class="badge" [hgTooltip]="description()" tabindex="0" [class.blue]="active()" [class.success]="success()" [class.warning]="warning()" [class.error]="error()"><i></i>{{ value() | label }}</span>',
 })
 export class Status {
   readonly value = input<string | null>('');
+  readonly description = computed(() => {
+    const value = this.value()?.toUpperCase() ?? '';
+    const descriptions: Record<string, string> = {
+      UNKNOWN: 'Исход операции ещё не установлен. Не повторяйте действие до проверки результата.',
+      TRANSFERRING: 'Сервер подтверждает смену владельца управления браузером.',
+      PAUSED: 'Задача приостановлена. Продолжение требует явного действия.',
+      PAUSING: 'Завершается текущее действие перед паузой.',
+      STOPPING: 'Остановка запрошена и ещё не подтверждена.',
+      DELETION_PENDING: 'Удаление запланировано. До начала очистки его можно отменить.',
+      PURGING: 'Очистка данных началась. Отменить удаление уже нельзя.',
+      LOST: 'Браузер потерян. Новый браузер требует отдельного подтверждения.',
+      UNREACHABLE: 'Связь с браузером потеряна. Состояние уточняется.',
+      DRAINING: 'Новые браузеры на узле не запускаются. Открытые продолжают работать.',
+      INCOMPLETE: 'Полученные данные неполные.',
+    };
+    return descriptions[value] ?? states[value] ?? value;
+  });
+  readonly active = computed(() =>
+    ['RUNNING', 'STARTING', 'LIVE', 'ALLOCATING'].includes(this.value()?.toUpperCase() ?? ''),
+  );
   readonly success = computed(() =>
     [
       'SUCCESS',
@@ -134,12 +156,12 @@ export class Status {
 }
 @Component({
   selector: 'hg-pager',
-  imports: [FormsModule, Icon],
+  imports: [FormsModule, Icon, Tooltip],
   template: ` <footer class="table-footer">
     <span aria-live="polite">{{ total() === null ? 'Данные ещё не получены' : range() }}</span>
     @if (!fixed()) {
       <label
-        >Строк:
+        >На странице
         <select
           [ngModel]="size()"
           (ngModelChange)="changeSize($event)"
@@ -156,7 +178,7 @@ export class Status {
         type="button"
         class="icon-button"
         aria-label="Предыдущая страница"
-        title="Предыдущая страница"
+        hgTooltip="Предыдущая страница"
         [disabled]="page() <= 1 || total() === null"
         (click)="pageChange.emit(page() - 1)"
       >
@@ -166,7 +188,7 @@ export class Status {
         type="button"
         class="icon-button"
         aria-label="Следующая страница"
-        title="Следующая страница"
+        hgTooltip="Следующая страница"
         [disabled]="page() >= pages() || total() === null"
         (click)="pageChange.emit(page() + 1)"
       >
@@ -177,19 +199,23 @@ export class Status {
 })
 export class Pager {
   readonly page = input(1);
-  readonly size = input(10);
+  readonly size = input(5);
   readonly total = input<number | null>(null);
   readonly fixed = input(false);
+  readonly summaryLabel = input('');
   readonly pageChange = output<number>();
   readonly sizeChange = output<number>();
-  readonly sizes = [10, 20, 50];
+  readonly sizes = [5, 10, 25, 50];
   readonly pages = computed(() => Math.max(1, Math.ceil((this.total() ?? 0) / this.size())));
   readonly range = computed(() => {
     const total = this.total() ?? 0;
-    if (total === 0) return '0 записей';
+    const prefix = this.summaryLabel() ? this.summaryLabel() + ': ' : '';
+    if (total === 0) return prefix ? prefix + '0' : '0 записей';
     const first = (this.page() - 1) * this.size() + 1;
-    if (first > total) return `На странице нет записей · всего ${total}`;
-    return `${first}–${Math.min(this.page() * this.size(), total)} из ${total}`;
+    if (first > total) return prefix
+      ? prefix + `на странице пусто · всего ${total}`
+      : `На странице нет записей · всего ${total}`;
+    return prefix + `${first}–${Math.min(this.page() * this.size(), total)} из ${total}`;
   });
   changeSize(value: number) {
     this.sizeChange.emit(value);
@@ -199,9 +225,10 @@ export class Pager {
   selector: 'hg-empty',
   imports: [Icon],
   template:
-    '<div class="empty"><span class="empty-symbol"><hg-icon name="list" /></span><h2>{{ title() }}</h2><p>{{ description() }}</p><ng-content /></div>',
+    '<div class="empty"><span class="empty-symbol"><hg-icon [name]="icon()" /></span><h2>{{ title() }}</h2><p>{{ description() }}</p><ng-content /></div>',
 })
 export class Empty {
+  readonly icon = input<IconName>('list');
   readonly title = input('Ничего не найдено');
   readonly description = input('Измените поиск или выбранные фильтры.');
 }

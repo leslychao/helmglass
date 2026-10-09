@@ -10,10 +10,13 @@ import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Contracts;
 import ru.helmglass.api.Database;
+import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.ListQuery;
 import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.browsers.BrowserService;
@@ -26,7 +29,8 @@ public class ConnectionService {
   private static final String SELECT =
       """
       SELECT c.*,b.id browser_id,b.status browser_status,b.node_id,b.control_owner,b.control_epoch,
-        b.private_mode,b.current_url,b.version browser_version FROM connections c
+        b.private_mode,b.current_url,b.version browser_version,b.task_id,b.login_confirmed,
+        b.started_at browser_started_at,b.closed_at browser_closed_at FROM connections c
       LEFT JOIN browser_sessions b ON b.connection_id=c.id AND b.status NOT IN ('CLOSED','LOST')
       """;
   private final JdbcClient jdbc;
@@ -35,6 +39,8 @@ public class ConnectionService {
   private final EventService events;
   private final Identity identity;
   private final WorkerClient worker;
+  private final JsonSupport json;
+  private final TransactionTemplate transactions;
 
   public ConnectionService(
       JdbcClient jdbc,
@@ -42,17 +48,25 @@ public class ConnectionService {
       TaskService tasks,
       EventService events,
       Identity identity,
-      WorkerClient worker) {
+      WorkerClient worker,
+      JsonSupport json,
+      PlatformTransactionManager transactionManager) {
     this.jdbc = jdbc;
     this.browsers = browsers;
     this.tasks = tasks;
     this.events = events;
     this.identity = identity;
     this.worker = worker;
+    this.json = json;
+    this.transactions = new TransactionTemplate(transactionManager);
   }
 
   public Contracts.Connection get(UUID owner, UUID id) {
-    return jdbc.sql(SELECT + " WHERE c.id=:id AND c.owner_id=:owner AND c.deleted_at IS NULL")
+    String detail = SELECT.replace(
+        "LEFT JOIN browser_sessions b ON b.connection_id=c.id AND b.status NOT IN ('CLOSED','LOST')",
+        "LEFT JOIN LATERAL (SELECT s.* FROM browser_sessions s WHERE s.connection_id=c.id"
+            + " ORDER BY s.created_at DESC,s.id DESC LIMIT 1) b ON true");
+    return jdbc.sql(detail + " WHERE c.id=:id AND c.owner_id=:owner AND c.deleted_at IS NULL")
         .param("id", id)
         .param("owner", owner)
         .query(this::map)
@@ -76,10 +90,13 @@ public class ConnectionService {
             .params(parameters)
             .query(Long.class)
             .single();
-    String order =
-        "name".equals(query.sort())
-            ? "c.name"
-            : "site".equals(query.sort()) ? "c.site" : "c.updated_at";
+    String order = switch (query.sort() == null ? "" : query.sort()) {
+      case "name" -> "c.name";
+      case "site" -> "c.site";
+      case "status" -> "c.status";
+      case "lastUsedAt" -> "c.last_used_at";
+      default -> "c.updated_at";
+    };
     var items =
         jdbc.sql(
                 SELECT
@@ -88,7 +105,7 @@ public class ConnectionService {
                     + " ORDER BY "
                     + order
                     + (query.ascending() ? " ASC" : " DESC")
-                    + ",c.id LIMIT :limit OFFSET :offset")
+                    + " NULLS LAST,c.id LIMIT :limit OFFSET :offset")
             .params(parameters)
             .param("limit", query.pageSize())
             .param("offset", query.offset())
@@ -111,9 +128,9 @@ public class ConnectionService {
             .single();
     var items =
         jdbc.sql(
-                "SELECT DISTINCT site FROM connections WHERE "
+                "SELECT site FROM connections WHERE "
                     + where
-                    + " ORDER BY site LIMIT :limit OFFSET :offset")
+                    + " GROUP BY site ORDER BY max(updated_at) DESC,site LIMIT :limit OFFSET :offset")
             .params(parameters)
             .param("limit", query.pageSize())
             .param("offset", query.offset())
@@ -279,6 +296,109 @@ WHERE t.owner_id=:owner AND (t.selected_connection_id=:id OR b.connection_id=:id
     return get(owner, id);
   }
 
+  @Transactional
+  public UUID connectionForLogin(UUID owner, UUID browserId) {
+    identity.requireActive(owner);
+    tasks.lockOwner(owner);
+    browsers.get(owner, browserId);
+    BrowserService.SessionReference reference = browsers.reference(browserId);
+    if (reference.connectionId() != null) {
+      get(owner, reference.connectionId());
+      return reference.connectionId();
+    }
+    if (reference.taskId() == null) {
+      throw ApiException.conflict("CONNECTION_REQUIRED", "Браузер не связан с подключением.");
+    }
+    Contracts.Task task = tasks.get(owner, reference.taskId());
+    UUID selected = jdbc.sql("SELECT selected_connection_id FROM tasks WHERE id=:id")
+        .param("id", task.id()).query((row, index) -> row.getObject(1, UUID.class))
+        .optional().orElse(null);
+    UUID connection = selected == null
+        ? create(owner, new Contracts.ConnectionInput(task.site(), task.site(), task.startUrl())).id()
+        : get(owner, selected).id();
+    jdbc.sql("""
+            UPDATE browser_sessions SET connection_id=:connection WHERE id=:browser
+            AND NOT EXISTS(SELECT 1 FROM browser_sessions other WHERE other.id<>:browser
+              AND (other.connection_id=:connection OR other.pending_connection_id=:connection)
+              AND other.status NOT IN ('CLOSED','LOST'))
+            """).param("connection", connection).param("browser", browserId).update();
+    if (!connection.equals(browsers.reference(browserId).connectionId())) {
+      throw ApiException.conflict("CONNECTION_BUSY", "Подключение занято другим браузером.");
+    }
+    jdbc.sql("UPDATE tasks SET selected_connection_id=:connection WHERE id=:id")
+        .param("connection", connection).param("id", task.id()).update();
+    return connection;
+  }
+
+  public Object credentials(
+      UUID owner, UUID browserId, String action, String viewerId, Map<String, Object> values) {
+    // Commit the canonical destination before a worker call whose reply may be lost.
+    UUID connection = transactions.execute(transaction -> {
+      identity.requireActive(owner);
+      tasks.lockOwner(owner);
+      Contracts.Browser browser = browsers.get(owner, browserId);
+      BrowserService.SessionReference reference = browsers.reference(browserId);
+      if (!"LIVE".equals(browser.status()) || !browser.privateMode()
+          || !"USER".equals(browser.controlOwner())
+          || viewerId == null || !viewerId.equals(reference.controllerId())) {
+        throw Identity.denied("Сначала откройте защищённый вход в этом просмотре.");
+      }
+      return reference.connectionId();
+    });
+    Map<String, Object> payload = new HashMap<>(values);
+    payload.put("action", action);
+    payload.put("ownerId", owner);
+    payload.put("viewerId", viewerId);
+    if (connection != null) {
+      get(owner, connection);
+      payload.put("connectionId", connection);
+    }
+    try {
+      return worker.call("POST", "/sessions/" + browserId + "/credentials", payload);
+    } catch (WorkerClient.WorkerException exception) {
+      if (exception.status() == 400 || exception.status() == 413) {
+        throw ApiException.invalid("credentials", "Проверьте поля сохранённого входа.");
+      }
+      if (exception.status() == 403) {
+        throw Identity.denied("Подстановка разрешена только в защищённом входе нужного сайта.");
+      }
+      if (exception.status() == 409) {
+        throw ApiException.conflict("CREDENTIAL_STATE_CHANGED", "Состояние сохранённого входа изменилось.");
+      }
+      throw exception;
+    }
+  }
+
+  @Transactional
+  public Contracts.Browser finishTaskLogin(
+      UUID owner, UUID browserId, Contracts.ControlInput input) {
+    tasks.lockOwner(owner);
+    UUID connection = connectionForLogin(owner, browserId);
+    Contracts.Connection current = get(owner, connection);
+    String label = input.accountLabel() == null ? current.accountLabel() : input.accountLabel();
+    String subject = input.accountSubject() == null ? current.accountSubject() : input.accountSubject();
+    return browsers.control(owner, browserId, new Contracts.ControlInput(
+        "FINISH_LOGIN", input.viewerId(), true, true, connection, label, subject));
+  }
+
+  @Transactional
+  public Contracts.Browser sessionLogin(UUID owner, UUID browserId, Contracts.ControlInput input) {
+    if ("CONFIRM_LOGIN".equals(input.type())) {
+      return browsers.control(owner, browserId, input);
+    }
+    if (!"SAVE_SESSION".equals(input.type())) {
+      throw ApiException.invalid("type", "Неизвестное действие сессии.");
+    }
+    tasks.lockOwner(owner);
+    UUID connection = connectionForLogin(owner, browserId);
+    Contracts.Connection current = get(owner, connection);
+    String label = input.accountLabel() == null ? current.accountLabel() : input.accountLabel();
+    String subject = input.accountSubject() == null ? current.accountSubject() : input.accountSubject();
+    return browsers.control(owner, browserId, new Contracts.ControlInput(
+        "SAVE_SESSION", input.viewerId(), false, true, connection, label, subject,
+        input.controlEpoch()));
+  }
+
   private Contracts.Connection map(ResultSet row, int index) throws SQLException {
     UUID browserId = row.getObject("browser_id", UUID.class);
     Contracts.Browser browser =
@@ -294,7 +414,10 @@ WHERE t.owner_id=:owner AND (t.selected_connection_id=:id OR b.connection_id=:id
                 row.getBoolean("private_mode") ? null : row.getString("current_url"),
                 "LIVE".equals(row.getString("browser_status")),
                 "LIVE".equals(row.getString("browser_status")),
-                row.getLong("browser_version"));
+                row.getLong("browser_version"), row.getString("profile_save_error"),
+                row.getObject("task_id", UUID.class), row.getObject("id", UUID.class),
+                row.getBoolean("login_confirmed"), Database.instant(row, "browser_started_at"),
+                Database.instant(row, "browser_closed_at"));
     return new Contracts.Connection(
         row.getObject("id", UUID.class),
         row.getLong("version"),
@@ -307,6 +430,18 @@ WHERE t.owner_id=:owner AND (t.selected_connection_id=:id OR b.connection_id=:id
         Database.instant(row, "last_used_at"),
         browser,
         Database.instant(row, "created_at"),
-        Database.instant(row, "updated_at"));
+        Database.instant(row, "updated_at"),
+        row.getLong("profile_revision"),
+        Database.instant(row, "profile_saved_at"),
+        row.getString("profile_save_error"),
+        savedOrigins(row.getString("authorized_origins")));
+  }
+
+  private List<String> savedOrigins(String value) {
+    List<String> origins = new ArrayList<>();
+    for (var origin : json.read(value)) {
+      origins.add(origin.asString());
+    }
+    return List.copyOf(origins);
   }
 }

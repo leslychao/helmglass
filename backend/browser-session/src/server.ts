@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net from "node:net";
 import path from "node:path";
@@ -14,11 +14,16 @@ import { WebSocketServer, createWebSocketStream, type WebSocket } from "ws";
 import { z } from "zod";
 import { fileTypeFromBuffer } from "file-type";
 import { cookieMatchesHost, exportProfile, ProfileExportError } from "./profile-export.js";
+import { importProfile } from "./profile-import.js";
+import { fillSavedCredential, type SavedCredential } from "./credential-autofill.js";
+import { CredentialCapture, CaptureConflict } from "./credential-capture.js";
 
 function required(name: string): string { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; }
 const sessionId = z.uuid().parse(required("SESSION_ID"));
 const token = required("SESSION_TOKEN");
 const proxyIp = z.ipv4().parse(required("PROXY_IP"));
+const screenWidth = z.coerce.number().int().positive().parse(required("BROWSER_SCREEN_WIDTH"));
+const screenHeight = z.coerce.number().int().positive().parse(required("BROWSER_SCREEN_HEIGHT"));
 const proxy = `http://${proxyIp}:3128`;
 const dispatcher = new ProxyAgent(proxy);
 const dataDirectory = process.env["DATA_DIR"] ?? "/data";
@@ -30,12 +35,18 @@ const Policy = z.object({ controlEpoch: z.number().int().nonnegative(), owner: z
 type Policy = z.infer<typeof Policy>;
 const savedPolicy = db.prepare("SELECT value FROM state WHERE id='policy'").get();
 let policy: Policy = savedPolicy ? Policy.parse(JSON.parse(z.string().parse(savedPolicy["value"]))) : { controlEpoch: 0, owner: "NONE", privateMode: false };
+let savedCredential: SavedCredential | undefined;
+const credentialCapture = new CredentialCapture();
+let activeAutofills = 0;
+const loginOrigins = new Set<string>();
+let exportingProfile = false;
 const previouslyStarted = Boolean(db.prepare("SELECT value FROM state WHERE id='started'").get());
 let status: "STARTING" | "LIVE" | "LOST" = previouslyStarted ? "LOST" : "STARTING";
 let browser: Browser | undefined;
 let context: BrowserContext | undefined;
 let currentPage: Page | undefined;
 let initialization: Promise<void> | undefined;
+const profileImports = new Map<string, BrowserContext>();
 let activeOperation: string | undefined;
 let activeAbort: AbortController | undefined;
 let navigationError: string | undefined;
@@ -65,8 +76,24 @@ function authorized(request: IncomingMessage): boolean {
 }
 function selectedPage(): Page { if (status !== "LIVE" || !currentPage || currentPage.isClosed()) throw new HttpError(409, "Browser unavailable"); return currentPage; }
 function publicUrl(value: string): string { const url = new URL(value); if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new HttpError(400, "Only HTTP(S) URLs are allowed"); return url.href; }
-function observationAllowed(): void { if (policy.privateMode) throw new HttpError(423, "Private input in progress"); }
-function snapshotUrl(value: string): string | undefined { return value.length <= snapshotLimits.url ? value : undefined; }
+function observationAllowed(): void {
+  if (policy.privateMode) throw new HttpError(423, "Private input in progress");
+  if (exportingProfile) throw new HttpError(409, "Profile save in progress");
+}
+function snapshotUrl(value: string): string | undefined {
+  if (value.length > snapshotLimits.url) return undefined;
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:", "about:"].includes(url.protocol)) return undefined;
+    url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+    return url.href;
+  } catch { return undefined; }
+}
+async function privateAutofill(page: Page, credential: SavedCredential): Promise<boolean> {
+  activeAutofills++;
+  try { return await fillSavedCredential(page, credential); }
+  finally { activeAutofills--; }
+}
 function summary(): object { return { id: sessionId, status, controlEpoch: policy.controlEpoch, controlOwner: policy.owner, controllerId: policy.controllerId, privateMode: policy.privateMode, ...(!policy.privateMode && currentPage ? { currentUrl: snapshotUrl(currentPage.url()), navigationError } : {}) }; }
 
 async function saveArtifact(stream: Readable, metadata: { name: string; mimeType: string; sourceUrl: string; sourceRef?: string; complete: boolean; pageId?: string; operationId?: string }, signal?: AbortSignal): Promise<object> {
@@ -124,19 +151,34 @@ function registerPage(page: Page): void {
     }).catch(() => {});
   });
 }
-async function createContext(profile?: unknown): Promise<BrowserContext> {
+async function createContext(): Promise<BrowserContext> {
   if (!browser) throw new HttpError(409, "Browser unavailable");
-  let storageState: string | undefined;
-  try {
-    if (profile !== undefined) {
-      const saved = z.object({ cookies: z.array(z.object({ domain: z.string() }).passthrough()).max(10_000), origins: z.array(z.object({ origin: z.url() }).passthrough()).max(1000) }).parse(profile);
-      const hosts = saved.origins.map((origin) => new URL(origin.origin).hostname);
-      const scoped = { ...saved, cookies: saved.cookies.filter((cookie) =>
-        hosts.some((host) => cookieMatchesHost(cookie.domain, host))) };
-      storageState = `/home/node/imported-storage-${randomUUID()}.json`;
-      await writeFile(storageState, JSON.stringify(scoped), { mode: 0o600 });
-    }
-    const created = await browser.newContext({ viewport: null, acceptDownloads: true, storageState, locale: "ru-RU", serviceWorkers: "allow" });
+  const created = await browser.newContext({ viewport: null, acceptDownloads: true, locale: "ru-RU", serviceWorkers: "allow" });
+    await credentialCapture.install(created, (page) => !exportingProfile && policy.privateMode && policy.owner === "USER" && page === currentPage);
+    const lastAutofill = new WeakMap<Page, number>();
+    await created.exposeBinding("__helmPrivateAutofill", async (source) => {
+      if (!policy.privateMode || policy.owner !== "USER" || !savedCredential
+          || source.frame !== source.page.mainFrame() || source.page.isClosed()) return;
+      const now = Date.now();
+      if (now - (lastAutofill.get(source.page) ?? 0) < 250) return;
+      lastAutofill.set(source.page, now);
+      await privateAutofill(source.page, savedCredential);
+    });
+    await created.addInitScript(() => {
+      let pending = false;
+      const notify = () => {
+        if (pending) return;
+        pending = true;
+        setTimeout(() => {
+          pending = false;
+          const callback: unknown = Reflect.get(window, "__helmPrivateAutofill");
+          if (typeof callback === "function") Promise.resolve(callback()).catch(() => {});
+        }, 300);
+      };
+      document.addEventListener("DOMContentLoaded", () => {
+        notify(); new MutationObserver(notify).observe(document, { subtree: true, childList: true });
+      }, { once: true });
+    });
     await created.exposeBinding("__helmVisiblePage", async (source) => {
       if (source.page.isClosed()) return;
       const visible = await source.page.evaluate(() => document.visibilityState === "visible" && document.hasFocus());
@@ -158,21 +200,27 @@ async function createContext(profile?: unknown): Promise<BrowserContext> {
     });
     created.setDefaultTimeout(20_000); created.setDefaultNavigationTimeout(40_000);
     created.on("page", registerPage);
+    created.on("page", (page) => page.on("framenavigated", (frame) => {
+      if (!policy.privateMode || frame !== page.mainFrame()) return;
+      try {
+        const url = new URL(frame.url());
+        if (["http:", "https:"].includes(url.protocol) && loginOrigins.size < 20) loginOrigins.add(url.origin);
+      } catch { /* A transient about:blank page has no site origin. */ }
+    }));
     return created;
-  } finally { if (storageState) await rm(storageState, { force: true }); }
 }
-async function initialize(input: { startUrl: string; profile?: unknown }): Promise<void> {
+async function initialize(input: { startUrl: string }): Promise<void> {
   if (previouslyStarted || status === "LOST") return;
   db.prepare("INSERT OR REPLACE INTO state(id,value) VALUES('started','true')").run();
   try {
     browser = await chromium.launch({
       headless: false, chromiumSandbox: true,
       proxy: { server: proxy, bypass: "<-loopback>" },
-      args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-features=WebRtcAllowInputVolumeAdjustment", "--no-first-run", "--start-maximized"],
+      args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-features=WebRtcAllowInputVolumeAdjustment", "--no-first-run", `--window-size=${screenWidth},${screenHeight}`, "--window-position=0,0"],
       env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: "/home/node", DISPLAY: ":99", LANG: "ru_RU.UTF-8" },
     });
     browser.on("disconnected", () => { status = "LOST"; for (const viewer of viewers) viewer.close(1011, "Browser lost"); });
-    context = await createContext(input.profile);
+    context = await createContext();
     const page = await context.newPage();
     if (input.startUrl !== "about:blank") {
       // Initial navigation is not repeated if the caller loses its response.
@@ -216,7 +264,8 @@ async function observe(): Promise<object> {
         elements.push({ index: elements.length, tag: node.tagName.toLowerCase(), role: exact(node.getAttribute("role"), limits.attribute), id: exact(node.id, limits.identifier) || undefined,
           text: node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? "" : clipped(node.textContent ?? "", 300),
           label: clipped(node.getAttribute("aria-label") ?? node.getAttribute("placeholder"), limits.label), type: exact(node.getAttribute("type"), limits.attribute), name: exact(node.getAttribute("name"), limits.identifier),
-          ...(node instanceof HTMLAnchorElement ? { href: exact(node.href, limits.url) } : {}) });
+          ...(node instanceof HTMLAnchorElement && ["http:", "https:"].includes(node.protocol)
+            ? { href: exact(node.origin + node.pathname, limits.url) } : {}) });
       }
     }
     const title = clipped(document.title, limits.title);
@@ -330,18 +379,20 @@ async function captureAudio(args: Record<string, unknown>, signal: AbortSignal):
   return { artifact };
 }
 async function applyConnection(args: Record<string, unknown>, signal: AbortSignal): Promise<object> {
-  const input = z.object({ connectionId: z.string().min(1).max(200), ownerId: z.string().min(1).max(200), origins: z.array(z.url()).min(1).max(50), url: z.url(), profile: z.object({ cookies: z.array(z.object({ domain: z.string() }).passthrough()).max(10_000), origins: z.array(z.object({ origin: z.string() }).passthrough()).max(1000) }) }).parse(args);
+  const input = z.object({ connectionId: z.string().min(1).max(200), ownerId: z.string().min(1).max(200), origins: z.array(z.url()).min(1).max(50), url: z.url(), profileId: z.uuid() }).parse(args);
   const target = new URL(publicUrl(input.url));
   const origins = input.origins.map((value) => new URL(publicUrl(value)).origin);
   if (!origins.includes(target.origin)) throw new BeforeEffectRejection(403, "Account switch destination was not confirmed");
   if (!browser) throw new HttpError(409, "Browser unavailable");
   const hosts = origins.map((origin) => new URL(origin).hostname);
   const matchesCookie = (domain: string) => hosts.some((host) => cookieMatchesHost(domain, host));
-  const profile = { cookies: input.profile.cookies.filter((cookie) => matchesCookie(cookie.domain)), origins: input.profile.origins.filter((origin) => origins.includes(origin.origin)) };
-  const previousContexts = browser.contexts();
+  const replacement = profileImports.get(input.profileId);
+  if (!replacement) throw new BeforeEffectRejection(409, "Imported profile unavailable");
+  const previousContexts = browser.contexts().filter((item) => item !== replacement);
   // A fresh context isolates the selected account while retaining the same Chromium process.
   // setStorageState on a live context would erase unrelated origins and their OPFS.
-  const replacement = await createContext(profile);
+  profileImports.delete(input.profileId);
+  credentialCapture.clear();
   signal.throwIfAborted();
   const replacementPage = await replacement.newPage();
   for (const previous of previousContexts) {
@@ -421,7 +472,7 @@ async function execute(command: Command): Promise<object> {
   }
   observationAllowed();
   if ((command.type !== "applyConnection" && policy.owner !== "CHATGPT") || command.controlEpoch !== policy.controlEpoch) throw new HttpError(409, "Control not granted for this epoch");
-  if (activeOperation) throw new HttpError(409, "Another command is running");
+  if (activeOperation || exportingProfile) throw new HttpError(409, "Another command is running");
   const unresolved = db.prepare("SELECT id FROM operations WHERE status='UNKNOWN' LIMIT 1").get();
   if (unresolved && !readCommands.has(command.type)) throw new HttpError(409, "Unknown result requires reconciliation");
   selectedPage(); activeOperation = command.operationId; const abort = new AbortController(); activeAbort = abort;
@@ -444,14 +495,58 @@ const server = http.createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://session");
     if (url.pathname === "/health") { reply(response, 200, summary()); return; }
     if (url.pathname === "/initialize" && request.method === "POST") {
-      const input = z.object({ startUrl: z.string().max(8192), profile: z.unknown().optional() }).parse(await body(request));
+      const input = z.object({ startUrl: z.string().max(8192) }).strict().parse(await body(request));
       if (!initialization && status === "STARTING") initialization = initialize(input);
       await initialization; reply(response, 200, summary()); return;
+    }
+    if (url.pathname.startsWith("/profile/import/")) {
+      const id = z.uuid().parse(url.pathname.slice("/profile/import/".length));
+      const activated = db.prepare("SELECT value FROM state WHERE id='profile-import'").get()?.["value"] === id;
+      if (request.method === "GET") {
+        if (!activated && !profileImports.has(id)) throw new HttpError(404, "Profile import not found");
+        reply(response, 200, { ready: true, activated }); return;
+      }
+      if (request.method === "POST") {
+        if (activeOperation || exportingProfile || status !== "LIVE") throw new HttpError(409, "Browser work in progress");
+        if (activated || profileImports.has(id)) { request.resume(); reply(response, 200, { ready: true, activated }); return; }
+        const scope = url.searchParams.get("origins");
+        const origins = scope ? z.array(z.url()).min(1).max(50).parse(JSON.parse(scope)) : undefined;
+        exportingProfile = true;
+        let replacement: BrowserContext | undefined;
+        try {
+          for (const staged of profileImports.values()) await staged.close();
+          profileImports.clear();
+          replacement = await createContext();
+          await importProfile(replacement, request, origins); profileImports.set(id, replacement);
+        }
+        catch (error) { await replacement?.close(); throw error; }
+        finally { exportingProfile = false; if (currentPage && !currentPage.isClosed()) await currentPage.bringToFront(); }
+        reply(response, 200, { ready: true, activated: false }); return;
+      }
+    }
+    if (url.pathname === "/profile/activate" && request.method === "POST") {
+      const input = z.object({ id: z.uuid(), startUrl: z.string().max(8192) }).strict().parse(await body(request));
+      if (db.prepare("SELECT value FROM state WHERE id='profile-import'").get()?.["value"] === input.id) { reply(response, 200, summary()); return; }
+      if (activeOperation || exportingProfile) throw new HttpError(409, "Browser work in progress");
+      const replacement = profileImports.get(input.id);
+      if (!replacement || !browser) throw new HttpError(409, "Imported profile unavailable");
+      const previous = browser.contexts().filter((item) => item !== replacement);
+      const page = await replacement.newPage();
+      context = replacement; currentPage = page; profileImports.delete(input.id); credentialCapture.clear();
+      db.prepare("INSERT INTO state(id,value) VALUES('profile-import',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(input.id);
+      for (const old of previous) await old.close();
+      if (input.startUrl !== "about:blank") {
+        try { await page.goto(publicUrl(input.startUrl), { waitUntil: "domcontentloaded" }); }
+        catch { navigationError = "Initial navigation failed; the browser remains open"; }
+      }
+      await page.bringToFront(); reply(response, 200, summary()); return;
     }
     if (url.pathname === "/control" && request.method === "POST") {
       const input = Policy.parse(await body(request));
       if (input.controlEpoch < policy.controlEpoch || (input.controlEpoch === policy.controlEpoch && JSON.stringify(input) !== JSON.stringify(policy))) throw new HttpError(409, "Stale control epoch");
       if (JSON.stringify(input) === JSON.stringify(policy)) { reply(response, 200, summary()); return; }
+      // Never expose a renderer while a private password injection is still pending.
+      if (activeAutofills || exportingProfile) throw new HttpError(409, "Private browser work is finishing");
       if (input.owner === "USER" && !input.controllerId) throw new HttpError(400, "Controller identity required");
       if (activeOperation && input.owner !== "NONE") throw new HttpError(409, "Wait for the dispatched action to finish");
       activeAbort?.abort();
@@ -462,18 +557,78 @@ const server = http.createServer(async (request, response) => {
         }
       }
       for (const viewer of viewers) viewer.terminate(); viewers.clear();
+      if (!input.privateMode || input.owner !== "USER") savedCredential = undefined;
+      if (!input.privateMode || (input.owner === "USER" && input.controllerId !== policy.controllerId)) credentialCapture.clear();
+      if (input.privateMode && !policy.privateMode) {
+        loginOrigins.clear();
+        if (currentPage) {
+          const current = new URL(currentPage.url());
+          if (["http:", "https:"].includes(current.protocol)) loginOrigins.add(current.origin);
+        }
+      }
       policy = input; media.clear(); mediaTruncated = false;
       db.prepare("INSERT INTO state(id,value) VALUES('policy',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(JSON.stringify(policy));
+      if (currentPage && !currentPage.isClosed()) await credentialCapture.updatePage(currentPage);
       reply(response, 200, summary()); return;
     }
     if (url.pathname === "/observe" && request.method === "GET") { reply(response, 200, await observe()); return; }
     if (url.pathname === "/profile/export" && request.method === "POST") {
       if (!context || status !== "LIVE") throw new HttpError(409, "Browser unavailable");
-      if (activeOperation) throw new HttpError(409, "Action in progress");
-      const input = z.object({ origins: z.array(z.url()).min(1).max(50) }).parse(await body(request));
+      if (activeOperation || exportingProfile) throw new HttpError(409, "Action in progress");
+      const input = z.object({ origins: z.array(z.url()).min(1).max(50), includeLoginOrigins: z.boolean().default(false) }).parse(await body(request));
       const allowed = [...new Set(input.origins.map((origin) => new URL(publicUrl(origin)).origin))];
-      const profile = await exportProfile(selectedPage(), allowed);
-      reply(response, 200, profile); return;
+      if (input.includeLoginOrigins) {
+        if (!policy.privateMode) throw new HttpError(403, "Login scope requires private input");
+        for (const origin of loginOrigins) if (!allowed.includes(origin)) allowed.push(origin);
+        if (allowed.length > 50) throw new HttpError(413, "Too many login origins");
+      }
+      const selected = selectedPage();
+      exportingProfile = true;
+      if (input.includeLoginOrigins) { for (const viewer of viewers) viewer.terminate(); viewers.clear(); }
+      try {
+        const candidate = input.includeLoginOrigins ? credentialCapture.export() : null;
+        response.writeHead(200, { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" });
+        try { await exportProfile(selected, allowed, response, candidate); }
+        catch (error) { if (!(error instanceof ProfileExportError)) throw error; }
+        response.end();
+      }
+      finally { exportingProfile = false; if (!selected.isClosed()) currentPage = selected; }
+      return;
+    }
+    if (url.pathname === "/login-context" && request.method === "POST") {
+      if (!policy.privateMode || policy.owner !== "NONE" || activeOperation || exportingProfile || activeAutofills) throw new HttpError(409, "Protected idle browser required");
+      const input = z.object({ startUrl: z.url() }).strict().parse(await body(request));
+      const previous = browser?.contexts() ?? [];
+      context = await createContext();
+      const page = await context.newPage(); currentPage = page;
+      for (const prior of previous) await prior.close();
+      loginOrigins.clear(); savedCredential = undefined;
+      await page.goto(publicUrl(input.startUrl), { waitUntil: "domcontentloaded" });
+      reply(response, 200, { ready: true }); return;
+    }
+    if (url.pathname === "/credentials/context" && request.method === "POST") {
+      const input = z.object({ viewerId: z.string() }).strict().parse(await body(request));
+      if (!policy.privateMode || policy.owner !== "USER" || input.viewerId !== policy.controllerId) throw new HttpError(403, "Private controller required");
+      const current = new URL(selectedPage().url());
+      reply(response, 200, { origin: current.protocol === "https:" ? current.origin : null, ...credentialCapture.metadata() }); return;
+    }
+    if (url.pathname === "/credentials/consent" && request.method === "POST") {
+      const input = z.object({ viewerId: z.string(), enabled: z.boolean(), expectedCaptureRevision: z.number().int().nonnegative(),
+        operationId: z.string().min(8).max(128), storedRevision: z.number().int().nonnegative() }).strict().parse(await body(request, 2048));
+      if (!policy.privateMode || policy.owner !== "USER" || input.viewerId !== policy.controllerId) throw new HttpError(403, "Private controller required");
+      reply(response, 200, await credentialCapture.consent(selectedPage(), input.enabled, input.expectedCaptureRevision, input.operationId, input.storedRevision)); return;
+    }
+    if (url.pathname === "/credentials/fill" && request.method === "POST") {
+      const input = z.object({ viewerId: z.string(), origin: z.url(), username: z.string().min(1).max(500), password: z.string().min(1).max(8192) }).strict().parse(await body(request, 32_768));
+      if (!policy.privateMode || policy.owner !== "USER" || input.viewerId !== policy.controllerId) throw new HttpError(403, "Private controller required");
+      if (new URL(input.origin).protocol !== "https:") throw new HttpError(403, "HTTPS credential origin required");
+      savedCredential = { origin: input.origin, username: input.username, password: input.password };
+      reply(response, 200, { filled: await privateAutofill(selectedPage(), savedCredential) }); return;
+    }
+    if (url.pathname === "/credentials/clear" && request.method === "POST") {
+      savedCredential = undefined; credentialCapture.clear();
+      if (currentPage) await credentialCapture.updatePage(currentPage);
+      reply(response, 200, { cleared: true }); return;
     }
     if (url.pathname === "/commands" && request.method === "POST") { reply(response, 200, await execute(Command.parse(await body(request, 8_650_752)))); return; }
     const command = /^\/commands\/([^/]+)$/.exec(url.pathname);
@@ -508,13 +663,13 @@ const server = http.createServer(async (request, response) => {
     throw new HttpError(404, "Route not found");
   } catch (error) {
     if (response.headersSent) { response.destroy(); return; }
-    reply(response, error instanceof HttpError ? error.status : error instanceof ProfileExportError ? 413 : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 500, { error: error instanceof HttpError || error instanceof ProfileExportError ? error.message : "Browser operation unavailable" });
+    reply(response, error instanceof HttpError || error instanceof ProfileExportError ? error.status : error instanceof CaptureConflict ? 409 : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 500, { error: error instanceof HttpError || error instanceof ProfileExportError ? error.message : "Browser operation unavailable", ...(error instanceof ProfileExportError ? { code: error.code } : {}) });
   }
 });
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1_048_576, perMessageDeflate: false });
 server.on("upgrade", (request, socket, head) => {
   try {
-    if (!authorized(request) || status !== "LIVE") throw new HttpError(403, "View unavailable");
+    if (!authorized(request) || status !== "LIVE" || exportingProfile) throw new HttpError(403, "View unavailable");
     const url = new URL(request.url ?? "/", "http://session");
     if (url.pathname !== "/view" || Number(url.searchParams.get("epoch")) !== policy.controlEpoch) throw new HttpError(409, "Stale viewer");
     const viewerId = url.searchParams.get("viewerId"); const controller = url.searchParams.get("role") === "CONTROLLER";

@@ -1,0 +1,407 @@
+hg-data-table {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+}
+.hg-drag-label {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 10px 14px;
+  border: 1px solid #b8ccee;
+  border-radius: 7px;
+  background: white;
+  box-shadow: 0 8px 24px #34405426;
+  font-size: 12px;
+  pointer-events: none;
+}
+.hg-drag-marker {
+  position: fixed;
+  z-index: 999;
+  width: 3px;
+  background: #397bed;
+  pointer-events: none;
+}
+.hg-drag-marker > span {
+  position: absolute;
+  top: -27px;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: #397bed;
+  color: white;
+  font-size: 11px;
+  white-space: nowrap;
+}
+hg-data-table .hg-grid .hg-action-cell .button {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: #5c6b7e;
+  white-space: nowrap;
+}
+hg-data-table .hg-grid .hg-action-cell .button:hover:not(:disabled) {
+  background: #eef3f9;
+  color: #315f9c;
+}
+hg-data-table .hg-grid .hg-action-cell :is(.danger, .danger-soft) {
+  color: #b42318;
+}
+hg-data-table .hg-grid .hg-action-cell :is(.danger, .danger-soft):hover:not(:disabled) {
+  background: #fff1ef;
+  color: #b42318;
+}
+.hg-grid
+  :is(
+    .hg-sort,
+    .hg-column-grip,
+    .hg-header-help,
+    .hg-action-cell button,
+    .hg-action-cell a
+  ):focus-visible {
+  outline: 2px solid #397bed;
+  outline-offset: 2px;
+}
+.hg-grid-scroll {
+  overflow: auto;
+  max-width: 100%;
+  overscroll-behavior-inline: contain;
+  scrollbar-width: thin;
+}
+hg-data-table .hg-grid {
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
+}
+hg-data-table .hg-grid th {
+  position: relative;
+  height: 50px;
+  padding: 7px 9px;
+  background: #f8fafc;
+  color: #506078;
+  font-size: 12px;
+  font-weight: 500;
+  border-right: 1px solid #e1e7ef;
+  border-bottom: 1px solid var(--line);
+  text-align: center;
+  vertical-align: middle;
+}
+hg-data-table .hg-grid th:last-child {
+  border-right: 0;
+}
+hg-data-table .hg-grid td {
+  height: 66px;
+  padding: 12px 10px;
+  vertical-align: middle;
+  text-align: center;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+hg-data-table .hg-grid tbody > tr:hover > td {
+  background: #fafbfc;
+}
+hg-data-table .hg-grid tbody > tr:last-child > td {
+  border-bottom: 0;
+}
+.hg-grid-heading {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 20px;
+  gap: 6px;
+  align-items: center;
+  justify-items: center;
+  min-width: 0;
+}
+hg-data-table .hg-grid .hg-sort {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 6px 0;
+  font: inherit;
+  color: inherit;
+  border: 0;
+  background: transparent;
+}
+.hg-sort > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.hg-sort hg-icon {
+  display: flex;
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
+  color: #9aa4b3;
+}
+.hg-sort .icon {
+  width: 10px;
+  height: 10px;
+}
+hg-data-table .hg-grid th:is([aria-sort='ascending'], [aria-sort='descending']) .hg-sort,
+hg-data-table .hg-grid th:is([aria-sort='ascending'], [aria-sort='descending']) .hg-sort hg-icon {
+  color: var(--blue);
+}
+hg-data-table .hg-grid .hg-column-grip {
+  background: transparent;
+  border: 0;
+  padding: 2px;
+  width: 20px;
+  height: 28px;
+  min-height: 28px;
+  color: #8b98aa;
+  cursor: grab;
+  touch-action: none;
+  opacity: 0.78;
+}
+.hg-column-grip .icon {
+  width: 12px;
+  height: 17px;
+}
+.hg-column-grip:active {
+  cursor: grabbing;
+}
+hg-data-table .hg-grid .hg-header-help {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  min-height: 28px;
+  padding: 2px;
+  background: transparent;
+  border: 0;
+  color: #76869b;
+}
+.hg-header-help .icon {
+  width: 13px;
+  height: 13px;
+}
+hg-data-table .hg-grid .hg-column-resizer {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+}
+.hg-column-resizer:hover,
+.hg-column-resizer:focus-visible {
+  box-shadow: inset -2px 0 #729ee6;
+}
+hg-data-table .hg-grid .hg-drag-source {
+  background: #edf4ff;
+}
+hg-data-table .hg-grid .hg-drop-before {
+  box-shadow: inset 3px 0 #3679ef;
+  background: #edf4ff;
+}
+hg-data-table .hg-grid .hg-drop-after {
+  box-shadow: inset -3px 0 #3679ef;
+  background: #edf4ff;
+}
+hg-data-table .hg-grid .hg-action-cell {
+  padding: 12px;
+  white-space: nowrap;
+}
+.hg-action-cell .actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.hg-action-cell .icon-button {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #5c6b7e;
+}
+.hg-action-cell .icon-button:hover {
+  background: #eef3f9;
+  color: #315f9c;
+}
+hg-data-table .hg-grid .hg-detail-cell {
+  padding: 16px;
+  text-align: left;
+  background: #f8fafc;
+}
+.hg-detail-content {
+  position: sticky;
+  left: 16px;
+  min-width: 0;
+}
+.hg-grid td small {
+  display: block;
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.45;
+}
+hg-data-table .hg-grid :is(.task-name, .summary-cell, .audit-text, .entity-cell) {
+  text-align: left;
+}
+hg-data-table .hg-grid .entity-cell .site-cell {
+  justify-content: flex-start;
+}
+.hg-grid .task-name > a {
+  display: block;
+  font-weight: 500;
+}
+.hg-grid .task-cell-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.hg-grid .task-summary-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.table-tools {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+}
+hg-column-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+hg-column-picker .button {
+  min-height: 35px;
+  font-size: 12px;
+}
+.table-columns-dialog {
+  width: min(520px, calc(100vw - 24px));
+  max-height: calc(100dvh - 32px);
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  background: white;
+  box-shadow: 0 12px 50px #10182826;
+}
+.table-columns-dialog::backdrop {
+  background: #10182855;
+}
+.table-columns-dialog > header,
+.table-columns-dialog > footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 20px;
+}
+.table-columns-dialog > header {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+}
+.table-columns-dialog > header h2 {
+  font-size: 18px;
+}
+.table-columns-dialog > footer {
+  border-top: 1px solid var(--line);
+}
+.table-columns-body {
+  padding: 16px 20px;
+  max-height: calc(100dvh - 215px);
+  overflow: auto;
+}
+.table-columns-body > p {
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+.table-column-choice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 0;
+  border-bottom: 1px solid #edf0f4;
+}
+.table-column-choice label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  font-size: 13px;
+}
+.table-column-choice input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--blue);
+}
+.table-column-choice .icon-button {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+}
+.table-footer {
+  padding: 11px 14px;
+  font-size: 11px;
+}
+.table-footer .icon-button {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+}
+.table-footer label {
+  margin-left: auto;
+}
+@media (hover: hover) and (pointer: fine) {
+  hg-data-table .hg-grid .hg-column-grip {
+    opacity: 0;
+  }
+  hg-data-table .hg-grid th:hover .hg-column-grip,
+  hg-data-table .hg-grid .hg-column-grip:focus-visible,
+  hg-data-table .hg-grid .hg-drag-source .hg-column-grip {
+    opacity: 0.85;
+  }
+}
+@media (max-width: 560px) {
+  .table-columns-button > span {
+    display: none;
+  }
+  .table-tools {
+    padding: 8px 10px;
+    flex-wrap: wrap;
+  }
+  hg-column-picker .button {
+    font-size: 11px;
+    padding: 7px 8px;
+  }
+  .table-columns-dialog > header,
+  .table-columns-dialog > footer,
+  .table-columns-body {
+    padding: 12px;
+  }
+}

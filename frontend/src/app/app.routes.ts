@@ -1,5 +1,4 @@
-import { inject } from '@angular/core';
-import { Router, Routes } from '@angular/router';
+import { Routes } from '@angular/router';
 import { authenticated, administrator, preserveForm } from './core/session';
 
 export const routes: Routes = [
@@ -9,6 +8,11 @@ export const routes: Routes = [
   },
   {
     path: 'unavailable',
+    loadComponent: () => import('./core/account').then((module) => module.Unavailable),
+  },
+  {
+    path: 'sign-in-error',
+    data: { signInError: true },
     loadComponent: () => import('./core/account').then((module) => module.Unavailable),
   },
   {
@@ -33,18 +37,6 @@ export const routes: Routes = [
       },
       {
         path: 'tasks/:id/edit',
-        canDeactivate: [preserveForm],
-        loadComponent: () => import('./tasks/task-form').then((module) => module.TaskForm),
-      },
-      {
-        path: 'tasks/:id/refine',
-        data: { mode: 'refine' },
-        canDeactivate: [preserveForm],
-        loadComponent: () => import('./tasks/task-form').then((module) => module.TaskForm),
-      },
-      {
-        path: 'tasks/:id/similar',
-        data: { mode: 'similar' },
         canDeactivate: [preserveForm],
         loadComponent: () => import('./tasks/task-form').then((module) => module.TaskForm),
       },
@@ -84,7 +76,7 @@ export const routes: Routes = [
         canActivate: [administrator],
         loadComponent: () => import('./admin/admin-shell').then((module) => module.AdminShell),
         children: [
-          { path: '', pathMatch: 'full', redirectTo: 'users' },
+          { path: '', pathMatch: 'full', loadComponent: () => import('./admin/users').then(module => module.AdminUsers) },
           {
             path: 'users',
             loadComponent: () => import('./admin/users').then((module) => module.AdminUsers),
@@ -99,20 +91,7 @@ export const routes: Routes = [
           },
           {
             path: 'audit',
-            pathMatch: 'full',
-            redirectTo: ({ queryParams }) => {
-              const parameters: Record<string, string | string[]> = { section: 'audit' };
-              for (const key of ['search', 'action', 'status', 'from', 'to', 'page', 'pageSize']) {
-                const value: unknown = queryParams[key];
-                if (
-                  typeof value === 'string' ||
-                  (Array.isArray(value) && value.every((item: unknown) => typeof item === 'string'))
-                ) {
-                  parameters['audit' + key[0].toUpperCase() + key.slice(1)] = value;
-                }
-              }
-              return inject(Router).createUrlTree(['/admin/users'], { queryParams: parameters });
-            },
+            loadComponent: () => import('./admin/audit').then(module => module.Audit),
           },
         ],
       },

@@ -65,7 +65,7 @@ class UnlimitedFairnessTest(unittest.TestCase):
                 self.assertFalse(error, state)
                 task = state["task"]
                 operation = str(uuid.uuid4())
-                error, receipt, _ = transport.tool("browser.execute", {"taskId": task["id"], "action": {
+                error, receipt, _ = transport.execute_in_scenario_step({"taskId": task["id"], "action": {
                     "operationId": operation, "type": "observe", "arguments": {},
                     "instructionRevision": task["instructionRevision"]}})
                 self.assertFalse(error, receipt)
@@ -100,15 +100,15 @@ class UnlimitedFairnessTest(unittest.TestCase):
         ended_task, _, _, ended_client = expected[-1]
         current = ended_client.api("/api/tasks/" + ended_task)[1]
         self.assertEqual(200, ended_client.api("/api/tasks/" + ended_task + "/commands", "POST", {
-            "type": "END_SESSION", "expectedVersion": current["version"]})[0])
+            "type": "STOP", "expectedVersion": current["version"]})[0])
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
             ended = ended_client.api("/api/tasks/" + ended_task)[1]
             if ended["browser"]["status"] == "CLOSED":
                 break
             time.sleep(.2)
-        self.assertEqual(("PAUSED", "CLOSED", "Сессия браузера закрыта"),
-                         (ended["status"], ended["browser"]["status"], ended["summary"]))
+        self.assertEqual(("STOPPED", "CLOSED"),
+                         (ended["status"], ended["browser"]["status"]))
         for identity in (self.identity, peer):
             self.assertEqual(200, self.admin.api("/api/admin/users/" + identity.id + "/commands", "POST", {
                 "type": "STOP_ALL"})[0])

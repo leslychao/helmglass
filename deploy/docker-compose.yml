@@ -156,19 +156,35 @@ services:
     image: helmglass-browser-node:current
     build: ../backend/browser-node
     restart: unless-stopped
-    depends_on: [docker-proxy]
+    depends_on: [docker-proxy, vault]
     environment:
       NODE_ID: ${NODE_ID:?NODE_ID is required}
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
-      PROFILE_ENCRYPTION_KEY: ${PROFILE_ENCRYPTION_KEY:?PROFILE_ENCRYPTION_KEY is required}
+      VAULT_ADDR: https://vault:8200
+      VAULT_ROLE_ID: ${VAULT_ROLE_ID-}
+      VAULT_SECRET_ID: ${VAULT_SECRET_ID-}
+      NODE_EXTRA_CA_CERTS: /vault-ca/ca.crt
       DOCKER_HOST: http://docker-proxy:2375
       BROWSER_SESSION_IMAGE: helmglass-browser-session:current
       BROWSER_EGRESS_IMAGE: helmglass-browser-egress:current
       BROWSER_EGRESS_NETWORK: helmglass-browser-egress
       BROWSER_CAPACITY: '4'
       PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
-    volumes: [browser-node:/data]
-    networks: [control, docker, browser-egress]
+    volumes: [browser-node:/data, vault-ca:/vault-ca:ro]
+    networks: [control, docker, browser-egress, secrets]
+  vault:
+    image: helmglass-vault:current
+    build: ./vault
+    restart: unless-stopped
+    environment:
+      VAULT_UNSEAL_KEY: ${VAULT_UNSEAL_KEY-}
+    volumes: [vault-data:/vault/data, vault-tls:/vault/tls, vault-ca:/vault/ca]
+    networks: [secrets]
+    healthcheck:
+      test: [CMD-SHELL, 'VAULT_ADDR=https://vault:8200 VAULT_CACERT=/vault/ca/ca.crt vault status >/dev/null']
+      interval: 5s
+      timeout: 3s
+      retries: 20
   browser-session-image:
     image: helmglass-browser-session:current
     build: ../backend/browser-session
@@ -206,7 +222,11 @@ volumes:
   redis: {}
   artifacts: {}
   browser-node: {}
+  vault-data: {}
+  vault-tls: {}
+  vault-ca: {}
 networks:
+  secrets: {internal: true}
   data: {internal: true}
   identity:
     internal: true

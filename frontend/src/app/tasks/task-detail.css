@@ -1,0 +1,146 @@
+.detail-heading {
+  text-align: left;
+}
+
+.detail-heading h1 {
+  font-weight: 600;
+}
+
+.current-step-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.current-step-heading h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.current-step-heading > hg-icon {
+  color: var(--muted);
+}
+
+.current-step-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.step-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--blue);
+  background: #eff5ff;
+}
+
+.task-sidebar .current-step-content p {
+  margin: 0;
+}
+
+.draft-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.history-list {
+  padding: 12px 0 0;
+}
+
+.history-list li {
+  position: relative;
+  padding: 0 0 22px 32px;
+  border-bottom: 0;
+}
+
+.history-list li::before {
+  content: '';
+  position: absolute;
+  top: 24px;
+  bottom: 2px;
+  left: 11px;
+  border-left: 1px solid var(--line);
+}
+
+.history-list li:last-child::before {
+  display: none;
+}
+
+.history-mark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--blue);
+  background: #f3f7ff;
+}
+
+.history-mark hg-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.history-list [data-event$='SUCCEEDED'] .history-mark {
+  color: #31967a;
+  background: #f3faf7;
+}
+
+.history-list [data-event$='FAILED'] .history-mark,
+.history-list [data-event='UNKNOWN'] .history-mark {
+  color: #b87821;
+  background: #fff8ed;
+}
+
+.history-event-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 23px;
+}
+
+.history-event-heading time {
+  flex: none;
+  margin: 0;
+}
+
+.history-list p {
+  margin: 3px 0 0;
+  line-height: 1.8;
+}
+
+@media (max-width: 580px) {
+  .detail-heading {
+    align-items: flex-start;
+  }
+
+  .detail-heading h1 {
+    font-size: 21px;
+  }
+
+  .detail-heading .actions {
+    justify-content: flex-start;
+  }
+}
+
+.history-event-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.history-list p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.history-list small { color: var(--muted); }
+.detail-heading { justify-content: flex-end; margin-bottom: 10px; }
+.detail-heading .actions { flex-wrap: wrap; }
+.task-result { margin: 16px 0; padding: 16px; }
+.task-result > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.duplicate-task { margin-top: 12px; }

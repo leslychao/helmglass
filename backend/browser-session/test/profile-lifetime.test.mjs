@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { Readable } from 'node:stream';
 import { test } from 'node:test';
+import { ConnectionStore } from '../dist/connection-store.js';
+import { Vault } from '../dist/vault.js';
 
 const worker = process.env.WORKER_URL, fixture = process.env.TEST_FIXTURE_URL, token = process.env.WORKER_TOKEN;
 assert.ok(worker && fixture && token, 'WORKER_URL, TEST_FIXTURE_URL and WORKER_TOKEN are required');
@@ -10,6 +13,77 @@ async function request(route, body, method = body ? 'POST' : 'GET') {
   const response = await fetch(worker + route, { method, headers, body: body ? JSON.stringify(body) : undefined });
   return { status: response.status, value: await response.json() };
 }
+
+test('explicit save owns profile updates and failed export cannot block close', { timeout: 180_000 }, async () => {
+  const owner = randomUUID(), profile = randomUUID(), sessions = [];
+  let session;
+  async function create(restore = false) {
+    session = randomUUID(); sessions.push(session);
+    const created = await request('/sessions', { sessionId: session, ownerId: owner,
+      startUrl: fixture, ...(restore ? { connectionId: profile } : {}) });
+    assert.equal(created.value.status, 'LIVE');
+    assert.equal((await request('/sessions/' + session + '/control', {
+      controlEpoch: 1, owner: 'CHATGPT', privateMode: false })).status, 200);
+  }
+  async function command(type, arguments_ = {}) {
+    const result = await request('/sessions/' + session + '/commands', { operationId: randomUUID(),
+      type, arguments: arguments_, instructionRevision: 0, controlEpoch: 1 });
+    assert.equal(result.value.status, 'SUCCEEDED'); return result.value.result;
+  }
+  try {
+    await create();
+    await command('click', { selector: '#account-a' });
+    const save = () => request('/sessions/' + session + '/profile/export', {
+      connectionId: profile, ownerId: owner, origins: [new URL(fixture).origin] });
+    const first = await save();
+    assert.equal(first.status, 200); assert.equal(first.value.revision, 1);
+    assert.equal((await save()).value.revision, first.value.revision,
+      'Unchanged storage must not create another profile revision');
+    await command('click', { selector: '#account-b' });
+    await command('click', { selector: '#short-login' });
+    assert.equal((await save()).status, 200);
+    assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
+    await create(true);
+    await command('click', { selector: '#read-state' });
+    assert.ok((await command('observe')).text.includes('"account":"b"'),
+      'Explicit save must retain the changed account');
+    await command('click', { selector: '#logout' });
+    assert.equal((await save()).status, 200);
+    assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
+    await create(true);
+    await command('click', { selector: '#read-state' });
+    assert.ok((await command('observe')).text.includes('"session":"login-required"'),
+      'Explicitly saving logout must replace the previously saved login');
+    await command('click', { selector: '#ordinary-storage' });
+    assert.equal((await save()).status, 200, 'A 2 MiB ASCII site cache is retained');
+    await command('click', { selector: '#large-storage' });
+    assert.equal((await save()).status, 200, 'A serialized 12 MiB cache is saved without approximate overhead');
+    assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
+    await create(true);
+    await command('click', { selector: '#read-state' });
+    assert.ok((await command('observe')).text.includes('"cacheLength":2097152'));
+    await command('click', { selector: '#account-a' });
+    await command('click', { selector: '#oversize-record' });
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if ((await command('observe')).text.includes('Stored oversize')) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    const rejected = await save();
+    assert.equal(rejected.status, 413, 'An individual record above 16 MiB is rejected without truncation');
+    assert.equal(rejected.value.code, 'PROFILE_RECORD_TOO_LARGE');
+    const closed = await request('/sessions/' + session, undefined, 'DELETE');
+    assert.equal(closed.status, 200);
+    assert.equal(closed.value.status, 'CLOSED', 'A failed save must not prevent closing');
+    assert.equal(closed.value.profileSaveError, 'PROFILE_RECORD_TOO_LARGE');
+    await create(true);
+    await command('click', { selector: '#read-state' });
+    assert.ok((await command('observe')).text.includes('"account":"b"'),
+      'Closing must preserve the last successful save, not replace it with later unsaved state');
+  } finally {
+    for (const id of sessions) await request('/sessions/' + id, undefined, 'DELETE');
+    await request('/profiles/' + profile, undefined, 'DELETE');
+  }
+});
 
 test('saved profile does not renew expired site login or restore forms; redirects retain selected account', { timeout: 90_000 }, async () => {
   const owner = randomUUID(), profileA = randomUUID(), profileB = randomUUID();
@@ -138,30 +212,24 @@ test('saved host-only cookies and local storage stay isolated from a similar hos
     assert.ok(retained.text.includes('"pathAccount":"a"'));
     assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
 
-    // Reproduce the previously exported encrypted profile, scoped to our random owner.
-    // The old URL cookie filter included the host-only parent cookie in the www profile.
-    const key = Buffer.from(process.env.PROFILE_ENCRYPTION_KEY, 'base64');
+    // Reproduce a formerly exported parent cookie, only in our random owner's profile.
     const database = new DatabaseSync((process.env.DATA_DIR ?? '/data') + '/node.sqlite');
     try {
-      const readProfile = id => {
-        const row = database.prepare('SELECT encrypted FROM profiles WHERE id=? AND owner=?').get(id, owner);
-        assert.ok(row);
-        const encoded = Buffer.from(row.encrypted);
-        const decipher = createDecipheriv('aes-256-gcm', key, encoded.subarray(0, 12));
-        decipher.setAAD(Buffer.from(`${owner}:${id}`)); decipher.setAuthTag(encoded.subarray(12, 28));
-        return JSON.parse(Buffer.concat([decipher.update(encoded.subarray(28)), decipher.final()]).toString('utf8'));
+      const vault = new Vault(process.env.VAULT_ADDR, process.env.VAULT_ROLE_ID, process.env.VAULT_SECRET_ID);
+      const store = new ConnectionStore(database, vault, process.env.DATA_DIR ?? '/data');
+      const readProfile = async id => {
+        const result = await store.stream(id, owner), chunks = []; let size = 0;
+        for await (const bytes of result.input) { size += bytes.length; assert.ok(size < 65536); chunks.push(bytes); }
+        await result.completion;
+        return Buffer.concat(chunks).toString('utf8').trimEnd().split('\n').map(line => JSON.parse(line));
       };
-      const parent = readProfile(profileA).cookies.find(cookie => cookie.name === 'helm_fixture_account');
+      const parent = (await readProfile(profileA)).find(record => record.type === 'cookie' && record.value.name === 'helm_fixture_account').value;
       assert.equal(parent.domain, 'httpbin.org');
-      const oldProfile = readProfile(profileB);
-      assert.deepEqual(oldProfile.origins.map(entry => entry.origin), [otherOrigin]);
-      oldProfile.cookies.push(parent);
-      const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, nonce);
-      cipher.setAAD(Buffer.from(`${owner}:${profileB}`));
-      const content = Buffer.concat([cipher.update(JSON.stringify(oldProfile)), cipher.final()]);
-      assert.equal(database.prepare('UPDATE profiles SET encrypted=? WHERE id=? AND owner=?').run(
-        Buffer.concat([nonce, cipher.getAuthTag(), content]), profileB, owner).changes, 1);
-      assert.ok(readProfile(profileB).cookies.some(cookie => cookie.domain === 'httpbin.org'));
+      const oldProfile = await readProfile(profileB);
+      assert.deepEqual(oldProfile[0].origins, [otherOrigin]);
+      oldProfile.splice(1, 0, { type: 'cookie', value: parent });
+      await store.save(profileB, owner, randomUUID(), Readable.from(oldProfile.map(record => Buffer.from(JSON.stringify(record) + '\n'))));
+      assert.ok((await readProfile(profileB)).some(record => record.type === 'cookie' && record.value.domain === 'httpbin.org'));
     } finally { database.close(); }
     await create(similar, profileB); await state('b');
     await command('navigate', { url: first }); await state(null);

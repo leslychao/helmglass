@@ -1,6 +1,10 @@
 <!doctype html><meta charset="utf-8"><title>Profile lifetime acceptance</title>
 <button id="account-a">Use account A</button><button id="account-b">Use account B</button>
 <button id="short-login">Sign in for eight seconds</button>
+<button id="logout">Sign out</button>
+<button id="ordinary-storage">Add a 2 MiB site cache</button>
+<button id="large-storage">Add serialized site data above 8 MiB</button>
+<button id="oversize-record">Add a record above 16 MiB</button>
 <label>Unsaved form <input id="draft" autocomplete="off"></label>
 <button id="read-state">Read state</button><pre id="state"></pre>
 <script>
@@ -9,7 +13,7 @@
     account: cookie('helm_fixture_account'), localAccount: localStorage.getItem('helm_fixture_account'),
     pathAccount: cookie('helm_fixture_path_account'),
     session: cookie('helm_fixture_session') === 'valid' ? 'authenticated' : 'login-required',
-    draft: document.querySelector('#draft').value
+    draft: document.querySelector('#draft').value, cacheLength: localStorage.getItem('helm_fixture_cache')?.length ?? 0
   });
   for (const value of ['a', 'b']) document.querySelector('#account-' + value).onclick = () => {
     document.cookie = 'helm_fixture_account=' + value + ';path=/;SameSite=Lax;Secure';
@@ -21,6 +25,25 @@
     document.cookie = 'helm_fixture_session=valid;Max-Age=8;path=/;SameSite=Lax;Secure';
     read();
   };
+  document.querySelector('#logout').onclick = () => {
+    document.cookie = 'helm_fixture_session=;Max-Age=0;path=/;SameSite=Lax;Secure';
+    read();
+  };
   document.querySelector('#read-state').onclick = read;
+  document.querySelector('#ordinary-storage').onclick = () => {
+    localStorage.setItem('helm_fixture_cache', 'x'.repeat(2 * 1024 * 1024));
+  };
+  document.querySelector('#large-storage').onclick = () => {
+    localStorage.setItem('helm_fixture_cache', '\u0001'.repeat(2 * 1024 * 1024));
+  };
+  document.querySelector('#oversize-record').onclick = () => {
+    const request = indexedDB.open('oversize', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('values');
+    request.onsuccess = () => {
+      const db = request.result, transaction = db.transaction('values', 'readwrite');
+      transaction.objectStore('values').put('x'.repeat(17 * 1024 * 1024), 'oversize');
+      transaction.oncomplete = () => { db.close(); document.querySelector('#state').textContent = 'Stored oversize'; };
+    };
+  };
   read();
 </script>

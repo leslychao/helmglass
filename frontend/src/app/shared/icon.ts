@@ -1,6 +1,10 @@
 import { Component, input } from '@angular/core';
 
 export type IconName =
+  | 'arrow-up'
+  | 'arrow-down'
+  | 'sort'
+  | 'grip'
   | 'logout'
   | 'tasks'
   | 'plug'
@@ -10,9 +14,14 @@ export type IconName =
   | 'plus'
   | 'search'
   | 'filter'
+  | 'columns'
+  | 'reset-filters'
+  | 'reset-view'
+  | 'calendar'
   | 'close'
   | 'check'
   | 'clock'
+  | 'pointer'
   | 'play'
   | 'stop'
   | 'browser'
@@ -33,6 +42,10 @@ export type IconName =
   | 'list'
   | 'grid'
   | 'expand'
+  | 'collapse'
+  | 'video'
+  | 'video-off'
+  | 'power'
   | 'pause'
   | 'monitor'
   | 'save'
@@ -53,6 +66,14 @@ export type IconName =
   template: `
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       @switch (name()) {
+        @case ('collapse') { <path d="M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5" /> }
+        @case ('video') { <rect x="3" y="6" width="12" height="12" rx="2" /><path d="m15 10 6-4v12l-6-4" /> }
+        @case ('video-off') { <path d="m3 3 18 18M10 6h3a2 2 0 0 1 2 2v2l6-4v12l-6-4M6 6H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2" /> }
+        @case ('power') { <path d="M12 2v10M6.3 5.7a8 8 0 1 0 11.4 0" /> }
+        @case ('arrow-up') { <path d="M12 19V5m-5 5 5-5 5 5" /> }
+        @case ('arrow-down') { <path d="M12 5v14m-5-5 5 5 5-5" /> }
+        @case ('sort') { <path d="m7 9 5-5 5 5M7 15l5 5 5-5" /> }
+        @case ('grip') { <path d="M9 5h.01M15 5h.01M9 12h.01M15 12h.01M9 19h.01M15 19h.01" stroke-width="3.5" stroke-linecap="round" /> }
         @case ('logout') {
           <path d="M9 4H4v16h5M14 8l4 4-4 4M8 12h10" />
         }
@@ -92,6 +113,9 @@ export type IconName =
         @case ('clock') {
           <circle cx="12" cy="12" r="9" />
           <path d="M12 7v5l3 2" />
+        }
+        @case ('pointer') {
+          <path d="m5 3 15 9-7 2-3 7L5 3z" />
         }
         @case ('play') {
           <path d="m8 4 12 8-12 8V4z" />
@@ -184,7 +208,22 @@ export type IconName =
           <path d="m6 9 6 6 6-6" />
         }
         @case ('arrow-left') {
-          <path d="m14 5-7 7 7 7" />
+          <path d="M20 12H4m6-6-6 6 6 6" />
+        }
+        @case ('columns') {
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 4v16M15 4v16" />
+        }
+        @case ('reset-filters') {
+          <path d="M4 4h16l-6 7v5l-4 3v-8L4 4Z" />
+          <path d="m16 16 5 5m0-5-5 5" />
+        }
+        @case ('reset-view') {
+          <path d="M3 10a9 9 0 1 1 2 8M3 4v6h6" />
+        }
+        @case ('calendar') {
+          <rect x="3" y="5" width="18" height="16" rx="2" />
+          <path d="M7 3v4M17 3v4M3 11h18M7 15h2M14 15h2" />
         }
         @case ('more') {
           <circle cx="5" cy="12" r="1" />
