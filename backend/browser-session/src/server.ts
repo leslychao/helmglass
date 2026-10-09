@@ -8,12 +8,13 @@ import path from "node:path";
 import { PassThrough, Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DatabaseSync } from "node:sqlite";
-import { chromium, type Browser, type BrowserContext, type Page, type Download } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page, type Download, type Locator } from "playwright";
 import { fetch, ProxyAgent } from "undici";
 import { WebSocketServer, createWebSocketStream, type WebSocket } from "ws";
 import { z } from "zod";
 import { fileTypeFromBuffer } from "file-type";
 import { cookieMatchesHost, exportProfile, ProfileExportError, trackLoginOrigins } from "./profile-export.js";
+import { profileExportUrl } from "./profile-target.js";
 import { importProfile } from "./profile-import.js";
 import { fillSavedCredential, type SavedCredential } from "./credential-autofill.js";
 import { CredentialCapture, CaptureConflict } from "./credential-capture.js";
@@ -132,6 +133,7 @@ async function saveDownload(download: Download, pageId: string, signal: AbortSig
   } finally { await download.delete(); }
 }
 function registerPage(page: Page): void {
+  if (page.url() === profileExportUrl) return;
   const id = randomUUID(); pages.set(id, page); pageIds.set(page, id); currentPage = page;
   page.on("close", () => { pages.delete(id); if (currentPage === page) currentPage = [...pages.values()].at(-1); });
   page.on("download", (download) => {
@@ -188,7 +190,7 @@ async function createContext(): Promise<BrowserContext> {
       }, { once: true });
     });
     await created.exposeBinding("__helmVisiblePage", async (source) => {
-      if (source.page.isClosed()) return;
+      if (!pageIds.has(source.page) || source.page.isClosed()) return;
       const visible = await source.page.evaluate(() => document.visibilityState === "visible" && document.hasFocus());
       if (visible) currentPage = source.page;
     });
@@ -235,7 +237,7 @@ async function initialize(input: { startUrl: string }): Promise<void> {
   } catch { status = "LOST"; await browser?.close(); throw new HttpError(502, "Browser launch failed"); }
 }
 
-const Command = z.object({ operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "reload", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative() }).strict();
+const Command = z.object({ operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "reload", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative(), observeAfter: z.boolean().default(true) }).strict();
 type Command = z.infer<typeof Command>;
 const readCommands = new Set(["observe", "screenshot", "listMedia", "captureAudio", "waitFor"]);
 async function observe(): Promise<object> {
@@ -262,11 +264,13 @@ async function observe(): Promise<object> {
         text += clipped(node.textContent ?? "", limits.text - text.length) ?? "";
         if (text.length < limits.text) text += " ";
       }
-      if (node instanceof Element && node.matches("a,button,input,textarea,select,[role=button]")) {
+      const editable = node instanceof HTMLElement && node.hasAttribute("contenteditable") && node.isContentEditable;
+      if (node instanceof Element && (editable || node.matches("a,button,input,textarea,select,[role=button],[role=textbox]"))) {
         if (elements.length >= limits.elements) { truncated = true; continue; }
-        elements.push({ index: elements.length, tag: node.tagName.toLowerCase(), role: exact(node.getAttribute("role"), limits.attribute), id: exact(node.id, limits.identifier) || undefined,
-          text: node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? "" : clipped(node.textContent ?? "", 300),
-          label: clipped(node.getAttribute("aria-label") ?? node.getAttribute("placeholder"), limits.label), type: exact(node.getAttribute("type"), limits.attribute), name: exact(node.getAttribute("name"), limits.identifier),
+        elements.push({ index: elements.length, tag: node.tagName.toLowerCase(), role: exact(node.getAttribute("role"), limits.attribute) || undefined, id: exact(node.id, limits.identifier) || undefined,
+          text: node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? undefined : clipped(node.textContent ?? "", 300) || undefined,
+          label: clipped(node.getAttribute("aria-label") ?? node.getAttribute("placeholder"), limits.label) || undefined, type: exact(node.getAttribute("type"), limits.attribute) || undefined, name: exact(node.getAttribute("name"), limits.identifier) || undefined,
+          ...(editable ? { contentEditable: true } : {}),
           ...(node instanceof HTMLAnchorElement && ["http:", "https:"].includes(node.protocol)
             ? { href: exact(node.origin + node.pathname, limits.url) } : {}) });
       }
@@ -417,7 +421,22 @@ async function applyConnection(args: Record<string, unknown>, signal: AbortSigna
   await replacementPage.bringToFront();
   return { connectionId: input.connectionId, url: replacementPage.url(), switched: true };
 }
-async function perform(command: Command, signal: AbortSignal): Promise<unknown> {
+async function requirePublicInput(page: Page, target: Locator | undefined, signal: AbortSignal): Promise<void> {
+  try {
+    if (target && await target.count() !== 1) {
+      throw new BeforeEffectRejection(409, "Input selector must match exactly one element. Observe the page before retrying.");
+    }
+    const sensitive = target
+      ? await target.evaluate((element) => element instanceof HTMLInputElement && (element.type === "password" || /password|one-time-code/i.test(element.autocomplete)), undefined, { signal })
+      : await page.evaluate(() => document.activeElement instanceof HTMLInputElement && (document.activeElement.type === "password" || /password|one-time-code/i.test(document.activeElement.autocomplete)));
+    if (sensitive) throw new BeforeEffectRejection(403, "Private input requires the user");
+  } catch (error) {
+    if (error instanceof BeforeEffectRejection) throw error;
+    // This gate only reads the target; neither fill nor press has been invoked yet.
+    throw new BeforeEffectRejection(409, "Input target could not be inspected. Observe the page before retrying.");
+  }
+}
+async function perform(command: Command, signal: AbortSignal): Promise<object> {
   signal.throwIfAborted();
   const page = selectedPage(); const args = command.arguments;
   switch (command.type) {
@@ -434,17 +453,14 @@ async function perform(command: Command, signal: AbortSignal): Promise<unknown> 
     case "fill": {
       const input = z.object({ selector: z.string().max(2000), text: z.string().max(50_000) }).parse(args);
       const locator = page.locator(input.selector);
-      const sensitive = await locator.evaluate((element) => element instanceof HTMLInputElement && (element.type === "password" || /password|one-time-code/i.test(element.autocomplete)), undefined, { signal });
-      if (sensitive) throw new BeforeEffectRejection(403, "Private input requires the user");
+      await requirePublicInput(page, locator, signal);
       await locator.fill(input.text, { signal }); break;
     }
     case "press": {
       const input = z.object({ selector: z.string().max(2000).optional(), key: z.string().max(100) }).parse(args);
-      const sensitive = input.selector
-        ? await page.locator(input.selector).evaluate((element) => element instanceof HTMLInputElement && (element.type === "password" || /password|one-time-code/i.test(element.autocomplete)), undefined, { signal })
-        : await page.evaluate(() => document.activeElement instanceof HTMLInputElement && (document.activeElement.type === "password" || /password|one-time-code/i.test(document.activeElement.autocomplete)));
-      if (sensitive) throw new BeforeEffectRejection(403, "Private input requires the user");
-      if (input.selector) await page.locator(input.selector).press(input.key, { signal }); else { signal.throwIfAborted(); await page.keyboard.press(input.key); } break;
+      const locator = input.selector ? page.locator(input.selector) : undefined;
+      await requirePublicInput(page, locator, signal);
+      if (locator) await locator.press(input.key, { signal }); else { signal.throwIfAborted(); await page.keyboard.press(input.key); } break;
     }
     case "selectOption": { const input = z.object({ selector: z.string().max(2000), values: z.array(z.string().max(1000)).max(100) }).parse(args); await page.locator(input.selector).selectOption(input.values, { signal }); break; }
     case "check": { const input = z.object({ selector: z.string().max(2000), checked: z.boolean() }).parse(args); await page.locator(input.selector).setChecked(input.checked, { signal }); break; }
@@ -482,7 +498,11 @@ async function execute(command: Command): Promise<object> {
   // Durable before external dispatch: restart or a lost response never replays a mutation.
   db.prepare("INSERT INTO operations(id,fingerprint,status) VALUES(?,?,'RUNNING')").run(command.operationId, fingerprint);
   try {
-    const result = await perform(command, abort.signal);
+    let result = await perform(command, abort.signal);
+    if (command.observeAfter && command.type !== "observe") {
+      try { result = { ...result, observation: await observe() }; }
+      catch { result = { ...result, observationError: "OBSERVATION_UNAVAILABLE" }; }
+    }
     if (command.controlEpoch !== policy.controlEpoch) throw new HttpError(409, "Control changed while the action was in progress; verify its result");
     db.prepare("UPDATE operations SET status='SUCCEEDED',result=? WHERE id=?").run(JSON.stringify({ result }), command.operationId);
   } catch (error) {
@@ -597,7 +617,7 @@ const server = http.createServer(async (request, response) => {
         catch (error) { if (!(error instanceof ProfileExportError)) throw error; }
         response.end();
       }
-      finally { exportingProfile = false; if (!selected.isClosed()) currentPage = selected; }
+      finally { exportingProfile = false; }
       return;
     }
     if (url.pathname === "/login-context" && request.method === "POST") {

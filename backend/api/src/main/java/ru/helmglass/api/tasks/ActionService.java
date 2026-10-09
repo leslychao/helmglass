@@ -1,16 +1,28 @@
 package ru.helmglass.api.tasks;
 
+import jakarta.annotation.PreDestroy;
+import java.sql.Types;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Contracts;
@@ -27,6 +39,7 @@ import tools.jackson.databind.JsonNode;
 @Service
 public class ActionService {
   private static final Logger log = LoggerFactory.getLogger(ActionService.class);
+  private static final int MAXIMUM_DISPATCHES = 8;
   private static final Set<String> READ_ONLY =
       Set.of("observe", "screenshot", "listMedia", "captureAudio", "waitFor");
   private static final Set<String> ACTIONS =
@@ -58,6 +71,11 @@ public class ActionService {
   private final Identity identity;
   private final EventService events;
   private final TransactionTemplate transactions;
+  private final Map<UUID, Completion> completions = new ConcurrentHashMap<>();
+  private final Semaphore waitingCalls = new Semaphore(64);
+  private final Semaphore dispatchSlots = new Semaphore(MAXIMUM_DISPATCHES);
+  private final ExecutorService dispatcher = Executors.newFixedThreadPool(MAXIMUM_DISPATCHES,
+      Thread.ofPlatform().name("browser-command-", 0).factory());
 
   public ActionService(
       JdbcClient jdbc,
@@ -97,6 +115,9 @@ public class ActionService {
     }
     String confirmation = action.confirmationPrompt() == null ? null
         : TaskService.required(action.confirmationPrompt(), "confirmationPrompt", 4000);
+    if ((action.stepId() == null) == (action.step() == null)) {
+      throw ApiException.invalid("step", "Укажите stepId или описание нового бизнес-шага.");
+    }
     var previous =
         jdbc.sql("SELECT id FROM operations WHERE id=:id AND owner_id=:owner")
             .param("id", action.operationId())
@@ -106,12 +127,19 @@ public class ActionService {
     if (previous.isPresent()) {
       boolean same =
           jdbc.sql(
-                  "SELECT task_id=:task AND step_id IS NOT DISTINCT FROM CAST(:step AS uuid) AND type=:type AND arguments=CAST(:arguments AS jsonb) AND"
+                  "SELECT task_id=:task AND ((CAST(:definition AS jsonb) IS NULL AND"
+                      + " step_id=CAST(:step AS uuid)) OR coalesce("
+                      + " instruction_snapshot->'step'=CAST(:definition AS jsonb),false))"
+                      + " AND (:observe IS NULL OR"
+                      + " coalesce((instruction_snapshot->>'observeAfter')::boolean,true)=:observe)"
+                      + " AND type=:type AND arguments=CAST(:arguments AS jsonb) AND"
                       + " instruction_revision=:revision AND requested_control_epoch IS NOT"
                       + " DISTINCT FROM CAST(:epoch AS bigint) AND instruction_snapshot->>'confirmationPrompt'"
                       + " IS NOT DISTINCT FROM CAST(:confirmation AS text) FROM operations WHERE id=:id")
               .param("task", taskId)
               .param("step", action.stepId())
+              .param("definition", action.step() == null ? null : json.write(action.step()))
+              .param("observe", action.observeAfter(), Types.BOOLEAN)
               .param("type", action.type())
               .param("arguments", json.write(action.arguments()))
               .param("revision", action.instructionRevision())
@@ -153,7 +181,9 @@ public class ActionService {
             || task.browser().privateMode())) {
       throw ApiException.conflict("CONTROL_NOT_OWNED", "Браузером управляет пользователь.");
     }
-    steps.requireRunning(owner, taskId, action.stepId());
+    UUID stepId = action.step() == null ? action.stepId()
+        : steps.startForAction(owner, taskId, action.instructionRevision(), action.step());
+    steps.requireRunning(owner, taskId, stepId);
     boolean mutating = !READ_ONLY.contains(action.type());
     if ("captureAudio".equals(action.type())) {
       validateAudioContext(action.arguments().path("sourceContext"));
@@ -162,6 +192,12 @@ public class ActionService {
     instruction.put("revision", task.instructionRevision());
     instruction.put("title", task.title());
     instruction.put("goal", task.goal());
+    instruction.put("observeAfter", action.observeAfter() == null
+        ? !Set.of("listMedia", "captureAudio", "screenshot").contains(action.type())
+        : action.observeAfter());
+    if (action.step() != null) {
+      instruction.put("step", action.step());
+    }
     if (confirmation != null) {
       instruction.put("confirmationPrompt", confirmation);
     }
@@ -177,7 +213,7 @@ public class ActionService {
         .param("id", action.operationId())
         .param("owner", owner)
         .param("task", taskId)
-        .param("step", action.stepId())
+        .param("step", stepId)
         .param("type", action.type())
         .param("arguments", json.write(action.arguments()))
         .param("status", state)
@@ -403,21 +439,26 @@ public class ActionService {
   }
 
   public Contracts.Operation result(UUID owner, UUID id) {
+    Contracts.Operation operation = operation(owner, id);
+    requireResultAccess(owner, operation.taskId());
+    return operation;
+  }
+
+  public void requireResultAccess(UUID owner, UUID task) {
     boolean privateBrowser =
         jdbc.sql(
                 """
-                SELECT EXISTS(SELECT 1 FROM operations o JOIN tasks t ON t.id=o.task_id
-                  JOIN browser_sessions b ON b.id=t.browser_session_id
-                  WHERE o.id=:id AND o.owner_id=:owner AND b.private_mode)
+                SELECT coalesce(b.private_mode,false) FROM tasks t
+                LEFT JOIN browser_sessions b ON b.id=t.browser_session_id
+                WHERE t.id=:task AND t.owner_id=:owner
                 """)
-            .param("id", id)
+            .param("task", task)
             .param("owner", owner)
             .query(Boolean.class)
-            .single();
+            .optional().orElseThrow(ApiException::notFound);
     if (privateBrowser) {
       throw Identity.denied("Содержимое браузера недоступно во время защищённого входа.");
     }
-    return operation(owner, id);
   }
 
   private Contracts.Operation operation(UUID owner, UUID id) {
@@ -441,18 +482,88 @@ public class ActionService {
         .orElseThrow(ApiException::notFound);
   }
 
+  /** Waits for a committed result without holding locks or polling the database. */
+  public Contracts.Operation awaitResult(UUID owner, Contracts.Operation submitted,
+      long deadlineNanos) {
+    if (!Set.of("ACCEPTED", "DISPATCHED").contains(submitted.status())
+        || System.nanoTime() >= deadlineNanos || !waitingCalls.tryAcquire()) {
+      return submitted;
+    }
+    Completion completion = completions.compute(submitted.id(), (id, current) -> current == null
+        ? new Completion(new CompletableFuture<>(), 1)
+        : new Completion(current.signal(), current.waiters() + 1));
+    try {
+      // Register before reading, so completion between submit and this call is not lost.
+      Contracts.Operation current = result(owner, submitted.id());
+      long remaining = deadlineNanos - System.nanoTime();
+      if (!Set.of("ACCEPTED", "DISPATCHED").contains(current.status()) || remaining <= 0) {
+        return current;
+      }
+      try {
+        completion.signal().get(remaining, TimeUnit.NANOSECONDS);
+      } catch (TimeoutException exception) {
+        // A different API instance may have committed it; the durable receipt is authoritative.
+      } catch (InterruptedException exception) {
+        Thread.currentThread().interrupt();
+      } catch (ExecutionException exception) {
+        throw new IllegalStateException("Operation completion notification failed", exception);
+      }
+      return result(owner, submitted.id());
+    } finally {
+      completions.computeIfPresent(submitted.id(), (id, current) -> current.waiters() == 1
+          ? null : new Completion(current.signal(), current.waiters() - 1));
+      waitingCalls.release();
+    }
+  }
+
   @Scheduled(fixedDelay = 300)
   public void dispatch() {
-    Dispatch dispatch = transactions.execute(status -> claim());
-    if (dispatch == null) {
+    if (!dispatchSlots.tryAcquire()) {
       return;
     }
+    boolean scheduled = false;
+    try {
+      dispatcher.execute(() -> {
+        try {
+          Dispatch dispatch = transactions.execute(status -> claim());
+          if (dispatch != null) {
+            send(dispatch);
+          }
+        } catch (RuntimeException exception) {
+          log.warn("Action dispatch failed: {}", exception.getClass().getSimpleName());
+        } finally {
+          dispatchSlots.release();
+        }
+      });
+      scheduled = true;
+    } finally {
+      if (!scheduled) {
+        dispatchSlots.release();
+      }
+    }
+  }
+
+  @PreDestroy
+  void stopDispatcher() {
+    dispatcher.shutdown();
+    try {
+      if (!dispatcher.awaitTermination(45, TimeUnit.SECONDS)) {
+        dispatcher.shutdownNow();
+      }
+    } catch (InterruptedException exception) {
+      dispatcher.shutdownNow();
+      Thread.currentThread().interrupt();
+    }
+  }
+
+  private void send(Dispatch dispatch) {
     Map<String, Object> request = new HashMap<>();
     request.put("operationId", dispatch.id());
     request.put("type", dispatch.type());
     request.put("arguments", dispatch.arguments());
     request.put("instructionRevision", dispatch.revision());
     request.put("controlEpoch", dispatch.epoch());
+    request.put("observeAfter", dispatch.observeAfter());
     try {
       JsonNode response =
           worker.call("POST", "/sessions/" + dispatch.session() + "/commands", request);
@@ -493,7 +604,7 @@ JOIN accounts a ON a.id=o.owner_id WHERE o.status='ACCEPTED' AND a.status='ACTIV
       OR leased.pending_connection_id=t.selected_connection_id))))
   AND NOT EXISTS(SELECT 1 FROM task_requests r WHERE r.task_id=t.id AND r.status='PENDING'
     AND r.type<>'UNKNOWN_RESULT')
-ORDER BY o.created_at LIMIT 1
+ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
 """)
             .query(
                 (row, index) ->
@@ -506,9 +617,10 @@ ORDER BY o.created_at LIMIT 1
       return null;
     }
     Pending candidate = pending.get();
-    tasks.lockOwner(candidate.owner());
+    // The queue claims the account lock first, preserving the owner/task lock order.
     tasks.lockTask(candidate.owner(), candidate.task());
-    if (!jdbc.sql("SELECT status='ACCEPTED' FROM operations WHERE id=:id FOR UPDATE")
+    if (tasks.hasDispatched(candidate.task())
+        || !jdbc.sql("SELECT status='ACCEPTED' FROM operations WHERE id=:id FOR UPDATE")
         .param("id", candidate.id())
         .query(Boolean.class)
         .single()) {
@@ -528,9 +640,12 @@ ORDER BY o.created_at LIMIT 1
         || task.browser().privateMode()) {
       return null;
     }
+    UUID sessionId = task.browser().id();
+    long epoch = task.browser().controlEpoch();
     Dispatch command =
         jdbc.sql(
-                "SELECT id,type,arguments,instruction_revision,mutating FROM operations WHERE"
+                "SELECT id,type,arguments,instruction_revision,mutating,instruction_snapshot"
+                    + " FROM operations WHERE"
                     + " id=:id")
             .param("id", candidate.id())
             .query(
@@ -539,12 +654,14 @@ ORDER BY o.created_at LIMIT 1
                         candidate.id(),
                         candidate.owner(),
                         candidate.task(),
-                        null,
+                        sessionId,
                         row.getString("type"),
                         json.read(row.getString("arguments")),
                         row.getLong("instruction_revision"),
-                        0,
-                        row.getBoolean("mutating")))
+                        epoch,
+                        row.getBoolean("mutating"),
+                        json.read(row.getString("instruction_snapshot"))
+                            .path("observeAfter").asBoolean(true)))
             .single();
     if (command.revision() != task.instructionRevision()
         || tasks.hasUnknown(task.id()) && command.mutating()) {
@@ -553,7 +670,6 @@ ORDER BY o.created_at LIMIT 1
           .update();
       return null;
     }
-    long epoch = task.browser().controlEpoch();
     Long boundEpoch =
         jdbc.sql("SELECT control_epoch FROM operations WHERE id=:id")
             .param("id", command.id())
@@ -589,6 +705,11 @@ ORDER BY o.created_at LIMIT 1
             "Выбранное подключение занято другой работой");
         return null;
       }
+      if (!browsers.refreshProfile(candidate.owner(), sessionId, command.id() + ":before-switch")) {
+        complete(command, "FAILED", null, "PROFILE_SAVE_FAILED",
+            "Не удалось сохранить текущее подключение. Смена аккаунта не выполнялась.");
+        return null;
+      }
       jdbc.sql("UPDATE browser_sessions SET pending_connection_id=:connection WHERE id=:id")
           .param("connection", connection)
           .param("id", task.browser().id())
@@ -596,7 +717,8 @@ ORDER BY o.created_at LIMIT 1
     }
     jdbc.sql(
             "UPDATE operations SET"
-                + " status='DISPATCHED',session_id=:session,control_epoch=:epoch,dispatched_at=now()"
+                + " status='DISPATCHED',session_id=:session,control_epoch=:epoch,"
+                + " dispatched_at=clock_timestamp()"
                 + " WHERE id=:id")
         .param("session", task.browser().id())
         .param("epoch", epoch)
@@ -619,16 +741,7 @@ ORDER BY o.created_at LIMIT 1
           "Выполняется команда ChatGPT: " + command.type());
     }
     browsers.refreshIdle(candidate.owner(), task.browser().id(), false);
-    return new Dispatch(
-        command.id(),
-        candidate.owner(),
-        task.id(),
-        task.browser().id(),
-        command.type(),
-        command.arguments(),
-        command.revision(),
-        epoch,
-        command.mutating());
+    return command;
   }
 
   @Scheduled(fixedDelay = 5000)
@@ -648,7 +761,9 @@ ORDER BY o.created_at LIMIT 1
                         json.read(row.getString("arguments")),
                         row.getLong("instruction_revision"),
                         row.getLong("control_epoch"),
-                        row.getBoolean("mutating")))
+                        row.getBoolean("mutating"),
+                        json.read(row.getString("instruction_snapshot"))
+                            .path("observeAfter").asBoolean(true)))
             .list();
     for (Dispatch operation : operations) {
       try {
@@ -698,7 +813,8 @@ ORDER BY o.created_at LIMIT 1
           tasks.lockOwner(operation.owner());
           tasks.lockTask(operation.owner(), operation.task());
           String previous = operation(operation.owner(), operation.id()).status();
-          if (!Set.of("DISPATCHED", "UNKNOWN").contains(previous)) {
+          if (!Set.of("DISPATCHED", "UNKNOWN").contains(previous)
+              && !("ACCEPTED".equals(previous) && "FAILED".equals(status))) {
             return;
           }
           jdbc.sql(
@@ -730,9 +846,6 @@ ORDER BY o.created_at LIMIT 1
           }
           if ("SUCCEEDED".equals(status)) {
             browsers.recordSuccessfulUse(operation.owner(), operation.session());
-            if (!Set.of("applyConnection", "screenshot").contains(operation.type())) {
-              browsers.refreshProfile(operation.owner(), operation.session());
-            }
           }
           jdbc.sql(
                   "UPDATE usage_intervals SET ended_at=now(),incomplete=incomplete OR :unknown"
@@ -807,6 +920,15 @@ ORDER BY o.created_at LIMIT 1
           tasks.settleStop(operation.owner(), operation.task());
           browsers.refreshIdle(operation.owner(), operation.session(), true);
           events.emit(operation.owner(), "operation", operation.id(), 1);
+          TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+              Completion completion = completions.get(operation.id());
+              if (completion != null) {
+                completion.signal().complete(null);
+              }
+            }
+          });
         });
   }
 
@@ -975,6 +1097,8 @@ ORDER BY o.created_at LIMIT 1
 
   private record Pending(UUID id, UUID owner, UUID task) {}
 
+  private record Completion(CompletableFuture<Void> signal, int waiters) {}
+
   private record Dispatch(
       UUID id,
       UUID owner,
@@ -984,5 +1108,6 @@ ORDER BY o.created_at LIMIT 1
       JsonNode arguments,
       long revision,
       long epoch,
-      boolean mutating) {}
+      boolean mutating,
+      boolean observeAfter) {}
 }

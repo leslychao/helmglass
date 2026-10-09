@@ -177,6 +177,22 @@ public class TaskStepService {
   }
 
   /** Called in the action transaction before accepting a new command. */
+  @Transactional
+  public UUID startForAction(UUID owner, UUID task, long revision,
+      Contracts.StepDefinition definition) {
+    Contracts.TaskStep step = command(owner, task, new Contracts.StepCommand(
+        "DECLARE", null, null, revision, definition.operationKey(), definition.objectKey(),
+        definition.title(), definition.completionCriterion(), null, null, List.of()));
+    if ("PLANNED".equals(step.status())) {
+      step = command(owner, task, new Contracts.StepCommand(
+          "START", step.id(), step.version(), revision, null, null, null, null,
+          null, null, List.of()));
+    }
+    requireRunning(owner, task, step.id());
+    return step.id();
+  }
+
+  /** Called in the action transaction before accepting a new command. */
   public void requireRunning(UUID owner, UUID task, UUID id) {
     if (id == null) {
       throw ApiException.invalid("stepId", "Сначала объявите и начните бизнес-шаг.");

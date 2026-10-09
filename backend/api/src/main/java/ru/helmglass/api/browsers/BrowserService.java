@@ -942,7 +942,10 @@ RETURNING id,version
     SessionReference previous = reference(session);
     if (connection != null && !connection.equals(previous.connectionId())) {
       requireAvailableConnection(connection, session);
-      refreshProfile(owner, session);
+      if (!refreshProfile(owner, session, session + ":switch:" + browser.controlEpoch())) {
+        throw ApiException.conflict("PROFILE_SAVE_FAILED",
+            "Не удалось сохранить текущее подключение. Смена аккаунта отменена.");
+      }
     }
     boolean switchingConnection = connection != null && !connection.equals(previous.connectionId());
     if (switchingConnection || !browser.privateMode() || !"USER".equals(browser.controlOwner())) {
@@ -992,33 +995,89 @@ RETURNING id,version
         }).single();
   }
 
-  /** A checkpoint failure never turns a completed external action into a retry. */
+  /** Attempt one final save; a storage failure must not prevent the requested closure. */
   @Transactional
-  public void refreshProfile(UUID owner, UUID session) {
+  public boolean prepareClose(UUID session) {
+    UUID owner = reference(session).ownerId();
+    tasks.lockOwner(owner);
+    SessionReference reference = reference(session);
+    if (!reference.closeRequested()) {
+      return false;
+    }
+    int claimed = jdbc.sql("""
+            UPDATE browser_sessions b SET close_profile_attempted=true
+            WHERE b.id=:id AND NOT b.close_profile_attempted AND NOT b.private_mode
+              AND EXISTS(SELECT 1 FROM connections c WHERE c.id=b.connection_id
+                AND c.status='READY' AND c.deleted_at IS NULL)
+            """).param("id", session).update();
+    if (claimed == 0) {
+      return true;
+    }
+    Contracts.Browser browser = get(owner, session);
+    try {
+      if (!"NONE".equals(browser.controlOwner())) {
+        long epoch = browser.controlEpoch() + 1;
+        worker.call("POST", "/sessions/" + session + "/control",
+            Map.of("controlEpoch", epoch, "owner", "NONE", "privateMode", false),
+            Duration.ofSeconds(5));
+        jdbc.sql("""
+                UPDATE browser_sessions SET control_epoch=:epoch,control_owner='NONE',
+                  controller_id=NULL,version=version+1 WHERE id=:id
+                """).param("epoch", epoch).param("id", session).update();
+        jdbc.sql("""
+                UPDATE usage_intervals SET ended_at=now()
+                WHERE session_id=:id AND kind='MANUAL' AND ended_at IS NULL
+                """).param("id", session).update();
+      }
+      refreshProfile(owner, session, session + ":close", Duration.ofSeconds(20));
+    } catch (WorkerClient.WorkerException exception) {
+      recordProfileFailure(owner, reference.connectionId(), exception);
+    }
+    events.emit(owner, "browser", session, 0);
+    return true;
+  }
+
+  @Transactional
+  public boolean refreshProfile(UUID owner, UUID session, String operationId) {
+    return refreshProfile(owner, session, operationId, Duration.ofSeconds(310));
+  }
+
+  private boolean refreshProfile(UUID owner, UUID session, String operationId, Duration timeout) {
     tasks.lockOwner(owner);
     var connection = jdbc.sql("""
             SELECT c.id FROM connections c JOIN browser_sessions b ON b.connection_id=c.id
-            WHERE b.id=:session AND b.owner_id=:owner AND b.status='LIVE'
+            WHERE b.id=:session AND b.owner_id=:owner AND b.status IN ('LIVE','CLOSING')
               AND NOT b.private_mode AND c.status='READY' AND c.deleted_at IS NULL
             """).param("session", session).param("owner", owner).query(UUID.class).optional();
     if (connection.isEmpty()) {
-      return;
+      return true;
     }
     try {
       JsonNode result = worker.call("POST", "/sessions/" + session + "/profile/export",
           Map.of("connectionId", connection.get(), "ownerId", owner,
-              "origins", connectionOrigins(owner, connection.get())), Duration.ofSeconds(310));
-      recordProfileSave(owner, connection.get(), result);
-    } catch (WorkerClient.WorkerException exception) {
-      String failure = exception.code().startsWith("PROFILE_")
-          ? exception.code() : "PROFILE_SAVE_FAILED";
-      int changed = jdbc.sql("""
-              UPDATE connections SET profile_save_error=:failure,version=version+1
-              WHERE id=:id AND profile_save_error IS DISTINCT FROM :failure
-              """).param("id", connection.get()).param("failure", failure).update();
-      if (changed != 0) {
-        events.emit(owner, "connection", connection.get(), 0);
+              "origins", connectionOrigins(owner, connection.get()), "operationId", operationId),
+          timeout);
+      if (!result.path("saved").asBoolean(false)
+          || !connection.get().toString().equals(result.path("profileRef").asString())
+          || result.path("revision").asLong(0) < 1 || !result.path("savedAt").isString()) {
+        throw new WorkerClient.WorkerException("PROFILE_SAVE_FAILED", 502);
       }
+      recordProfileSave(owner, connection.get(), result);
+      return true;
+    } catch (WorkerClient.WorkerException exception) {
+      recordProfileFailure(owner, connection.get(), exception);
+      return false;
+    }
+  }
+
+  private void recordProfileFailure(UUID owner, UUID connection, WorkerClient.WorkerException error) {
+    String failure = error.code().startsWith("PROFILE_") ? error.code() : "PROFILE_SAVE_FAILED";
+    int changed = jdbc.sql("""
+            UPDATE connections SET profile_save_error=:failure,version=version+1
+            WHERE id=:id AND profile_save_error IS DISTINCT FROM :failure
+            """).param("failure", failure).param("id", connection).update();
+    if (changed != 0) {
+      events.emit(owner, "connection", connection, 0);
     }
   }
 
@@ -1041,6 +1100,9 @@ RETURNING id,version
               cookie_usable_count=:count,cookie_checked_at=CAST(:checked AS timestamptz),
               version=version+1
             WHERE id=:id AND profile_revision<=:revision
+              AND (CAST(:error AS text) IS NOT NULL OR profile_save_error IS NULL
+                OR profile_revision<:revision OR cookie_checked_at IS NULL
+                OR CAST(:checked AS timestamptz)>cookie_checked_at)
               AND (profile_revision<:revision OR cookie_checked_at IS NULL
                 OR CAST(:checked AS timestamptz)>=cookie_checked_at)
               AND (profile_revision<>:revision OR profile_save_error IS DISTINCT FROM :error

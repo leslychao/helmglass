@@ -82,10 +82,11 @@ process.stdout.write(result.outputFiles[0].text);
 
         panels = InitialPanels()
         panels.feed(html)
-        for panel in ("steps", "session"):
-            self.assertIn("hidden", panels.elements[panel + "-panel"],
-                          "Initially collapsed panels must not cover the browser")
-            self.assertEqual("false", panels.elements[panel + "-toggle"].get("aria-expanded"))
+        self.assertNotIn("hidden", panels.elements["steps-panel"],
+                         "Business steps open beside the browser on first render")
+        self.assertEqual("true", panels.elements["steps-toggle"].get("aria-expanded"))
+        self.assertIn("hidden", panels.elements["session-panel"])
+        self.assertEqual("false", panels.elements["session-toggle"].get("aria-expanded"))
         digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
         self.assertEqual("ui://helmglass/task-" + digest + ".html", uri,
                          "Changed widget bytes must have a different host cache identity")

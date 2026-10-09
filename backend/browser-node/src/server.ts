@@ -6,10 +6,11 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DatabaseSync } from "node:sqlite";
-import { WebSocket, WebSocketServer, createWebSocketStream } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { CookieCheck, CredentialConflict, ConnectionStore } from "./connection-store.js";
 import { StorageError, Vault } from "./vault.js";
+import { bridgeViewer, type ViewerCloseReason } from "./viewer-bridge.js";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -55,7 +56,7 @@ const AccessBinding = z.object({ channel: z.enum(["WEB", "MCP"]), grantId: z.str
 const Ticket = z.object({ ticket: z.string().min(32).max(512), role: z.enum(["VIEWER", "CONTROLLER"]), viewerId: z.string().min(1).max(200), expiresAt: z.string().datetime(), access: AccessBinding });
 type Ticket = z.infer<typeof Ticket>;
 const tickets = new Map<string, Ticket & { sessionId: string }>();
-const viewers = new Map<string, Set<{ socket: WebSocket; upstream: WebSocket; viewerId: string; role: string; access: z.infer<typeof AccessBinding> }>>();
+const viewers = new Map<string, Set<{ close: (reason: ViewerCloseReason) => void; viewerId: string; role: string; access: z.infer<typeof AccessBinding> }>>();
 const starting = new Map<string, Promise<Session>>();
 const closing = new Map<string, Promise<Session>>();
 const savingProfiles = new Set<string>();
@@ -276,8 +277,8 @@ async function startSession(input: z.infer<typeof CreateSession>): Promise<Sessi
   if (!pending) { pending = createSession(input); starting.set(input.sessionId, pending); }
   try { return await pending; } finally { if (starting.get(input.sessionId) === pending) starting.delete(input.sessionId); }
 }
-function disconnectViewers(id: string): void {
-  for (const viewer of viewers.get(id) ?? []) { viewer.socket.terminate(); viewer.upstream.terminate(); }
+function disconnectViewers(id: string, reason: ViewerCloseReason): void {
+  for (const viewer of viewers.get(id) ?? []) viewer.close(reason);
   viewers.delete(id);
   for (const [key, ticket] of tickets) if (ticket.sessionId === id) tickets.delete(key);
 }
@@ -296,7 +297,7 @@ async function finishClose(id: string): Promise<Session> {
   if (session.status === "CLOSED") return session;
   // Closing releases the browser; only an explicit save replaces its connection profile.
   session = save({ ...saved(session.id), status: "CLOSING" });
-  disconnectViewers(session.id);
+  disconnectViewers(session.id, "session_closed");
   try {
     const container = await inspect(session.containerId ?? `helm-browser-${session.id}`);
     if (container?.State.Running) await docker(`/containers/${container.Id}/stop?t=15`, "POST");
@@ -464,7 +465,7 @@ const server = http.createServer(async (request, response) => {
       for (const [id, group] of viewers) {
         if (saved(id).ownerId !== ownerId) continue;
         for (const viewer of group) if (matches(viewer.access)) {
-          viewer.socket.terminate(); viewer.upstream.terminate(); group.delete(viewer); disconnected += 1;
+          viewer.close("grant_revoked"); disconnected += 1;
         }
         if (group.size === 0) viewers.delete(id);
       }
@@ -545,7 +546,7 @@ const server = http.createServer(async (request, response) => {
       if (policy.controlEpoch < session.policy.controlEpoch) throw new HttpError(409, "Stale control epoch");
       if (policy.owner === "USER" && !policy.controllerId) throw new HttpError(400, "Controller identity required");
       if (JSON.stringify(policy) === JSON.stringify(session.policy)) { reply(response, 200, await sessionJson(session, "/control", "POST", policy)); return; }
-      disconnectViewers(session.id);
+      disconnectViewers(session.id, "control_changed");
       const result = await sessionJson(session, "/control", "POST", policy);
       const current = saved(session.id);
       if (current.policy.controlEpoch <= policy.controlEpoch) save({ ...current, policy });
@@ -608,7 +609,7 @@ const server = http.createServer(async (request, response) => {
           if (existing.status !== 404) throw new HttpError(502, "Account switch receipt unavailable");
           const args = z.object({ connectionId: z.string().min(1).max(200), ownerId: z.string().min(1).max(200), origins: z.array(z.url()).min(1).max(50), url: z.url() }).strict().parse(command.arguments);
           if (args.ownerId !== session.ownerId) throw new HttpError(403, "Profile owner mismatch");
-          disconnectViewers(session.id);
+          disconnectViewers(session.id, "account_changed");
           await prepareProfile(session, args.connectionId, command.operationId, args.origins);
           input = { ...command, arguments: { ...args, profileId: command.operationId } };
         }
@@ -637,16 +638,18 @@ server.on("upgrade", (request, socket, head) => {
     if (session.policy.privateMode && ticket.viewerId !== session.policy.controllerId) throw new HttpError(423, "Private input");
     if (ticket.role === "CONTROLLER" && (session.policy.owner !== "USER" || ticket.viewerId !== session.policy.controllerId)) throw new HttpError(403, "Control not granted");
     const group = viewers.get(session.id) ?? new Set();
-    for (const viewer of group) if (viewer.viewerId === ticket.viewerId) { viewer.socket.close(); viewer.upstream.close(); group.delete(viewer); }
+    for (const viewer of group) if (viewer.viewerId === ticket.viewerId) viewer.close("viewer_replaced");
     if (group.size >= 2 || !session.address || session.status !== "LIVE") throw new HttpError(409, "View unavailable");
     websocketServer.handleUpgrade(request, socket, head, (client) => {
-      const upstream = new WebSocket(`ws://${session.address}:8080/view?role=${ticket.role}&epoch=${session.policy.controlEpoch}&viewerId=${encodeURIComponent(ticket.viewerId)}`, { headers: { "X-Worker-Token": session.token }, perMessageDeflate: false, maxPayload: 16_777_216 });
-      const viewer = { socket: client, upstream, viewerId: ticket.viewerId, role: ticket.role, access: ticket.access }; group.add(viewer); viewers.set(session.id, group);
-      const clientStream = createWebSocketStream(client); const upstreamStream = createWebSocketStream(upstream);
-      const clean = () => { group.delete(viewer); clientStream.destroy(); upstreamStream.destroy(); };
-      client.on("close", clean); upstream.on("close", clean); client.on("error", clean); upstream.on("error", clean);
-      clientStream.on("error", clean); upstreamStream.on("error", clean);
-      clientStream.pipe(upstreamStream); upstreamStream.pipe(clientStream);
+      const upstream = new WebSocket(`ws://${session.address}:8080/view?role=${ticket.role}&epoch=${session.policy.controlEpoch}&viewerId=${encodeURIComponent(ticket.viewerId)}`, { headers: { "X-Worker-Token": session.token }, handshakeTimeout: 10_000, perMessageDeflate: false, maxPayload: 16_777_216 });
+      const connectionId = randomUUID();
+      const bridge = bridgeViewer(client, upstream, event => {
+        group.delete(viewer);
+        if (group.size === 0 && viewers.get(session.id) === group) viewers.delete(session.id);
+        console.info(JSON.stringify({ event: "viewer_disconnected", connectionId, sessionId: session.id, ...event }));
+      });
+      const viewer = { close: bridge.close, viewerId: ticket.viewerId, role: ticket.role, access: ticket.access };
+      group.add(viewer); viewers.set(session.id, group);
     });
   } catch { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); }
 });

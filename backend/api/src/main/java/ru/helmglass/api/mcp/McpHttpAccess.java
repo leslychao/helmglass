@@ -113,7 +113,11 @@ final class McpHttpAccess implements Filter {
       String tool = message.path("params").path("name").asString();
       // Only these tools can serialize bounded, multi-megabyte media responses.
       boundedResponse = "tools/call".equals(message.path("method").asString())
-          && "operations.get".equals(tool);
+          && ("operations.get".equals(tool)
+              || "browser.execute".equals(tool)
+                  && (message.path("params").path("arguments").has("actions")
+                      || "screenshot".equals(message.path("params").path("arguments")
+                          .path("action").path("type").asString())));
       httpRequest = new ReplayableRequest(httpRequest, body);
     }
     if (initialize) {

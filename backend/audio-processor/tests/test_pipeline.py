@@ -1,9 +1,12 @@
 """Pipeline invariants run inside the deployed CPU image."""
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+import tempfile
+from unittest.mock import Mock, patch
+import wave
 import numpy as np
 import parselmouth
-from pipeline import acoustic, ctc_words, intervals, choose_end, RATE
+from pipeline import acoustic, ctc_words, intervals, choose_end, process, RATE
 
 class Tokenizer:
     def decode(self, labels):
@@ -18,6 +21,44 @@ class Model:
         return self.output
 
 class PipelineTest(unittest.TestCase):
+    def test_emotion_windows_do_not_discard_short_tail_of_eligible_speech(self):
+        for duration in (5.5, 10.5, .8):
+            with self.subTest(duration=duration), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'recording'
+                with wave.open(str(path), 'wb') as output:
+                    output.setparams((1, 2, RATE, 0, 'NONE', 'not compressed'))
+                    output.writeframes(bytes(round(duration * RATE) * 2))
+                model = Model([3])
+                first = True
+                def vad(_):
+                    nonlocal first
+                    if first:
+                        first = False
+                        return {'start': 0}
+                    return None
+                model.vad = lambda: vad
+                model.emotions = Mock(return_value={'angry': .1, 'sad': .2, 'neutral': .6, 'positive': .1})
+                events = []
+                job = {'artifactId': path.name, 'sizeBytes': path.stat().st_size,
+                       'mode': 'full', 'transcriptComplete': False}
+                with patch('pipeline.Path', return_value=path.parent):
+                    process(job, model, events.append, lambda: None)
+                items = [item for event in events if event['type'] == 'block'
+                         for item in event['data']['emotions']]
+                self.assertEqual(0, items[0]['start'])
+                self.assertEqual(duration, items[-1]['end'])
+                for left, right in zip(items, items[1:]):
+                    self.assertEqual(left['end'], right['start'])
+                for item in items:
+                    self.assertLessEqual(item['end'] - item['start'], 5)
+                    if duration >= 1:
+                        self.assertIsNone(item['reason'])
+                        self.assertIsNotNone(item['scores'])
+                    else:
+                        self.assertEqual('too_short', item['reason'])
+                        self.assertIsNone(item['scores'])
+                self.assertEqual(len(items) if duration >= 1 else 0, model.emotions.call_count)
+
     def test_context_frames_are_owned_once_and_true_repetition_survives(self):
         state={'lastToken':3,'pendingWord':'','pendingStart':0}
         first=[3]*20;first[16:19]=[0,1,2]

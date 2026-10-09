@@ -11,15 +11,24 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.JsonSupport;
@@ -40,6 +49,8 @@ public class AudioAnalysisService {
   private final AudioProcessorClient processor;
   private final ExecutorService executor = Executors.newSingleThreadExecutor();
   private final AtomicBoolean active = new AtomicBoolean();
+  private final Map<UUID, Completion> completions = new ConcurrentHashMap<>();
+  private final Semaphore waitingCalls = new Semaphore(16);
 
   public AudioAnalysisService(
       JdbcClient jdbc,
@@ -57,6 +68,54 @@ public class AudioAnalysisService {
   }
 
   public Map<String, Object> analyze(UUID owner, UUID artifactId, String mode) {
+    return state(owner, enqueue(owner, artifactId, mode));
+  }
+
+  /** Returns a bounded first transcript page, waiting only for committed results. */
+  public Map<String, Object> analyzeAndRead(UUID owner, UUID artifactId, String mode) {
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+    UUID id = enqueue(owner, artifactId, mode);
+    if (System.nanoTime() < deadline && waitingCalls.tryAcquire()) {
+      Completion completion = completions.compute(id, (key, current) -> current == null
+          ? new Completion(new CompletableFuture<>(), 1)
+          : new Completion(current.signal(), current.waiters() + 1));
+      try {
+        // Register before reading: completion between enqueue and registration is not lost.
+        boolean ready = transcriptReady(owner, id);
+        long remaining = deadline - System.nanoTime();
+        if (!ready && remaining > 0) {
+          try {
+            completion.signal().get(remaining, TimeUnit.NANOSECONDS);
+          } catch (TimeoutException exception) {
+            // Another API instance can complete the durable analysis without a local signal.
+          } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+          } catch (ExecutionException exception) {
+            throw new IllegalStateException("Audio completion notification failed", exception);
+          }
+        }
+      } finally {
+        completions.computeIfPresent(id, (key, current) -> current.waiters() == 1
+            ? null : new Completion(current.signal(), current.waiters() - 1));
+        waitingCalls.release();
+      }
+    }
+    return page(owner, id, "transcript", 0, 100, null, null);
+  }
+
+  private boolean transcriptReady(UUID owner, UUID id) {
+    return jdbc.sql("SELECT transcript_complete OR status IN ('SUCCEEDED','PARTIAL','FAILED')"
+            + " FROM audio_analyses WHERE id=:id AND owner_id=:owner")
+        .param("id", id)
+        .param("owner", owner)
+        .query(Boolean.class)
+        .optional()
+        .orElseThrow(ApiException::notFound);
+  }
+
+  private record Completion(CompletableFuture<Void> signal, int waiters) {}
+
+  private UUID enqueue(UUID owner, UUID artifactId, String mode) {
     if (!Set.of("transcript", "full").contains(mode == null ? "" : mode)) {
       throw ApiException.invalid("mode", "Выберите transcript или full.");
     }
@@ -122,7 +181,8 @@ public class AudioAnalysisService {
               changed(owner, analysisId);
               return analysisId;
             });
-    return state(owner, id);
+    dispatch();
+    return id;
   }
 
   public Map<String, Object> latest(UUID owner, UUID artifact) {
@@ -178,6 +238,15 @@ public class AudioAnalysisService {
         .query(UUID.class)
         .optional()
         .ifPresent(task -> events.emit(owner, "audio-analysis", task, 0));
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+      @Override
+      public void afterCommit() {
+        Completion completion = completions.get(id);
+        if (completion != null && transcriptReady(owner, id)) {
+          completion.signal().complete(null);
+        }
+      }
+    });
   }
 
   public record Summary(
@@ -496,6 +565,8 @@ public class AudioAnalysisService {
                 : "PROCESSOR_CONNECTION_LOST";
         fail(job, failure, true);
       }
+    } catch (DataAccessException exception) {
+      fail(job, "RESULT_STORAGE_UNAVAILABLE", true);
     } catch (RuntimeException exception) {
       fail(job, "PROCESSOR_RESULT_INVALID", false);
     }

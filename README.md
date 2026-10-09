@@ -201,6 +201,11 @@ python backend/api/tests/prepare_audio_corpus.py
 python backend/api/tests/evaluate_audio.py
 ```
 
+Для отдельной проверки четырёх классов эмоций на закреплённых 20 записях:
+`python backend/api/tests/prepare_audio_corpus.py --emotions`, затем
+`python backend/api/tests/evaluate_audio.py --emotions`. Это малая диагностическая
+выборка; отсутствие оценки и несовпадение с разметкой отражаются в результате.
+
 `python backend/api/tests/verify_audio_recovery.py` — отдельная проверка сбоев на свободной
 аудиоочереди dev: создаёт запись менее минуты, перезапускает только исполнитель моделей
 и проверяет истёкший lease. Фактическая приёмка и ограничения находятся в

@@ -1,7 +1,9 @@
 import type { BrowserContext, Cookie, Page } from "playwright";
 import type { Writable } from "node:stream";
+import { z } from "zod";
 import { installProfileCodec } from "./profile-page.js";
 import { ProfileExportError, profileLimits, writeProfileChunk } from "./profile-format.js";
+import { ProfileTarget } from "./profile-target.js";
 export { ProfileExportError } from "./profile-format.js";
 
 export function cookieMatchesHost(domain: string, hostname: string): boolean {
@@ -78,19 +80,12 @@ export async function exportProfile(selected: Page, origins: string[], output: W
   total = Buffer.byteLength(JSON.stringify({ type: "header", version: 2, origins }) + "\n");
   await writeProfileChunk(output, Buffer.from(JSON.stringify({ type: "header", version: 2, origins, candidate, cookieCheck }) + "\n"));
   for (const value of cookies) await write(JSON.stringify({ type: "cookie", value }) + "\n");
-  const page = await context.newPage();
+  const page = await ProfileTarget.create(selected, write);
   try {
-    const cdp = await context.newCDPSession(page);
-    await cdp.send("Network.setBypassServiceWorker", { bypass: true });
-    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Saving connection</title>" }));
-    await page.exposeBinding("__helmProfileWrite", async (source, value: unknown) => {
-      if (source.page !== page || source.frame !== page.mainFrame() || typeof value !== "string" || Buffer.byteLength(value) > profileLimits.chunk) throw new ProfileExportError(422, "Invalid profile chunk", "PROFILE_INVALID");
-      await write(value);
-    });
     for (const origin of origins) {
-      await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 20_000 });
-      await page.evaluate(installProfileCodec);
-      const result = await page.evaluate(async ({ recordLimit, chunkLimit }) => {
+      await page.navigate(origin);
+      await page.evaluate(`(${installProfileCodec.toString()})()`);
+      const exportStorage = async ({ recordLimit, chunkLimit }: { recordLimit: number; chunkLimit: number }) => {
         const encode = window.__helmProfileCodec.encode;
         const emit = async (value: object) => {
           const text = JSON.stringify(value) + "\n";
@@ -188,7 +183,11 @@ export async function exportProfile(selected: Page, origins: string[], output: W
           const message = error instanceof Error ? error.message : "PROFILE_SAVE_FAILED";
           return { ok: false, code: /PROFILE_[A-Z_]+/.exec(message)?.[0] ?? "PROFILE_SAVE_FAILED" };
         }
-      }, { recordLimit: profileLimits.record, chunkLimit: profileLimits.chunk });
+      };
+      const result = z.object({ ok: z.boolean(), code: z.string().optional() }).parse(
+        await page.evaluate(`(${exportStorage.toString()})(${JSON.stringify({
+          recordLimit: profileLimits.record, chunkLimit: profileLimits.chunk,
+        })})`, 300_000));
       if (!result.ok) {
         const status = result.code?.endsWith("TOO_LARGE") || result.code === "PROFILE_COMPLEXITY_LIMIT" ? 413
           : result.code === "PROFILE_UNSUPPORTED_VALUE" || result.code === "PROFILE_INVALID" ? 422 : 409;
@@ -200,9 +199,6 @@ export async function exportProfile(selected: Page, origins: string[], output: W
     if (error instanceof ProfileExportError && !output.destroyed) await writeProfileChunk(output, Buffer.from(JSON.stringify({ type: "error", code: error.code }) + "\n"));
     throw error;
   } finally {
-    // Closing the temporary target also releases its CDP sessions. Explicit
-    // detach can wait indefinitely on a renderer left by cross-site navigation.
     await page.close();
-    if (!selected.isClosed()) await selected.bringToFront();
   }
 }

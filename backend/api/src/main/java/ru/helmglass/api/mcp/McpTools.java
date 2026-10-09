@@ -11,12 +11,14 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -181,7 +183,8 @@ public class McpTools {
             "tasks.create",
             "Создать новую самостоятельную задачу только по явному поручению пользователя и связать с"
                 + " исходным чатом. Уточнения продолжают прежний taskId. Возвращает единственную карточку"
-                + " этого ответа: дополнительный tasks.view не нужен. Работайте автономно в рамках поручения.",
+                + " этого ответа: дополнительный tasks.view не нужен. Первую браузерную команду"
+                + " отправляйте с описанием step: отдельные DECLARE и START не нужны.",
             object(
                 Map.of(
                     "operationKey",
@@ -226,7 +229,10 @@ public class McpTools {
             "search", text(300), "beforeSequence", Map.of("type", "integer", "minimum", 1)),
             "taskId"), true, false));
     result.add(tool("steps.command",
-        "Управлять бизнес-шагом: DECLARE, START, WAIT, COMPLETE, SKIP, RETRY. Один шаг — одна"
+        "Управлять бизнес-шагом: WAIT, COMPLETE, SKIP, RETRY; DECLARE/START только для отдельного"
+            + " планирования. При выполнении создавайте и начинайте шаг через browser.execute.step"
+            + " одним вызовом. Навигация, получение файла и проверка адресата — действия внутри"
+            + " предметного шага, если сами не являются целью пользователя. Один шаг — одна"
             + " предметная операция над объектом; 20 товаров — 20 шагов. operationKey/objectKey"
             + " стабильны и не зависят от заголовка. COMPLETE требует предметного результата,"
             + " для SUCCEEDED/PARTIAL — подтверждений. Успешный клик не доказывает достижение цели."
@@ -284,14 +290,24 @@ public class McpTools {
     result.add(
         tool(
             "browser.execute",
-            "Выполнить техническое действие внутри начатого бизнес-шага stepId. confirmationPrompt указывайте"
+            "Выполнить action или последовательность actions (до 8) внутри бизнес-шага."
+                + " Короткие команды возвращают готовый результат; только для ACCEPTED/DISPATCHED"
+                + " или потерянного ответа нужен operations.get. После изменения страницы возвращается"
+                + " observation: используйте её вместо отдельного observe. listMedia, captureAudio"
+                + " и screenshot по умолчанию возвращают только свой результат."
+                + " Для нового шага передайте step вместо отдельных DECLARE/START; для существующего stepId."
+                + " actions используйте только для заранее известных действий без промежуточного решения."
+                + " Каждый элемент имеет свой стабильный operationId. Последовательность останавливается"
+                + " на первом неподтверждённом успехе; complete=false и nextOperationId требуют проверки."
+                + " confirmationPrompt указывайте"
                 + " только если конкретный шаг требует решения пользователя: задайте этот вопрос в чате,"
                 + " получите ответ через tasks.respond с requestId/requestVersion."
                 + " operationId сохраняется при повторе; при потере ответа"
                 + " запрашивать operations.get. Не передавать пароли и коды: вход выполняется в"
                 + " кабинете. captureAudio требует sourceId из listMedia, sourceRef и"
                 + " sourceContext с идентификатором задания, точной инструкцией и вопросами.",
-            object(Map.of("taskId", uuid(), "action", actionSchema()), "taskId", "action"),
+            object(Map.of("taskId", uuid(), "action", actionSchema(),
+                "actions", array(actionSchema(), 8)), "taskId"),
             false,
             true));
     result.add(tool("operations.list",
@@ -304,14 +320,18 @@ public class McpTools {
     result.add(
         tool(
             "operations.get",
-            "Проверить исход ранее отправленной операции без её повторения.",
+            "Проверить исход операции после ACCEPTED/DISPATCHED или потери ответа. Если"
+                + " browser.execute уже вернул SUCCEEDED и результат, повторное чтение не нужно.",
             object(Map.of("operationId", uuid()), "operationId"),
             true,
             false));
     result.add(tool("audio.analyze",
         "Запустить локальный анализ собственного сохранённого аудио. Для текста mode=transcript;"
             + " для звучания mode=full. Повтор переиспользует анализ, повышение режима сохраняет"
-            + " расшифровку. Доступен из любого своего чата без передачи управления задачей.",
+            + " расшифровку. Ожидает до 8 секунд и возвращает первую страницу transcript с items,"
+            + " sectionComplete, hasMore и nextCursor. Используйте готовые items сразу; audio.get"
+            + " нужен только для незавершённого анализа, следующих страниц или других разделов."
+            + " Доступен из любого своего чата без передачи управления задачей.",
         object(Map.of("artifactId", uuid(), "mode", Map.of("type", "string", "enum",
             List.of("transcript", "full"))), "artifactId", "mode"), false, false));
     result.add(tool("audio.get",
@@ -489,7 +509,8 @@ public class McpTools {
         if (!arguments.keySet().equals(Set.of("artifactId", "mode"))) {
           throw ApiException.invalid("arguments", "Требуются artifactId и mode.");
         }
-        return textResult(audioAnalyses.analyze(owner, uuid(input, "artifactId"), string(input, "mode")));
+        return textResult(audioAnalyses.analyzeAndRead(
+            owner, uuid(input, "artifactId"), string(input, "mode")));
       }
       if ("steps.list".equals(name)) {
         var values = new LinkedMultiValueMap<String, String>();
@@ -622,7 +643,7 @@ public class McpTools {
                           null);
                       return tasks.get(owner, taskId);
                     }));
-        case "browser.execute" -> execute(owner, taskId, chat, input.path("action"));
+        case "browser.execute" -> execute(owner, taskId, chat, input);
         case "results.publish" ->
             textResult(
                 idempotency.execute(
@@ -745,17 +766,85 @@ public class McpTools {
   }
 
   private McpSchema.CallToolResult execute(UUID owner, UUID task, String chat, JsonNode input) {
-    Contracts.BrowserAction action = json.convert(input, Contracts.BrowserAction.class);
+    boolean sequence = input.has("actions");
+    if (sequence == input.has("action")) {
+      throw ApiException.invalid("action", "Передайте action или actions, но не оба поля.");
+    }
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+    if (!sequence) {
+      if (!input.path("action").isObject()) {
+        throw ApiException.invalid("action", "Действие должно быть объектом.");
+      }
+      Contracts.BrowserAction action = json.convert(input.path("action"), Contracts.BrowserAction.class);
+      return operationResponse(owner, executeAction(owner, task, chat, action, deadline));
+    }
+    JsonNode supplied = input.path("actions");
+    if (!supplied.isArray() || supplied.isEmpty() || supplied.size() > 8) {
+      throw ApiException.invalid("actions", "Последовательность содержит от 1 до 8 действий.");
+    }
+    List<Contracts.BrowserAction> commands = new ArrayList<>();
+    Set<UUID> identifiers = new HashSet<>();
+    for (JsonNode item : supplied) {
+      if (!item.isObject()) {
+        throw ApiException.invalid("actions", "Каждое действие должно быть объектом.");
+      }
+      Contracts.BrowserAction action = json.convert(item, Contracts.BrowserAction.class);
+      if (action.operationId() == null || !identifiers.add(action.operationId())) {
+        throw ApiException.invalid("operationId", "Каждому действию нужен уникальный operationId.");
+      }
+      commands.add(new Contracts.BrowserAction(action.operationId(), action.stepId(), action.type(),
+          action.arguments(), action.instructionRevision(), action.controlEpoch(),
+          action.confirmationPrompt(), action.step(),
+          action.observeAfter() == null && commands.size() < supplied.size() - 1
+              ? Boolean.FALSE : action.observeAfter()));
+    }
+    List<Contracts.Operation> completed = new ArrayList<>();
+    for (Contracts.BrowserAction action : commands) {
+      if (!completed.isEmpty() && System.nanoTime() >= deadline) {
+        return sequenceResult(owner, task, Map.of("operations", completed, "complete", false,
+            "nextOperationId", action.operationId()));
+      }
+      Contracts.Operation result;
+      try {
+        result = executeAction(owner, task, chat, action, deadline);
+      } catch (ApiException exception) {
+        if (completed.isEmpty()) {
+          throw exception;
+        }
+        return sequenceResult(owner, task, Map.of("operations", completed, "complete", false,
+            "nextOperationId", action.operationId(), "error", exception.response()));
+      }
+      completed.add(result);
+      if (!"SUCCEEDED".equals(result.status())) {
+        return sequenceResult(owner, task, Map.of("operations", completed, "complete", false,
+            "nextOperationId", action.operationId()));
+      }
+    }
+    return sequenceResult(owner, task, Map.of("operations", completed, "complete", true));
+  }
+
+  private McpSchema.CallToolResult sequenceResult(UUID owner, UUID task, Map<String, Object> result) {
+    actions.requireResultAccess(owner, task);
+    return textResult(result);
+  }
+
+  private Contracts.Operation executeAction(UUID owner, UUID task, String chat,
+      Contracts.BrowserAction action, long deadline) {
+    chats.requireCurrent(owner, task, chat);
     Contracts.Operation result = actions.submit(owner, task, action);
     if (Set.of("ACCEPTED", "DISPATCHED", "SUCCEEDED").contains(result.status())) {
       chats.accepted(owner, task, chat, action.instructionRevision(), action.operationId());
     }
-    return textResult(result);
+    return actions.awaitResult(owner, result, deadline);
   }
 
   private McpSchema.CallToolResult operation(UUID owner, UUID id) {
     Contracts.Operation operation = actions.result(owner, id);
     browsers.modelActivity(owner, operation.taskId());
+    return operationResponse(owner, operation);
+  }
+
+  private McpSchema.CallToolResult operationResponse(UUID owner, Contracts.Operation operation) {
     JsonNode result = operation.result();
     if ("screenshot".equals(operation.type())
         && "SUCCEEDED".equals(operation.status())
@@ -764,7 +853,7 @@ public class McpTools {
       UUID artifactId = UUID.fromString(result.path("artifact").path("id").asString());
       Contracts.Artifact artifact = artifacts.getReady(owner, artifactId);
       return McpSchema.CallToolResult.builder()
-          .addTextContent(json.write(Map.of("operationId", id, "status", operation.status())))
+          .addTextContent(json.write(Map.of("operationId", operation.id(), "status", operation.status())))
           .addContent(
               McpSchema.ImageContent.builder(
                       Base64.getEncoder().encodeToString(imageBytes(owner, artifact)),
@@ -816,7 +905,12 @@ public class McpTools {
             .orElse("");
     return McpSchema.CallToolResult.builder()
         .structuredContent(state)
-        .addTextContent("Задача «" + state.task().title() + "»: " + state.task().status())
+        .addTextContent("Задача «" + state.task().title() + "»: " + state.task().status()
+            + ". Выполнение: browser.execute с step создаёт и начинает бизнес-шаг за один вызов;"
+            + " отдельные steps.command DECLARE/START не нужны. Объединяйте заранее известные"
+            + " действия в actions, используйте возвращённую observation. Навигация и получение"
+            + " исходных данных входят в предметный шаг. Готовые SUCCEEDED и текст audio.analyze"
+            + " используйте сразу, без повторного чтения. Завершайте шаг после проверки результата.")
         .meta(
             Map.of(
                 "publicUrl",
@@ -1010,6 +1104,12 @@ public class McpTools {
             uuid(),
             "stepId",
             uuid(),
+            "step",
+            object(Map.of("operationKey", text(128), "objectKey", text(500),
+                "title", text(300), "completionCriterion", text(2000)),
+                "operationKey", "objectKey", "title", "completionCriterion"),
+            "observeAfter",
+            bool(),
             "confirmationPrompt",
             text(4000),
             "type",
@@ -1065,7 +1165,6 @@ public class McpTools {
                     Map.entry("name", text(240)),
                     Map.entry("state", choice("visible", "hidden", "attached", "detached"))))),
         "operationId",
-        "stepId",
         "type",
         "instructionRevision",
         "arguments");

@@ -209,7 +209,12 @@ public final class Contracts {
       JsonNode arguments,
       long instructionRevision,
       Long controlEpoch,
-      String confirmationPrompt) {}
+      String confirmationPrompt,
+      StepDefinition step,
+      Boolean observeAfter) {}
+
+  public record StepDefinition(
+      String operationKey, String objectKey, String title, String completionCriterion) {}
 
   public record StepSource(String title, String url) {}
 

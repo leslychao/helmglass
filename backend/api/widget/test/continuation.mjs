@@ -4,11 +4,12 @@ import assert from 'node:assert/strict';
 class Element {
   contentWindow = { postMessage(message) { viewerMessages.push(message); } };
   listeners = new Map(); children = []; disabled = true; hidden = false;
-  classList = { add() {}, toggle() {} }; style = {}; value = "";
+  classList = { add() {}, toggle() {} }; style = { setProperty(name, value) { this[name] = value; } }; value = "";
   focus() {}
   addEventListener(type, callback) { this.listeners.set(type, callback); }
   removeAttribute(name) { delete this[name]; }
   setAttribute(name, value) { this[name] = value; }
+  getAttribute(name) { return this[name] ?? null; }
   append(...items) { for (const item of items) { item.remove(); item.parent = this; this.children.push(item); } }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter(item => item !== this); this.parent = undefined; }
   insertBefore(item, reference) { item.remove(); item.parent = this; const index = reference ? this.children.indexOf(reference) : this.children.length; this.children.splice(index, 0, item); }
@@ -17,7 +18,7 @@ class Element {
 }
 for (const name of ['HTMLElement', 'HTMLHeadingElement', 'HTMLSpanElement', 'HTMLParagraphElement',
   'HTMLInputElement', 'HTMLIFrameElement', 'HTMLButtonElement', 'HTMLImageElement', 'HTMLOListElement']) globalThis[name] = Element;
-let elements, sources, app, call, send, capabilities, moduleId = 0;
+let elements, sources, app, call, send, capabilities, hostContext, moduleId = 0;
 const messages = [], links = [], viewerMessages = [], timers = new Map(), windowListeners = new Map(), documentListeners = new Map();
 const intervals = new Map();
 let timerId = 0;
@@ -26,8 +27,9 @@ globalThis.clearTimeout = id => timers.delete(id);
 globalThis.setInterval = callback => { const id = ++timerId; intervals.set(id, callback); return id; };
 globalThis.clearInterval = id => intervals.delete(id);
 globalThis.document = {
+  body: new Element(),
   visibilityState: 'visible',
-  getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); if (["steps-panel", "session-panel"].includes(id) && !elements.get(id).initialized) { elements.get(id).hidden = true; elements.get(id).initialized = true; } return elements.get(id); },
+  getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); if (id === "session-panel" && !elements.get(id).initialized) { elements.get(id).hidden = true; elements.get(id).initialized = true; } return elements.get(id); },
   createElement() { return new Element(); },
   addEventListener(type, callback) { documentListeners.set(type, callback); },
   removeEventListener(type, callback) { if (documentListeners.get(type) === callback) documentListeners.delete(type); },
@@ -51,9 +53,12 @@ globalThis.EventSource = class {
 };
 globalThis.WidgetTestApp = class {
   constructor() { app = this; }
-  connect() { return Promise.resolve(); }
+  connect() {
+    assert.equal(elements.get('card').style.maxHeight, 'none', 'CSS owns the initial responsive height');
+    return Promise.resolve();
+  }
   getHostCapabilities() { return capabilities; }
-  getHostContext() { return { displayMode: "inline", availableDisplayModes: ["inline"] }; }
+  getHostContext() { return hostContext; }
   callServerTool(request) { return call(request); }
   sendMessage(message) { messages.push(message); return send(message); }
   openLink(link) { links.push(link); return Promise.resolve({}); }
@@ -98,15 +103,90 @@ async function mount() {
   document.visibilityState = 'visible';
   navigator.onLine = true;
   capabilities = { message: { text: {} } };
+  hostContext = { displayMode: 'inline', availableDisplayModes: ['inline', 'fullscreen'] };
   send = () => Promise.resolve({});
   await import('WIDGET_UNDER_TEST#' + ++moduleId);
 }
 
 await mount();
+assert.equal(elements.get('card').style.maxHeight, 'none', 'An unconstrained host preserves the intrinsic card size');
+hostContext.containerDimensions = { maxHeight: 480, width: 700 };
+hostContext.safeAreaInsets = { top: 12, bottom: 20, left: 0, right: 0 };
+app.onhostcontextchanged(hostContext);
+assert.equal(elements.get('card').style.maxHeight, '448px', 'Safe area is reserved inside the host height limit');
+hostContext.containerDimensions = { height: 600, width: 700 };
+hostContext.displayMode = 'fullscreen';
+app.onhostcontextchanged(hostContext);
+assert.equal(elements.get('card').style.maxHeight, '568px', 'A larger host allows the intrinsic size without stretching the card');
+hostContext.containerDimensions = { maxWidth: 700 };
+hostContext.safeAreaInsets = undefined;
+app.onhostcontextchanged(hostContext);
+assert.equal(elements.get('card').style.maxHeight, 'none', 'Removing the host constraint restores the intrinsic size');
+const fresh = presentation('IDLE', liveBrowser()), saved = structuredClone(fresh), restoredCalls = [];
+saved.task.title = 'Saved title before the update';
+delete saved.task.stepCount;
+delete saved.task.browser.idleCloseAt;
+delete saved.task.browser.closeReason;
+call = request => {
+  restoredCalls.push(request.name);
+  if (request.name === 'widget.state') return Promise.resolve(response(fresh));
+  if (request.name === 'widget.browser') return Promise.resolve(ticket);
+  if (request.name === 'widget.steps') return Promise.resolve(history());
+  throw new Error(request.name);
+};
+show(saved); await settled();
+assert.ok(restoredCalls.includes('widget.state'), 'Saved responses from before a schema change must refresh from the server');
+assert.equal(elements.get('title').textContent, fresh.task.title);
+assert.equal(elements.get('event-count').textContent, '20');
+assert.ok(elements.get('viewer').src, 'A historical response must restore the current browser');
+
+await mount();
+const oldState = deferred(), oldPresentation = presentation('PENDING'), active = presentation();
+let initialCalls = 0;
+call = request => {
+  if (request.name === 'widget.state') return ++initialCalls === 1 ? oldState.promise : Promise.resolve(response(active));
+  if (request.name === 'widget.steps') return Promise.resolve(history());
+  throw new Error(request.name);
+};
+show({ generation: oldPresentation.generation, task: { id: oldPresentation.task.id } });
+show({ generation: active.generation, task: { id: active.task.id } });
+oldState.resolve(response(oldPresentation)); await settled();
+assert.equal(elements.get('title').textContent, active.task.title);
+assert.equal(elements.get('cabinet').disabled, false, 'A stable reference alone restores a card');
+assert.equal(messages.length, 0, 'A late bootstrap response cannot continue the previous presentation');
+
+await mount();
+let offlineBootstrapCalls = 0;
+call = request => {
+  offlineBootstrapCalls++;
+  return Promise.resolve(request.name === 'widget.state' ? response(active) : history());
+};
+navigator.onLine = false; windowListeners.get('offline')();
+show({ generation: active.generation, task: { id: active.task.id } }); await settled();
+assert.equal(offlineBootstrapCalls, 0);
+navigator.onLine = true; windowListeners.get('online')(); await settled();
+assert.equal(elements.get('title').textContent, active.task.title, 'A reference received offline restores when the network returns');
+
+await mount();
+call = () => Promise.resolve({ ...stale, isError: true });
+show({ generation: active.generation, task: { id: active.task.id } }); await settled();
+assert.match(elements.get('state').textContent, /Неактивная карточка/);
+assert.equal(timers.size, 0, 'A stale reference is retired before any current state exists');
+assert.equal(messages.length, 0);
+
+await mount();
+call = () => { throw new Error('An invalid tool result must not call the server'); };
+app.ontoolresult({ isError: true, structuredContent: { code: 'FORBIDDEN', message: 'Доступ к задаче запрещён.' } });
+assert.equal(elements.get('state').textContent, 'Доступ к задаче запрещён.');
+assert.equal(elements.get('header-status').textContent, 'Ошибка загрузки');
+assert.equal(elements.get('browser-state').textContent, 'Данные задачи недоступны.');
+assert.equal(elements.get('cabinet').disabled, true);
+
+await mount();
 const preflight = deferred(), mounted = presentation('PENDING', liveBrowser()), preflightCalls = [];
 call = request => { preflightCalls.push(request.name); return preflight.promise; };
 show(mounted);
-assert.equal(elements.get('title').textContent, mounted.task.title);
+assert.notEqual(elements.get('title').textContent, mounted.task.title, 'Saved task data is not authoritative before preflight');
 elements.get('cabinet').click();
 assert.deepEqual(preflightCalls, ['widget.state']);
 assert.equal(sources.length, 0); assert.equal(messages.length, 0); assert.equal(links.length, 0);
@@ -134,7 +214,6 @@ assert.ok(elements.get('viewer').src, 'Validated live browsers open automaticall
 assert.equal(elements.get('viewer').hidden, true, 'A ticket does not prove a live frame');
 viewerState('connected');
 assert.equal(elements.get('viewer').hidden, false);
-assert.equal(elements.get('address').textContent, 'https://site.example/work', 'Address must omit credentials, query and fragment');
 assert.equal(elements.get('steps').children.length, 1, 'Latest steps are visible without disclosure');
 assert.equal(elements.get('event-count').textContent, '20');
 assert.ok(calls.filter(item => item.name === 'widget.steps').every(item => item.arguments.page === 1));
@@ -142,7 +221,6 @@ assert.equal(elements.get('cabinet').textContent, 'Открыть в Helm Glass'
 const viewerSource = elements.get('viewer').src;
 const callsBeforeCollapse = calls.length;
 elements.get('steps-toggle').disabled = false;
-elements.get('steps-toggle').click();
 assert.equal(elements.get('steps-panel').hidden, false);
 assert.equal(elements.get('steps-toggle')['aria-expanded'], 'true');
 elements.get('steps-toggle').click();
@@ -150,6 +228,14 @@ assert.equal(elements.get('steps-panel').hidden, true);
 assert.equal(elements.get('steps-toggle')['aria-expanded'], 'false');
 assert.equal(elements.get('viewer').src, viewerSource, 'Folding steps preserves the current viewer');
 assert.equal(calls.length, callsBeforeCollapse, 'Folding steps is a local presentation action');
+elements.get('expand').disabled = false;
+elements.get('expand').click();
+assert.equal(elements.get('expand')['aria-label'], 'Свернуть браузер');
+assert.equal(elements.get('viewer').src, viewerSource, 'Expanding preserves the live viewer');
+assert.equal(calls.length, callsBeforeCollapse, 'Expanding stays inside the existing widget');
+documentListeners.get('keydown')({ key: 'Escape' });
+assert.equal(elements.get('expand')['aria-label'], 'Развернуть браузер');
+assert.equal(elements.get('steps-panel').hidden, true, 'Returning restores the chosen sidebar state');
 elements.get('session-toggle').disabled = false;
 elements.get('steps-toggle').click();
 elements.get('session-toggle').click();
@@ -171,24 +257,49 @@ elements.get('video-toggle').click(); await settled(); viewerState('connected');
 assert.equal(elements.get('viewer').hidden, false);
 assert.equal(sourceBeforeVideoOff, sources.at(-1));
 viewerState('resized', 'stale-epoch', { width: 800, height: 600 });
-assert.equal(elements.get('viewport').style.aspectRatio, undefined);
+assert.equal(document.getElementById('viewport').style.aspectRatio, undefined);
 viewerState('resized', undefined, { width: 1440, height: 900 });
-assert.equal(elements.get('viewport').style.aspectRatio, '1440 / 900');
+assert.equal(elements.get('viewport').style.aspectRatio, undefined, 'Frame dimensions cannot grow the card');
 viewerState('resized', undefined, { width: -1, height: 900 });
-assert.equal(elements.get('viewport').style.aspectRatio, '1440 / 900', 'Invalid frame dimensions cannot change layout');
+assert.equal(elements.get('viewport').style.aspectRatio, undefined);
 elements.get('cabinet').click();
 assert.equal(links.at(-1).url, metadata(state).taskUrl);
 
 const historyCalls = calls.filter(item => item.name === 'widget.steps').length;
+const sourceBeforeHistory = elements.get('viewer').src;
 const businessRow = elements.get('steps').children[0];
+const disclosure = businessRow.children[0];
+const result = businessRow.children[1];
+assert.equal(disclosure.disabled, true, 'A step without a result has no disclosure');
+assert.equal(disclosure.getAttribute('aria-expanded'), null);
 businessStepVersion++;
 sources.at(-1).change('step'); await settled();
 assert.equal(elements.get('steps').children[0], businessRow, 'An update must preserve the business step row');
 assert.equal(elements.get('steps').children.length, 1, 'Status updates do not append progress entries');
 assert.equal(elements.get('event-count').textContent, '20');
-assert.match(businessRow.children[0].textContent, /Выполнен/);
+assert.match(disclosure.children[0].textContent, /Выполнен/);
+assert.equal(disclosure.disabled, false);
+assert.equal(disclosure.getAttribute('aria-expanded'), 'false');
+assert.equal(result.hidden, true, 'A newly available result starts collapsed');
+disclosure.click();
+assert.equal(result.hidden, false);
+assert.equal(disclosure.getAttribute('aria-expanded'), 'true');
+elements.get('steps-content').scrollTop = 123;
+businessStepVersion++;
+sources.at(-1).change('step'); await settled();
+assert.equal(elements.get('steps').children[0], businessRow);
+assert.equal(disclosure.getAttribute('aria-expanded'), 'true', 'Updates preserve disclosure state');
+assert.equal(result.hidden, false);
+assert.equal(elements.get('steps-content').scrollTop, 123, 'Updates preserve panel scroll position');
+assert.equal(elements.get('viewer').src, sourceBeforeHistory, 'Step updates preserve the viewer');
+hostContext.containerDimensions = { maxHeight: 400, width: 500 };
+hostContext.displayMode = 'fullscreen';
+app.onhostcontextchanged(hostContext);
+assert.equal(elements.get('viewer').src, sourceBeforeHistory, 'Host resizing preserves the connected iframe');
+disclosure.click();
+assert.equal(result.hidden, true);
 
-assert.equal(calls.filter(item => item.name === 'widget.steps').length, historyCalls + 1);
+assert.equal(calls.filter(item => item.name === 'widget.steps').length, historyCalls + 2);
 elements.get('steps-search').value = 'несуществующий шаг';
 elements.get('steps-search').listeners.get('input')(); await nextTimer();
 assert.match(elements.get('history-state').textContent, /По запросу шаги не найдены/);
@@ -243,7 +354,6 @@ state = { ...state, task: { ...state.task, version: 2, waitReason: 'LOGIN',
 sources.at(-1).change('browser'); await settled();
 assert.equal(elements.get('viewer').src, undefined);
 assert.equal(elements.get('viewer').hidden, true);
-assert.equal(elements.get('address').textContent, 'Защищённый вход');
 assert.equal(elements.get('cabinet').textContent, 'Войти на сайт');
 elements.get('cabinet').click();
 assert.equal(links.at(-1).url, metadata(state).loginUrl);
@@ -275,6 +385,47 @@ await nextTimer();
 assert.ok(lastSource.closed); assert.equal(timers.size, 0);
 assert.equal(elements.get('cabinet').disabled, true);
 assert.match(elements.get('state').textContent, /Неактивная карточка/);
+
+for (const outcome of ['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'FAILED', 'STOPPED', 'WAITING_CHATGPT']) {
+  await mount();
+  const recovered = presentation();
+  recovered.task.status = outcome;
+  recovered.task.summary = 'Сохранённый результат';
+  let stateUnavailable = false;
+  call = request => {
+    if (request.name === 'widget.state') return stateUnavailable
+      ? Promise.reject(new Error('Temporary state request failure')) : Promise.resolve(response(recovered));
+    if (request.name === 'widget.steps') return Promise.resolve(history());
+    throw new Error(request.name);
+  };
+  show(recovered); await settled();
+  const healthyStream = sources.at(-1);
+  for (let outage = 0; outage < 9; outage++) {
+    stateUnavailable = true;
+    healthyStream.change('task'); await settled();
+    assert.equal(elements.get('state').hidden, false, 'An actual refresh failure remains visible');
+    assert.equal(elements.get('header-status')['data-status'], outcome);
+    assert.equal(elements.has('summary'), false, 'Task results must not create a duplicate footer summary');
+    stateUnavailable = false;
+    assert.equal(timers.size, 1, outcome + ': outage ' + (outage + 1) + ' must schedule recovery');
+    await nextTimer();
+    assert.equal(elements.get('state').hidden, true, outcome + ' recovers from an independent outage');
+    assert.equal(sources.at(-1), healthyStream, 'A failed snapshot must not replace a healthy stream');
+  }
+  stateUnavailable = true;
+  healthyStream.change('task'); await settled();
+  assert.equal(timers.size, 1);
+  stateUnavailable = false;
+  healthyStream.change('task'); await settled();
+  assert.equal(timers.size, 0, 'A successful event-driven refresh cancels the obsolete retry');
+  assert.equal(elements.get('state').hidden, true);
+
+  stateUnavailable = true;
+  healthyStream.change('task'); await settled();
+  for (let retry = 0; retry < 8; retry++) await nextTimer();
+  assert.equal(timers.size, 0, 'Consecutive snapshot failures remain bounded');
+  assert.match(elements.get('state').textContent, /Связь недоступна/);
+}
 
 await mount();
 let retryState = presentation();

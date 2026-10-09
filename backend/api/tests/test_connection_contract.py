@@ -1,5 +1,7 @@
 """Deployed admission and connection contracts with disposable accounts."""
+import base64
 import json
+from pathlib import Path
 import time
 import unittest
 from urllib.parse import urlencode
@@ -309,9 +311,9 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual(0, result.returncode)
             self.assertEqual("", result.stdout.strip(), "Browser containers must actually be removed")
 
-    def saved_connection(self, client, suffix, close=True):
+    def saved_connection(self, client, suffix, close=True, url="https://example.com"):
         status,value=client.api("/api/connections","POST",{
-            "name":"Anonymous profile "+suffix,"site":"example.com","startUrl":"https://example.com"})
+            "name":"Anonymous profile "+suffix,"startUrl":url})
         self.assertEqual(200,status,value)
         connection=value["id"]
         viewer=str(uuid.uuid4())
@@ -342,6 +344,148 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         task=primary.api("/api/tasks/"+task["id"])[1]
         self.assertEqual(standalone["id"],task["browser"]["id"])
         self.assertEqual("CHATGPT",task["browser"]["controlOwner"])
+
+    def test_profile_is_saved_on_close_and_restored_with_updated_site_data(self):
+        identity, primary = self.owner()
+        fixture = Path(__file__).resolve().parents[2] / 'browser-session/test/fixtures/profile-lifetime.html'
+        url = 'https://httpbin.org/base64/' + base64.urlsafe_b64encode(fixture.read_bytes()).decode()
+        connection = self.saved_connection(primary, 'Save before close', close=False, url=url)
+        client, task = self.create(primary, url=url)
+        browser = task['browser']
+        path = '/api/connections/' + connection
+        original = primary.api(path)[1]['cookieCheck']
+        for _ in range(3):
+            receipt = self.wait_operation(self.observe(client, task), client)
+            self.assertEqual('SUCCEEDED', receipt['status'])
+            self.assertEqual(original, primary.api(path)[1]['cookieCheck'],
+                'Reading the page must not export the complete saved profile')
+
+        def click(transport, current, selector):
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                current = primary.api('/api/tasks/' + current['id'])[1]
+                if current.get('browser') and current['browser']['status'] == 'LIVE':
+                    break
+                time.sleep(.2)
+            self.assertEqual('LIVE', current['browser']['status'])
+            operation = str(uuid.uuid4())
+            error, receipt, _ = transport.execute_in_scenario_step({'taskId': current['id'], 'action': {
+                'operationId': operation, 'type': 'click', 'arguments': {'selector': selector},
+                'instructionRevision': current['instructionRevision'],
+                'controlEpoch': current['browser']['controlEpoch']}})
+            self.assertFalse(error, receipt)
+            self.assertEqual('SUCCEEDED', self.wait_operation(operation, transport)['status'])
+
+        click(client, task, '#account-b')
+        # Exceed the former checkpoint interval while the same browser remains open.
+        deadline = time.monotonic() + 66
+        while time.monotonic() < deadline:
+            self.assertEqual(original, primary.api(path)[1]['cookieCheck'],
+                'An open browser must not periodically export its profile')
+            time.sleep(2)
+
+        current = primary.api('/api/tasks/' + task['id'])[1]
+        self.assertEqual(200, primary.api('/api/tasks/' + task['id'] + '/commands', 'POST', {
+            'type': 'STOP', 'expectedVersion': current['version']})[0])
+        closed = self.await_connection(primary, connection,
+            lambda value: value['browser']['status'] == 'CLOSED')
+        self.assertNotEqual(original, closed['cookieCheck'])
+        self.assertIsNone(closed['profileSaveError'])
+        self.assertGreaterEqual(closed['cookieCheck']['usableCount'], 2)
+        self.assertEqual('t', self.fixture_sql(identity,
+            "SELECT close_profile_attempted FROM browser_sessions WHERE owner_id=:owner AND id='"
+            + str(uuid.UUID(browser['id'])) + "';"))
+
+        restored_client, restored = self.create(primary, url=url, preferred=[connection])
+        click(restored_client, restored, '#read-state')
+        observed = self.wait_operation(self.observe(restored_client, restored), restored_client)
+        self.assertEqual('SUCCEEDED', observed['status'])
+        self.assertNotEqual(browser['id'], primary.api('/api/tasks/' + restored['id'])[1]['browser']['id'])
+        self.assertIn('"account":"b"', observed['result']['text'])
+        self.assertIn('"localAccount":"b"', observed['result']['text'])
+
+    def test_failed_final_save_closes_browser_keeps_previous_profile_and_warns(self):
+        identity, primary = self.owner()
+        connection = self.saved_connection(primary, 'Failed final save', close=False)
+        client, task = self.create(primary)
+        self.assertEqual('SUCCEEDED', self.wait_operation(self.observe(client, task), client)['status'])
+        path = '/api/connections/' + connection
+        original = primary.api(path)[1]
+        browser_id = original['browser']['id']
+        # Reject this disposable profile at the real worker; no shared service is stopped.
+        self.fixture_sql(identity, "UPDATE connections SET authorized_origins='[\"about:blank\"]' "
+            "WHERE owner_id=:owner AND id='" + str(uuid.UUID(connection)) + "';")
+        try:
+            started = time.monotonic()
+            current = primary.api('/api/tasks/' + task['id'])[1]
+            self.assertEqual(200, primary.api('/api/tasks/' + task['id'] + '/commands', 'POST', {
+                'type': 'STOP', 'expectedVersion': current['version']})[0])
+            failed = self.await_connection(primary, connection,
+                lambda value: value['browser']['status'] == 'CLOSED')
+            self.assertLess(time.monotonic() - started, 45)
+            self.assertIsNotNone(failed['profileSaveError'])
+            self.assertEqual(original['cookieCheck'], failed['cookieCheck'])
+            self.assertEqual(original['profileRevision'], failed['profileRevision'])
+        finally:
+            self.fixture_sql(identity, "UPDATE connections SET authorized_origins='[\"https://example.com\"]' "
+                "WHERE owner_id=:owner AND id='" + str(uuid.UUID(connection)) + "';")
+
+        self.assertEqual('t', self.fixture_sql(identity,
+            "SELECT close_profile_attempted FROM browser_sessions WHERE owner_id=:owner AND id='"
+            + str(uuid.UUID(browser_id)) + "';"))
+        removed = dev.subprocess.run([
+            'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+            'ps', '-aq', '--filter', 'name=helm-browser-' + browser_id],
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual((0, ''), (removed.returncode, removed.stdout.strip()))
+        self.assertEqual(404, self.user.api(path)[0])
+        replay = dev.subprocess.run([
+            'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+            'exec', '-i', 'helmglass-browser-node-1', 'node', '--input-type=module', '-'],
+            input='''
+            const headers = {'X-Worker-Token': process.env.WORKER_TOKEN,
+                             'Content-Type': 'application/json'};
+            const id = %s;
+            const response = await fetch('http://127.0.0.1:8090/sessions/' + id, {headers});
+            if (!response.ok) throw new Error('Fixture browser receipt unavailable');
+            const state = await response.json();
+            delete state.profileSaveError;
+            const replay = await fetch('http://api:8080/internal/worker/sessions/' + id + '/events',
+                {method: 'POST', headers, body: JSON.stringify(state)});
+            if (!replay.ok) throw new Error('Fixture event rejected');
+            ''' % json.dumps(browser_id), text=True, capture_output=True, timeout=30)
+        self.assertEqual(0, replay.returncode, replay.stderr)
+        self.assertEqual(failed['profileSaveError'], primary.api(path)[1]['profileSaveError'],
+                         'An older saved profile must not clear the latest failed-save warning')
+        # Verify the actual closed-browser warning through normal console authentication.
+        ui = dev.subprocess.run([
+            'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+            'run', '--rm', '-i', '--network', 'bridge', '--user', 'node',
+            '--security-opt', 'seccomp=backend/browser-node/seccomp-profile.json',
+            '--entrypoint', 'node', 'helmglass-browser-session:current', '--input-type=module', '-'],
+            input='''
+            import assert from 'node:assert/strict';
+            import { chromium } from 'playwright';
+            const input = %s;
+            const browser = await chromium.launch({headless: true, chromiumSandbox: true});
+            try {
+              const page = await browser.newPage();
+              page.setDefaultTimeout(30000);
+              await page.goto(input.base + '/oauth2/start?rd=' + encodeURIComponent('/tasks/' + input.task));
+              await page.locator('#username').fill(input.username);
+              await page.locator('#password').fill(input.password);
+              await page.locator('#kc-login').click();
+              const warning = page.getByRole('alert').filter({hasText: 'Браузер закрыт. Последние изменения сессии не удалось сохранить.'});
+              await warning.waitFor({state: 'visible'});
+              assert.match(await warning.innerText(), /прежняя сохранённая версия/);
+              assert.equal(await page.getByRole('button', {name: 'Повторить сохранение и закрыть'}).count(), 0);
+            } finally { await browser.close(); }
+            ''' % json.dumps({'base': primary.base, 'username': identity.username,
+                              'password': identity.password, 'task': task['id']}),
+            capture_output=True, text=True, encoding='utf-8', timeout=120)
+        self.assertEqual(0, ui.returncode,
+                         ui.stderr.replace(identity.password, '[redacted]'))
+        self.assertEqual(original['cookieCheck'], primary.api(path)[1]['cookieCheck'])
 
     def test_finish_login_saves_and_releases_control_in_one_command(self):
         _, primary = self.owner()
@@ -478,7 +622,8 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual(saved['profileRevision'], reopened['profileRevision'])
             self.assertTrue(reopened['browser']['privateMode'],
                             'Opening a connection always grants protected control')
-            self.assertEqual(saved['cookieCheck'], reopened['cookieCheck'])
+            self.assertGreater(reopened['cookieCheck']['checkedAt'], saved['cookieCheck']['checkedAt'],
+                               'The standalone browser saves its latest profile before closing')
             browser = reopened['browser']
             self.assertEqual(200, primary.api('/api/browser-sessions/' + browser['id'] + '/login', 'POST', {
                 'type': 'FINISH_LOGIN', 'viewerId': viewer, 'controlEpoch': browser['controlEpoch']})[0])
@@ -800,12 +945,16 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertEqual(browser,task["browser"]["id"])
         _,current=primary.api("/api/connections/"+first)
         self.assertEqual(browser,current["browser"]["id"])
+        previous_check = current['cookieCheck']
         status,value=primary.api("/api/tasks/"+task["id"]+"/commands","POST",{
             "type":"CONFIRM","expectedVersion":task["version"],"requestId":task["request"]["id"],"requestVersion":task["request"]["version"]})
         self.assertEqual((409,"HOST_RESPONSE_REQUIRED"),(status,value["code"]))
         error,value,_=client.respond(task,{"proceed":True})
         self.assertFalse(error,value)
-        self.assertEqual("SUCCEEDED",self.wait_operation(operation,client)["status"])
+        switched = self.wait_operation(operation, client)
+        self.assertEqual("SUCCEEDED", switched["status"], switched)
+        self.assertNotEqual(previous_check, primary.api('/api/connections/' + first)[1]['cookieCheck'],
+                            'Replacing a browser context must first save its current connection')
         _,current=primary.api("/api/connections/"+second)
         self.assertEqual(browser,current["browser"]["id"])
         error,result,_=client.tool("results.publish",{"taskId":task["id"],"instructionRevision":task["instructionRevision"],

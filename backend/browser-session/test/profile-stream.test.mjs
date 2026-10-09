@@ -32,7 +32,7 @@ test('cookie suitability checks snapshot expiry, domain and secure transport, no
 });
 
 test('export reports cookies from its saved snapshot and preserves cookie-free site storage', { timeout: 30000 }, async () => {
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+  const browser = await chromium.launch({ headless: false, chromiumSandbox: true });
   try {
     const context = await browser.newContext();
     await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }));
@@ -47,11 +47,34 @@ test('export reports cookies from its saved snapshot and preserves cookie-free s
         request.onerror = reject;
       });
     });
+    const protocol = await browser.newBrowserCDPSession();
+    const visibleTabs = async () => (await protocol.send('Target.getTargets', {
+      filter: [{ type: 'tab' }],
+    })).targetInfos.filter(target => target.embedderData?.tabStripIndex !== undefined)
+      .map(target => ({ id: target.targetId, ...target.embedderData }))
+      .sort((left, right) => left.id.localeCompare(right.id));
     const snapshot = async () => {
+      const originalTabs = await visibleTabs();
+      assert.ok(originalTabs.length > 0, 'The fixture must have a visible browser tab');
+      const originalFocus = await page.evaluate(() => document.hasFocus());
       const chunks = [];
-      const output = new Writable({ write(chunk, _encoding, done) { chunks.push(chunk); done(); } });
+      let checkedHiddenExport = false;
+      const output = new Writable({ write(chunk, _encoding, done) {
+        chunks.push(chunk);
+        if (chunk.toString().startsWith('{"type":"origin"')) {
+          checkedHiddenExport = true;
+          visibleTabs().then(async tabs => {
+            assert.deepEqual(tabs, originalTabs, 'Saving must not add or switch a browser tab');
+            assert.equal(await page.evaluate(() => document.hasFocus()), originalFocus,
+              'Saving must not change page focus');
+            done();
+          }).catch(done);
+        } else done();
+      } });
       await exportProfile(page, ['https://site.example'], output);
       output.end(); await finished(output);
+      assert.ok(checkedHiddenExport, 'Inspect the tab strip while exporting storage');
+      assert.deepEqual(context.pages(), [page], 'No temporary page may survive export');
       const bytes = Buffer.concat(chunks);
       assert.ok(bytes.length < 65536);
       return { bytes, records: bytes.toString().trim().split('\n').map(line => JSON.parse(line)) };
@@ -85,7 +108,7 @@ test('export reports cookies from its saved snapshot and preserves cookie-free s
 });
 
 test('background cookie changes do not invalidate the captured login snapshot', { timeout: 30000 }, async () => {
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+  const browser = await chromium.launch({ headless: false, chromiumSandbox: true });
   const origin = 'https://profile.example';
   try {
     const context = await browser.newContext();
@@ -136,7 +159,7 @@ test('missing response headers release the login snapshot wait and allow retry',
 });
 
 test('snapshot page cleanup releases protocol sessions without waiting for detach', { timeout: 5000 }, async t => {
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+  const browser = await chromium.launch({ headless: false, chromiumSandbox: true });
   t.after(() => browser.close());
   const context = await browser.newContext();
   await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html>' }));
@@ -150,7 +173,7 @@ test('snapshot page cleanup releases protocol sessions without waiting for detac
       const cdp = await create(page);
       sessions.push(new Promise(resolve => cdp.once('close', resolve)));
       // A renderer may stop acknowledging detach after a cross-site navigation.
-      t.mock.method(cdp, 'detach', () => new Promise(() => {}));
+      if (page !== selected) t.mock.method(cdp, 'detach', () => new Promise(() => {}));
       return cdp;
     });
   };
@@ -186,7 +209,7 @@ async function loginSite() {
 test('private login retains host-only cookies from background identity requests', { timeout: 30000 }, async () => {
   const directory = await mkdtemp(tmpdir() + '/helm-login-origins-');
   const site = await loginSite();
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true,
+  const browser = await chromium.launch({ headless: false, chromiumSandbox: true,
     args: ['--host-resolver-rules=MAP *.example 127.0.0.1'] });
   const origin = site.origin('account.example');
   const identity = site.origin('login.account.example');
@@ -227,7 +250,7 @@ test('private login retains host-only cookies from background identity requests'
 
 test('resource hosts without cookies do not exhaust login scope or hide a later identity origin', { timeout: 30000 }, async () => {
   const site = await loginSite();
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true,
+  const browser = await chromium.launch({ headless: false, chromiumSandbox: true,
     args: ['--host-resolver-rules=MAP *.example 127.0.0.1'] });
   try {
     const context = await browser.newContext();
@@ -257,7 +280,7 @@ test('resource hosts without cookies do not exhaust login scope or hide a later 
 
 test('wide IndexedDB records within the byte limit retain all objects and shared references', { timeout: 120000 }, async () => {
   const directory = await mkdtemp(tmpdir() + '/helm-wide-profile-');
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+  const browser = await chromium.launch({ headless: false, chromiumSandbox: true });
   const origin = 'https://profile.example';
   try {
     const context = await browser.newContext();
@@ -304,7 +327,7 @@ test('wide IndexedDB records within the byte limit retain all objects and shared
 
 test('Chromium streams >8 MiB with Unicode, binary, IDB references and bounded Node memory', { timeout: 240000 }, async () => {
   const directory = await mkdtemp(tmpdir() + '/helm-profile-');
-  const browser = await chromium.launch({ headless: true, chromiumSandbox: true });
+  const browser = await chromium.launch({ headless: false, chromiumSandbox: true });
   const origin = 'https://profile.example';
   try {
     const context = await browser.newContext();

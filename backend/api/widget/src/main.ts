@@ -1,7 +1,7 @@
 import { App } from '@modelcontextprotocol/ext-apps';
 import { z } from 'zod';
 
-import { stepsSchema, metadataSchema, presentationSchema, ticketSchema, toolErrorSchema, widgetStateSchema, type Presentation } from './presentation';
+import { stepsSchema, metadataSchema, presentationSchema, presentationReferenceSchema, ticketSchema, toolErrorSchema, widgetStateSchema, type Presentation } from './presentation';
 
 function element<T extends HTMLElement>(id: string, type: new () => T): T {
   const result = document.getElementById(id);
@@ -12,13 +12,13 @@ function element<T extends HTMLElement>(id: string, type: new () => T): T {
 const title = element('title', HTMLHeadingElement);
 const status = element('header-status', HTMLSpanElement);
 const statePanel = element('state', HTMLElement);
-const address = element('address', HTMLSpanElement);
 const browserState = element('browser-state', HTMLParagraphElement);
 const viewer = element('viewer', HTMLIFrameElement);
 const cabinet = element('cabinet', HTMLButtonElement);
 const brand = element('brand', HTMLImageElement);
 const historyStatus = element('history-state', HTMLParagraphElement);
 const steps = element('steps', HTMLOListElement);
+const stepsContent = element('steps-content', HTMLElement);
 const stepsToggle = element('steps-toggle', HTMLButtonElement);
 const stepsPanel = element('steps-panel', HTMLElement);
 const sessionPanel = element('session-panel', HTMLElement);
@@ -37,10 +37,11 @@ let expanded = false;
 let historyPage = 1;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let sessionTimer: ReturnType<typeof setInterval> | undefined;
-const viewport = element('viewport', HTMLElement);
+const card = element('card', HTMLElement);
 const app = new App({ name: 'Helm Glass', version: '1.0.0' }, {});
 const viewerId = crypto.randomUUID();
 const retryLimit = 8;
+let reference: z.infer<typeof presentationReferenceSchema> | undefined;
 let current: Presentation | undefined;
 let metadata: z.infer<typeof metadataSchema> | undefined;
 let validated = false;
@@ -82,7 +83,7 @@ const stepLabels: Record<z.infer<typeof stepsSchema>['items'][number]['status'],
   PLANNED: 'Запланирован', RUNNING: 'Выполняется', WAITING: 'Ожидает', SUCCEEDED: 'Выполнен',
   PARTIAL: 'Частично выполнен', FAILED: 'Не выполнен', UNKNOWN: 'Результат неизвестен', SKIPPED: 'Пропущен',
 };
-const stepRows = new Map<string, { row: HTMLLIElement; heading: HTMLElement; details: HTMLElement;
+const stepRows = new Map<string, { row: HTMLLIElement; disclosure: HTMLButtonElement; heading: HTMLElement; details: HTMLElement;
   description: HTMLParagraphElement; version: number }>();
 const browserWaiting: Record<string, string> = {
   DRAFT: 'Браузер откроется после запуска задачи.',
@@ -144,9 +145,9 @@ function renderBrowser(): void {
 }
 
 function args(): { taskId: string; generation: string } {
-  if (!current) throw new Error('Задача ещё не получена');
+  if (!reference) throw new Error('Задача ещё не получена');
   if (superseded) throw new Error(supersededMessage);
-  return { taskId: current.task.id, generation: current.generation };
+  return { taskId: reference.task.id, generation: reference.generation };
 }
 
 function renderIdle(): void {
@@ -206,14 +207,15 @@ async function tool(name: string, extra: Record<string, unknown> = {}) {
       try { failure = toolErrorSchema.safeParse(JSON.parse(text.text)); } catch { /* Plain errors remain plain. */ }
     }
     if (failure.success && failure.data.code === 'STALE_WIDGET'
-        && current?.task.id === binding.taskId && current.generation === binding.generation) retirePresentation();
+        && reference?.task.id === binding.taskId && reference.generation === binding.generation) retirePresentation();
     throw new Error(failure.success ? failure.data.message : 'Сервер отклонил запрос.');
   }
   return result;
 }
 
 function render(next: Presentation): void {
-  if (superseded || tornDown || !validated) return;
+  if (superseded || tornDown || !validated || reference?.generation !== next.generation
+      || reference.task.id !== next.task.id) return;
   if (current?.generation === next.generation) {
     if (next.task.version < current.task.version) return;
     const previousBrowser = current.task.browser;
@@ -224,26 +226,9 @@ function render(next: Presentation): void {
   }
   current = next;
   title.textContent = next.task.title;
+  title.title = next.task.title;
   status.textContent = labels[next.task.status] ?? next.task.status;
   status.setAttribute('data-status', next.task.status);
-  element('summary', HTMLSpanElement).textContent = next.task.summary ?? '';
-  const audioPanel = element('audio-analysis', HTMLElement);
-  audioPanel.hidden = next.audio.length === 0;
-  audioPanel.replaceChildren();
-  for (const analysis of next.audio) {
-    const row = document.createElement('p');
-    row.textContent = analysis.name + ' · ' + (labels[analysis.status] ?? analysis.status)
-      + ' · Текст ' + (analysis.transcriptComplete ? 'готов' : 'не завершён')
-      + (analysis.mode === 'full' ? ' · Измерения ' + (analysis.acousticsComplete ? 'готовы' : 'не завершены')
-        + ' · Эмоции ' + (analysis.emotionsComplete ? 'готовы' : 'не завершены') : '')
-      + (analysis.errorCode ? ' · ' + analysis.errorCode : '');
-    audioPanel.append(row);
-  }
-  if (next.audio.length) {
-    const note = document.createElement('p');
-    note.textContent = 'Последние 10 анализов. Оценки эмоций не являются вероятностями чувств; голоса не разделяются.';
-    audioPanel.append(note);
-  }
   const finished = finishedStatuses.has(next.task.status);
   element('content', HTMLElement).inert = false;
   cabinet.disabled = !metadata;
@@ -254,13 +239,6 @@ function render(next: Presentation): void {
   renderSession();
   if (!sessionTimer && browser?.startedAt && !browser.closedAt) {
     sessionTimer = setInterval(renderClock, 1000);
-  }
-  address.textContent = browser?.privateMode ? 'Защищённый вход' : 'Браузер подготавливается';
-  if (browser?.currentUrl && !browser.privateMode) {
-    try {
-      const url = new URL(browser.currentUrl);
-      address.textContent = ['https:', 'http:'].includes(url.protocol) ? url.origin + url.pathname : 'Новая вкладка';
-    } catch { address.textContent = 'Адрес недоступен'; }
   }
   if (finished || !browser || browser.status !== 'LIVE' || browser.privateMode || browserId && browser.id !== browserId) closeViewer();
   renderBrowser();
@@ -284,28 +262,35 @@ function scheduleReconnect(): void {
 }
 
 async function refresh(): Promise<void> {
-  if (superseded || tornDown || !online) return;
+  if (superseded || tornDown || !online || !reference || !metadata) return;
   if (refreshing) { dirty = true; return; }
   refreshing = true;
-  let generation = current?.generation;
+  let requested = reference;
   try {
     do {
       dirty = false;
-      generation = current?.generation;
+      requested = reference;
       const response = await tool('widget.state');
+      if (reference !== requested || tornDown || superseded || !online) continue;
       const next = widgetStateSchema.parse(response.structuredContent);
-      if (current?.generation !== generation || tornDown || superseded || !online) continue;
       if ('code' in next) retirePresentation();
       else {
+        if (next.generation !== requested.generation || next.task.id !== requested.task.id)
+          throw new Error('Сервер вернул состояние другой карточки.');
         validated = true;
         syncReady = streamConnected;
         if (syncReady) connectionError = '';
         render(next);
+        if (syncReady) {
+          reconnects = 0;
+          clearTimeout(retryTimer);
+          retryTimer = undefined;
+        }
         if (!events && metadata && !retryTimer && reconnects <= retryLimit) connectEvents();
       }
     } while (dirty && !tornDown && !superseded && online);
   } catch {
-    if (current?.generation === generation && !superseded && !tornDown && online) {
+    if (reference === requested && !superseded && !tornDown && online) {
       syncReady = false;
       connectionError = 'Не удалось получить актуальное состояние задачи. Восстанавливаем связь…';
       renderBrowser();
@@ -437,7 +422,7 @@ async function openViewer(renew = false): Promise<void> {
     const result = await tool('widget.browser', { viewerId });
     const content = result.content.find(item => item.type === 'text');
     const ticket = ticketSchema.parse(content?.type === 'text' ? JSON.parse(content.text) : null);
-    if (attempt !== viewerGeneration || superseded || tornDown || current.generation !== generation
+    if (attempt !== viewerGeneration || superseded || tornDown || current?.generation !== generation
         || current.task.browser?.id !== requestedBrowser || current.task.browser.privateMode) return;
     const url = new URL(ticket.url, metadata.publicUrl);
     if (url.origin !== new URL(metadata.publicUrl).origin || url.username || url.password) throw new Error('Invalid viewer origin');
@@ -476,8 +461,9 @@ async function loadHistory(): Promise<void> {
       const response = await tool('widget.steps', { page: historyPage, search: stepsSearch.value });
       const content = response.content.find(item => item.type === 'text');
       const history = stepsSchema.parse(content?.type === 'text' ? JSON.parse(content.text) : null);
-      if (superseded || tornDown || current.generation !== generation || request !== historyGeneration) return;
+      if (superseded || tornDown || current?.generation !== generation || request !== historyGeneration) return;
       if (historyDirty) continue;
+      const scrollTop = stepsContent.scrollTop;
       const visible = new Set(history.items.map(entry => entry.id));
       for (const [id, view] of stepRows) {
         if (!visible.has(id)) { view.row.remove(); stepRows.delete(id); }
@@ -486,26 +472,44 @@ async function loadHistory(): Promise<void> {
         let view = stepRows.get(entry.id);
         if (!view) {
           const row = document.createElement('li');
+          const disclosure = document.createElement('button');
+          disclosure.type = 'button';
+          disclosure.className = 'step-disclosure';
           const heading = document.createElement('strong');
           const details = document.createElement('small');
           const description = document.createElement('p');
-          row.append(details, heading, description);
-          view = { row, heading, details, description, version: 0 };
+          description.id = 'step-result-' + entry.id;
+          description.hidden = true;
+          disclosure.setAttribute('aria-controls', description.id);
+          disclosure.append(details, heading);
+          disclosure.addEventListener('click', () => {
+            description.hidden = !description.hidden;
+            disclosure.setAttribute('aria-expanded', String(!description.hidden));
+          });
+          row.append(disclosure, description);
+          view = { row, disclosure, heading, details, description, version: -1 };
           stepRows.set(entry.id, view);
         }
-        if (entry.version >= view.version) {
+        if (entry.version > view.version) {
           view.heading.textContent = entry.title;
           const created = new Date(entry.createdAt);
           view.details.textContent = stepLabels[entry.status] + ' · '
             + created.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
           view.details.title = created.toLocaleString('ru-RU');
           view.description.textContent = entry.result ?? '';
-          view.description.hidden = !entry.result;
+          view.disclosure.disabled = !entry.result;
+          if (entry.result) {
+            view.disclosure.setAttribute('aria-expanded', String(!view.description.hidden));
+          } else {
+            view.description.hidden = true;
+            view.disclosure.removeAttribute('aria-expanded');
+          }
           view.version = entry.version;
         }
         if (steps.children[index] !== view.row) steps.insertBefore(view.row, steps.children[index] ?? null);
       }
-      element('steps-count', HTMLSpanElement).textContent = 'Шаги: ' + history.total;
+      stepsContent.scrollTop = scrollTop;
+      element('steps-count', HTMLSpanElement).textContent = String(history.total);
       const pages = Math.max(1, Math.ceil(history.total / history.pageSize));
       stepsPrevious.disabled = historyPage <= 1;
       stepsNext.disabled = historyPage >= pages;
@@ -530,10 +534,24 @@ async function loadHistory(): Promise<void> {
 
 app.ontoolresult = response => {
   if (superseded || tornDown) return;
-  const next = presentationSchema.safeParse(response.structuredContent);
-  if (!next.success) { notice('Чат не передал данные задачи. Откройте её через tasks.view.', true); return; }
-  const changed = current?.generation !== next.data.generation;
+  const next = presentationReferenceSchema.safeParse(response.structuredContent);
+  const meta = metadataSchema.safeParse(response._meta);
+  if (response.isError || !next.success || !meta.success
+      || ![meta.data.taskUrl, meta.data.loginUrl].every(value => new URL(value).pathname === '/tasks/' + next.data.task.id)) {
+    const failure = toolErrorSchema.safeParse(response.structuredContent);
+    notice(failure.success ? failure.data.message : 'Не удалось открыть карточку задачи. Обновите страницу чата.', true);
+    if (!reference) {
+      title.textContent = 'Карточка задачи недоступна';
+      status.textContent = 'Ошибка загрузки';
+      browserState.textContent = 'Данные задачи недоступны.';
+      historyStatus.textContent = 'Шаги недоступны.';
+    }
+    return;
+  }
+  const changed = reference?.generation !== next.data.generation || reference.task.id !== next.data.task.id;
   if (changed) {
+    reference = next.data;
+    current = undefined;
     validated = false;
     syncReady = false;
     streamConnected = false;
@@ -541,31 +559,32 @@ app.ontoolresult = response => {
     events = undefined;
     clearTimeout(retryTimer);
     retryTimer = undefined;
+    clearInterval(sessionTimer);
+    sessionTimer = undefined;
     closeViewer();
     historyGeneration++;
     historyDirty = true;
+    historyPage = 1;
+    stepsSearch.value = '';
+    stepRows.clear();
     steps.replaceChildren();
     element('event-count', HTMLSpanElement).textContent = '';
     element('steps-count', HTMLSpanElement).textContent = '';
     historyStatus.hidden = false;
     historyStatus.textContent = 'Получаем шаги…';
     cabinet.disabled = true;
-    metadata = undefined;
-    current = next.data;
+    title.textContent = 'Получаем задачу…';
+    status.textContent = 'Подключение';
+    status.removeAttribute('data-status');
+    connectionError = '';
+    renderBrowser();
   }
-  title.textContent = next.data.task.title;
-  const meta = metadataSchema.safeParse(response._meta);
-  if (meta.success && [meta.data.taskUrl, meta.data.loginUrl].every(value => new URL(value).pathname === '/tasks/' + next.data.task.id)) {
-    metadata = meta.data;
-    brand.src = new URL('/helm-logo.png', metadata.publicUrl).href;
-    if (streamUrl !== metadata.eventsUrl) {
-      streamUrl = metadata.eventsUrl;
-      streamCursor = '';
-      reconnects = 0;
-    }
-  } else {
-    notice('Не удалось проверить ссылку на задачу.', true);
-    return;
+  metadata = meta.data;
+  brand.src = new URL('/helm-logo.png', metadata.publicUrl).href;
+  if (streamUrl !== metadata.eventsUrl) {
+    streamUrl = metadata.eventsUrl;
+    streamCursor = '';
+    reconnects = 0;
   }
   void refresh();
 };
@@ -573,7 +592,7 @@ app.ontoolresult = response => {
 function recover(): void {
   online = navigator.onLine;
   if (!online) return;
-  if (tornDown || superseded || !current || document.visibilityState === 'hidden') return;
+  if (tornDown || superseded || !reference || document.visibilityState === 'hidden') return;
   clearTimeout(retryTimer);
   retryTimer = undefined;
   reconnects = 0;
@@ -636,12 +655,15 @@ stepsToggle.addEventListener('click', () => {
 });
 
 function updatePanels(): void {
-  element('execution', HTMLElement).classList.toggle('steps-collapsed', !!stepsPanel.hidden && !!sessionPanel.hidden);
+  card.classList.toggle('panels-collapsed', !!stepsPanel.hidden && !!sessionPanel.hidden);
   stepsToggle.setAttribute('aria-expanded', String(!stepsPanel.hidden));
   const label = stepsPanel.hidden ? 'Показать шаги' : 'Скрыть шаги';
   stepsToggle.setAttribute('aria-label', label);
   stepsToggle.title = label;
   sessionToggle.setAttribute('aria-expanded', String(!sessionPanel.hidden));
+  const sessionLabel = sessionPanel.hidden ? 'Показать сессию' : 'Скрыть сессию';
+  sessionToggle.setAttribute('aria-label', sessionLabel);
+  sessionToggle.title = sessionLabel;
   if (!sessionPanel.hidden) {
     renderSession();
   }
@@ -697,25 +719,27 @@ stepsSearch.addEventListener('input', () => {
   historyDirty = true;
   searchTimer = setTimeout(() => changeHistoryPage(1), 250);
 });
-function displayModeChanged(mode = app.getHostContext()?.displayMode): void {
+function updateHostLayout(): void {
   const context = app.getHostContext();
-  expanded = mode === 'fullscreen';
-  expandButton.hidden = !expanded && !context?.availableDisplayModes?.includes('fullscreen');
-  element('card', HTMLElement).classList.toggle('expanded', expanded);
+  const dimensions = context?.containerDimensions;
+  const availableHeight = dimensions && ('height' in dimensions ? dimensions.height : dimensions.maxHeight);
+  const insets = context?.safeAreaInsets;
+  document.body.style.padding = `${insets?.top ?? 0}px ${insets?.right ?? 0}px ${insets?.bottom ?? 0}px ${insets?.left ?? 0}px`;
+  card.style.maxHeight = typeof availableHeight === 'number' && Number.isFinite(availableHeight) && availableHeight > 0
+    ? Math.max(0, availableHeight - (insets?.top ?? 0) - (insets?.bottom ?? 0)) + 'px' : 'none';
+}
+
+function expandBrowser(value: boolean): void {
+  expanded = value;
+  card.classList.toggle('expanded', expanded);
   const label = expanded ? 'Свернуть браузер' : 'Развернуть браузер';
   expandButton.setAttribute('aria-label', label); expandButton.title = label;
   document.getElementById('expand-path')?.setAttribute('d', expanded ? 'M3 8h5V3m13 5h-5V3M8 21v-5H3m13 5v-5h5' : 'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5');
+  expandButton.focus();
 }
-async function setDisplayMode(fullscreen: boolean): Promise<void> {
-  try {
-    const result = await app.requestDisplayMode({ mode: fullscreen ? 'fullscreen' : 'inline' });
-    displayModeChanged(result.mode);
-    if (!fullscreen) expandButton.focus();
-  } catch { notice('Чат не разрешил изменить размер просмотра.', true); }
-}
-expandButton.addEventListener('click', () => void setDisplayMode(!expanded));
-document.addEventListener('keydown', event => { if (event.key === 'Escape' && expanded) void setDisplayMode(false); });
-app.onhostcontextchanged = () => displayModeChanged();
+expandButton.addEventListener('click', () => expandBrowser(!expanded));
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && expanded) expandBrowser(false); });
+app.onhostcontextchanged = updateHostLayout;
 
 window.addEventListener('online', recover);
 window.addEventListener('offline', offline);
@@ -727,14 +751,8 @@ window.addEventListener('message', event => {
       || Reflect.get(event.data, 'viewerEpoch') !== String(viewerGeneration)) return;
   const state = Reflect.get(event.data, 'state');
   if (state === 'escape') {
-    if (expanded) void setDisplayMode(false);
+    if (expanded) expandBrowser(false);
     return;
-  }
-  const width = Reflect.get(event.data, 'width');
-  const height = Reflect.get(event.data, 'height');
-  if (typeof width === 'number' && Number.isInteger(width) && width > 0 && width <= 8192
-      && typeof height === 'number' && Number.isInteger(height) && height > 0 && height <= 8192) {
-    viewport.style.aspectRatio = width + ' / ' + height;
   }
   if (state === 'connected') {
     browserConnected = true;
@@ -750,5 +768,7 @@ window.addEventListener('message', event => {
   }
 });
 
-try { await app.connect(); displayModeChanged(); }
+updatePanels();
+updateHostLayout();
+try { await app.connect(); updateHostLayout(); }
 catch { notice('Этот чат не поддерживает интерактивный виджет. Откройте задачу по ссылке Helm Glass в ответе инструмента.', true); }

@@ -330,6 +330,9 @@ def process(job, models, emit, pulse):
                     left, stop = round(span['start'] * RATE), round(span['end'] * RATE)
                     while left < stop:
                         right = min(stop, left + 5 * RATE)
+                        # Keep a usable final window instead of discarding a subsecond tail.
+                        if 0 < stop - right < RATE:
+                            right = stop - RATE
                         item = {'start': sec(left), 'end': sec(right), 'scores': None,
                                 'reason': 'too_short' if right - left < RATE else None}
                         if right - left >= RATE:

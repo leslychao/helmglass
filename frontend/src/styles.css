@@ -1418,7 +1418,6 @@ hg-date-filter {
 }
 .browser-stage {
   display: flex;
-  height: 420px;
   position: relative;
   min-height: 0;
 }
@@ -1870,11 +1869,6 @@ hg-date-filter {
 }
 .drawer-shade {
   display: none;
-}
-@media (min-width: 1700px) {
-  .browser-stage {
-    height: clamp(420px, 55dvh, 700px);
-  }
 }
 @media (max-width: 1200px) {
   .sidebar {

@@ -45,7 +45,7 @@ export function browserViewerId(): string {
       white-space: nowrap;
     }
   `,
-  template: ` <section
+  template: ` <section #card
     class="browser-card"
     [class.browser-expanded]="expanded()"
     [cdkTrapFocus]="expanded()"
@@ -115,16 +115,21 @@ export function browserViewerId(): string {
     @if (idleError()) { <p class="error-banner" role="alert">{{ idleError() }}</p> }
     @if (sessionPanel()?.error() || browser()?.profileSaveError) {
       <p class="error-banner" role="alert">
-        {{ sessionPanel()?.error() || profileError() }}
-        @if (sessionPanel()?.finishDisabledReason()) {
-          {{ sessionPanel()?.finishDisabledReason() }}
+        @if (browser()?.status === 'CLOSED' && browser()?.profileSaveError) {
+          Браузер закрыт. Последние изменения сессии не удалось сохранить.
+          Доступна прежняя сохранённая версия; при следующем запуске может потребоваться повторный вход.
+        } @else {
+          {{ sessionPanel()?.error() || profileError() }}
+          @if (sessionPanel()?.finishDisabledReason()) {
+            {{ sessionPanel()?.finishDisabledReason() }}
+          }
         }
       </p>
     }
     @if (sessionPanel()?.message()) {
       <p class="sr-only" role="status">{{ sessionPanel()?.message() }}</p>
     }
-    <div #stage class="browser-stage" [style.height.px]="expanded() ? null : viewportHeight()">
+    <div class="browser-stage" [style.height.px]="expanded() ? null : viewportHeight()">
       <div #viewport class="browser-viewport">
         @if (!browser() || ['CLOSED', 'LOST'].includes(browser()?.status || '')) {
           <div class="viewer-placeholder">
@@ -265,7 +270,7 @@ export function browserViewerId(): string {
         }
       </aside>
     </div>
-    <footer #footer class="browser-footer">
+    <footer class="browser-footer">
       <span class="connection-dot" [class.online]="connected()"></span>
       {{
         connected()
@@ -423,7 +428,7 @@ export class BrowserViewer {
   readonly exhausted = signal(false);
   private readonly frameAspect = signal(1440 / 900);
   private readonly viewportWidth = signal(0);
-  private readonly availableHeight = signal(420);
+  private readonly availableHeight = signal(120);
   readonly viewportHeight = computed(() =>
     Math.min(
       this.availableHeight(),
@@ -445,8 +450,7 @@ export class BrowserViewer {
   private readonly destroy = inject(DestroyRef);
   private readonly frame = viewChild<ElementRef<HTMLIFrameElement>>('frame');
   private readonly viewport = viewChild<ElementRef<HTMLElement>>('viewport');
-  private readonly stage = viewChild<ElementRef<HTMLElement>>('stage');
-  private readonly footer = viewChild<ElementRef<HTMLElement>>('footer');
+  private readonly card = viewChild<ElementRef<HTMLElement>>('card');
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private generation = 0;
   private attempts = 0;
@@ -482,26 +486,22 @@ export class BrowserViewer {
     });
     effect((onCleanup) => {
       const viewport = this.viewport()?.nativeElement;
-      const stage = this.stage()?.nativeElement;
-      const footer = this.footer()?.nativeElement;
-      if (!viewport || !stage || !footer || this.expanded()) return;
+      const card = this.card()?.nativeElement;
+      if (!viewport || !card || this.expanded()) return;
       const measure = () => {
-        this.viewportWidth.set(viewport.getBoundingClientRect().width);
-        // Restored scroll positions must not reserve space for headings already off screen.
-        const top = Math.max(0, stage.getBoundingClientRect().top);
-        this.availableHeight.set(
-          Math.max(120, window.innerHeight - top - footer.getBoundingClientRect().height - 16),
-        );
+        const viewportRect = viewport.getBoundingClientRect();
+        const cardRect = card.getBoundingClientRect();
+        this.viewportWidth.set(viewportRect.width);
+        // Include all controls and notices; document coordinates keep sizing stable while scrolling.
+        const top = cardRect.top + window.scrollY;
+        const chromeHeight = cardRect.height - viewportRect.height;
+        this.availableHeight.set(Math.max(120, window.innerHeight * 0.95 - top - chromeHeight));
       };
       const observer = new ResizeObserver(measure);
       observer.observe(viewport);
-      observer.observe(footer);
-      // Notices and headings above the viewer can change after live updates.
-      for (
-        let parent = this.host.nativeElement.parentElement;
-        parent;
-        parent = parent.parentElement
-      ) {
+      observer.observe(card);
+      // Live notices and wrapped headings can move the card without resizing the viewport.
+      for (let parent = this.host.nativeElement.parentElement; parent; parent = parent.parentElement) {
         observer.observe(parent);
         if (parent.tagName === 'MAIN') break;
       }

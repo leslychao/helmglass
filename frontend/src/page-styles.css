@@ -547,7 +547,6 @@ hg-task-list > hg-kpi-section {
   bottom: auto;
 }
 hg-browser .browser-stage {
-  height: 420px;
   overflow: hidden;
 }
 .browser-footer .history-toggle {

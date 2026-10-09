@@ -91,4 +91,10 @@
   <changeSet id="27-profile-cookie-check" author="helmglass">
     <sqlFile path="027-profile-cookie-check.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="28-profile-checkpoints" author="helmglass">
+    <sqlFile path="028-profile-checkpoints.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="29-profile-on-close" author="helmglass">
+    <sqlFile path="029-profile-on-close.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

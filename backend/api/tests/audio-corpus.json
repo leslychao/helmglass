@@ -280,5 +280,208 @@
       "source": "fleurs-10669014641440041936.wav",
       "duration": 45.248
     }
+  ],
+  "emotionEvaluation": "First five test rows per class from xbgoose/dusha, within rows 0-99, chosen before inference. Predicted clip label is argmax of duration-weighted mean scores over eligible speech windows; no score is counted as no prediction. Small diagnostic sample, not an independent generalization benchmark; overlap with model training data was not ruled out.",
+  "emotionSamples": [
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 6,
+      "emotion": "angry",
+      "file": "dusha-6.wav",
+      "sha256": "15d1dc08596911609578a2e5ed1b7170f51acdb4eddd7de7c6efaef28e05655b",
+      "duration": 2.9253125
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 9,
+      "emotion": "angry",
+      "file": "dusha-9.wav",
+      "sha256": "ec3e2d464b8ac32f301dc70dea18066e4acdb3c611ce42005b8e5aa12d430b9e",
+      "duration": 3.6915625
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 10,
+      "emotion": "angry",
+      "file": "dusha-10.wav",
+      "sha256": "1b85d07b020f7a7e44e0b3abe97d6a443b22afdfee7625aa06fabf1ec339ce6e",
+      "duration": 3.58
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 14,
+      "emotion": "angry",
+      "file": "dusha-14.wav",
+      "sha256": "937028a3151c77dba7912bade35189a4780519cf015f3e0e66de36435c5de365",
+      "duration": 1.834
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 19,
+      "emotion": "angry",
+      "file": "dusha-19.wav",
+      "sha256": "33c4946696b7a3bbb37fd8e03c369008ed3d1e7e72b2fc40e4b4a47715bb9bae",
+      "duration": 4.92
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 1,
+      "emotion": "sad",
+      "file": "dusha-1.wav",
+      "sha256": "85adceb46c2615ee737d4ab451f85738fc46e8cb509f870df640e5787705823e",
+      "duration": 3.7
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 16,
+      "emotion": "sad",
+      "file": "dusha-16.wav",
+      "sha256": "8e1e4b6a2b871f5f639ed3283feeeee1f6f76c0295c9f79cc9b8d23184447462",
+      "duration": 6.18
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 23,
+      "emotion": "sad",
+      "file": "dusha-23.wav",
+      "sha256": "d85036665bb24ec4ab9d5a3f79135d930faafc3ba82467eff62a702fe139c80c",
+      "duration": 4.06
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 48,
+      "emotion": "sad",
+      "file": "dusha-48.wav",
+      "sha256": "bd4c7ffe7d04d223979c25eeaff1390219c55cd2666e23fb0e6cef5d6ad2316d",
+      "duration": 5.08
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 49,
+      "emotion": "sad",
+      "file": "dusha-49.wav",
+      "sha256": "1b0ceb9f1967b511bed1e787951749c135d550885b123bed1f204a16067d18f9",
+      "duration": 6.42
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 0,
+      "emotion": "neutral",
+      "file": "dusha-0.wav",
+      "sha256": "ada344669196aa8b9af02695f032c75804cbfbcee53b270253e92715529939d9",
+      "duration": 5.82
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 2,
+      "emotion": "neutral",
+      "file": "dusha-2.wav",
+      "sha256": "f53f4061e766eef65b1e4911e3303fd426d65d9f03e259449f7a123c5bbb3cda",
+      "duration": 4.38
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 3,
+      "emotion": "neutral",
+      "file": "dusha-3.wav",
+      "sha256": "a04a6f13cfbdfa60b6c3b08f4b5486806dee926b8c99ae7ddf3810d4e4fbdf02",
+      "duration": 8.58
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 4,
+      "emotion": "neutral",
+      "file": "dusha-4.wav",
+      "sha256": "996f1a43e733d9a28288015b3d0d6f67fe94388c2c1762467afbcaaef988f147",
+      "duration": 5.06
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 5,
+      "emotion": "neutral",
+      "file": "dusha-5.wav",
+      "sha256": "292ed49261c3b086b833f4d9740b9dfd0af531a287041a6538078f7559431f75",
+      "duration": 7.6
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 7,
+      "emotion": "positive",
+      "file": "dusha-7.wav",
+      "sha256": "36588ebcc27a35acf1fb0af3b0e4a8fc2238214285b40f856d4b2221f37dd8aa",
+      "duration": 5.72
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 13,
+      "emotion": "positive",
+      "file": "dusha-13.wav",
+      "sha256": "50c39f7aa8e7de9ad7f9f7d3804ecb5730ba4472f32a658f2b65cca9e8d9f72d",
+      "duration": 3.78
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 25,
+      "emotion": "positive",
+      "file": "dusha-25.wav",
+      "sha256": "ac8ef9b98a962bec6720fa4e3b5827b40f8efd429053d623b62e3e8284565cd2",
+      "duration": 4.2
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 26,
+      "emotion": "positive",
+      "file": "dusha-26.wav",
+      "sha256": "68825d09c343b8b8443cf6fc29d0e9dc443ae86fb51bb0967ebee7c00235e346",
+      "duration": 3.2968125
+    },
+    {
+      "dataset": "xbgoose/dusha",
+      "revision": "e3e309de7723f4dc4a0230b4b9d725061d561044",
+      "split": "test",
+      "id": 56,
+      "emotion": "positive",
+      "file": "dusha-56.wav",
+      "sha256": "91ba2dc78f6b400f04d0f31821ea2bd611553f1b7d040113fb44a16d88577f50",
+      "duration": 3.74
+    }
   ]
 }

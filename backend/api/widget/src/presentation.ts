@@ -5,9 +5,6 @@ const browserSchema = z.object({ id: z.uuid(), status: z.string(), privateMode: 
   startedAt: z.string().nullable(), closedAt: z.string().nullable(),
   idleCloseAt: z.string().nullable(), closeReason: z.enum(['USER', 'IDLE_TIMEOUT']).nullable() });
 export const presentationSchema = z.object({
-  audio: z.array(z.object({ analysisId: z.uuid(), name: z.string(), mode: z.enum(['transcript', 'full']),
-    status: z.string(), transcriptComplete: z.boolean(), acousticsComplete: z.boolean(),
-    emotionsComplete: z.boolean(), errorCode: z.string().nullable() })).max(10).default([]),
   generation: z.uuid(), continuationStatus: z.string(), continuationRevision: z.number().nullable(),
   continuationId: z.uuid().nullable(),
   continuationReason: z.string().nullable(), task: z.object({ id: z.uuid(), title: z.string(), goal: z.string(),
@@ -15,6 +12,10 @@ export const presentationSchema = z.object({
     request: z.object({ type: z.string(), prompt: z.string() }).nullable(),
     result: z.object({ summary: z.string().optional(), limitations: z.array(z.string()).optional() }).passthrough().nullable(),
   }),
+});
+// Saved tool results identify a presentation; widget.state owns its current data.
+export const presentationReferenceSchema = presentationSchema.pick({ generation: true }).extend({
+  task: presentationSchema.shape.task.pick({ id: true }),
 });
 export const metadataSchema = z.object({ publicUrl: z.url(), taskUrl: z.url(), loginUrl: z.url(), eventsUrl: z.url() })
   .refine(value => {

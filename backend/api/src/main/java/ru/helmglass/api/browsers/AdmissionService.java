@@ -164,6 +164,9 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
           }
           boolean archived = artifacts.importSessionBatch(session.id());
           if ((session.close() || "LOST".equals(state)) && archived) {
+            if ("LIVE".equals(state) && !browsers.prepareClose(session.id())) {
+              continue;
+            }
             browsers.reconcile(
                 session.id(), worker.call("DELETE", "/sessions/" + session.id(), null));
           }

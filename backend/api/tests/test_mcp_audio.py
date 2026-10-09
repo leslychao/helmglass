@@ -1,7 +1,9 @@
 """Real CPU audio analysis contracts on deployed dev."""
 from concurrent.futures import ThreadPoolExecutor
+from array import array
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -82,6 +84,101 @@ class AudioAnalysisTest(unittest.TestCase):
             time.sleep(.5)
         self.fail('Browser action timeout')
 
+    def test_short_transcript_returns_inline_and_pending_wait_is_bounded(self):
+        path = Path('.work/audio-corpus/fleurs-10669014641440041936.wav')
+        self.assertTrue(path.is_file(), 'Prepare the existing audio corpus before this dev acceptance')
+        artifact, _, _ = self.fixture(path, 'inline transcript')
+        started = time.monotonic()
+        page = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'transcript'})
+        elapsed = time.monotonic() - started
+        self.assertEqual('SUCCEEDED', page['status'], page)
+        self.assertTrue(page['sectionComplete'])
+        self.assertFalse(page['hasMore'])
+        self.assertIsNone(page['nextCursor'])
+        self.assertGreater(len(' '.join(item['text'] for item in page['items']).split()), 10)
+        self.assertLess(elapsed, 8)
+        self.assertEqual(1, page['metrics']['asrCalls'])
+        repeat = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'transcript'})
+        self.assertEqual(page, repeat)
+        print(f'Short audio: transcript and ready receipt in one MCP call, {elapsed:.3f}s', flush=True)
+
+        delayed_artifact, _, digest = self.fixture(path, 'queued transcript')
+        delayed_id = str(uuid.uuid4())
+        self.sql(f"""INSERT INTO audio_analyses
+            (id,owner_id,artifact_id,source_sha256,processing_version,metadata,
+             requested_mode,status,next_attempt_at)
+            SELECT '{delayed_id}',owner_id,'{delayed_artifact}','{digest}',processing_version,
+              metadata,'transcript','QUEUED',now()+interval '1 day'
+            FROM audio_analyses WHERE id='{page['analysisId']}';""")
+        try:
+            started = time.monotonic()
+            pending = self.tool('audio.analyze', {'artifactId': delayed_artifact, 'mode': 'transcript'})
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 10)
+            self.assertEqual(delayed_id, pending['analysisId'])
+            self.assertEqual('QUEUED', pending['status'])
+            self.assertFalse(pending['sectionComplete'])
+            self.assertEqual([], pending['items'])
+        finally:
+            self.sql(f"UPDATE audio_analyses SET next_attempt_at=now() WHERE id='{delayed_id}';")
+        finished = self.wait(delayed_id)
+        self.assertEqual('SUCCEEDED', finished['status'], finished)
+        self.assertEqual(1, finished['metrics']['asrCalls'])
+
+    def test_loudness_levels_and_timeline_through_mcp(self):
+        # Analytic RMS/peak references for a sine, including both silence edges.
+        # Eighteen seconds crosses the processor's bounded decoding blocks.
+        directory = Path('.work/audio-fixtures')
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / ('levels-' + str(uuid.uuid4()) + '.wav')
+        try:
+            with wave.open(str(path), 'wb') as output:
+                output.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+                for amplitude, seconds in ((0, 2), (.1, 4), (.5, 4), (.025, 4), (0, 4)):
+                    second = array('h', (round(32768 * amplitude * math.sin(2 * math.pi * 200 * n / 16000))
+                                         for n in range(16000)))
+                    for _ in range(seconds):
+                        output.writeframes(second.tobytes())
+            artifact, _, _ = self.fixture(path, 'known loudness levels')
+        finally:
+            path.unlink(missing_ok=True)
+        job = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'full'})
+        state = self.wait(job['analysisId'])
+        self.assertTrue(state['acousticsComplete'], state)
+        self.assertEqual(18, state['durationSeconds'])
+        cursor = None
+        loudness = []
+        while True:
+            arguments = {'analysisId': job['analysisId'], 'section': 'acoustics', 'limit': 100}
+            if cursor:
+                arguments['cursor'] = cursor
+            page = self.tool('audio.get', arguments)
+            self.assertTrue(page['sectionComplete'])
+            loudness.extend(item for item in page['items'] if item['kind'] == 'loudness')
+            if not page['hasMore']:
+                break
+            self.assertNotEqual(cursor, page['nextCursor'])
+            cursor = page['nextCursor']
+        self.assertEqual(360, len(loudness))
+        for index, item in enumerate(loudness):
+            self.assertAlmostEqual(index / 20, item['start'])
+            self.assertAlmostEqual((index + 1) / 20, item['end'])
+            if index < 40 or index >= 280:
+                self.assertTrue(item['digitalSilence'])
+                self.assertIsNone(item['rmsDbfs'])
+                self.assertIsNone(item['peakDbfs'])
+            else:
+                # Independently calculated: 20 log10(A), RMS is 3.0103 dB lower.
+                if index < 120:
+                    rms, peak = -23.0103, -20
+                elif index < 200:
+                    rms, peak = -9.0309, -6.0206
+                else:
+                    rms, peak = -35.0515, -32.0412
+                self.assertFalse(item['digitalSilence'])
+                self.assertAlmostEqual(rms, item['rmsDbfs'], delta=.02)
+                self.assertAlmostEqual(peak, item['peakDbfs'], delta=.02)
+
     def test_browser_capture_transcript_upgrade_and_other_chat(self):
         failed, presentation, _ = self.client.tool('tasks.create', {
             'operationKey': str(uuid.uuid4()), 'task': {'title': 'Local audio browser regression',
@@ -99,6 +196,7 @@ class AudioAnalysisTest(unittest.TestCase):
                     'questions': ['What is said in the recording?']},
                 'name': 'gigaam-example.wav'})
             artifact = captured['result']['artifact']
+            self.assertNotIn('observation', captured['result'])
             self.assertNotIn('sourceUrl', artifact)
             self.assertNotIn('downloadUrl', artifact)
             listing = self.tool('artifacts.list', {'taskId': task_id})
