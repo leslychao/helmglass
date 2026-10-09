@@ -6,26 +6,26 @@ import { FilterReset } from '../shared/filter-reset';
 import { KpiSection } from '../shared/kpi-section';
 import { Autocomplete, AutocompleteOption } from '../shared/autocomplete';
 import { DatePipe } from '@angular/common';
-import { CdkMenuModule } from '@angular/cdk/menu';
 import { Component, DestroyRef, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DateFilter } from '../shared/date-filter';
 import { RouterLink } from '@angular/router';
 import * as z from 'zod/mini';
-import { Api, errorMessage } from '../core/api';
+import { Api, ApiError, errorMessage } from '../core/api';
 import { LiveEvents } from '../core/live-events';
 import { Page, Task, kpiSchema, pageSchema, taskSchema } from '../core/models';
 import { MultiFilter, Option } from '../shared/multi-filter';
 import { QueryState } from '../shared/query-state';
 import { Tooltip } from '../shared/tooltip';
 import { DurationPipe, Empty, Pager, Status, states } from '../shared/ui';
+import { TaskStop } from './task-stop';
+import { TaskDuration } from './task-duration';
 
 @Component({
   selector: 'hg-task-list',
   imports: [
     DataTable,
     TableCell,
-    CdkMenuModule,
     ColumnPicker,
     FilterReset,
     KpiSection,
@@ -36,6 +36,7 @@ import { DurationPipe, Empty, Pager, Status, states } from '../shared/ui';
     RouterLink,
     MultiFilter,
     DurationPipe,
+    TaskDuration,
     Empty,
     Pager,
     Status,
@@ -47,6 +48,7 @@ import { DurationPipe, Empty, Pager, Status, states } from '../shared/ui';
 export class TaskList {
   readonly query = inject(QueryState);
   private readonly api = inject(Api);
+  private readonly taskStop = inject(TaskStop);
   private readonly live = inject(LiveEvents);
   private readonly destroy = inject(DestroyRef);
   private generation = 0;
@@ -55,6 +57,7 @@ export class TaskList {
   private summaryFilters = '';
   readonly error = signal('');
   readonly loading = signal(true);
+  readonly stopping = signal<string | null>(null);
   readonly filterKeys = ['search', 'taskId', 'status', 'site', 'source', 'from', 'to'];
   readonly stateOptions: Option[] = [
     'DRAFT',
@@ -127,7 +130,10 @@ export class TaskList {
     { key: 'title', label: 'Задача', width: 300, required: true, className: 'task-name' },
     { key: 'site', label: 'Сайт', width: 210 },
     { key: 'status', label: 'Состояние', width: 190, required: true },
-    { key: 'executionSeconds', label: 'Время выполнения', width: 180 },
+    { key: 'elapsedSeconds', label: 'Длительность задачи', width: 190,
+      help: 'От подготовки до завершения задачи, включая ожидания и паузы. Черновик не учитывается.' },
+    { key: 'executionSeconds', label: 'Команды браузера', width: 180, hidden: true,
+      help: 'Суммарное время выполнения команд браузера, без ожиданий между командами и работы ChatGPT.' },
     { key: 'manualSeconds', label: 'Человек', width: 150, hidden: true },
     { key: 'mediaSeconds', label: 'Медиа', width: 150, hidden: true },
     { key: 'mediaBytes', label: 'Байты медиа', width: 160, hidden: true },
@@ -148,6 +154,23 @@ export class TaskList {
     this.destroy.onDestroy(() => {
       this.generation++;
     });
+  }
+  async stop(task: Task) {
+    if (this.stopping() !== null) return;
+    this.stopping.set(task.id);
+    this.error.set('');
+    try {
+      const updated = await this.taskStop.stop(task);
+      if (!updated || this.destroy.destroyed) return;
+      // Stopping can change membership, ordering and summary counts for the current filters.
+      await this.load(false);
+    } catch (error: unknown) {
+      if (this.destroy.destroyed) return;
+      if (error instanceof ApiError && error.status === 409) await this.load(false);
+      if (!this.destroy.destroyed) this.error.set(errorMessage(error));
+    } finally {
+      if (!this.destroy.destroyed) this.stopping.set(null);
+    }
   }
   async load(show = true) {
     const generation = ++this.generation;

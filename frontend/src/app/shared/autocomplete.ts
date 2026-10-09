@@ -1,8 +1,9 @@
-import { ConnectedPosition, OverlayModule } from '@angular/cdk/overlay';
+import { CdkConnectedOverlay, ConnectedPosition, OverlayModule } from '@angular/cdk/overlay';
 import {
   Component,
   DestroyRef,
   ElementRef,
+  afterRenderEffect,
   effect,
   inject,
   input,
@@ -31,7 +32,12 @@ export interface AutocompleteResult {
   styleUrl: './autocomplete.css',
   host: { '[class.multiple]': 'multiple()' },
   template: `
-    <label class="autocomplete-field" cdkOverlayOrigin #origin="cdkOverlayOrigin">
+    <label
+      class="autocomplete-field"
+      [class.selected]="multiple() && selected().length"
+      cdkOverlayOrigin
+      #origin="cdkOverlayOrigin"
+    >
       <hg-icon [name]="multiple() ? 'globe' : 'search'" />
       <input
         #field
@@ -46,8 +52,8 @@ export interface AutocompleteResult {
         [attr.aria-controls]="open() ? listId : null"
         [attr.aria-activedescendant]="active() >= 0 ? listId + '-' + active() : null"
         [attr.aria-describedby]="open() ? listId + '-status' : null"
-        [placeholder]="label()"
-        [value]="text()"
+        [placeholder]="multiple() && !open() && selected().length === 1 ? selected()[0] : label()"
+        [value]="multiple() && !open() ? '' : text()"
         [hgTooltip]="
           open()
             ? ''
@@ -61,6 +67,13 @@ export interface AutocompleteResult {
         (keydown)="key($event)"
       />
       @if (multiple()) {
+        @if (selected().length > 1) {
+          <b
+            class="autocomplete-count"
+            [attr.aria-label]="'Выбрано сайтов: ' + selected().length"
+            >{{ selected().length }}</b
+          >
+        }
         <hg-icon name="chevron-down" />
       } @else if (text()) {
         <button
@@ -84,7 +97,7 @@ export interface AutocompleteResult {
       (overlayOutsideClick)="outside($event)"
       (detach)="hide()"
     >
-      <div class="autocomplete-panel">
+      <div class="autocomplete-panel" (keydown)="panelKey($event)">
         <div
           [id]="listId"
           role="listbox"
@@ -102,14 +115,26 @@ export interface AutocompleteResult {
               (mousedown)="$event.preventDefault()"
               (click)="choose(item)"
             >
-              <hg-icon [name]="multiple() ? 'globe' : 'tasks'" />
+              @if (multiple()) {
+                <span
+                  class="autocomplete-checkbox"
+                  [class.checked]="selected().includes(item.id)"
+                  aria-hidden="true"
+                >
+                  @if (selected().includes(item.id)) {
+                    <hg-icon name="check" />
+                  }
+                </span>
+              } @else {
+                <hg-icon name="tasks" />
+              }
               <span
                 ><strong>{{ item.label }}</strong>
                 @if (item.detail) {
                   <small>{{ item.detail }}</small>
                 }
               </span>
-              @if (selected().includes(item.id)) {
+              @if (!multiple() && selected().includes(item.id)) {
                 <hg-icon name="check" />
               }
             </div>
@@ -142,6 +167,20 @@ export interface AutocompleteResult {
             }}
           }
         </div>
+        @if (multiple()) {
+          <footer class="autocomplete-actions">
+            <button
+              #reset
+              type="button"
+              class="button quiet"
+              [disabled]="!selected().length"
+              (click)="clearSelection()"
+            >
+              Снять выбор
+            </button>
+            <button #done type="button" class="button primary" (click)="finish()">Готово</button>
+          </footer>
+        }
       </div>
     </ng-template>
   `,
@@ -154,6 +193,7 @@ export class Autocomplete {
   readonly multiple = input(false);
   readonly searched = output<string>();
   readonly picked = output<AutocompleteOption>();
+  readonly cleared = output<void>();
   readonly text = signal('');
   readonly open = signal(false);
   readonly loading = signal(false);
@@ -171,8 +211,16 @@ export class Autocomplete {
   private pendingSearch: string | undefined;
   private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly field = viewChild.required<ElementRef<HTMLInputElement>>('field');
+  private readonly overlay = viewChild(CdkConnectedOverlay);
+  private readonly reset = viewChild<ElementRef<HTMLButtonElement>>('reset');
+  private readonly done = viewChild<ElementRef<HTMLButtonElement>>('done');
 
   constructor() {
+    afterRenderEffect(() => {
+      this.selected();
+      this.items();
+      if (this.open()) this.overlay()?.overlayRef?.updatePosition();
+    });
     effect(() => {
       const value = this.value();
       if (this.pendingSearch === undefined) this.text.set(value);
@@ -186,7 +234,7 @@ export class Autocomplete {
   show() {
     if (this.open()) return;
     this.open.set(true);
-    this.schedule();
+    void this.request();
   }
 
   edit(event: Event) {
@@ -216,6 +264,7 @@ export class Autocomplete {
     this.loading.set(true);
     this.error.set('');
     this.active.set(-1);
+    this.items.set([]);
     try {
       const result = await this.load()(this.text());
       if (generation !== this.generation || !this.open()) return;
@@ -234,10 +283,7 @@ export class Autocomplete {
   choose(item: AutocompleteOption) {
     this.pendingSearch = undefined;
     this.picked.emit(item);
-    if (this.multiple()) {
-      this.text.set('');
-      this.schedule();
-    } else {
+    if (!this.multiple()) {
       this.text.set(item.label);
       this.hide();
     }
@@ -248,13 +294,21 @@ export class Autocomplete {
     this.text.set('');
     this.pendingSearch = '';
     this.publishSearch();
+    this.open.set(true);
+    void this.request();
     this.field().nativeElement.focus();
-    this.show();
-    this.schedule();
   }
 
   key(event: KeyboardEvent) {
     if (event.key === 'Tab') {
+      if (this.multiple() && this.open() && !event.shiftKey) {
+        const target = this.selected().length ? this.reset() : this.done();
+        if (target) {
+          event.preventDefault();
+          target.nativeElement.focus();
+          return;
+        }
+      }
       this.hide();
       return;
     }
@@ -289,6 +343,32 @@ export class Autocomplete {
       else {
         this.publishSearch();
         this.hide();
+      }
+    }
+  }
+
+  finish() {
+    this.field().nativeElement.focus();
+    this.hide();
+  }
+
+  clearSelection() {
+    this.cleared.emit();
+    this.field().nativeElement.focus();
+  }
+
+  panelKey(event: KeyboardEvent) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      this.finish();
+    } else if (event.key === 'Tab') {
+      const first = this.selected().length ? this.reset() : this.done();
+      if (event.shiftKey && event.target === first?.nativeElement) {
+        event.preventDefault();
+        this.field().nativeElement.focus();
+      } else if (!event.shiftKey && event.target === this.done()?.nativeElement) {
+        this.finish();
       }
     }
   }

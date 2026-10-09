@@ -154,6 +154,66 @@ class DevClient:
             headers["Mcp-Session-Id"] = self.mcp_session
         return headers
 
+    def return_control_without_continuing(self, task_id):
+        """Enter internal PAUSED through a real manual handoff of a live browser."""
+        path = "/api/tasks/" + task_id
+        viewer = str(uuid.uuid4())
+        for kind, expected_owner in (("TAKE_CONTROL", "USER"), ("RETURN_CONTROL", "CHATGPT")):
+            status, task = self.api(path)
+            if status != 200:
+                raise AssertionError((status, task))
+            status, receipt = self.api(path + "/commands", "POST", {
+                "type": kind, "expectedVersion": task["version"], "viewerId": viewer,
+                "resume": False})
+            if status != 200:
+                raise AssertionError((status, receipt))
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                status, task = self.api(path)
+                if status != 200:
+                    raise AssertionError((status, task))
+                if task["browser"]["controlOwner"] == expected_owner:
+                    break
+                time.sleep(.2)
+            else:
+                raise AssertionError("Manual control transfer was not confirmed")
+        if task["status"] != "PAUSED":
+            raise AssertionError(task["status"])
+        return task
+
+    def observe_task_browser(self, task_id):
+        """Explicitly start and finish a read before testing browser lifetime transitions."""
+        if self.token is None:
+            self.login_mcp()
+        status, task = self.api("/api/tasks/" + task_id)
+        if status != 200:
+            raise AssertionError((status, task))
+        if not task["chatBound"]:
+            error, receipt, _ = self.tool("tasks.bind", {
+                "taskId": task_id, "operationKey": str(uuid.uuid4())})
+            if error:
+                raise AssertionError(receipt)
+        operation = str(uuid.uuid4())
+        action = {"operationId": operation, "type": "observe", "arguments": {},
+                  "instructionRevision": task["instructionRevision"]}
+        if task.get("browser"):
+            action["controlEpoch"] = task["browser"]["controlEpoch"]
+        error, receipt, _ = self.execute_in_scenario_step({"taskId": task_id, "action": action})
+        if error:
+            raise AssertionError(receipt)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            error, receipt, _ = self.tool("operations.get", {"operationId": operation})
+            if error:
+                raise AssertionError(receipt)
+            if receipt["status"] not in ("ACCEPTED", "DISPATCHED"):
+                break
+            time.sleep(.2)
+        if receipt["status"] != "SUCCEEDED":
+            raise AssertionError(receipt)
+        self.complete_scenario_step(task_id, operation)
+        return self.api("/api/tasks/" + task_id)[1]
+
     def close_mcp(self):
         if self.mcp_session:
             self.request(self.base + "/mcp", "DELETE", headers=self.mcp_headers())

@@ -302,9 +302,11 @@ import { Tooltip } from '../shared/tooltip';
       >
         <div class="section-heading padded">
           <h2 id="usage-sites-title">Использование по сайтам</h2>
+          @if (report.sites.items.length) {
+            <hg-column-picker [view]="table" />
+          }
         </div>
         @if (report.sites.items.length) {
-          <div class="table-tools"><hg-column-picker [view]="table" /></div>
           <hg-data-table
             [view]="table"
             [rows]="report.sites.items"
@@ -506,7 +508,7 @@ export class Usage {
     return segments;
   });
   readonly tableColumns: readonly TableColumn[] = [
-    { key: 'site', label: 'Сайт', width: 260, required: true, className: 'entity-cell' },
+    { key: 'site', label: 'Сайт', width: 260, required: true },
     { key: 'browserSeconds', label: 'Время браузера', width: 200 },
     { key: 'tasks', label: 'Задачи', width: 140 },
     { key: 'mediaSeconds', label: 'Медиа', width: 170 },

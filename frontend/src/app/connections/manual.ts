@@ -1,5 +1,4 @@
-import { Component, DestroyRef, inject, signal } from '@angular/core';
-import { DatePipe } from '@angular/common';
+import { Component, DestroyRef, effect, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { BrowserViewer, browserViewerId } from '../browser/viewer';
@@ -9,25 +8,21 @@ import { LiveEvents } from '../core/live-events';
 import {
   BrowserSession,
   Connection,
-  Page,
   Task,
   browserSchema,
   connectionSchema,
-  pageSchema,
-  stepSchema,
   taskSchema,
 } from '../core/models';
 import { PageContext, pageReturnLabel, pageReturnUrl } from '../core/page-context';
 import { Dialog } from '../shared/dialog';
 import { Icon } from '../shared/icon';
 import { Tooltip } from '../shared/tooltip';
-import { Pager, Status } from '../shared/ui';
-import * as z from 'zod/mini';
-import { SearchInput } from '../shared/search-input';
+import { Status } from '../shared/ui';
+import { BrowserPageLifetime } from '../browser/page-lifetime';
 
 @Component({
   selector: 'hg-manual',
-  imports: [Icon, BrowserViewer, Status, ResourceUnavailable, Tooltip, RouterLink, Pager, DatePipe, SearchInput],
+  imports: [Icon, BrowserViewer, Status, ResourceUnavailable, Tooltip, RouterLink],
   styles: `
     .connection-page-bar {
       display: flex;
@@ -37,46 +32,27 @@ import { SearchInput } from '../shared/search-input';
       flex-wrap: wrap;
       margin-bottom: 14px;
     }
-    .connection-page-bar .actions {
-      flex-wrap: wrap;
-    }
-    .button.danger-light {
-      border-color: #efceca;
-      color: var(--red);
-    }
-    .connection-steps {
-      padding: 0;
-      list-style: none;
-    }
-    .connection-steps li {
-      padding: 12px 0;
-      border-bottom: 1px solid var(--line);
-    }
-    .connection-steps p {
-      overflow-wrap: anywhere;
-      white-space: pre-wrap;
-    }
-    .connection-steps time {
-      display: block;
-      color: var(--muted);
-      font-size: 11px;
-    }
   `,
   template: `
     <button class="back-link" hgTooltip="Вернуться на исходную страницу" (click)="back()">
       <hg-icon name="arrow-left" />{{ returnLabel }}
     </button>
     <h1 class="sr-only">{{ connection()?.name || 'Браузер подключения' }}</h1>
+    @if (returnError()) {
+      <p class="error-banner" role="alert">{{ returnError() }}
+        <button class="text-button" [disabled]="busy()" (click)="returnAfterSave()">Вернуться в подключение</button>
+      </p>
+    }
     @if (unavailable()) {
       <hg-resource-unavailable
         title="Подключение недоступно для текущего аккаунта"
         backUrl="/connections"
         backLabel="К подключениям"
       />
-    } @else if (error()) {
+    } @else if (error() || entryError()) {
       <div class="error-banner" role="alert">
-        {{ error()
-        }}<button class="text-button" [disabled]="busy()" (click)="load()">Повторить</button>
+        {{ entryError() || error()
+        }}<button class="text-button" [disabled]="busy()" (click)="retry()">Повторить</button>
       </div>
     }
     @if (connection(); as item) {
@@ -91,104 +67,22 @@ import { SearchInput } from '../shared/search-input';
             >
           }
         </div>
-        <div class="actions">
-          @if (task(); as linked) {
-            @if (linked.allowedCommands.includes('PAUSE')) {
-              <button class="button small" [disabled]="busy()" (click)="taskCommand('PAUSE')">
-                <hg-icon name="pause" />Пауза
-              </button>
-            }
-            @if (linked.allowedCommands.includes('RESUME')) {
-              <button
-                class="button primary small"
-                [disabled]="busy()"
-                (click)="taskCommand('RESUME')"
-              >
-                <hg-icon name="play" />Продолжить
-              </button>
-            }
-            @if (linked.allowedCommands.includes('STOP')) {
-              <button class="button small" [disabled]="busy()" (click)="taskCommand('STOP')">
-                <hg-icon name="stop" />Завершить
-              </button>
-            }
-          }
-        </div>
       </header>
       <hg-browser
         [browser]="item.browser"
         [connection]="item"
+        [loginSaved]="saved()"
         [task]="task()"
         [role]="controller() ? 'CONTROLLER' : 'VIEWER'"
-        [steps]="true"
-        [stepCount]="task()?.stepCount ?? 0"
         [busy]="busy()"
+        [allowStreamPause]="false"
         [canOpen]="task() ? !!task()?.allowedCommands?.includes('OPEN_BROWSER') : !item.browser || ['CLOSED', 'LOST'].includes(item.browser.status)"
-        [canClose]="task() ? !!task()?.allowedCommands?.includes('CLOSE_BROWSER') : !!item.browser && !['CLOSED', 'LOST', 'CLOSING'].includes(item.browser.status)"
-        (closeBrowser)="task() ? taskCommand('CLOSE_BROWSER') : close()"
         (openBrowser)="task() ? taskCommand('OPEN_BROWSER') : start()"
         [allowSession]="!task() || !!task()?.allowedCommands?.includes('FINISH_LOGIN')"
         (controlLost)="controlLost()"
         (sessionChanged)="sessionChanged($event)"
-        (stepsOpen)="showSteps($event)"
-      >
-        @if (item.browser?.status === 'LIVE') {
-          @if (!controller()) {
-            <button
-              class="button small browser-control-button"
-              [disabled]="busy() || !canControl('TAKE_CONTROL')"
-              (click)="control('BEGIN_LOGIN')"
-            >
-              <hg-icon name="pointer" />Взять управление
-            </button>
-          } @else {
-            <button
-              class="button small browser-control-button"
-              [disabled]="busy() || !canControl('RETURN_CONTROL')"
-              (click)="control('RETURN')"
-            >
-              <hg-icon name="play" />{{ task() ? 'Передать агенту' : 'Завершить управление' }}
-            </button>
-          }
-        }
-        <div browserSteps>
-          @if (task()) {
-            <input hgSearch aria-label="Найти шаги" placeholder="Найти шаги" [value]="stepsSearch()" (searchChange)="searchSteps($event)" />
-          } @else {
-            <p>Нет связанных шагов. Браузер открыт отдельно от задачи.</p>
-          }
-          @if (stepsError()) {
-            <p class="error-banner" role="alert">{{ stepsError() }}</p>
-          }
-          @if (stepsLoading()) {
-            <p role="status">Загружаем шаги…</p>
-          }
-          <ol class="connection-steps">
-            @for (step of steps()?.items; track step.id) {
-              <li>
-                <strong>{{ step.title }}</strong
-                ><time>{{ step.createdAt | date: 'dd.MM HH:mm:ss' }}</time
-                ><hg-status [value]="step.status" />
-                @if (step.result) {
-                  <p>{{ step.result }}</p>
-                }
-              </li>
-            }
-          </ol>
-          @if (steps(); as page) {
-            @if (!page.total) {
-              <p>Шаги пока не записаны.</p>
-            }
-            <hg-pager
-              [page]="page.page"
-              [size]="10"
-              [total]="page.total"
-              [fixed]="true"
-              (pageChange)="loadSteps($event)"
-            />
-          }
-        </div>
-      </hg-browser>
+        (loginFinished)="loginFinished($event)"
+      />
     } @else if (!error()) {
       <div class="loading" role="status">Загружаем подключение…</div>
     }
@@ -201,10 +95,13 @@ export class Manual {
   private readonly route = inject(ActivatedRoute);
   private readonly context = inject(PageContext);
   private readonly destroy = inject(DestroyRef);
+  private readonly lifetime = inject(BrowserPageLifetime);
+  private leaving: Promise<boolean> | null = null;
   private generation = 0;
   private routeRevision = 0;
-  private stepsGeneration = 0;
-  private stepsVisible = false;
+  private entryPending = true;
+  readonly saved = signal(false);
+  readonly returnError = signal('');
   private get id() {
     return this.route.snapshot.paramMap.get('id') ?? '';
   }
@@ -217,33 +114,29 @@ export class Manual {
   readonly connection = signal<Connection | null>(null);
   readonly task = signal<Task | null>(null);
   readonly error = signal('');
+  readonly entryError = signal('');
   readonly unavailable = signal(false);
   readonly busy = signal(false);
   readonly controller = signal(false);
-  readonly steps = signal<Page<z.infer<typeof stepSchema>> | null>(null);
-  readonly stepsLoading = signal(false);
-  readonly stepsSearch = signal('');
-  readonly stepsError = signal('');
 
   constructor() {
     this.route.paramMap.pipe(takeUntilDestroyed()).subscribe(() => {
       this.routeRevision++;
+      this.entryPending = true;
+      this.saved.set(false);
+      this.returnError.set('');
       this.generation++;
-      this.stepsGeneration++;
-      this.stepsVisible = false;
-      this.stepsLoading.set(false);
-      this.stepsError.set('');
       this.busy.set(false);
       this.error.set('');
+      this.entryError.set('');
       this.connection.set(null);
       this.task.set(null);
       this.controller.set(false);
-      this.steps.set(null);
       this.unavailable.set(false);
       void this.load();
     });
     inject(LiveEvents)
-      .watch(['connection', 'browser', 'task', 'step'])
+      .watch(['connection', 'browser', 'task'])
       .pipe(takeUntilDestroyed())
       .subscribe((change) => {
         if (
@@ -253,23 +146,69 @@ export class Manual {
           )
         ) {
           void this.load();
-          if (this.stepsVisible && ['sync', 'step'].includes(change.resource))
-            void this.loadSteps(this.steps()?.page ?? 1);
         }
       });
     this.destroy.onDestroy(() => {
       this.generation++;
-      this.stepsGeneration++;
     });
+    effect((cleanup) => {
+      if (!this.closesOnLeave() || this.saved()) return;
+      const warn = (event: BeforeUnloadEvent) => {
+        event.preventDefault();
+        event.returnValue = '';
+      };
+      window.addEventListener('beforeunload', warn);
+      cleanup(() => window.removeEventListener('beforeunload', warn));
+    });
+  }
+  private closesOnLeave() {
+    const browser = this.connection()?.browser;
+    return !!browser && !browser.taskId && !['CLOSED', 'LOST', 'CLOSING'].includes(browser.status);
+  }
+  canLeave(nextUrl: string): Promise<boolean> {
+    if (this.lifetime.retains(this.connection()?.browser, nextUrl)) return Promise.resolve(true);
+    return this.leaving ??= this.leavePage().finally(() => { this.leaving = null; });
+  }
+  private async leavePage() {
+    if (this.busy()) {
+      this.error.set('Дождитесь завершения действия с браузером перед выходом.');
+      return false;
+    }
+    if (!this.saved() && this.closesOnLeave() && !(await this.dialog.ask(
+      'Закрыть браузер и выйти?',
+      'Браузер подключения будет закрыт. Несохранённый вход будет потерян. Сохранённая сессия останется в подключении.',
+      'Закрыть и выйти',
+    ))) return false;
+    this.busy.set(true);
+    try {
+      await this.lifetime.follow(this.connection()?.browser);
+      await this.lifetime.leave();
+      return true;
+    } catch (error: unknown) {
+      if (this.saved()) this.returnError.set('Сессия сохранена, но не удалось завершить выход со страницы. Повторите возврат.');
+      else this.error.set(errorMessage(error));
+      return false;
+    } finally {
+      this.busy.set(false);
+    }
   }
   back() {
     void this.router.navigateByUrl(pageReturnUrl(this.route, this.router, '/connections'));
   }
-  canControl(command: string) {
-    return (
-      this.connection()?.browser?.controlOwner !== 'TRANSFERRING' &&
-      (!this.connection()?.browser?.taskId || !!this.task()?.allowedCommands.includes(command))
-    );
+  loginFinished(browser: BrowserSession) {
+    if (this.saved() || browser.id !== this.connection()?.browser?.id) return;
+    this.saved.set(true);
+    void this.returnAfterSave();
+  }
+  async returnAfterSave() {
+    if (!this.saved()) return;
+    const revision = this.routeRevision;
+    this.returnError.set('');
+    try {
+      if (await this.router.navigate(['/connections', this.id], { replaceUrl: true })) return;
+    } catch { /* The saved profile remains available if navigation fails. */ }
+    if (this.isCurrent(revision))
+      this.returnError.set('Сессия сохранена, но не удалось вернуться в подключение. Повторите возврат.');
   }
   controlLost() {
     const browser = this.connection()?.browser;
@@ -309,6 +248,10 @@ export class Manual {
         browser.controlOwner === 'USER' &&
         sessionStorage.getItem('helm-controller:' + browser.id) === 'true',
     );
+    const revision = this.routeRevision;
+    void this.lifetime.follow(browser).catch((error: unknown) => {
+      if (this.isCurrent(revision)) this.error.set(errorMessage(error));
+    });
   }
   async load() {
     const generation = ++this.generation;
@@ -327,6 +270,12 @@ export class Manual {
       this.context.setResource('connections', connection.id, connection.name);
       this.error.set('');
       this.unavailable.set(false);
+      if (this.entryPending && !this.busy()
+        && (!connection.browser || ['LIVE', 'CLOSED', 'LOST'].includes(connection.browser.status))
+        && connection.browser?.controlOwner !== 'TRANSFERRING') {
+        this.entryPending = false;
+        await this.enterBrowser();
+      }
     } catch (error: unknown) {
       if (generation === this.generation) {
         this.error.set(errorMessage(error));
@@ -335,15 +284,46 @@ export class Manual {
       }
     }
   }
-  async start() {
+  private async enterBrowser() {
+    const connection = this.connection();
+    if (!connection) return;
+    const browser = connection.browser;
+    if (!browser || ['CLOSED', 'LOST'].includes(browser.status)) {
+      if (this.task()) {
+        const revision = this.routeRevision;
+        await this.taskCommand('OPEN_BROWSER', false);
+        if (!this.isCurrent(revision) || this.error()
+          || ['CLOSED', 'LOST'].includes(this.connection()?.browser?.status ?? 'CLOSED')) return;
+        this.entryPending = true;
+        await this.load();
+      } else {
+        await this.start(false);
+      }
+      return;
+    }
+    await this.control();
+  }
+  retry() {
+    if (this.entryError()) {
+      this.entryError.set('');
+      this.entryPending = true;
+    }
+    void this.load();
+  }
+  async start(confirmReopen = true) {
     if (this.busy()) return;
+    if (confirmReopen && this.connection()?.browser && !(await this.dialog.ask(
+      'Возобновить браузер?',
+      'Будет использован последний сохранённый вход. Несохранённая страница прежнего браузера не восстановится.',
+      'Возобновить браузер',
+    ))) return;
     const id = this.id,
       revision = this.routeRevision;
     this.busy.set(true);
     try {
       const connection = await this.api.mutate(
         '/api/connections/' + id + '/login',
-        { action: 'START', viewerId: browserViewerId() },
+        { action: 'START', viewerId: browserViewerId(), pageVisitId: this.lifetime.prepareStart() },
         connectionSchema,
       );
       if (!this.isCurrent(revision)) return;
@@ -358,27 +338,17 @@ export class Manual {
       if (this.isCurrent(revision)) this.busy.set(false);
     }
   }
-  async control(type: 'TAKE' | 'BEGIN_LOGIN' | 'RETURN') {
+  private async control() {
     const browser = this.connection()?.browser;
     if (!browser || this.busy()) return;
     const revision = this.routeRevision;
-    if (
-      browser.controlOwner === 'USER' &&
-      !this.controller() &&
-      !(await this.dialog.ask(
-        'Передать управление этому окну?',
-        'Управление в другом окне будет прекращено.',
-        'Взять управление',
-      ))
-    )
-      return;
     if (!this.isCurrent(revision)) return;
     this.busy.set(true);
     try {
       const updated = await this.api.mutate(
         '/api/browser-sessions/' + browser.id + '/control',
         {
-          type,
+          type: 'BEGIN_LOGIN',
           viewerId: browserViewerId(),
           controlEpoch: browser.controlEpoch,
           resume: true,
@@ -386,33 +356,20 @@ export class Manual {
         browserSchema,
       );
       if (!this.isCurrent(revision) || this.connection()?.browser?.id !== browser.id) return;
-      if (type !== 'RETURN') sessionStorage.setItem('helm-controller:' + browser.id, 'true');
+      sessionStorage.setItem('helm-controller:' + browser.id, 'true');
       this.sessionChanged(updated);
     } catch (error: unknown) {
-      if (this.isCurrent(revision)) this.error.set(errorMessage(error));
+      if (this.isCurrent(revision)) this.entryError.set(errorMessage(error));
     } finally {
       if (this.isCurrent(revision)) this.busy.set(false);
     }
   }
-  async taskCommand(type: 'PAUSE' | 'RESUME' | 'STOP' | 'CLOSE_BROWSER' | 'OPEN_BROWSER') {
+  async taskCommand(type: 'OPEN_BROWSER', confirmReopen = true) {
     const task = this.task();
     if (!task || this.busy()) return;
     const revision = this.routeRevision;
-    if (type === 'CLOSE_BROWSER' && !(await this.dialog.ask('Закрыть браузер?',
-      'Задача останется на паузе. Шаги и результаты сохранятся. Несохранённый вход будет потерян.', 'Закрыть браузер', [], true))) return;
-    if (type === 'OPEN_BROWSER' && !(await this.dialog.ask('Открыть новый браузер?',
-      'Будет использован последний сохранённый вход. Задача останется на паузе.', 'Открыть браузер'))) return;
-    if (
-      type === 'STOP' &&
-      !(await this.dialog.ask(
-        'Завершить задачу?',
-        'Браузер закроется после текущего действия. Результаты сохранятся.',
-        'Завершить',
-        [],
-        true,
-      ))
-    )
-      return;
+    if (confirmReopen && !(await this.dialog.ask('Возобновить браузер?',
+      'Будет использован последний сохранённый вход. Несохранённая страница прежнего браузера не восстановится. Задача продолжится автоматически, если нет других причин ожидания.', 'Возобновить браузер'))) return;
     if (!this.isCurrent(revision)) return;
     this.busy.set(true);
     try {
@@ -425,69 +382,11 @@ export class Manual {
       this.generation++;
       if ((this.task()?.version ?? -1) <= updated.version) this.task.set(updated);
       if (updated.browser) this.sessionChanged(updated.browser);
-      if (type === 'OPEN_BROWSER') await this.load();
+      await this.load();
     } catch (error: unknown) {
       if (this.isCurrent(revision)) this.error.set(errorMessage(error));
     } finally {
       if (this.isCurrent(revision)) this.busy.set(false);
-    }
-  }
-  async close() {
-    const id = this.id,
-      revision = this.routeRevision;
-    if (
-      this.busy() ||
-      !(await this.dialog.ask(
-        'Закрыть браузер?',
-        'Несохранённый вход будет потерян. Сохранённая сессия останется в подключении.',
-        'Закрыть',
-      ))
-    )
-      return;
-    if (!this.isCurrent(revision)) return;
-    this.busy.set(true);
-    try {
-      const updated = await this.api.mutate(
-        '/api/connections/' + id + '/login',
-        { action: 'CLOSE', viewerId: browserViewerId() },
-        connectionSchema,
-      );
-      if (!this.isCurrent(revision)) return;
-      this.generation++;
-      this.applyConnection(updated);
-    } catch (error: unknown) {
-      if (this.isCurrent(revision)) this.error.set(errorMessage(error));
-    } finally {
-      if (this.isCurrent(revision)) this.busy.set(false);
-    }
-  }
-  showSteps(open: boolean) {
-    this.stepsVisible = open;
-    if (open) void this.loadSteps(this.steps()?.page ?? 1);
-  }
-  searchSteps(search: string) {
-    this.stepsSearch.set(search);
-    void this.loadSteps(1);
-  }
-  async loadSteps(page: number) {
-    const id = this.task()?.id;
-    if (!id) return;
-    const generation = ++this.stepsGeneration;
-    this.stepsLoading.set(true);
-    try {
-      const steps = await this.api.get('/api/tasks/' + id + '/steps', pageSchema(stepSchema), {
-        page,
-        pageSize: 10,
-        search: this.stepsSearch(),
-      });
-      if (generation === this.stepsGeneration) {
-        this.steps.set(steps);
-        this.stepsError.set('');
-      }
-    } catch (error: unknown) {
-      if (generation === this.stepsGeneration) this.stepsError.set(errorMessage(error));
-    } finally {
-      if (generation === this.stepsGeneration) this.stepsLoading.set(false);
     }
   }
 }

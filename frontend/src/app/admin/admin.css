@@ -1,4 +1,5 @@
 .admin-v14 {
+  --table-inset: 20px;
   display: block;
   min-width: 0;
 }
@@ -30,7 +31,7 @@
 .admin-v14 .toolbar {
   gap: 10px;
   flex-wrap: wrap;
-  padding: 12px 20px;
+  padding: 12px var(--table-inset);
 }
 .admin-v14 .toolbar .search {
   width: 330px;

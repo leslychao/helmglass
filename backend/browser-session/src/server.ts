@@ -13,7 +13,7 @@ import { fetch, ProxyAgent } from "undici";
 import { WebSocketServer, createWebSocketStream, type WebSocket } from "ws";
 import { z } from "zod";
 import { fileTypeFromBuffer } from "file-type";
-import { cookieMatchesHost, exportProfile, ProfileExportError } from "./profile-export.js";
+import { cookieMatchesHost, exportProfile, ProfileExportError, trackLoginOrigins } from "./profile-export.js";
 import { importProfile } from "./profile-import.js";
 import { fillSavedCredential, type SavedCredential } from "./credential-autofill.js";
 import { CredentialCapture, CaptureConflict } from "./credential-capture.js";
@@ -39,6 +39,8 @@ let savedCredential: SavedCredential | undefined;
 const credentialCapture = new CredentialCapture();
 let activeAutofills = 0;
 const loginOrigins = new Set<string>();
+let loginScopeRevision = 0;
+let flushLoginOrigins: (() => Promise<void>) | undefined;
 let exportingProfile = false;
 const previouslyStarted = Boolean(db.prepare("SELECT value FROM state WHERE id='started'").get());
 let status: "STARTING" | "LIVE" | "LOST" = previouslyStarted ? "LOST" : "STARTING";
@@ -124,14 +126,20 @@ async function saveArtifact(stream: Readable, metadata: { name: string; mimeType
   } catch (error) { await rm(temporary, { force: true }); await rm(final, { force: true }); throw error; }
 }
 async function saveDownload(download: Download, pageId: string, signal: AbortSignal, operationId?: string): Promise<object> {
-  const stream = await download.createReadStream();
-  return saveArtifact(stream, { name: download.suggestedFilename(), mimeType: "application/octet-stream", sourceUrl: download.url(), complete: true, pageId, operationId }, signal);
+  try {
+    const stream = await download.createReadStream();
+    return await saveArtifact(stream, { name: download.suggestedFilename(), mimeType: "application/octet-stream", sourceUrl: download.url(), complete: true, pageId, operationId }, signal);
+  } finally { await download.delete(); }
 }
 function registerPage(page: Page): void {
   const id = randomUUID(); pages.set(id, page); pageIds.set(page, id); currentPage = page;
   page.on("close", () => { pages.delete(id); if (currentPage === page) currentPage = [...pages.values()].at(-1); });
   page.on("download", (download) => {
-    if (policy.privateMode) { void download.cancel(); return; }
+    if (policy.privateMode) {
+      void download.cancel().finally(() => download.delete())
+        .catch(() => console.error("Private download cleanup failed"));
+      return;
+    }
     const downloadId = randomUUID(); const abort = new AbortController();
     const completion = saveDownload(download, id, abort.signal, activeOperation).finally(() => pendingDownloads.delete(downloadId));
     pendingDownloads.set(downloadId, { completion, abort, download }); completion.catch(() => {});
@@ -200,13 +208,8 @@ async function createContext(): Promise<BrowserContext> {
     });
     created.setDefaultTimeout(20_000); created.setDefaultNavigationTimeout(40_000);
     created.on("page", registerPage);
-    created.on("page", (page) => page.on("framenavigated", (frame) => {
-      if (!policy.privateMode || frame !== page.mainFrame()) return;
-      try {
-        const url = new URL(frame.url());
-        if (["http:", "https:"].includes(url.protocol) && loginOrigins.size < 20) loginOrigins.add(url.origin);
-      } catch { /* A transient about:blank page has no site origin. */ }
-    }));
+    flushLoginOrigins = trackLoginOrigins(created, loginOrigins,
+      () => policy.privateMode && !exportingProfile, () => loginScopeRevision);
     return created;
 }
 async function initialize(input: { startUrl: string }): Promise<void> {
@@ -560,7 +563,7 @@ const server = http.createServer(async (request, response) => {
       if (!input.privateMode || input.owner !== "USER") savedCredential = undefined;
       if (!input.privateMode || (input.owner === "USER" && input.controllerId !== policy.controllerId)) credentialCapture.clear();
       if (input.privateMode && !policy.privateMode) {
-        loginOrigins.clear();
+        loginOrigins.clear(); loginScopeRevision++;
         if (currentPage) {
           const current = new URL(currentPage.url());
           if (["http:", "https:"].includes(current.protocol)) loginOrigins.add(current.origin);
@@ -577,15 +580,17 @@ const server = http.createServer(async (request, response) => {
       if (activeOperation || exportingProfile) throw new HttpError(409, "Action in progress");
       const input = z.object({ origins: z.array(z.url()).min(1).max(50), includeLoginOrigins: z.boolean().default(false) }).parse(await body(request));
       const allowed = [...new Set(input.origins.map((origin) => new URL(publicUrl(origin)).origin))];
-      if (input.includeLoginOrigins) {
-        if (!policy.privateMode) throw new HttpError(403, "Login scope requires private input");
-        for (const origin of loginOrigins) if (!allowed.includes(origin)) allowed.push(origin);
-        if (allowed.length > 50) throw new HttpError(413, "Too many login origins");
-      }
+      if (input.includeLoginOrigins && !policy.privateMode) throw new HttpError(403, "Login scope requires private input");
       const selected = selectedPage();
       exportingProfile = true;
-      if (input.includeLoginOrigins) { for (const viewer of viewers) viewer.terminate(); viewers.clear(); }
       try {
+        if (input.includeLoginOrigins) {
+          await flushLoginOrigins?.();
+          for (const origin of loginOrigins) if (!allowed.includes(origin)) allowed.push(origin);
+          if (allowed.length > 50) throw new ProfileExportError(413, "Too many login origins", "PROFILE_ORIGIN_LIMIT");
+          for (const viewer of viewers) viewer.terminate();
+          viewers.clear();
+        }
         const candidate = input.includeLoginOrigins ? credentialCapture.export() : null;
         response.writeHead(200, { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" });
         try { await exportProfile(selected, allowed, response, candidate); }
@@ -602,7 +607,7 @@ const server = http.createServer(async (request, response) => {
       context = await createContext();
       const page = await context.newPage(); currentPage = page;
       for (const prior of previous) await prior.close();
-      loginOrigins.clear(); savedCredential = undefined;
+      loginOrigins.clear(); loginScopeRevision++; savedCredential = undefined;
       await page.goto(publicUrl(input.startUrl), { waitUntil: "domcontentloaded" });
       reply(response, 200, { ready: true }); return;
     }
@@ -680,9 +685,10 @@ server.on("upgrade", (request, socket, head) => {
       // x11vnc's viewonly endpoint rejects input on the server, independently of the UI.
       const upstream = net.connect(controller ? 5901 : 5900, "127.0.0.1");
       const stream = createWebSocketStream(client);
-      stream.pipe(upstream); upstream.pipe(stream);
       const clean = () => { viewers.delete(client); upstream.destroy(); stream.destroy(); };
       client.on("close", clean); client.on("error", clean); upstream.on("error", clean); upstream.on("close", clean);
+      stream.on("error", clean);
+      stream.pipe(upstream); upstream.pipe(stream);
     });
   } catch { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); }
 });

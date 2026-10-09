@@ -70,4 +70,25 @@
   <changeSet id="20-browser-login-completion" author="helmglass">
     <sqlFile path="020-browser-login-completion.sql" relativeToChangelogFile="true" splitStatements="true"/>
   </changeSet>
+  <changeSet id="21-browser-page-visits" author="helmglass">
+    <sqlFile path="021-browser-page-visits.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="22-browser-page-cascade" author="helmglass">
+    <sqlFile path="022-browser-page-cascade.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="23-browser-idle-lifecycle" author="helmglass">
+    <sqlFile path="023-browser-idle-lifecycle.sql" relativeToChangelogFile="true" splitStatements="true"/>
+  </changeSet>
+  <changeSet id="024-control-intent-privacy" author="helmglass">
+    <sqlFile path="024-control-intent-privacy.sql" relativeToChangelogFile="true" />
+  </changeSet>
+  <changeSet id="25-pending-browser-confirmation" author="helmglass">
+    <sqlFile path="025-pending-browser-confirmation.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="26-audio-analysis" author="helmglass">
+    <sqlFile path="026-audio-analysis.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="27-profile-cookie-check" author="helmglass">
+    <sqlFile path="027-profile-cookie-check.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

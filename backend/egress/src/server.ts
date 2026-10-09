@@ -33,6 +33,7 @@ const server = http.createServer(async (request, response) => {
     }
     const port = Number(target.port || 80);
     const address = await publicTarget(target.hostname, port);
+    if (response.destroyed || request.aborted) return;
     const headers: http.OutgoingHttpHeaders = { ...request.headers, host: target.host };
     delete headers["proxy-authorization"];
     delete headers["proxy-connection"];
@@ -49,6 +50,7 @@ const server = http.createServer(async (request, response) => {
       response.end("Upstream unavailable");
     });
     request.on("aborted", () => upstream.destroy());
+    response.once("close", () => upstream.destroy());
     pipeline(request, upstream, () => {});
   } catch {
     response.writeHead(403, { "Content-Type": "text/plain" });
@@ -62,6 +64,7 @@ server.on("connect", async (request, client, head) => {
     if (target.username || target.password || target.pathname !== "/") throw new Error("Invalid CONNECT");
     const port = Number(target.port || 443);
     const address = await publicTarget(target.hostname, port);
+    if (client.destroyed) return;
     const upstream = net.connect({ host: address, port });
     upstream.once("connect", () => {
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -83,6 +86,7 @@ server.on("upgrade", async (request, client, head) => {
     if (!["http:", "ws:"].includes(target.protocol) || target.username || target.password || request.headers.upgrade?.toLowerCase() !== "websocket") throw new Error("Invalid WebSocket destination");
     const port = Number(target.port || 80);
     const address = await publicTarget(target.hostname, port);
+    if (client.destroyed) return;
     const headers: http.OutgoingHttpHeaders = { ...request.headers, host: target.host };
     delete headers["proxy-authorization"]; delete headers["proxy-connection"];
     const upstreamRequest = http.request({ host: address, port, method: "GET", path: target.pathname + target.search, headers });

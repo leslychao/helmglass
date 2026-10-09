@@ -49,6 +49,8 @@ export const browserSchema = z.object({
   loginConfirmed: z.boolean(),
   startedAt: z.nullable(z.string()),
   closedAt: z.nullable(z.string()),
+  idleCloseAt: z.nullable(z.string()),
+  closeReason: z.nullable(z.enum(['USER', 'IDLE_TIMEOUT'])),
 });
 export type BrowserSession = z.infer<typeof browserSchema>;
 export const artifactSchema = z.object({
@@ -96,6 +98,7 @@ export const taskSchema = z.object({
   startUrl: z.nullable(z.string()),
   outputFormat: z.string(),
   chatBound: z.boolean(),
+  continuation: z.nullable(z.object({ status: z.string(), reason: z.nullable(z.string()) })),
   preferredConnectionIds: z.array(z.string()),
   status: z.string(),
   outcome: z.nullable(z.string()),
@@ -108,6 +111,7 @@ export const taskSchema = z.object({
   result: z.nullable(resultSchema),
   createdAt: z.string(),
   updatedAt: z.string(),
+  timing: z.object({ elapsedSeconds: nullableNumber, running: z.boolean() }),
   usage: usageSchema,
   allowedCommands: z.array(z.string()),
   stepCount: z.number(),
@@ -132,6 +136,10 @@ export const connectionSchema = z.object({
   profileSavedAt: z.nullable(z.string()),
   profileSaveError: z.nullable(z.string()),
   authorizedOrigins: z.array(z.string()),
+  cookieCheck: z.nullable(z.object({
+    usableCount: z.int().check(z.gte(0), z.lte(10_000)), checkedAt: z.iso.datetime(),
+  })),
+  taskCount: z.number(),
 });
 export type Connection = z.infer<typeof connectionSchema>;
 export const stepSchema = z.object({

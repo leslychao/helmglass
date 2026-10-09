@@ -32,9 +32,16 @@ public class TaskService {
   public static final String SELECT =
       """
 SELECT t.*,
+  CASE WHEN t.accepted_at IS NOT NULL THEN
+    greatest(0,extract(epoch FROM coalesce(t.completed_at,statement_timestamp())-t.accepted_at))
+    END elapsed_seconds,
   (SELECT count(*) FROM task_steps s WHERE s.task_id=t.id) step_count,
   EXISTS(SELECT 1 FROM operations o WHERE o.task_id=t.id AND o.status='UNKNOWN') unknown_action,
   EXISTS(SELECT 1 FROM mcp_task_chats c WHERE c.task_id=t.id) chat_bound,
+  (SELECT jsonb_build_object('status',c.continuation_status,'reason',c.continuation_reason)
+    FROM mcp_chats c JOIN mcp_task_chats binding
+      ON binding.owner_id=c.owner_id AND binding.chat_id=c.chat_id
+    WHERE binding.task_id=t.id AND c.task_id=t.id)::text continuation_json,
   coalesce((SELECT coalesce(s.result,s.title) FROM task_steps s WHERE s.task_id=t.id
     AND s.status IN ('RUNNING','WAITING','UNKNOWN') LIMIT 1),t.result->>'summary',
     (SELECT coalesce(s.result,s.title) FROM task_steps s WHERE s.task_id=t.id
@@ -55,7 +62,8 @@ SELECT t.*,
     'currentUrl',CASE WHEN b.private_mode THEN NULL ELSE b.current_url END,
     'canView',b.status='LIVE','canControl',b.status='LIVE','version',b.version,
     'profileSaveError',c.profile_save_error,'taskId',b.task_id,'connectionId',b.connection_id,
-    'loginConfirmed',b.login_confirmed,'startedAt',b.started_at,'closedAt',b.closed_at)
+    'loginConfirmed',b.login_confirmed,'startedAt',b.started_at,'closedAt',b.closed_at,
+    'idleCloseAt',b.idle_close_at,'closeReason',b.close_reason)
     FROM browser_sessions b
     LEFT JOIN connections c ON c.id=coalesce(b.pending_connection_id,b.connection_id)
     WHERE b.id=t.browser_session_id)::text browser_json,
@@ -119,6 +127,7 @@ FROM tasks t
       case "source" -> "source";
       case "createdAt" -> "created_at";
       case "summary" -> "task_summary";
+      case "elapsedSeconds" -> "elapsed_seconds";
       case "executionSeconds" -> "(usage_json::jsonb->>'executionSeconds')::numeric";
       case "manualSeconds" -> "(usage_json::jsonb->>'manualSeconds')::numeric";
       case "mediaBytes" -> "(artifact_totals_json::jsonb->>'mediaBytes')::bigint";
@@ -277,15 +286,6 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
         }
         amend(owner, task, command);
       }
-      case "PAUSE" -> {
-        if (TERMINAL.contains(task.status())
-            || "DRAFT".equals(task.status())
-            || "STOPPING".equals(task.status())) {
-          throw unavailable();
-        }
-        jdbc.sql("UPDATE tasks SET paused_explicitly=true WHERE id=:id").param("id", id).update();
-        change(owner, id, hasDispatched(id) ? "PAUSING" : "PAUSED", null, "Запрошена пауза");
-      }
       case "RESUME" -> resume(owner, task, command);
       case "STOP" -> requestStop(owner, id);
       case "CLOSE_BROWSER" -> {
@@ -302,6 +302,11 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
 
   @Transactional
   public void closeBrowser(UUID owner, UUID id) {
+    closeBrowser(owner, id, "USER");
+  }
+
+  @Transactional
+  public void closeBrowser(UUID owner, UUID id, String reason) {
     identity.requireActive(owner);
     lockOwner(owner);
     lockTask(owner, id);
@@ -313,15 +318,67 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
     if (Set.of("CLOSED", "LOST").contains(task.browser().status())) {
       return;
     }
-    if (!TERMINAL.contains(task.status())) {
-      jdbc.sql("UPDATE tasks SET paused_explicitly=true WHERE id=:id").param("id", id).update();
-      cancelQueued(id);
-      change(owner, id, hasDispatched(id) ? "PAUSING" : "PAUSED", task.waitReason(),
-          "Закрытие браузера запрошено. Задача остаётся на паузе.");
+    boolean alreadyClosing = jdbc.sql("SELECT close_requested FROM browser_sessions WHERE id=:id")
+        .param("id", task.browser().id()).query(Boolean.class).single();
+    if (alreadyClosing) {
+      return;
     }
-    jdbc.sql("UPDATE browser_sessions SET close_requested=true,version=version+1 WHERE id=:id")
-        .param("id", task.browser().id()).update();
+    if (!TERMINAL.contains(task.status())) {
+      jdbc.sql("""
+              UPDATE tasks SET browser_resume_allowed=NOT paused_explicitly,
+                paused_explicitly=true WHERE id=:id
+              """).param("id", id).update();
+      suspendBrowserWork(id);
+      change(owner, id, hasDispatched(id) ? "PAUSING" : "PAUSED", task.waitReason(),
+          "IDLE_TIMEOUT".equals(reason)
+              ? "Браузер закрывается после 15 минут бездействия. Задача сохранена."
+              : "Закрытие браузера запрошено. Задача остаётся на паузе.");
+    }
+    if ("TRANSFERRING".equals(task.browser().controlOwner())) {
+      throw ApiException.conflict("CONTROL_CHANGED", "Дождитесь передачи управления.");
+    }
+    closeTaskBrowsers(id);
+    jdbc.sql("UPDATE browser_sessions SET close_reason=:reason,idle_close_at=NULL WHERE id=:id")
+        .param("reason", reason).param("id", task.browser().id()).update();
     events.emit(owner, "browser", task.browser().id(), 0);
+  }
+
+  /** Reopening the browser only removes the hold introduced by its closure. */
+  @Transactional
+  public void resumeWithBrowser(UUID owner, UUID id) {
+    lockOwner(owner);
+    lockTask(owner, id);
+    jdbc.sql("""
+            UPDATE tasks SET paused_explicitly=paused_explicitly AND NOT browser_resume_allowed,
+              browser_resume_allowed=false WHERE id=:id
+            """).param("id", id).update();
+  }
+
+  @Transactional
+  public void browserReady(UUID owner, UUID id) {
+    lockOwner(owner);
+    lockTask(owner, id);
+    Contracts.Task task = get(owner, id);
+    if (TERMINAL.contains(task.status()) || "STOPPING".equals(task.status())) {
+      return;
+    }
+    boolean paused = jdbc.sql("SELECT paused_explicitly FROM tasks WHERE id=:id")
+        .param("id", id).query(Boolean.class).single();
+    String reason = task.request() == null ? null : task.request().type();
+    if (reason == null && task.browser() != null && task.browser().privateMode()) {
+      reason = "LOGIN";
+    }
+    String state = "WAITING_CHATGPT";
+    if (paused) {
+      state = "PAUSED";
+    } else if (reason != null) {
+      state = "WAITING_USER";
+    }
+    change(owner, id, state,
+        reason, paused ? "Браузер открыт. Сохранена прежняя пауза." : "Браузер готов");
+    if ("BROWSER_OPEN_REQUESTED".equals(task.waitReason())) {
+      requestContinuation(id);
+    }
   }
 
   @Transactional
@@ -462,11 +519,17 @@ UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format
         .param("id", task.id())
         .update();
     String status = task.status();
+    String waitReason = null;
     if (!Set.of("DRAFT", "PAUSED", "PAUSING", "STOPPING").contains(status)
         && !TERMINAL.contains(status)) {
-      status = hasDispatched(task.id()) ? "RUNNING" : "WAITING_CHATGPT";
+      if (task.browser() != null && "USER".equals(task.browser().controlOwner())) {
+        status = "WAITING_USER";
+        waitReason = task.browser().privateMode() ? "LOGIN" : "MANUAL_CONTROL";
+      } else {
+        status = hasDispatched(task.id()) ? "RUNNING" : "WAITING_CHATGPT";
+      }
     }
-    change(owner, task.id(), status, null, "Поручение уточнено");
+    change(owner, task.id(), status, waitReason, "Поручение уточнено");
     if (hasUnknown(task.id())) {
       UUID operation =
           jdbc.sql(
@@ -509,7 +572,7 @@ UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format
           "Продолжение откроет новый браузер. Несохранённая страница утрачена.");
     }
     jdbc.sql("""
-        UPDATE tasks SET paused_explicitly=false,outcome=NULL,completed_at=NULL,
+        UPDATE tasks SET paused_explicitly=false,browser_resume_allowed=false,outcome=NULL,completed_at=NULL,
           instruction_revision=instruction_revision+CASE WHEN status IN
             ('SUCCEEDED','PARTIAL','NOT_ACHIEVED','FAILED') THEN 1 ELSE 0 END WHERE id=:id
         """)
@@ -843,6 +906,7 @@ completed_at=now() WHERE id=:id AND status='UNKNOWN'
     // An unallocated browser has no worker to acknowledge closure.
     jdbc.sql("""
             UPDATE browser_sessions SET close_requested=true,
+              version=version+1,
               closed_at=CASE WHEN status='QUEUED' THEN now() ELSE closed_at END,
               control_owner=CASE WHEN status='QUEUED' THEN 'NONE' ELSE control_owner END,
               status=CASE WHEN status='QUEUED' THEN 'CLOSED' ELSE status END
@@ -1027,6 +1091,13 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
         .update();
   }
 
+  /** An unanswered decision remains valid while the browser is paused or controlled manually. */
+  public void suspendBrowserWork(UUID task) {
+    jdbc.sql("UPDATE operations SET status='CANCELLED',completed_at=now()"
+            + " WHERE task_id=:id AND status='ACCEPTED'")
+        .param("id", task).update();
+  }
+
   public void cancelRequest(UUID task) {
     jdbc.sql("UPDATE task_requests SET status='CANCELLED' WHERE task_id=:id AND status='PENDING'")
         .param("id", task)
@@ -1142,7 +1213,7 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
     } else if (TERMINAL.contains(status) && !"STOPPED".equals(status)) {
       commands.add("RESUME");
     } else if (!TERMINAL.contains(status) && !"STOPPING".equals(status)) {
-      commands.addAll(List.of("PAUSE", "STOP", "TAKE_CONTROL", "BEGIN_LOGIN"));
+      commands.addAll(List.of("STOP", "TAKE_CONTROL", "BEGIN_LOGIN"));
     }
     String request = row.getString("request_json");
     String response = row.getString("response_json");
@@ -1209,6 +1280,8 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
         row.getString("site"),
         row.getString("output_format"),
         row.getBoolean("chat_bound"),
+        row.getString("continuation_json") == null ? null
+            : json.convert(json.read(row.getString("continuation_json")), Contracts.Continuation.class),
         json.uuidList(row.getString("preferred_connection_ids")),
         row.getString("source"),
         status,
@@ -1221,6 +1294,9 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
             : json.convert(json.read(response), Contracts.InteractionResponse.class),
         browserState,
         result,
+        new Contracts.TaskTiming(
+            row.getBigDecimal("elapsed_seconds"),
+            row.getObject("accepted_at") != null && row.getObject("completed_at") == null),
         usageMap(usage, artifactTotals),
         List.copyOf(commands),
         row.getLong("step_count"),

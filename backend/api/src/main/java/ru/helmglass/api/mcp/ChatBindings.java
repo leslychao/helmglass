@@ -4,18 +4,46 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import ru.helmglass.api.ApiException;
+import ru.helmglass.api.events.EventService;
 import ru.helmglass.api.tasks.TaskService;
 
 @Service
 public class ChatBindings {
   private final JdbcClient jdbc;
+  private final EventService events;
 
-  public ChatBindings(JdbcClient jdbc) {
+  public ChatBindings(JdbcClient jdbc, EventService events) {
     this.jdbc = jdbc;
+    this.events = events;
+  }
+
+  @Scheduled(fixedDelay = 5000)
+  @Transactional
+  public void expireUnconfirmedContinuation() {
+    var candidates = jdbc.sql("""
+            SELECT owner_id,chat_id FROM mcp_chats WHERE continuation_status='SENDING'
+              AND continuation_claimed_at<clock_timestamp()-interval '60 seconds'
+            ORDER BY owner_id,chat_id LIMIT 20
+            """).query((row, index) -> Map.entry(row.getObject("owner_id", UUID.class),
+                row.getString("chat_id"))).list();
+    for (var candidate : candidates) {
+      lockOwner(candidate.getKey());
+      jdbc.sql("""
+              UPDATE mcp_chats SET continuation_status='UNAVAILABLE',
+                continuation_reason='Отправка не подтверждена. Продолжите задачу в исходном чате ChatGPT.',
+                updated_at=now() WHERE owner_id=:owner AND chat_id=:chat
+                  AND continuation_status='SENDING'
+                  AND continuation_claimed_at<clock_timestamp()-interval '60 seconds'
+              RETURNING task_id
+              """).param("owner", candidate.getKey()).param("chat", candidate.getValue())
+          .query(UUID.class).optional()
+          .ifPresent(task -> events.emit(candidate.getKey(), "task", task, 0));
+    }
   }
 
   public static String chatId(Map<String, Object> metadata) {
@@ -195,9 +223,10 @@ public class ChatBindings {
   public boolean claim(UUID owner, UUID task, String chat, UUID generation, UUID continuation) {
     lockOwner(owner);
     state(owner, task, chat, generation);
-    return jdbc.sql(
+    boolean claimed = jdbc.sql(
                 """
-                UPDATE mcp_chats SET continuation_status='SENDING',updated_at=now()
+                UPDATE mcp_chats SET continuation_status='SENDING',updated_at=now(),
+                  continuation_claimed_at=clock_timestamp()
                 WHERE owner_id=:owner AND chat_id=:chat AND generation=:generation
                   AND continuation_status='PENDING'
                   AND continuation_id=:continuation
@@ -205,7 +234,8 @@ public class ChatBindings {
                     AND t.instruction_revision=mcp_chats.continuation_revision
                     AND t.status='WAITING_CHATGPT' AND NOT t.paused_explicitly
                     AND NOT EXISTS(SELECT 1 FROM task_requests r WHERE r.task_id=t.id AND r.status='PENDING')
-                    AND NOT EXISTS(SELECT 1 FROM browser_sessions b WHERE b.id=t.browser_session_id AND b.private_mode))
+                    AND NOT EXISTS(SELECT 1 FROM browser_sessions b WHERE b.id=t.browser_session_id
+                      AND (b.private_mode OR b.status<>'LIVE' OR b.control_owner<>'CHATGPT')))
                 """)
             .param("owner", owner)
             .param("chat", chat)
@@ -213,6 +243,10 @@ public class ChatBindings {
             .param("continuation", continuation)
             .update()
         == 1;
+    if (claimed) {
+      events.emit(owner, "task", task, 0);
+    }
+    return claimed;
   }
 
   @Transactional
@@ -229,7 +263,7 @@ public class ChatBindings {
     if (reason != null && reason.length() > 500) {
       throw ApiException.invalid("reason", "Слишком длинное описание ограничения.");
     }
-    jdbc.sql(
+    int changed = jdbc.sql(
             """
 UPDATE mcp_chats SET continuation_status=:status,continuation_reason=:reason,updated_at=now()
 WHERE owner_id=:owner AND chat_id=:chat AND generation=:generation
@@ -243,6 +277,9 @@ WHERE owner_id=:owner AND chat_id=:chat AND generation=:generation
         .param("generation", generation)
         .param("continuation", continuation)
         .update();
+    if (changed != 0) {
+      events.emit(owner, "task", task, 0);
+    }
     return state(owner, task, chat, generation);
   }
 

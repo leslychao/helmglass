@@ -31,8 +31,10 @@ export class SignIn {
           @if (signInError) {
             <a class="button primary" routerLink="/sign-in">Повторить вход</a>
           } @else {
-            <a class="button primary" routerLink="/tasks">К задачам</a>
-            <button class="button" (click)="retry()">Повторить</button>
+            @if (denied) {
+              <a class="button primary" routerLink="/tasks">К задачам</a>
+            }
+            <button class="button" [class.primary]="!denied" (click)="retry()">Повторить</button>
           }
         </div>
       </hg-empty>

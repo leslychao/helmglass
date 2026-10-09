@@ -618,6 +618,7 @@ ORDER BY o.created_at LIMIT 1
           null,
           "Выполняется команда ChatGPT: " + command.type());
     }
+    browsers.refreshIdle(candidate.owner(), task.browser().id(), false);
     return new Dispatch(
         command.id(),
         candidate.owner(),
@@ -804,6 +805,7 @@ ORDER BY o.created_at LIMIT 1
             }
           }
           tasks.settleStop(operation.owner(), operation.task());
+          browsers.refreshIdle(operation.owner(), operation.session(), true);
           events.emit(operation.owner(), "operation", operation.id(), 1);
         });
   }

@@ -76,6 +76,7 @@ import { Empty, Pager, Status } from '../shared/ui';
           [selected]="query.values('site')"
           [load]="siteSuggestions"
           (picked)="selectSite($event)"
+          (cleared)="query.set({ site: null })"
         />
         <hg-multi-filter
           label="Состояние"
@@ -89,7 +90,7 @@ import { Empty, Pager, Status } from '../shared/ui';
         @if (page.items.length) {
           <hg-data-table [view]="table" [rows]="page.items" label="Подключения">
             <ng-template hgCell="name" [hgCellOf]="page.items" let-connection>
-              <button class="connection-title" (click)="login(connection)">
+              <button class="connection-title" (click)="detail(connection)">
                 <span class="service-mark"><hg-icon name="globe" /></span
                 ><span
                   ><strong>{{ connection.name }}</strong
@@ -152,14 +153,7 @@ import { Empty, Pager, Status } from '../shared/ui';
                 ? 'Измените выбранные фильтры.'
                 : 'Добавьте сайт и сохраните вход в защищённом браузере.'
             "
-            ><button
-              class="icon-button primary"
-              (click)="create()"
-              aria-label="Добавить подключение"
-              hgTooltip="Добавить подключение"
-            >
-              <hg-icon name="plus" /></button
-          ></hg-empty>
+          />
         }
         <hg-pager
           [page]="page.page"
@@ -340,7 +334,7 @@ export class Connections {
     this.query.set({ site: this.query.values('site').filter((value) => value !== site) });
   }
   readonly statuses = [
-    { id: 'READY', label: 'Вход сохранён' },
+    { id: 'READY', label: 'Сессия сохранена' },
     { id: 'LOGIN_REQUIRED', label: 'Нужен вход' },
   ];
   readonly tableColumns: readonly TableColumn[] = [
@@ -422,7 +416,7 @@ export class Connections {
         connectionSchema,
       );
       this.dialog.complete(values);
-      await this.login(connection);
+      await this.detail(connection);
     } catch (error: unknown) {
       this.error.set(errorMessage(error));
     }
@@ -439,6 +433,11 @@ export class Connections {
     } finally {
       this.busy.set('');
     }
+  }
+  async detail(connection: Connection) {
+    await this.router.navigate(['/connections', connection.id], {
+      queryParams: { back: this.query.context() },
+    });
   }
   async rename(connection: Connection) {
     const values = await this.dialog.ask(

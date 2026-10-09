@@ -1,5 +1,6 @@
 package ru.helmglass.api;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -53,7 +54,7 @@ public final class Contracts {
       String accountLabel,
       String accountSubject) {
     public TaskCommand {
-      if (type == null || !Set.of("PREPARE", "AMEND", "PAUSE", "RESUME", "STOP", "ANSWER",
+      if (type == null || !Set.of("PREPARE", "AMEND", "RESUME", "STOP", "ANSWER",
           "CONFIRM", "REJECT", "CHOOSE_CONNECTION", "FINISH", "TAKE_CONTROL", "RETURN_CONTROL",
           "BEGIN_LOGIN", "FINISH_LOGIN", "REQUIRE_LOGIN", "CLOSE_BROWSER", "OPEN_BROWSER").contains(type)) {
         throw ApiException.invalid("type", "Неизвестная команда задачи.");
@@ -71,6 +72,7 @@ public final class Contracts {
       String site,
       String outputFormat,
       boolean chatBound,
+      Continuation continuation,
       List<UUID> preferredConnectionIds,
       String source,
       String status,
@@ -81,11 +83,16 @@ public final class Contracts {
       InteractionResponse lastResponse,
       Browser browser,
       JsonNode result,
+      TaskTiming timing,
       Map<String, Object> usage,
       List<String> allowedCommands,
       long stepCount,
       Instant createdAt,
       Instant updatedAt) {}
+
+  public record TaskTiming(BigDecimal elapsedSeconds, boolean running) {}
+
+  public record Continuation(String status, String reason) {}
 
   public record InteractionRequest(
       UUID id,
@@ -124,7 +131,17 @@ public final class Contracts {
       UUID connectionId,
       boolean loginConfirmed,
       Instant startedAt,
-      Instant closedAt) {}
+      Instant closedAt,
+      Instant idleCloseAt,
+      String closeReason) {}
+
+  public record CookieCheck(int usableCount, Instant checkedAt) {
+    public CookieCheck {
+      if (usableCount < 0 || usableCount > 10_000 || checkedAt == null) {
+        throw new IllegalArgumentException("Invalid cookie check");
+      }
+    }
+  }
 
   public record Connection(
       UUID id,
@@ -142,14 +159,17 @@ public final class Contracts {
       long profileRevision,
       Instant profileSavedAt,
       String profileSaveError,
-      List<String> authorizedOrigins) {}
+      List<String> authorizedOrigins,
+      CookieCheck cookieCheck,
+      long taskCount) {}
 
   public record ConnectionInput(String name, String site, String startUrl) {}
 
   public record RenameInput(String name, Long expectedVersion) {}
 
   public record LoginInput(
-      String action, String viewerId, String accountLabel, String accountSubject) {}
+      String action, String viewerId, String accountLabel, String accountSubject,
+      UUID pageVisitId) {}
 
   public record ControlInput(
       String type,

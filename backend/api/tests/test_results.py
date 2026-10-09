@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -63,11 +64,28 @@ process.stdout.write(result.outputFiles[0].text);
         self.assertEqual(0, checked.returncode, checked.stderr[-3000:])
 
     def test_published_widget_contains_executable_module_javascript(self):
-        resources = self.user.rpc("resources/list", {})["resources"]
+        resources = [resource for resource in self.user.rpc("resources/list", {})["resources"]
+                     if resource["uri"].startswith("ui://helmglass/task-")]
         self.assertEqual(1, len(resources))
         uri = resources[0]["uri"]
         resource = self.user.rpc("resources/read", {"uri": uri})
         html = resource["contents"][0]["text"]
+        class InitialPanels(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.elements = {}
+
+            def handle_starttag(self, tag, attributes):
+                attributes = dict(attributes)
+                if attributes.get("id") in ("steps-panel", "session-panel", "steps-toggle", "session-toggle"):
+                    self.elements[attributes["id"]] = attributes
+
+        panels = InitialPanels()
+        panels.feed(html)
+        for panel in ("steps", "session"):
+            self.assertIn("hidden", panels.elements[panel + "-panel"],
+                          "Initially collapsed panels must not cover the browser")
+            self.assertEqual("false", panels.elements[panel + "-toggle"].get("aria-expanded"))
         digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
         self.assertEqual("ui://helmglass/task-" + digest + ".html", uri,
                          "Changed widget bytes must have a different host cache identity")
@@ -245,11 +263,10 @@ process.stdout.write(result.outputFiles[0].text);
                     break
                 time.sleep(0.25)
             self.assertEqual("SUCCEEDED", receipt["status"])
-            for command in ("PAUSE", "RESUME"):
-                task = self.user.api("/api/tasks/" + task_id)[1]
-                status, _ = self.user.api("/api/tasks/" + task_id + "/commands", "POST",
-                                         {"type": command, "expectedVersion": task["version"]})
-                self.assertEqual(200, status)
+            task = self.user.return_control_without_continuing(task_id)
+            status, _ = self.user.api("/api/tasks/" + task_id + "/commands", "POST",
+                                     {"type": "RESUME", "expectedVersion": task["version"]})
+            self.assertEqual(200, status)
             self.assertEqual("PENDING", self.user.tool("widget.state", widget)[1]["continuationStatus"])
             self.assertFalse(self.user.execute_in_scenario_step({"taskId": task_id, "action": original})[0])
             self.assertEqual("PENDING", self.user.tool("widget.state", widget)[1]["continuationStatus"],

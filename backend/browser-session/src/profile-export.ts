@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { BrowserContext, Cookie, Page } from "playwright";
 import type { Writable } from "node:stream";
 import { installProfileCodec } from "./profile-page.js";
 import { ProfileExportError, profileLimits, writeProfileChunk } from "./profile-format.js";
@@ -8,24 +8,79 @@ export function cookieMatchesHost(domain: string, hostname: string): boolean {
   return domain.startsWith(".") ? hostname === domain.slice(1) || hostname.endsWith(domain) : hostname === domain;
 }
 
+export function checkCookies(cookies: readonly Cookie[], origins: readonly URL[], checkedAt = new Date()) {
+  const now = checkedAt.getTime() / 1000;
+  let usableCount = 0;
+  for (const cookie of cookies) {
+    if ((cookie.expires === -1 || cookie.expires > now)
+        && origins.some(origin => cookieMatchesHost(cookie.domain, origin.hostname)
+          && (!cookie.secure || origin.protocol === "https:"))) usableCount++;
+  }
+  return { usableCount, checkedAt: checkedAt.toISOString() };
+}
+
+export function trackLoginOrigins(
+  context: BrowserContext, origins: Set<string>, active: () => boolean,
+  revision: () => number = () => 0,
+): () => Promise<void> {
+  const pending = new Set<Promise<void>>();
+  let failedRevision: number | undefined;
+  let closed = false;
+  context.once("close", () => { closed = true; });
+  const retain = (url: URL) => {
+    // One excess origin makes an oversized scope fail explicitly instead of truncating it.
+    if (origins.size <= 50 && (url.protocol === "http:" || url.protocol === "https:")) origins.add(url.origin);
+  };
+  context.on("request", (request) => {
+    if (active() && request.isNavigationRequest()) retain(new URL(request.url()));
+  });
+  context.on("response", (response) => {
+    if (!active() || origins.size > 50) return;
+    const url = new URL(response.url());
+    if (origins.has(url.origin) || !["http:", "https:"].includes(url.protocol)) return;
+    const observedRevision = revision();
+    // Bound outstanding metadata reads too; an incomplete snapshot must not be saved.
+    if (pending.size >= 128) { failedRevision = observedRevision; return; }
+    const inspection = response.headerValue("set-cookie").then((cookie) => {
+      if (cookie && !closed && observedRevision === revision()) retain(url);
+    }).catch(() => { if (!closed && observedRevision === revision()) failedRevision = observedRevision; })
+      .finally(() => pending.delete(inspection));
+    pending.add(inspection);
+  });
+  return async () => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // Playwright's raw-header reads have no timeout. A missing network event must
+      // not leave FINISH_LOGIN holding the browser after its HTTP request expires.
+      await Promise.race([Promise.all(pending), new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new ProfileExportError(409,
+          "Login origin snapshot incomplete", "PROFILE_SNAPSHOT_CHANGED")), 20_000);
+      })]);
+    } finally { clearTimeout(timeout); }
+    if (failedRevision === revision()) throw new ProfileExportError(409,
+      "Login origin snapshot incomplete", "PROFILE_SNAPSHOT_CHANGED");
+  };
+}
+
 export async function exportProfile(selected: Page, origins: string[], output: Writable, candidate: unknown = null): Promise<void> {
   const context = selected.context();
-  const hosts = origins.map((origin) => new URL(origin).hostname);
-  const readCookies = async () => (await context.cookies()).filter((cookie) => hosts.some((host) => cookieMatchesHost(cookie.domain, host)));
-  const cookies = await readCookies();
+  const scope = origins.map((origin) => new URL(origin));
+  const cookies = (await context.cookies()).filter((cookie) => scope.some((origin) => cookieMatchesHost(cookie.domain, origin.hostname)));
   if (cookies.length > 10_000) throw new ProfileExportError(413, "Too many cookies", "PROFILE_COMPLEXITY_LIMIT");
-  const cookieJson = JSON.stringify(cookies);
+  const cookieCheck = checkCookies(cookies, scope);
   let total = 0;
   const write = async (text: string) => {
     const bytes = Buffer.from(text); total += bytes.length;
     if (total > profileLimits.total) throw new ProfileExportError(413, "Profile exceeds 256 MiB", "PROFILE_TOO_LARGE");
     await writeProfileChunk(output, bytes);
   };
-  await write(JSON.stringify({ type: "header", version: 2, origins, candidate }) + "\n");
+  // Credentials and snapshot diagnostics travel in the envelope, outside the profile digest.
+  total = Buffer.byteLength(JSON.stringify({ type: "header", version: 2, origins }) + "\n");
+  await writeProfileChunk(output, Buffer.from(JSON.stringify({ type: "header", version: 2, origins, candidate, cookieCheck }) + "\n"));
   for (const value of cookies) await write(JSON.stringify({ type: "cookie", value }) + "\n");
   const page = await context.newPage();
-  const cdp = await context.newCDPSession(page);
   try {
+    const cdp = await context.newCDPSession(page);
     await cdp.send("Network.setBypassServiceWorker", { bypass: true });
     await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Saving connection</title>" }));
     await page.exposeBinding("__helmProfileWrite", async (source, value: unknown) => {
@@ -107,18 +162,18 @@ export async function exportProfile(selected: Page, origins: string[], output: W
                     await new Promise<void>((resolve, reject) => {
                       // Cursor requests must run in an active IDB callback, including after I/O.
                       schedule(() => {
-                      const cursor = store.openCursor();
-                      cursor.onerror = () => reject(new Error("PROFILE_SNAPSHOT_CHANGED"));
-                      cursor.onsuccess = () => {
-                        const row = cursor.result;
-                        if (!row) { resolve(); return; }
-                        try {
-                          const value = { type: "record", store: name, valueEncoded: encode(row.value), ...(store.keyPath === null ? { keyEncoded: encode(row.key) } : {}) };
-                          void emit(value).then(() => schedule(() => {
-                            try { row.continue(); } catch (error) { reject(error); }
-                          }), reject).catch(reject);
-                        } catch (error) { reject(error); }
-                      };
+                        const cursor = store.openCursor();
+                        cursor.onerror = () => reject(new Error("PROFILE_SNAPSHOT_CHANGED"));
+                        cursor.onsuccess = () => {
+                          const row = cursor.result;
+                          if (!row) { resolve(); return; }
+                          try {
+                            const value = { type: "record", store: name, valueEncoded: encode(row.value), ...(store.keyPath === null ? { keyEncoded: encode(row.key) } : {}) };
+                            void emit(value).then(() => schedule(() => {
+                              try { row.continue(); } catch (error) { reject(error); }
+                            }), reject).catch(reject);
+                          } catch (error) { reject(error); }
+                        };
                       });
                     });
                   }
@@ -140,13 +195,14 @@ export async function exportProfile(selected: Page, origins: string[], output: W
         throw new ProfileExportError(status, "Profile export failed", result.code);
       }
     }
-    if (JSON.stringify(await readCookies()) !== cookieJson) throw new ProfileExportError(409, "Cookies changed during export", "PROFILE_SNAPSHOT_CHANGED");
     await write('{"type":"end"}\n');
   } catch (error) {
     if (error instanceof ProfileExportError && !output.destroyed) await writeProfileChunk(output, Buffer.from(JSON.stringify({ type: "error", code: error.code }) + "\n"));
     throw error;
   } finally {
-    await cdp.detach(); await page.close();
+    // Closing the temporary target also releases its CDP sessions. Explicit
+    // detach can wait indefinitely on a renderer left by cross-site navigation.
+    await page.close();
     if (!selected.isClosed()) await selected.bringToFront();
   }
 }

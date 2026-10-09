@@ -74,8 +74,14 @@ public class EventService {
         change -> true);
   }
 
-  public synchronized SseEmitter subscribe(
+  public SseEmitter subscribe(
       UUID owner, Long cursor, BooleanSupplier authorized, Predicate<Change> visible) {
+    return subscribe(owner, cursor, authorized, visible, () -> {});
+  }
+
+  public synchronized SseEmitter subscribe(
+      UUID owner, Long cursor, BooleanSupplier authorized, Predicate<Change> visible,
+      Runnable heartbeat) {
     if (!authorized.getAsBoolean()) {
       throw ru.helmglass.api.auth.Identity.denied("Доступ к событиям завершён.");
     }
@@ -91,7 +97,7 @@ public class EventService {
     SseEmitter emitter = new SseEmitter(0L);
     UUID id = UUID.randomUUID();
     Subscription subscription =
-        new Subscription(owner, emitter, start, highWater, authorized, visible);
+        new Subscription(owner, emitter, start, highWater, authorized, visible, heartbeat);
     emitter.onCompletion(() -> subscriptions.remove(id));
     emitter.onTimeout(() -> subscriptions.remove(id));
     emitter.onError(error -> subscriptions.remove(id));
@@ -140,8 +146,15 @@ WHERE owner_id=:owner AND sequence>:cursor AND sequence<=:highWater ORDER BY seq
   @Scheduled(fixedDelay = 20000)
   void heartbeat() {
     for (var entry : subscriptions.entrySet()) {
+      Subscription subscription = entry.getValue();
       try {
-        entry.getValue().emitter.send(SseEmitter.event().comment("connection"));
+        if (!subscription.authorized.getAsBoolean()) {
+          subscription.emitter.complete();
+          subscriptions.remove(entry.getKey());
+          continue;
+        }
+        subscription.emitter.send(SseEmitter.event().comment("connection"));
+        subscription.heartbeat.run();
       } catch (IOException | IllegalStateException exception) {
         entry.getValue().emitter.complete();
         subscriptions.remove(entry.getKey());
@@ -186,6 +199,7 @@ WHERE owner_id=:owner AND sequence>:cursor AND sequence<=:highWater ORDER BY seq
     private final SseEmitter emitter;
     private final BooleanSupplier authorized;
     private final Predicate<Change> visible;
+    private final Runnable heartbeat;
     private volatile long cursor;
     private final long highWater;
     private volatile boolean caughtUp;
@@ -196,13 +210,15 @@ WHERE owner_id=:owner AND sequence>:cursor AND sequence<=:highWater ORDER BY seq
         long cursor,
         long highWater,
         BooleanSupplier authorized,
-        Predicate<Change> visible) {
+        Predicate<Change> visible,
+        Runnable heartbeat) {
       this.owner = owner;
       this.emitter = emitter;
       this.cursor = cursor;
       this.highWater = highWater;
       this.authorized = authorized;
       this.visible = visible;
+      this.heartbeat = heartbeat;
     }
   }
 }

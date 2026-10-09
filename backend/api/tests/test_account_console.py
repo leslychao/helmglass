@@ -50,6 +50,40 @@ class AccountConsoleTest(unittest.TestCase):
         Image.new('RGB', size, (41, 89, 161)).save(output, format=format)
         return output.getvalue()
 
+    def test_avatar_head_requests_do_not_retain_file_descriptors(self):
+        identity = dev.DisposableIdentity(self.settings, self.template)
+        self.addCleanup(self.purge_identity, identity)
+        client = identity.client()
+        profile = client.login_web()
+        content = self.picture('PNG')
+        status, profile = self.upload(client, 'Resource lifetime', profile['version'], content)
+        self.assertEqual(200, status)
+        directory = '/data/artifacts/profiles/' + str(uuid.UUID(identity.id))
+
+        def descriptors():
+            result = subprocess.run([
+                'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+                'exec', '--user', '10001:10001', 'helmglass-api-1', 'find', '/proc/1/fd',
+                '-maxdepth', '1', '-lname', directory + '/*', '-printf', '.'],
+                capture_output=True, text=True, encoding='utf-8', timeout=15)
+            self.assertEqual(0, result.returncode, 'Could not inspect owned avatar descriptors')
+            return len(result.stdout)
+
+        before = descriptors()
+        for _ in range(20):
+            status, body, headers = client.request(client.base + profile['avatarUrl'], 'HEAD')
+            self.assertEqual(200, status)
+            self.assertEqual(b'', body)
+            self.assertEqual(len(content), int(headers['Content-Length']))
+        after = descriptors()
+        print(json.dumps({'avatarDescriptorsBefore': before, 'after20HeadRequests': after}))
+        self.assertEqual(before, after, 'HEAD must not leave an unread avatar stream open')
+        for _ in range(5):
+            status, body, _ = client.request(client.base + profile['avatarUrl'])
+            self.assertEqual(200, status)
+            self.assertEqual(content, body)
+        self.assertEqual(before, descriptors(), 'Completed GET must close its avatar stream')
+
     def test_profile_name_avatar_atomic_validation_replay_and_purge(self):
         identity = dev.DisposableIdentity(self.settings, self.template)
         client = identity.client()

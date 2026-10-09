@@ -8,6 +8,7 @@ export class LiveEvents implements OnDestroy {
   private source: EventSource | null = null;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private cursor = '';
+  private browserVisit: string | null = null;
   private attempts = 0;
   private stopped = true;
   private refreshes = 0;
@@ -37,12 +38,23 @@ export class LiveEvents implements OnDestroy {
     this.source?.close();
     this.source = null;
     this.cursor = '';
+    this.browserVisit = null;
     this.synchronized = false;
     this.state.set('idle');
   }
   reconnect() {
     this.attempts = 0;
     this.connect();
+  }
+  followBrowserPage(visit: string) {
+    if (this.browserVisit === visit) return;
+    this.browserVisit = visit;
+    this.reconnect();
+  }
+  leaveBrowserPage(visit: string) {
+    if (this.browserVisit !== visit) return;
+    this.browserVisit = null;
+    this.reconnect();
   }
   beginRefresh() {
     const tracked = this.state() === 'syncing';
@@ -66,9 +78,10 @@ export class LiveEvents implements OnDestroy {
     this.synchronized = false;
     this.refreshFailed = false;
     this.state.set('syncing');
-    const source = new EventSource(
-      '/api/events' + (this.cursor ? '?cursor=' + encodeURIComponent(this.cursor) : ''),
-    );
+    const query = new URLSearchParams();
+    if (this.cursor) query.set('cursor', this.cursor);
+    if (this.browserVisit) query.set('browserVisit', this.browserVisit);
+    const source = new EventSource('/api/events?' + query);
     this.source = source;
     source.addEventListener('change', (event) => {
       if (!(event instanceof MessageEvent) || source !== this.source) return;

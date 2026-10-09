@@ -48,7 +48,7 @@ export const states: Record<string, string> = {
   LOGIN: 'Нужен вход',
   LOGIN_REQUIRED: 'Нужен вход',
   MANUAL_CONTROL: 'Ручное управление',
-  CONNECTION_READY: 'Вход сохранён',
+  CONNECTION_READY: 'Сессия сохранена',
   ACTION: 'Нужно действие',
   SAVED: 'Вход сохранён',
   NEEDS_LOGIN: 'Нужен вход',
@@ -80,6 +80,7 @@ export class LabelPipe implements PipeTransform {
 export class DurationPipe implements PipeTransform {
   transform(value: number | null | undefined) {
     if (value === null || value === undefined) return 'Нет данных';
+    if (value > 0 && value < 1) return '< 1 с';
     const seconds = Math.floor(value),
       minutes = Math.floor(seconds / 60),
       hours = Math.floor(minutes / 60);

@@ -28,12 +28,12 @@ import { TableLayout, TableView } from './table-view';
     }
     <button
       type="button"
-      class="button table-columns-button"
+      class="icon-button control-button"
       (click)="open()"
       aria-label="Настроить столбцы"
       hgTooltip="Настроить столбцы"
     >
-      <hg-icon name="columns" /><span>Столбцы</span>
+      <hg-icon name="columns" />
     </button>
     <dialog
       #dialog

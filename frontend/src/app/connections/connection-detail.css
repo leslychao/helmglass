@@ -1,0 +1,29 @@
+.connection-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
+.connection-card { min-width: 0; padding: 0; overflow: hidden; }
+.connection-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px 24px; border-bottom: 1px solid #edf1f6; }
+.connection-card-heading h2 { display: flex; align-items: center; gap: 12px; margin: 0; font-size: 15px; }
+.connection-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; color: #2563eb; background: #edf3ff; }
+.connection-mark hg-icon { width: 18px; height: 18px; }
+.connection-card-body { padding: 12px 24px 24px; }
+.connection-facts { margin: 0; }
+.connection-facts > div { display: flex; align-items: baseline; justify-content: space-between; gap: 24px; padding: 17px 0; border-bottom: 1px solid #edf1f6; font-size: 13px; }
+.connection-facts dt { color: #7b8da3; }
+.connection-facts dd { margin: 0; text-align: right; color: #344b67; font-weight: 600; overflow-wrap: anywhere; }
+.connection-launch { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 28px 0 22px; }
+.connection-open { min-height: 44px; min-width: 230px; justify-content: center; text-decoration: none; }
+.connection-launch p { margin: 0; font-size: 12px; color: #7b8da3; text-align: center; }
+.connection-privacy { margin: 0; padding-top: 18px; border-top: 1px solid #edf1f6; color: #7b8da3; font-size: 12px; line-height: 1.7; }
+.connection-events { margin: 0; padding: 24px; list-style: none; }
+.connection-events li { display: flex; align-items: flex-start; gap: 14px; }
+.connection-events li + li { margin-top: 24px; }
+.event-dot { width: 9px; height: 9px; flex: 0 0 9px; margin-top: 5px; border-radius: 50%; background: #2563eb; box-shadow: 0 0 0 3px #edf3ff; }
+.connection-events h3 { margin: 0 0 6px; color: #344b67; font-size: 12px; font-weight: 600; }
+.connection-events p { margin: 0; color: #7b8da3; font-size: 11px; }
+@media (max-width: 860px) { .connection-layout { grid-template-columns: minmax(0, 1fr); gap: 18px; } }
+@media (max-width: 480px) {
+  .connection-card-heading { padding: 18px; gap: 10px; flex-wrap: wrap; }
+  .connection-card-body { padding: 8px 18px 18px; }
+  .connection-facts > div { gap: 16px; }
+  .connection-open { width: 100%; min-width: 0; }
+  .connection-events { padding: 20px 18px; }
+}

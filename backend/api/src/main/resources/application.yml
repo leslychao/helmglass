@@ -38,5 +38,7 @@ helm:
   jwk-set-uri: ${KEYCLOAK_INTERNAL_URL}/realms/helmglass/protocol/openid-connect/certs
   worker-url: ${WORKER_URL}
   worker-token: ${WORKER_TOKEN}
+  audio-url: http://audio-processor:8092
+  audio-token: ${AUDIO_TOKEN}
   artifact-directory: /data/artifacts
   platform-browser-limit: 2

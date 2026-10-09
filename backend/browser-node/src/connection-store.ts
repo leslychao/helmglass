@@ -12,11 +12,12 @@ import { StorageError, Vault } from "./vault.js";
 export const Credential = z.object({ origin: z.url(), username: z.string().min(1).max(500), password: z.string().min(1).max(8192) }).strict();
 export type Credential = z.infer<typeof Credential>;
 export class CredentialConflict extends Error {}
-const Profile = z.object({ file: z.uuid(), revision: z.number().int().positive(), savedAt: z.string(), origins: z.array(z.url()).max(50), nonce: z.string(), tag: z.string(), wrappedKey: z.string(), digest: z.string(), operationId: z.string() });
+export const CookieCheck = z.object({ usableCount: z.number().int().min(0).max(10_000), checkedAt: z.iso.datetime() });
+const Profile = z.object({ file: z.uuid(), revision: z.number().int().positive(), savedAt: z.string(), origins: z.array(z.url()).max(50), nonce: z.string(), tag: z.string(), wrappedKey: z.string(), digest: z.string(), operationId: z.string(), cookieCheck: CookieCheck.optional() });
 const Secret = z.object({ owner: z.string(), connectionId: z.string(), profile: Profile.optional(), credential: z.object({ revision: z.number().int().nonnegative(), operationId: z.string(), value: Credential.nullable() }) });
 type Secret = z.infer<typeof Secret>;
 const Pending = z.object({ id: z.string(), owner: z.string(), operationId: z.string(), expectedVersion: z.number().int().nonnegative(), wrappedKey: z.string(), nonce: z.string(), tag: z.string(), encrypted: z.string(), file: z.uuid(), previousFile: z.uuid().optional() });
-const Header = z.object({ type: z.literal("header"), version: z.literal(2), origins: z.array(z.url()).min(1).max(50), candidate: z.object({ operationId: z.string(), expectedRevision: z.number().int().nonnegative(), credential: Credential }).nullable().optional() });
+const Header = z.object({ type: z.literal("header"), version: z.literal(2), origins: z.array(z.url()).min(1).max(50), candidate: z.object({ operationId: z.string(), expectedRevision: z.number().int().nonnegative(), credential: Credential }).nullable().optional(), cookieCheck: CookieCheck.optional() });
 
 export class ConnectionStore {
   private readonly directory: string;
@@ -172,7 +173,7 @@ export class ConnectionStore {
           const directory = await open(this.directory, "r"); try { await directory.sync(); } finally { await directory.close(); }
           const contentDigest = digest.digest("hex");
           const unchanged = previous?.data.profile?.digest === contentDigest ? previous.data.profile : undefined;
-          const profile = { file, revision: legacy?.revision ?? unchanged?.revision ?? (previous?.data.profile?.revision ?? 0) + 1, savedAt: legacy?.savedAt ?? unchanged?.savedAt ?? new Date().toISOString(), origins: header.origins, nonce: nonce.toString("base64"), tag: cipher.getAuthTag().toString("base64"), wrappedKey: key.wrapped, digest: contentDigest, operationId };
+          const profile = { file, revision: legacy?.revision ?? unchanged?.revision ?? (previous?.data.profile?.revision ?? 0) + 1, savedAt: legacy?.savedAt ?? unchanged?.savedAt ?? new Date().toISOString(), origins: header.origins, nonce: nonce.toString("base64"), tag: cipher.getAuthTag().toString("base64"), wrappedKey: key.wrapped, digest: contentDigest, operationId, cookieCheck: header.cookieCheck };
           const data: Secret = { owner, connectionId: id, profile, credential };
           const commitNonce = randomBytes(12); const commit = createCipheriv("aes-256-gcm", key.plain, commitNonce);
           commit.setAAD(this.aad(owner, id, "profile-commit-v2"));

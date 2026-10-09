@@ -21,6 +21,9 @@ test('original Blob bytes, lost-response receipt, deduplication and cancelled tr
   try {
     assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
     await request(base + '/control', { controlEpoch: epoch, owner: 'CHATGPT', privateMode: false });
+    assert.equal((await request(base + '/commands', command('waitFor', {
+      selector: 'body[data-ready="true"]',
+    }))).status, 'SUCCEEDED', 'Synthetic audio generation must finish before observing its metadata');
     const observation = await request(base + '/observe');
     const original = JSON.parse(observation.text.match(/\{"sizeBytes":.*?\}/)[0]);
     const listed = await request(base + '/commands', command('listMedia', {}));

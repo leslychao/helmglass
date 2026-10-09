@@ -24,13 +24,16 @@ hg-task-list > hg-kpi-section {
 }
 .task-cell-meta {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: flex-start;
   flex-wrap: wrap;
-  gap: 7px;
+  gap: 8px;
   font-size: 11px;
   color: #93a0b5;
   margin-top: 4px;
+}
+.task-cell-meta > small {
+  margin-top: 0;
 }
 .task-short-id {
   font-family: ui-monospace, Consolas, monospace;
@@ -664,6 +667,12 @@ hg-result .file-row small {
   font-size: 11px;
   color: var(--muted);
 }
+hg-usage .table-card > .section-heading {
+  padding: 8px var(--table-inset);
+}
+hg-usage .table-card > .section-heading h2 {
+  font-size: 14px;
+}
 .chart-note,
 .usage-footnote {
   font-size: 11px;
@@ -674,6 +683,7 @@ hg-result .file-row small {
 .site-usage {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 14px;
 }
 .site-usage > span {
@@ -1398,6 +1408,7 @@ hg-result .result-summary > p {
   color: var(--ink);
 }
 .result-data {
+  --table-inset: 0px;
   margin-top: 24px;
 }
 .result-data > .toolbar {

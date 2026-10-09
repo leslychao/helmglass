@@ -16,7 +16,7 @@ export async function writeProfileChunk(output: Writable, bytes: Uint8Array): Pr
 export async function* profileRecords(input: AsyncIterable<Uint8Array>): AsyncGenerator<unknown> {
   let total = 0;
   let length = 0;
-  let parts: Buffer[] = [];
+  const record = Buffer.allocUnsafe(profileLimits.record);
   for await (const raw of input) {
     const chunk = Buffer.from(raw);
     total += chunk.length;
@@ -26,13 +26,12 @@ export async function* profileRecords(input: AsyncIterable<Uint8Array>): AsyncGe
       const newline = chunk.indexOf(10, start);
       const end = newline < 0 ? chunk.length : newline;
       const part = chunk.subarray(start, end);
-      length += part.length;
-      if (length + (newline < 0 ? 0 : 1) > profileLimits.record) throw new ProfileExportError(413, "Profile record exceeds 16 MiB", "PROFILE_RECORD_TOO_LARGE");
-      if (part.length) parts.push(part);
+      if (length + part.length + (newline < 0 ? 0 : 1) > profileLimits.record) throw new ProfileExportError(413, "Profile record exceeds 16 MiB", "PROFILE_RECORD_TOO_LARGE");
+      part.copy(record, length); length += part.length;
       if (newline < 0) break;
       if (!length) throw new ProfileExportError(422, "Empty profile record", "PROFILE_INVALID");
-      const text = Buffer.concat(parts, length).toString("utf8");
-      parts = []; length = 0;
+      const text = record.toString("utf8", 0, length);
+      length = 0;
       yield JSON.parse(text);
       start = newline + 1;
     }

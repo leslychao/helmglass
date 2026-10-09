@@ -21,6 +21,22 @@ const historyStatus = element('history-state', HTMLParagraphElement);
 const steps = element('steps', HTMLOListElement);
 const stepsToggle = element('steps-toggle', HTMLButtonElement);
 const stepsPanel = element('steps-panel', HTMLElement);
+const sessionPanel = element('session-panel', HTMLElement);
+const sessionToggle = element('session-toggle', HTMLButtonElement);
+const videoToggle = element('video-toggle', HTMLButtonElement);
+const expandButton = element('expand', HTMLButtonElement);
+const idleWarning = element('idle-warning', HTMLElement);
+const idleCountdown = element('idle-countdown', HTMLSpanElement);
+const keepOpen = element('keep-open', HTMLButtonElement);
+let keepOpenAttempt: { browserId: string; generation: string; key: string } | undefined;
+const stepsSearch = element('steps-search', HTMLInputElement);
+const stepsPrevious = element('steps-prev', HTMLButtonElement);
+const stepsNext = element('steps-next', HTMLButtonElement);
+let videoEnabled = true;
+let expanded = false;
+let historyPage = 1;
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let sessionTimer: ReturnType<typeof setInterval> | undefined;
 const viewport = element('viewport', HTMLElement);
 const app = new App({ name: 'Helm Glass', version: '1.0.0' }, {});
 const viewerId = crypto.randomUUID();
@@ -103,16 +119,21 @@ function renderNotice(): void {
 }
 
 function renderBrowser(): void {
+  renderIdle();
   const browser = current?.task.browser;
   if (finishedStatuses.has(current?.task.status ?? '') || browser?.status === 'CLOSED') {
     viewer.hidden = true;
-    browserState.hidden = true;
-    browserState.textContent = '';
+    browserState.hidden = false;
+    browserState.textContent = browser?.status === 'CLOSED'
+      ? (browser.closeReason === 'IDLE_TIMEOUT' ? 'Браузер закрыт после 15 минут бездействия. ' : 'Браузер закрыт. ')
+        + 'Возобновить браузер и задачу можно в Helm Glass; шаги и результаты сохранены.'
+      : 'Задача завершена. Шаги и результаты доступны в Helm Glass.';
     return;
   }
-  viewer.hidden = !browserConnected || !syncReady || !browser || browser.privateMode || browser.status !== 'LIVE';
+  viewer.hidden = !videoEnabled || !browserConnected || !syncReady || !browser || browser.privateMode || browser.status !== 'LIVE';
   browserState.hidden = !viewer.hidden;
-  browserState.textContent = browser?.privateMode ? 'Защищённый вход открыт в Helm Glass.'
+  browserState.textContent = !videoEnabled ? 'Трансляция остановлена. Включите её, чтобы видеть браузер.'
+    : browser?.privateMode ? 'Защищённый вход открыт в Helm Glass.'
     : !syncReady ? 'Восстанавливаем актуальное состояние браузера…'
     : browserError || (browser?.status === 'LIVE' ? 'Подключаем просмотр браузера…'
       : browser?.status === 'LOST' ? 'Браузер утрачен. Для продолжения требуется восстановление.'
@@ -128,12 +149,42 @@ function args(): { taskId: string; generation: string } {
   return { taskId: current.task.id, generation: current.generation };
 }
 
+function renderIdle(): void {
+  const browser = current?.task.browser;
+  const seconds = browser?.idleCloseAt ? Math.max(0, Math.ceil((Date.parse(browser.idleCloseAt) - Date.now()) / 1000)) : null;
+  idleWarning.hidden = !validated || !syncReady || superseded || tornDown || browser?.status !== 'LIVE'
+    || seconds === null || seconds > 300;
+  if (seconds !== null) idleCountdown.textContent = 'Браузер закроется из-за простоя через '
+    + Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0') + '. Задача сохранится. ';
+}
+
+keepOpen.addEventListener('click', async () => {
+  if (!current?.task.browser || !validated || !syncReady || superseded || tornDown || keepOpen.disabled) return;
+  const binding = args();
+  const session = current.task.browser.id;
+  keepOpen.disabled = true;
+  if (keepOpenAttempt?.browserId !== session || keepOpenAttempt.generation !== binding.generation)
+    keepOpenAttempt = { browserId: session, generation: binding.generation, key: crypto.randomUUID() };
+  try {
+    const result = await tool('widget.keep-open', { ...binding, browserId: session, operationKey: keepOpenAttempt.key });
+    keepOpenAttempt = undefined;
+    if (!tornDown && !superseded && current?.generation === binding.generation)
+      render(presentationSchema.parse(result.structuredContent));
+  } catch {
+    notice('Продление браузера не подтверждено. Проверьте связь и повторите действие.', true);
+  } finally {
+    keepOpen.disabled = false;
+  }
+});
+
 function retirePresentation(): void {
   superseded = true;
   validated = false;
   syncReady = false;
   historyGeneration++;
   element('card', HTMLElement).classList.add('superseded');
+  clearInterval(sessionTimer);
+  clearTimeout(searchTimer);
   element('content', HTMLElement).inert = true;
   cabinet.disabled = true;
   events?.close();
@@ -176,12 +227,34 @@ function render(next: Presentation): void {
   status.textContent = labels[next.task.status] ?? next.task.status;
   status.setAttribute('data-status', next.task.status);
   element('summary', HTMLSpanElement).textContent = next.task.summary ?? '';
+  const audioPanel = element('audio-analysis', HTMLElement);
+  audioPanel.hidden = next.audio.length === 0;
+  audioPanel.replaceChildren();
+  for (const analysis of next.audio) {
+    const row = document.createElement('p');
+    row.textContent = analysis.name + ' · ' + (labels[analysis.status] ?? analysis.status)
+      + ' · Текст ' + (analysis.transcriptComplete ? 'готов' : 'не завершён')
+      + (analysis.mode === 'full' ? ' · Измерения ' + (analysis.acousticsComplete ? 'готовы' : 'не завершены')
+        + ' · Эмоции ' + (analysis.emotionsComplete ? 'готовы' : 'не завершены') : '')
+      + (analysis.errorCode ? ' · ' + analysis.errorCode : '');
+    audioPanel.append(row);
+  }
+  if (next.audio.length) {
+    const note = document.createElement('p');
+    note.textContent = 'Последние 10 анализов. Оценки эмоций не являются вероятностями чувств; голоса не разделяются.';
+    audioPanel.append(note);
+  }
   const finished = finishedStatuses.has(next.task.status);
-  element('content', HTMLElement).inert = finished;
-  cabinet.disabled = finished || !metadata;
-  stepsToggle.disabled = finished;
+  element('content', HTMLElement).inert = false;
+  cabinet.disabled = !metadata;
   cabinet.textContent = needsLogin() ? 'Войти на сайт' : 'Открыть в Helm Glass';
   const browser = next.task.browser;
+  element('event-count', HTMLSpanElement).textContent = String(next.task.stepCount);
+  videoToggle.disabled = !browser || ['CLOSED', 'LOST'].includes(browser.status);
+  renderSession();
+  if (!sessionTimer && browser?.startedAt && !browser.closedAt) {
+    sessionTimer = setInterval(renderClock, 1000);
+  }
   address.textContent = browser?.privateMode ? 'Защищённый вход' : 'Браузер подготавливается';
   if (browser?.currentUrl && !browser.privateMode) {
     try {
@@ -191,7 +264,7 @@ function render(next: Presentation): void {
   }
   if (finished || !browser || browser.status !== 'LIVE' || browser.privateMode || browserId && browser.id !== browserId) closeViewer();
   renderBrowser();
-  if (!finished && syncReady && browser?.status === 'LIVE' && !browserId && !browserRetry && browserAttempts <= retryLimit) void openViewer();
+  if (videoEnabled && !finished && syncReady && browser?.status === 'LIVE' && !browserId && !browserRetry && browserAttempts <= retryLimit) void openViewer();
   if (historyDirty) void loadHistory();
   renderNotice();
   void continueTask();
@@ -269,7 +342,7 @@ function connectEvents(): void {
       historyDirty = true;
       void loadHistory();
     }
-    if (resource !== 'step') void refresh();
+    void refresh();
   });
   source.onerror = () => {
     if (events !== source || tornDown || superseded) return;
@@ -304,7 +377,9 @@ async function continueTask(): Promise<void> {
     const response = await app.sendMessage({ role: 'user', content: [{ type: 'text',
       text: 'Продолжи исходную задачу Helm Glass ' + pending.task.id
         + '. Сначала получи актуальное поручение через tasks.get; ревизия ' + pending.task.instructionRevision
-        + '. Покажи одну новую карточку через tasks.view в этом ответе и продолжай автономно. Не повторяй уже отправленные операции.' }] });
+        + '. Это автоматическое продолжение уже показанной задачи: сохраняй текущий виджет, он обновляется событиями.'
+        + ' Не вызывай tasks.view и не создавай новую карточку. Получи актуальное состояние страницы и продолжай автономно.'
+        + ' Не повторяй уже отправленные операции.' }] });
     if (!stillWaiting()) return;
     const sent = !response.isError;
     const reported = await tool('widget.continuation', { ...binding, sent,
@@ -337,7 +412,7 @@ function retryViewer(): void {
   browserConnected = false;
   browserError = 'Связь с браузером прервана. Восстанавливаем просмотр…';
   renderBrowser();
-  if (browserRetry || tornDown || superseded || !online) return;
+  if (!videoEnabled || browserRetry || tornDown || superseded || !online) return;
   if (++browserAttempts > retryLimit) {
     browserError = 'Просмотр временно недоступен. При возвращении в чат или восстановлении сети подключимся снова.';
     renderBrowser();
@@ -350,7 +425,7 @@ function retryViewer(): void {
 }
 
 async function openViewer(renew = false): Promise<void> {
-  if (!validated || !syncReady || !online || !current?.task.browser || !metadata || openingBrowser
+  if (!videoEnabled || !validated || !syncReady || !online || !current?.task.browser || !metadata || openingBrowser
       || finishedStatuses.has(current.task.status)
       || superseded || tornDown || current.task.browser.status !== 'LIVE'
       || current.task.browser.privateMode || browserId && !renew) return;
@@ -398,7 +473,7 @@ async function loadHistory(): Promise<void> {
   try {
     do {
       historyDirty = false;
-      const response = await tool('widget.steps', { page: 1 });
+      const response = await tool('widget.steps', { page: historyPage, search: stepsSearch.value });
       const content = response.content.find(item => item.type === 'text');
       const history = stepsSchema.parse(content?.type === 'text' ? JSON.parse(content.text) : null);
       if (superseded || tornDown || current.generation !== generation || request !== historyGeneration) return;
@@ -431,9 +506,16 @@ async function loadHistory(): Promise<void> {
         if (steps.children[index] !== view.row) steps.insertBefore(view.row, steps.children[index] ?? null);
       }
       element('steps-count', HTMLSpanElement).textContent = 'Шаги: ' + history.total;
-      element('event-count', HTMLSpanElement).textContent = 'Всего шагов: ' + history.total;
-      historyStatus.textContent = history.total === 0 ? 'Бизнес-шаги для этой задачи не записаны.' : '';
+      const pages = Math.max(1, Math.ceil(history.total / history.pageSize));
+      stepsPrevious.disabled = historyPage <= 1;
+      stepsNext.disabled = historyPage >= pages;
+      element('steps-page', HTMLSpanElement).textContent = historyPage + ' / ' + pages;
       historyStatus.hidden = history.total !== 0;
+      historyStatus.textContent = '';
+      if (history.total === 0) {
+        historyStatus.textContent = stepsSearch.value.trim()
+          ? 'По запросу шаги не найдены.' : 'Бизнес-шаги для этой задачи не записаны.';
+      }
     } while (historyDirty && !superseded && !tornDown);
   } catch {
     if (!superseded && !tornDown && request === historyGeneration) {
@@ -514,6 +596,9 @@ function offline(): void {
   retryTimer = undefined;
   dirty = false;
   historyGeneration++;
+  clearTimeout(searchTimer);
+  clearInterval(sessionTimer);
+  sessionTimer = undefined;
   historyDirty = true;
   closeViewer();
   connectionError = 'Нет сети. Последний кадр скрыт; просмотр восстановится после подключения.';
@@ -526,6 +611,8 @@ app.onteardown = async () => {
   historyGeneration++;
   events?.close();
   clearTimeout(retryTimer);
+  clearTimeout(searchTimer);
+  clearInterval(sessionTimer);
   closeViewer();
   window.removeEventListener('online', recover);
   window.removeEventListener('offline', offline);
@@ -534,7 +621,7 @@ app.onteardown = async () => {
 };
 
 cabinet.addEventListener('click', () => {
-  if (metadata && validated && !superseded && !finishedStatuses.has(current?.task.status ?? '')) {
+  if (metadata && validated && !superseded) {
     void app.openLink({ url: needsLogin() ? metadata.loginUrl : metadata.taskUrl })
       .then(result => { if (result.isError) notice('Не удалось открыть задачу в Helm Glass.', true); })
       .catch(() => notice('Не удалось открыть задачу в Helm Glass.', true));
@@ -542,14 +629,93 @@ cabinet.addEventListener('click', () => {
 });
 
 stepsToggle.addEventListener('click', () => {
-  if (superseded || tornDown || finishedStatuses.has(current?.task.status ?? '')) return;
+  if (superseded || tornDown) return;
   stepsPanel.hidden = !stepsPanel.hidden;
-  element('execution', HTMLElement).classList.toggle('steps-collapsed', stepsPanel.hidden);
+  sessionPanel.hidden = true;
+  updatePanels();
+});
+
+function updatePanels(): void {
+  element('execution', HTMLElement).classList.toggle('steps-collapsed', !!stepsPanel.hidden && !!sessionPanel.hidden);
   stepsToggle.setAttribute('aria-expanded', String(!stepsPanel.hidden));
   const label = stepsPanel.hidden ? 'Показать шаги' : 'Скрыть шаги';
   stepsToggle.setAttribute('aria-label', label);
   stepsToggle.title = label;
+  sessionToggle.setAttribute('aria-expanded', String(!sessionPanel.hidden));
+  if (!sessionPanel.hidden) {
+    renderSession();
+  }
+}
+
+function renderClock(): void {
+  renderIdle();
+  if (!sessionPanel.hidden) renderSession();
+}
+
+function renderSession(): void {
+  renderIdle();
+  const browser = current?.task.browser;
+  const states: Record<string, string> = { LIVE: 'Работает', CLOSED: 'Закрыт', LOST: 'Утрачен', CLOSING: 'Закрывается', STARTING: 'Запускается', QUEUED: 'Ожидает запуска', UNREACHABLE: 'Нет связи' };
+  element('session-id', HTMLElement).textContent = browser?.id ?? 'Нет данных';
+  element('session-status', HTMLElement).textContent = browser ? states[browser.status] ?? browser.status : 'Не запущен';
+  element('session-start', HTMLElement).textContent = browser?.startedAt ? new Date(browser.startedAt).toLocaleString('ru-RU') : 'Нет данных';
+  element('session-closed-row', HTMLElement).hidden = !browser?.closedAt;
+  element('session-closed', HTMLElement).textContent = browser?.closedAt ? new Date(browser.closedAt).toLocaleString('ru-RU') : '';
+  const seconds = browser?.startedAt ? Math.max(0, Math.floor(((browser.closedAt ? Date.parse(browser.closedAt) : Date.now()) - Date.parse(browser.startedAt)) / 1000)) : null;
+  element('session-duration', HTMLElement).textContent = seconds === null || !Number.isFinite(seconds) ? 'Нет данных' : [Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60), seconds % 60].map(value => String(value).padStart(2, '0')).join(':');
+  element('session-control', HTMLElement).textContent = browser?.controlOwner === 'USER' ? 'Пользователь в Helm Glass' : browser?.controlOwner === 'CHATGPT' ? 'Агент' : browser?.controlOwner === 'TRANSFERRING' ? 'Передача управления' : '—';
+  if (browser?.closedAt) { clearInterval(sessionTimer); sessionTimer = undefined; }
+}
+
+sessionToggle.addEventListener('click', () => {
+  if (superseded || tornDown) return;
+  sessionPanel.hidden = !sessionPanel.hidden;
+  stepsPanel.hidden = true;
+  updatePanels();
 });
+videoToggle.addEventListener('click', () => {
+  videoEnabled = !videoEnabled;
+  const label = videoEnabled ? 'Остановить трансляцию' : 'Возобновить трансляцию';
+  videoToggle.setAttribute('aria-label', label); videoToggle.title = label;
+  videoToggle.setAttribute('aria-pressed', String(!videoEnabled));
+  if (!videoEnabled) closeViewer(); else void openViewer();
+  renderBrowser();
+});
+element('copy-session', HTMLButtonElement).addEventListener('click', () => {
+  if (current?.task.browser) void navigator.clipboard.writeText(current.task.browser.id)
+    .then(() => notice('Идентификатор браузера скопирован.'))
+    .catch(() => notice('Выделите идентификатор и скопируйте его вручную.', true));
+});
+function changeHistoryPage(page: number): void {
+  historyPage = page; historyDirty = true;
+  void loadHistory();
+}
+stepsPrevious.addEventListener('click', () => changeHistoryPage(Math.max(1, historyPage - 1)));
+stepsNext.addEventListener('click', () => changeHistoryPage(historyPage + 1));
+stepsSearch.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  historyDirty = true;
+  searchTimer = setTimeout(() => changeHistoryPage(1), 250);
+});
+function displayModeChanged(mode = app.getHostContext()?.displayMode): void {
+  const context = app.getHostContext();
+  expanded = mode === 'fullscreen';
+  expandButton.hidden = !expanded && !context?.availableDisplayModes?.includes('fullscreen');
+  element('card', HTMLElement).classList.toggle('expanded', expanded);
+  const label = expanded ? 'Свернуть браузер' : 'Развернуть браузер';
+  expandButton.setAttribute('aria-label', label); expandButton.title = label;
+  document.getElementById('expand-path')?.setAttribute('d', expanded ? 'M3 8h5V3m13 5h-5V3M8 21v-5H3m13 5v-5h5' : 'M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5');
+}
+async function setDisplayMode(fullscreen: boolean): Promise<void> {
+  try {
+    const result = await app.requestDisplayMode({ mode: fullscreen ? 'fullscreen' : 'inline' });
+    displayModeChanged(result.mode);
+    if (!fullscreen) expandButton.focus();
+  } catch { notice('Чат не разрешил изменить размер просмотра.', true); }
+}
+expandButton.addEventListener('click', () => void setDisplayMode(!expanded));
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && expanded) void setDisplayMode(false); });
+app.onhostcontextchanged = () => displayModeChanged();
 
 window.addEventListener('online', recover);
 window.addEventListener('offline', offline);
@@ -560,6 +726,10 @@ window.addEventListener('message', event => {
       || typeof event.data !== 'object' || event.data === null || Reflect.get(event.data, 'type') !== 'helm-viewer'
       || Reflect.get(event.data, 'viewerEpoch') !== String(viewerGeneration)) return;
   const state = Reflect.get(event.data, 'state');
+  if (state === 'escape') {
+    if (expanded) void setDisplayMode(false);
+    return;
+  }
   const width = Reflect.get(event.data, 'width');
   const height = Reflect.get(event.data, 'height');
   if (typeof width === 'number' && Number.isInteger(width) && width > 0 && width <= 8192
@@ -580,5 +750,5 @@ window.addEventListener('message', event => {
   }
 });
 
-try { await app.connect(); }
+try { await app.connect(); displayModeChanged(); }
 catch { notice('Этот чат не поддерживает интерактивный виджет. Откройте задачу по ссылке Helm Glass в ответе инструмента.', true); }

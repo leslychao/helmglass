@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 class Element {
   contentWindow = { postMessage(message) { viewerMessages.push(message); } };
   listeners = new Map(); children = []; disabled = true; hidden = false;
-  classList = { add() {}, toggle() {} }; style = {};
+  classList = { add() {}, toggle() {} }; style = {}; value = "";
+  focus() {}
   addEventListener(type, callback) { this.listeners.set(type, callback); }
   removeAttribute(name) { delete this[name]; }
   setAttribute(name, value) { this[name] = value; }
@@ -15,15 +16,18 @@ class Element {
   click() { if (!this.disabled) this.listeners.get('click')?.(); }
 }
 for (const name of ['HTMLElement', 'HTMLHeadingElement', 'HTMLSpanElement', 'HTMLParagraphElement',
-  'HTMLIFrameElement', 'HTMLButtonElement', 'HTMLImageElement', 'HTMLOListElement']) globalThis[name] = Element;
+  'HTMLInputElement', 'HTMLIFrameElement', 'HTMLButtonElement', 'HTMLImageElement', 'HTMLOListElement']) globalThis[name] = Element;
 let elements, sources, app, call, send, capabilities, moduleId = 0;
 const messages = [], links = [], viewerMessages = [], timers = new Map(), windowListeners = new Map(), documentListeners = new Map();
+const intervals = new Map();
 let timerId = 0;
 globalThis.setTimeout = (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; };
 globalThis.clearTimeout = id => timers.delete(id);
+globalThis.setInterval = callback => { const id = ++timerId; intervals.set(id, callback); return id; };
+globalThis.clearInterval = id => intervals.delete(id);
 globalThis.document = {
   visibilityState: 'visible',
-  getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
+  getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); if (["steps-panel", "session-panel"].includes(id) && !elements.get(id).initialized) { elements.get(id).hidden = true; elements.get(id).initialized = true; } return elements.get(id); },
   createElement() { return new Element(); },
   addEventListener(type, callback) { documentListeners.set(type, callback); },
   removeEventListener(type, callback) { if (documentListeners.get(type) === callback) documentListeners.delete(type); },
@@ -49,6 +53,7 @@ globalThis.WidgetTestApp = class {
   constructor() { app = this; }
   connect() { return Promise.resolve(); }
   getHostCapabilities() { return capabilities; }
+  getHostContext() { return { displayMode: "inline", availableDisplayModes: ["inline"] }; }
   callServerTool(request) { return call(request); }
   sendMessage(message) { messages.push(message); return send(message); }
   openLink(link) { links.push(link); return Promise.resolve({}); }
@@ -61,7 +66,7 @@ const presentation = (status = 'IDLE', browser = null) => ({ generation: crypto.
   continuationStatus: status, continuationId: status === 'IDLE' ? null : crypto.randomUUID(),
   continuationRevision: status === 'IDLE' ? null : 1, continuationReason: null,
   task: { id: crypto.randomUUID(), title: 'Acceptance fixture', goal: 'Observe public page',
-    status: 'WAITING_CHATGPT', waitReason: null, summary: null, version: 1, instructionRevision: 1,
+    status: 'WAITING_CHATGPT', waitReason: null, summary: null, version: 1, instructionRevision: 1, stepCount: 20,
     browser, request: null, result: null } });
 const metadata = value => ({ publicUrl: 'https://helm.example',
   taskUrl: 'https://helm.example/tasks/' + value.task.id + '?tab=overview',
@@ -70,7 +75,7 @@ const metadata = value => ({ publicUrl: 'https://helm.example',
 const show = value => app.ontoolresult({ structuredContent: value, _meta: metadata(value) });
 const stale = response({ code: 'STALE_WIDGET', message: 'Newer presentation exists' });
 const ticket = text({ url: 'https://helm.example/browser/view?ticket=fixture', expiresAt: '2099-01-01T00:00:00Z' });
-const liveBrowser = () => ({ id: crypto.randomUUID(), status: 'LIVE', privateMode: false, version: 1,
+const liveBrowser = () => ({ id: crypto.randomUUID(), status: 'LIVE', privateMode: false, version: 1, controlOwner: 'CHATGPT', startedAt: '2026-10-09T00:00:00Z', closedAt: null, idleCloseAt: null, closeReason: null,
   currentUrl: 'https://secret-user:secret-password@site.example/work?token=secret#private' });
 const businessStepId = crypto.randomUUID();
 let businessStepVersion = 1;
@@ -120,7 +125,8 @@ call = request => {
   calls.push(request);
   if (request.name === 'widget.state') return Promise.resolve(response(state));
   if (request.name === 'widget.browser') return pendingTicket?.promise ?? Promise.resolve(ticket);
-  if (request.name === 'widget.steps') return Promise.resolve(history());
+  if (request.name === 'widget.steps') return Promise.resolve(request.arguments.search
+    ? text({ items: [], total: 0, page: 1, pageSize: 10 }) : history());
   throw new Error(request.name);
 };
 show(state); await settled();
@@ -130,20 +136,40 @@ viewerState('connected');
 assert.equal(elements.get('viewer').hidden, false);
 assert.equal(elements.get('address').textContent, 'https://site.example/work', 'Address must omit credentials, query and fragment');
 assert.equal(elements.get('steps').children.length, 1, 'Latest steps are visible without disclosure');
-assert.equal(elements.get('event-count').textContent, 'Всего шагов: 20');
+assert.equal(elements.get('event-count').textContent, '20');
 assert.ok(calls.filter(item => item.name === 'widget.steps').every(item => item.arguments.page === 1));
 assert.equal(elements.get('cabinet').textContent, 'Открыть в Helm Glass');
 const viewerSource = elements.get('viewer').src;
 const callsBeforeCollapse = calls.length;
 elements.get('steps-toggle').disabled = false;
 elements.get('steps-toggle').click();
-assert.equal(elements.get('steps-panel').hidden, true);
-assert.equal(elements.get('steps-toggle')['aria-expanded'], 'false');
-elements.get('steps-toggle').click();
 assert.equal(elements.get('steps-panel').hidden, false);
 assert.equal(elements.get('steps-toggle')['aria-expanded'], 'true');
+elements.get('steps-toggle').click();
+assert.equal(elements.get('steps-panel').hidden, true);
+assert.equal(elements.get('steps-toggle')['aria-expanded'], 'false');
 assert.equal(elements.get('viewer').src, viewerSource, 'Folding steps preserves the current viewer');
 assert.equal(calls.length, callsBeforeCollapse, 'Folding steps is a local presentation action');
+elements.get('session-toggle').disabled = false;
+elements.get('steps-toggle').click();
+elements.get('session-toggle').click();
+assert.equal(elements.get('steps-panel').hidden, true);
+assert.equal(elements.get('steps-toggle')['aria-expanded'], 'false');
+assert.equal(elements.get('steps-toggle')['aria-label'], 'Показать шаги');
+assert.equal(elements.get('session-id').textContent, state.task.browser.id);
+assert.equal(elements.get('viewer').src, viewerSource, 'Session facts reuse the same viewer');
+elements.get('session-toggle').click();
+const sourceBeforeVideoOff = sources.at(-1);
+elements.get('video-toggle').click();
+assert.equal(elements.get('viewer').src, undefined, 'Video off releases frame transport');
+assert.equal(sourceBeforeVideoOff.closed, false, 'Video off preserves server events');
+const requestsWhileOff = calls.filter(item => item.name === 'widget.browser').length;
+sources.at(-1).change('browser'); await settled();
+assert.equal(calls.filter(item => item.name === 'widget.browser').length, requestsWhileOff,
+  'Server changes cannot restart explicitly disabled video');
+elements.get('video-toggle').click(); await settled(); viewerState('connected');
+assert.equal(elements.get('viewer').hidden, false);
+assert.equal(sourceBeforeVideoOff, sources.at(-1));
 viewerState('resized', 'stale-epoch', { width: 800, height: 600 });
 assert.equal(elements.get('viewport').style.aspectRatio, undefined);
 viewerState('resized', undefined, { width: 1440, height: 900 });
@@ -159,10 +185,19 @@ businessStepVersion++;
 sources.at(-1).change('step'); await settled();
 assert.equal(elements.get('steps').children[0], businessRow, 'An update must preserve the business step row');
 assert.equal(elements.get('steps').children.length, 1, 'Status updates do not append progress entries');
-assert.equal(elements.get('event-count').textContent, 'Всего шагов: 20');
+assert.equal(elements.get('event-count').textContent, '20');
 assert.match(businessRow.children[0].textContent, /Выполнен/);
 
 assert.equal(calls.filter(item => item.name === 'widget.steps').length, historyCalls + 1);
+elements.get('steps-search').value = 'несуществующий шаг';
+elements.get('steps-search').listeners.get('input')(); await nextTimer();
+assert.match(elements.get('history-state').textContent, /По запросу шаги не найдены/);
+assert.equal(elements.get('event-count').textContent, '20', 'Filtering keeps the task step count');
+assert.equal(elements.get('steps').children.length, 0);
+elements.get('steps-search').value = '';
+elements.get('steps-search').listeners.get('input')(); await nextTimer();
+assert.equal(elements.get('history-state').hidden, true);
+assert.equal(elements.get('steps').children.length, 1);
 viewerState('disconnected');
 assert.equal(elements.get('viewer').hidden, true, 'Disconnected frames are immediately hidden');
 await nextTimer();
@@ -283,10 +318,11 @@ assert.equal(reports.length, 0);
 
 await mount();
 const oldAck = deferred();
-let intent = presentation('PENDING'), originalIntent = intent.continuationId;
+let intent = presentation('PENDING', liveBrowser()), originalIntent = intent.continuationId;
 reports = [];
 call = request => {
   if (request.name === 'widget.state') return Promise.resolve(response(intent));
+  if (request.name === 'widget.browser') return Promise.resolve(ticket);
   if (request.name === 'widget.steps') return Promise.resolve(history());
   if (request.name === 'widget.claim') return Promise.resolve(text({ claimed: true }));
   reports.push(request.arguments);
@@ -295,6 +331,10 @@ call = request => {
 };
 send = () => messages.length === 1 ? oldAck.promise : Promise.resolve({});
 show(intent); await settled(); assert.equal(messages.length, 1);
+viewerState('connected');
+const continuationViewer = elements.get('viewer').src;
+assert.match(messages[0].content[0].text, /Не вызывай tasks\.view/,
+  'Automatic continuation must keep the mounted card instead of requesting another render');
 intent = { ...intent, continuationStatus: 'IDLE', continuationId: null,
   task: { ...intent.task, status: 'PAUSED', version: 2 } };
 show(intent); await settled();
@@ -305,6 +345,8 @@ assert.equal(messages.length, 2); assert.equal(reports.length, 1);
 assert.notEqual(reports[0].continuationId, originalIntent);
 assert.equal(reports[0].continuationId, intent.continuationId);
 assert.equal(intent.continuationStatus, 'MESSAGE_SENT');
+assert.equal(elements.get('viewer').src, continuationViewer, 'Continuation retains the live video frame');
+assert.equal(elements.get('viewer').hidden, false);
 
 await mount();
 let refused = presentation('PENDING');
@@ -356,9 +398,10 @@ for (const outcome of ['PARTIAL', 'NOT_ACHIEVED', 'FAILED', 'SUCCEEDED', 'STOPPE
   taskState = { ...taskState, task: { ...taskState.task, status: outcome, version: 2 } };
   sources.at(-1).change('task'); await settled();
   assert.equal(elements.get('viewer').src, undefined, outcome + ' releases the video transport');
-  assert.equal(elements.get('browser-state').hidden, true, outcome + ' leaves an empty canvas');
-  assert.equal(elements.get('browser-state').textContent, '');
-  assert.equal(elements.get('content').inert, true);
+  assert.equal(elements.get('browser-state').hidden, false, outcome + ' explains the closed browser');
+  assert.match(elements.get('browser-state').textContent, /Шаги и результаты/);
+  assert.equal(elements.get('content').inert, false);
+  assert.equal(elements.get('cabinet').disabled, false, 'Results remain accessible');
   assert.equal(elements.get('header-status')['data-status'], outcome);
   assert.equal(elements.has('status'), false, 'Only the header owns the task status');
   assert.equal(timers.size, 0, 'Finished widgets must not retry viewing');
@@ -375,4 +418,30 @@ for (const outcome of ['PARTIAL', 'NOT_ACHIEVED', 'FAILED', 'SUCCEEDED', 'STOPPE
   }
   await app.onteardown();
 }
-console.log('PASS widget execution, finished canvas, contextual login, safe address, fresh media, recovery, isolation and continuation races');
+await mount();
+let idle = presentation('IDLE', { ...liveBrowser(), idleCloseAt: new Date(Date.now() + 299000).toISOString() });
+const keepRequests = [];
+call = request => {
+  if (request.name === 'widget.state') return Promise.resolve(response(idle));
+  if (request.name === 'widget.steps') return Promise.resolve(history());
+  if (request.name === 'widget.browser') return Promise.resolve(ticket);
+  if (request.name === 'widget.keep-open') {
+    keepRequests.push(request.arguments);
+    idle = { ...idle, task: { ...idle.task, browser: { ...idle.task.browser,
+      idleCloseAt: new Date(Date.now() + 900000).toISOString() } } };
+    return Promise.resolve(response(idle));
+  }
+  throw new Error(request.name);
+};
+show(idle); await settled();
+assert.equal(elements.get('idle-warning').hidden, false, 'Five-minute warning is visible with session details folded');
+assert.match(elements.get('idle-countdown').textContent, /4:5/);
+elements.get('keep-open').disabled = false;
+elements.get('keep-open').click(); await settled();
+assert.equal(keepRequests.length, 1);
+assert.equal(keepRequests[0].browserId, idle.task.browser.id);
+assert.equal(elements.get('idle-warning').hidden, true, 'An acknowledged extension clears the warning');
+assert.equal(messages.length, 0, 'Keeping the browser open must not launch ChatGPT');
+await app.onteardown();
+assert.equal(intervals.size, 0, 'Widget clocks are disposed on teardown');
+console.log('PASS widget idle warning and extension, execution, recovery, isolation and continuation races');

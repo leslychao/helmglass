@@ -205,6 +205,110 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             time.sleep(.3)
         self.fail("Connection transition was not confirmed")
 
+    def test_deleting_connection_cancels_unacknowledged_control_transfer(self):
+        identity, client = self.owner()
+        status, connection = client.api('/api/connections', 'POST', {
+            'name': 'Delete unacknowledged control fixture', 'startUrl': 'https://example.com'})
+        self.assertEqual(200, status, connection)
+        path = '/api/connections/' + connection['id']
+        viewer = str(uuid.uuid4())
+        self.assertEqual(200, client.api(path + '/login', 'POST', {
+            'action': 'START', 'viewerId': viewer})[0])
+        opened = self.await_connection(client, connection['id'], lambda value:
+            value.get('browser') and value['browser']['status'] == 'LIVE'
+            and value['browser']['controlOwner'] == 'USER')
+        browser = opened['browser']
+        # A stale durable intent is refused by the real worker and cannot finish on its own.
+        intent = json.dumps({'input': {'type': 'BEGIN_LOGIN', 'viewerId': viewer,
+                                      'saveConnection': False}, 'keepPrivate': False})
+        self.fixture_sql(identity, "UPDATE browser_sessions SET control_owner='TRANSFERRING',"
+            "control_epoch=0,pending_control='" + intent + "'::jsonb WHERE owner_id=:owner AND id='"
+            + str(uuid.UUID(browser['id'])) + "';")
+        try:
+            self.assertEqual(404, self.user.api(path, 'DELETE')[0])
+            key = str(uuid.uuid4())
+            status, receipt = client.api(path, 'DELETE', key=key)
+            self.assertEqual(200, status, receipt)
+            self.assertEqual(receipt, client.api(path, 'DELETE', key=key)[1])
+            self.assertEqual(404, client.api(path)[0])
+            self.assertEqual('t', self.fixture_sql(identity,
+                "SELECT close_requested AND pending_control IS NULL FROM browser_sessions "
+                "WHERE owner_id=:owner AND id='" + str(uuid.UUID(browser['id'])) + "';"))
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                state = self.fixture_sql(identity,
+                    "SELECT b.status||':'||c.status FROM browser_sessions b JOIN connections c "
+                    "ON c.id=b.connection_id WHERE b.owner_id=:owner AND b.id='"
+                    + str(uuid.UUID(browser['id'])) + "';")
+                if state == 'CLOSED:DELETED':
+                    break
+                time.sleep(.5)
+            self.assertEqual('CLOSED:DELETED', state)
+        finally:
+            # Restore only a failed test's still-visible fixture so normal cleanup can finish.
+            if client.api(path)[0] == 200:
+                self.fixture_sql(identity, "UPDATE browser_sessions SET control_owner='USER',"
+                    "pending_control=NULL,control_epoch=" + str(browser['controlEpoch'])
+                    + " WHERE owner_id=:owner AND id='" + str(uuid.UUID(browser['id'])) + "';")
+                self.assertEqual(200, client.api(path, 'DELETE')[0])
+
+    def test_deleting_connection_releases_standalone_browser_capacity(self):
+        identity, primary = self.owner()
+        endpoint = "/api/admin/users/" + identity.id
+        _, detail = self.admin.api(endpoint)
+        self.assertEqual(200, self.admin.api(endpoint + "/commands", "POST", {
+            "type": "LIMITS", "expectedVersion": detail["user"]["version"],
+            "reason": "Verify connection deletion releases its browser",
+            "browserLimitMode": "CUSTOM", "browserLimit": 1, "waitingLimit": None})[0])
+
+        def open_connection(name, expected):
+            status, connection = primary.api("/api/connections", "POST", {
+                "name": name, "startUrl": "https://example.com"})
+            self.assertEqual(200, status, connection)
+            self.assertEqual(200, primary.api(
+                "/api/connections/" + connection["id"] + "/login", "POST", {
+                    "action": "START", "viewerId": str(uuid.uuid4())})[0])
+            return self.await_connection(primary, connection["id"], lambda value:
+                value.get("browser") and value["browser"]["status"] == expected)
+
+        def await_closed(browser):
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                state = self.fixture_sql(identity,
+                    "SELECT status FROM browser_sessions WHERE owner_id=:owner AND id='"
+                    + str(uuid.UUID(browser["id"])) + "';")
+                if state == "CLOSED":
+                    return
+                time.sleep(.5)
+            self.fail("Deleted connection still occupies a browser: " + state)
+
+        active = open_connection("Deleted live browser", "LIVE")
+        waiting = open_connection("Waiting for released browser slot", "QUEUED")
+        cancelled = open_connection("Deleted queued browser", "QUEUED")
+        self.assertEqual(404, self.user.api(
+            "/api/connections/" + active["id"], "DELETE")[0])
+        self.assertEqual(200, primary.api(
+            "/api/connections/" + cancelled["id"], "DELETE")[0])
+        await_closed(cancelled["browser"])
+        self.assertEqual(200, primary.api(
+            "/api/connections/" + active["id"], "DELETE")[0])
+        await_closed(active["browser"])
+        admitted = self.await_connection(primary, waiting["id"], lambda value:
+            value.get("browser") and value["browser"]["status"] == "LIVE")
+        self.assertEqual(waiting["browser"]["id"], admitted["browser"]["id"])
+        self.assertEqual(200, primary.api(
+            "/api/connections/" + waiting["id"], "DELETE")[0])
+        await_closed(admitted["browser"])
+
+        for connection in (active, waiting, cancelled):
+            self.assertEqual(404, primary.api("/api/connections/" + connection["id"])[0])
+            result = dev.subprocess.run([
+                "docker", "--host", "tcp://" + self.settings["DEV_HOST"] + ":2375",
+                "ps", "-aq", "--filter", "name=helm-browser-" + connection["browser"]["id"]],
+                capture_output=True, text=True, timeout=20)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual("", result.stdout.strip(), "Browser containers must actually be removed")
+
     def saved_connection(self, client, suffix, close=True):
         status,value=client.api("/api/connections","POST",{
             "name":"Anonymous profile "+suffix,"site":"example.com","startUrl":"https://example.com"})
@@ -223,7 +327,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertEqual(opened["browser"]["id"],value["browser"]["id"])
         if close:
             self.assertEqual(200,client.api(path,"POST",{"action":"CLOSE","viewerId":viewer})[0])
-            self.await_connection(client,connection,lambda value:not value.get("browser"))
+            self.await_connection(client,connection,lambda value: value["browser"]["status"] == "CLOSED")
         return connection
 
     def test_single_live_saved_connection_is_adopted_by_the_task(self):
@@ -238,6 +342,152 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         task=primary.api("/api/tasks/"+task["id"])[1]
         self.assertEqual(standalone["id"],task["browser"]["id"])
         self.assertEqual("CHATGPT",task["browser"]["controlOwner"])
+
+    def test_finish_login_saves_and_releases_control_in_one_command(self):
+        _, primary = self.owner()
+        _, foreign = self.owner()
+        status, connection = primary.api('/api/connections', 'POST', {
+            'name': 'Single action login fixture', 'startUrl': 'https://example.com'})
+        self.assertEqual(200, status, connection)
+        connection_id = connection['id']
+        connection_login = '/api/connections/' + connection_id + '/login'
+        viewer = str(uuid.uuid4())
+        self.assertEqual(200, primary.api(connection_login, 'POST', {
+            'action': 'START', 'viewerId': viewer})[0])
+        try:
+            opened = self.await_connection(primary, connection_id, lambda value:
+                value.get('browser') and value['browser']['status'] == 'LIVE'
+                and value['browser']['controlOwner'] == 'USER')
+            browser = opened['browser']
+            path = '/api/browser-sessions/' + browser['id'] + '/login'
+            finish = {'type': 'FINISH_LOGIN', 'viewerId': viewer,
+                      'controlEpoch': browser['controlEpoch'],
+                      'accountSubject': 'anonymous-single-action'}
+            self.assertFalse(browser['loginConfirmed'])
+            self.assertEqual(404, foreign.api(path, 'POST', finish)[0])
+            self.assertEqual(403, primary.api(path, 'POST', {
+                **finish, 'viewerId': str(uuid.uuid4())})[0])
+            for epoch in (None, browser['controlEpoch'] - 1):
+                status, refusal = primary.api(path, 'POST', {**finish, 'controlEpoch': epoch})
+                self.assertEqual((409, 'CONTROL_CHANGED'), (status, refusal.get('code')))
+            key = str(uuid.uuid4())
+            status, receipt = primary.api(path, 'POST', finish, key=key)
+            self.assertEqual(200, status, receipt)
+            saved = self.await_connection(primary, connection_id, lambda value:
+                value['status'] == 'READY' and value['browser']['controlOwner'] == 'NONE')
+            self.assertEqual((browser['id'], 'LIVE', False, False),
+                (saved['browser']['id'], saved['browser']['status'],
+                 saved['browser']['privateMode'], saved['browser']['loginConfirmed']))
+            self.assertGreater(saved['profileRevision'], 0)
+            self.assertIsNotNone(saved['profileSavedAt'])
+            self.assertEqual(0, saved['cookieCheck']['usableCount'])
+            self.assertIsNotNone(saved['cookieCheck']['checkedAt'])
+            self.assertEqual(receipt, primary.api(path, 'POST', finish, key=key)[1])
+            self.assertEqual(saved['profileRevision'], primary.api(
+                '/api/connections/' + connection_id)[1]['profileRevision'])
+            self.assertEqual(saved['cookieCheck'], primary.api(
+                '/api/connections/' + connection_id)[1]['cookieCheck'])
+
+            # A rejected save must leave private control and the previous session available.
+            self.assertEqual(200, primary.api('/api/browser-sessions/' + browser['id'] + '/control',
+                'POST', {'type': 'BEGIN_LOGIN', 'viewerId': viewer,
+                         'controlEpoch': saved['browser']['controlEpoch']})[0])
+            controlled = self.await_connection(primary, connection_id, lambda value:
+                value['browser']['controlOwner'] == 'USER')
+            finish['controlEpoch'] = controlled['browser']['controlEpoch']
+            status, refusal = primary.api(path, 'POST', {
+                **finish, 'accountSubject': 'another-account'})
+            self.assertEqual((409, 'ACCOUNT_MISMATCH'), (status, refusal.get('code')))
+            unchanged = primary.api('/api/connections/' + connection_id)[1]
+            self.assertEqual(('USER', True, saved['profileRevision']),
+                (unchanged['browser']['controlOwner'], unchanged['browser']['privateMode'],
+                 unchanged['profileRevision']))
+            del finish['accountSubject']
+            self.assertEqual(200, primary.api(path, 'POST', finish)[0])
+            retried = self.await_connection(primary, connection_id, lambda value:
+                value['browser']['controlOwner'] == 'NONE')
+            # Identical profile bytes retain their revision in the canonical store.
+            self.assertEqual(saved['profileRevision'], retried['profileRevision'])
+            self.assertGreater(retried['cookieCheck']['checkedAt'], saved['cookieCheck']['checkedAt'])
+            replay = dev.subprocess.run([
+                'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+                'exec', '-i', 'helmglass-browser-node-1', 'node', '--input-type=module', '-'],
+                input='''
+                const headers = {'X-Worker-Token': process.env.WORKER_TOKEN,
+                                 'Content-Type': 'application/json'};
+                const id = %s;
+                const response = await fetch('http://127.0.0.1:8090/sessions/' + id, {headers});
+                if (!response.ok) throw new Error('Fixture browser unavailable');
+                const state = await response.json();
+                state.cookieCheck = %s;
+                const replay = await fetch('http://api:8080/internal/worker/sessions/' + id + '/events',
+                    {method: 'POST', headers, body: JSON.stringify(state)});
+                if (!replay.ok) throw new Error('Stale fixture event rejected');
+                ''' % (json.dumps(browser['id']), json.dumps(saved['cookieCheck'])),
+                text=True, capture_output=True, timeout=30)
+            self.assertEqual(0, replay.returncode, replay.stderr)
+            self.assertEqual(retried['cookieCheck'], primary.api(
+                '/api/connections/' + connection_id)[1]['cookieCheck'],
+                'A delayed worker snapshot must not roll back the latest cookie check')
+            self.assertIsNone(retried['profileSaveError'])
+            self.assertFalse(retried['browser']['privateMode'])
+            self.assertEqual(saved['accountSubject'], retried['accountSubject'])
+        finally:
+            self.assertEqual(200, primary.api(connection_login, 'POST', {
+                'action': 'CLOSE', 'viewerId': viewer})[0])
+            self.await_connection(primary, connection_id, lambda value:
+                value['browser']['status'] == 'CLOSED')
+
+    def test_saved_connection_reopens_in_protected_control_with_its_saved_profile(self):
+        _, primary = self.owner()
+        status, connection = primary.api('/api/connections', 'POST', {
+            'name': 'Saved session reopening fixture', 'startUrl': 'https://example.com'})
+        self.assertEqual(200, status, connection)
+        connection_id = connection['id']
+        login = '/api/connections/' + connection_id + '/login'
+        viewer = str(uuid.uuid4())
+        self.assertEqual(0, connection['taskCount'])
+        status, draft = primary.api('/api/tasks', 'POST', {
+            'title': 'Connection details fixture', 'goal': 'Verify the connection task count',
+            'startUrl': 'https://example.com', 'preferredConnectionIds': [connection_id]})
+        self.assertEqual(200, status, draft)
+        self.tasks.append((primary, draft['id']))
+        self.assertEqual(1, primary.api('/api/connections/' + connection_id)[1]['taskCount'])
+
+        def open_browser():
+            self.assertEqual(200, primary.api(login, 'POST', {'action': 'START', 'viewerId': viewer})[0])
+            return self.await_connection(primary, connection_id, lambda value:
+                value['browser']['status'] == 'LIVE' and value['browser']['controlOwner'] == 'USER')
+
+        def close_browser():
+            self.assertEqual(200, primary.api(login, 'POST', {'action': 'CLOSE', 'viewerId': viewer})[0])
+            self.await_connection(primary, connection_id, lambda value: value['browser']['status'] == 'CLOSED')
+
+        try:
+            opened = open_browser()
+            self.assertTrue(opened['browser']['privateMode'])
+            browser = opened['browser']
+            self.assertEqual(200, primary.api('/api/browser-sessions/' + browser['id'] + '/login', 'POST', {
+                'type': 'FINISH_LOGIN', 'viewerId': viewer, 'controlEpoch': browser['controlEpoch']})[0])
+            saved = self.await_connection(primary, connection_id, lambda value:
+                value['status'] == 'READY' and value['browser']['controlOwner'] == 'NONE')
+            self.assertFalse(saved['browser']['privateMode'])
+            close_browser()
+            reopened = open_browser()
+            self.assertNotEqual(browser['id'], reopened['browser']['id'])
+            self.assertEqual(saved['profileRevision'], reopened['profileRevision'])
+            self.assertTrue(reopened['browser']['privateMode'],
+                            'Opening a connection always grants protected control')
+            self.assertEqual(saved['cookieCheck'], reopened['cookieCheck'])
+            browser = reopened['browser']
+            self.assertEqual(200, primary.api('/api/browser-sessions/' + browser['id'] + '/login', 'POST', {
+                'type': 'FINISH_LOGIN', 'viewerId': viewer, 'controlEpoch': browser['controlEpoch']})[0])
+            finished = self.await_connection(primary, connection_id, lambda value:
+                value['browser']['controlOwner'] == 'NONE')
+            self.assertEqual(browser['id'], finished['browser']['id'])
+            self.assertEqual(saved['profileRevision'], finished['profileRevision'])
+        finally:
+            close_browser()
 
     def test_confirmed_session_save_preserves_private_control(self):
         _, primary = self.owner()
@@ -335,17 +585,14 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         finally:
             self.assertEqual(200, primary.api(connection_login, "POST", {
                 "action": "CLOSE", "viewerId": viewer})[0])
-            self.await_connection(primary, connection_id, lambda value: not value.get("browser"))
+            self.await_connection(primary, connection_id, lambda value: value["browser"]["status"] == "CLOSED")
 
     def test_task_session_save_keeps_pause_request_and_browser(self):
         _, primary = self.owner()
         client, task = self.create(primary)
         self.assertEqual("SUCCEEDED", self.wait_operation(self.observe(client, task), client)["status"])
         task_path = "/api/tasks/" + task["id"]
-        task = primary.api(task_path)[1]
-        status, task = primary.api(task_path + "/commands", "POST", {
-            "type": "PAUSE", "expectedVersion": task["version"]})
-        self.assertEqual(200, status, task)
+        task = primary.return_control_without_continuing(task["id"])
         viewer = str(uuid.uuid4())
         status, task = primary.api(task_path + "/commands", "POST", {
             "type": "BEGIN_LOGIN", "viewerId": viewer, "expectedVersion": task["version"]})
@@ -364,6 +611,11 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         task = await_task(lambda value: value["browser"]["controlOwner"] == "USER")
         browser = task["browser"]
         browser_id = browser["id"]
+        self.assertIsNotNone(browser['connectionId'], 'Login must open through its canonical connection')
+        status, login_connection = primary.api('/api/connections/' + browser['connectionId'])
+        self.assertEqual(200, status, login_connection)
+        self.assertEqual((browser_id, task['id']),
+                         (login_connection['browser']['id'], login_connection['browser']['taskId']))
         pending_request = task["request"]
         task_state = task["status"]
         path = "/api/browser-sessions/" + browser_id + "/login"
@@ -391,6 +643,87 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         returned = await_task(lambda value: value["browser"]["controlOwner"] == "CHATGPT")
         self.assertEqual("PAUSED", returned["status"], "Saving must not clear the explicit task pause")
         self.assertEqual(browser_id, returned["browser"]["id"])
+
+    def test_optional_login_save_and_browser_close_reopen_keep_task_paused(self):
+        _, primary = self.owner()
+        _, foreign = self.owner()
+        for save_session in (False, True):
+            with self.subTest(save_session=save_session):
+                status, connection = primary.api('/api/connections', 'POST', {
+                    'name': 'V16 optional session save', 'startUrl': 'https://example.com'})
+                self.assertEqual(200, status)
+                _, task = self.create(primary, preferred=[connection['id']])
+                path = '/api/tasks/' + task['id']
+                viewer = str(uuid.uuid4())
+
+                def wait(predicate):
+                    deadline = time.monotonic() + 60
+                    while time.monotonic() < deadline:
+                        status, value = primary.api(path)
+                        self.assertEqual(200, status)
+                        if predicate(value):
+                            return value
+                        time.sleep(.3)
+                    self.fail('Browser lifecycle transition was not confirmed')
+
+                def command(kind, **extra):
+                    _, current = primary.api(path)
+                    status, value = primary.api(path + '/commands', 'POST', {
+                        'type': kind, 'expectedVersion': current['version'], **extra})
+                    self.assertEqual(200, status, value)
+                    return value
+
+                task = wait(lambda value: value.get('browser') and value['browser']['status'] == 'LIVE')
+                browser_id = task['browser']['id']
+                self.assertIsNotNone(task['browser']['startedAt'])
+                self.assertIsNone(task['browser']['closedAt'])
+                request_id = task['request']['id']
+                command('BEGIN_LOGIN', viewerId=viewer)
+                wait(lambda value: value['browser']['controlOwner'] == 'USER')
+                command('RETURN_CONTROL', viewerId=viewer, resume=True)
+                unconfirmed = wait(lambda value: value['browser']['controlOwner'] == 'CHATGPT')
+                self.assertEqual('WAITING_USER', unconfirmed['status'])
+                self.assertEqual(request_id, unconfirmed['request']['id'])
+                primary.return_control_without_continuing(task['id'])
+                command('BEGIN_LOGIN', viewerId=viewer)
+                controlled = wait(lambda value: value['browser']['controlOwner'] == 'USER')
+                login = '/api/browser-sessions/' + browser_id + '/login'
+                intent = {'type': 'CONFIRM_LOGIN', 'viewerId': viewer,
+                          'controlEpoch': controlled['browser']['controlEpoch']}
+                if save_session:
+                    self.assertEqual(200, primary.api(login, 'POST', {**intent, 'type': 'FINISH_LOGIN'})[0])
+                else:
+                    self.assertEqual(200, primary.api(login, 'POST', intent)[0])
+                    command('RETURN_CONTROL', viewerId=viewer, resume=True)
+                returned = wait(lambda value: value['browser']['controlOwner'] == 'CHATGPT')
+                self.assertEqual('PAUSED', returned['status'])
+                self.assertIsNone(returned['request'])
+                self.assertEqual(not save_session, returned['browser']['loginConfirmed'])
+                self.assertEqual(browser_id, returned['browser']['id'])
+                self.assertEqual(404, foreign.api(path + '/commands', 'POST', {
+                    'type': 'CLOSE_BROWSER', 'expectedVersion': returned['version']})[0])
+                self.assertEqual(409, primary.api(path + '/commands', 'POST', {
+                    'type': 'CLOSE_BROWSER', 'expectedVersion': returned['version'] - 1})[0])
+                command('CLOSE_BROWSER')
+                closed = wait(lambda value: value['browser']['status'] == 'CLOSED')
+                self.assertEqual('PAUSED', closed['status'])
+                self.assertEqual(returned['stepCount'], closed['stepCount'])
+                self.assertEqual(returned['browser']['startedAt'], closed['browser']['startedAt'])
+                self.assertIsNotNone(closed['browser']['closedAt'])
+                detail = primary.api('/api/connections/' + connection['id'])[1]
+                self.assertEqual(closed['browser']['closedAt'], detail['browser']['closedAt'])
+                key = str(uuid.uuid4())
+                opening = {'type': 'OPEN_BROWSER', 'expectedVersion': closed['version']}
+                status, receipt = primary.api(path + '/commands', 'POST', opening, key=key)
+                self.assertEqual(200, status, receipt)
+                self.assertEqual(receipt, primary.api(path + '/commands', 'POST', opening, key=key)[1])
+                reopened = wait(lambda value: value['browser']['status'] == 'LIVE')
+                self.assertNotEqual(browser_id, reopened['browser']['id'])
+                self.assertEqual('PAUSED', reopened['status'])
+                self.assertIsNone(reopened['browser']['closedAt'])
+                self.assertEqual(closed['stepCount'], reopened['stepCount'])
+                command('CLOSE_BROWSER')
+                wait(lambda value: value['browser']['status'] == 'CLOSED')
 
     def test_saved_credentials_are_owner_private_and_separate_from_cookies(self):
         _, client = self.owner()
@@ -448,7 +781,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual(1, removed['revision'])
         finally:
             self.assertEqual(200, client.api(login, 'POST', {'action': 'CLOSE', 'viewerId': viewer})[0])
-            self.await_connection(client, connection['id'], lambda value: not value.get('browser'))
+            self.await_connection(client, connection['id'], lambda value: value['browser']['status'] == 'CLOSED')
 
     def test_specific_switch_consent_and_account_choice_without_second_confirmation(self):
         _,primary=self.owner()
@@ -524,9 +857,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertEqual("LOGIN",task["request"]["type"])
         self.assertTrue(task["browser"]["privateMode"])
         self.assertEqual("NONE",task["browser"]["controlOwner"])
-        status,task=primary.api("/api/tasks/"+task["id"]+"/commands","POST",{
-            "type":"PAUSE","expectedVersion":task["version"]})
-        self.assertEqual(200,status,task)
+        task=primary.return_control_without_continuing(task["id"])
         viewer=str(uuid.uuid4())
         for command in ({"type":"BEGIN_LOGIN"},{"type":"FINISH_LOGIN","saveConnection":True,
                 "connectionId":connection["id"],"accountLabel":"Verified anonymous", "accountSubject":"anonymous-login"}):
@@ -585,13 +916,18 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
     def test_account_choice_is_bounded_and_validates_persisted_scope(self):
         identity,primary=self.owner()
         _,foreign=self.owner()
-        candidates=[]
-        for index in range(12):
+        first=self.saved_connection(primary,"Choice 00")
+        current=primary.api("/api/connections/"+first)[1]
+        status,_=primary.api("/api/connections/"+first,"PATCH",{
+            "name":"Choice 00","expectedVersion":current["version"]})
+        self.assertEqual(200,status)
+        candidates=[first]
+        for index in range(1,12):
             status,value=primary.api("/api/connections","POST",{
                 "name":"Choice "+str(index).zfill(2),"site":"example.com","startUrl":"https://example.com"})
             self.assertEqual(200,status)
             candidates.append(value["id"])
-        # Scope and list fixture only: paused tasks never import these credential-free records.
+        # Only the first candidate can be selected successfully; its profile was saved through login.
         self.fixture_sql(identity,"UPDATE connections SET status='READY' WHERE owner_id=:owner;")
         _,login_required=primary.api("/api/connections","POST",{
             "name":"Needs login","site":"example.com","startUrl":"https://example.com"})
@@ -609,9 +945,6 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         _,task=primary.api("/api/tasks/"+task["id"])
         self.assertEqual("ACCOUNT_CHOICE",task["request"]["type"])
         self.assertEqual(set(candidates),{option["id"] for option in task["request"]["options"]})
-        status,task=primary.api("/api/tasks/"+task["id"]+"/commands","POST",{
-            "type":"PAUSE","expectedVersion":task["version"]})
-        self.assertEqual(200,status)
         choice={"type":"CHOOSE_CONNECTION","expectedVersion":task["version"],
             "requestId":task["request"]["id"],"requestVersion":task["request"]["version"]}
         for selected in (login_required["id"],wrong_site["id"],foreign_connection["id"]):
@@ -628,15 +961,13 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         client,preferred=self.create(primary,preferred=candidates[:2])
         _,preferred=primary.api("/api/tasks/"+preferred["id"])
         self.assertEqual(set(candidates[:2]),{option["id"] for option in preferred["request"]["options"]})
-        status,preferred=primary.api("/api/tasks/"+preferred["id"]+"/commands","POST",{
-            "type":"PAUSE","expectedVersion":preferred["version"]})
-        self.assertEqual(200,status)
         self.assertTrue(client.respond(preferred,{"connectionId":candidates[2]})[0])
         error,selected,_=client.respond(preferred,{"connectionId":candidates[0]})
         self.assertFalse(error,selected)
         self.assertIsNone(selected["request"])
-        self.assertEqual("PAUSED",selected["status"])
-        self.assertIsNone(selected["browser"])
+        self.assertEqual("SUCCEEDED",self.wait_operation(self.observe(client,selected),client)["status"])
+        selected=primary.api("/api/tasks/"+selected["id"])[1]
+        self.assertEqual("WAITING_CHATGPT",selected["status"])
 
     def test_multiple_accounts_require_choice_even_after_success_and_busy_lease_resumes(self):
         identity, primary = self.owner()
@@ -683,7 +1014,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertIsNotNone(used.get("browser"),
                              "The explicitly chosen account must be used")
         self.assertEqual(active["browser"]["id"], used["browser"]["id"])
-        self.assertIsNone(primary.api("/api/connections/" + second)[1].get("browser"))
+        self.assertEqual("CLOSED", primary.api("/api/connections/" + second)[1]["browser"]["status"])
 
         waiting, pending = self.create(primary, preferred=[first])
         operation = self.observe(waiting, pending)
@@ -702,7 +1033,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertEqual("LIVE", resumed["browser"]["status"])
         self.assertNotEqual(active["browser"]["id"], resumed["browser"]["id"])
         self.assertEqual(resumed["browser"]["id"], primary.api("/api/connections/" + first)[1]["browser"]["id"])
-        self.assertIsNone(primary.api("/api/connections/" + second)[1].get("browser"))
+        self.assertEqual("CLOSED", primary.api("/api/connections/" + second)[1]["browser"]["status"])
         finish(pending["id"], waiting, operation)
         unused, preferred = self.create(primary, preferred=[first])
         finish(preferred["id"])
@@ -719,7 +1050,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual("ACCOUNT_CHOICE", value["request"]["type"])
             self.assertEqual("WAITING_USER", value["status"])
             self.assertEqual("ACCEPTED", transport.tool("operations.get", {"operationId": operation})[1]["status"])
-            self.assertIsNone(primary.api("/api/connections/" + second)[1].get("browser"))
+            self.assertEqual("CLOSED", primary.api("/api/connections/" + second)[1]["browser"]["status"])
             error, chosen, _ = transport.respond(value,{"connectionId":second})
             self.assertFalse(error, chosen)
             self.assertEqual("SUCCEEDED", self.wait_operation(operation, transport)["status"])

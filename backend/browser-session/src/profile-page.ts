@@ -15,7 +15,8 @@ export function installProfileCodec() {
       charge(JSON.stringify(text)); return text;
     };
     function visit(item: unknown, depth: number): unknown {
-      if (depth > 32 || references.size > 50_000) throw new Error("PROFILE_COMPLEXITY_LIMIT");
+      // The encoded byte budget bounds reference count, including wide IndexedDB records.
+      if (depth > 32) throw new Error("PROFILE_COMPLEXITY_LIMIT");
       if (item === undefined) return literal({ v: "undefined" });
       if (item === null) return literal({ v: "null" });
       if (typeof item === "string") return string(item);
@@ -79,7 +80,8 @@ export function installProfileCodec() {
       return value as Record<string, unknown>;
     };
     function visit(item: unknown, depth: number): unknown {
-      if (depth > 32 || references.size > 50_000) throw new Error("PROFILE_COMPLEXITY_LIMIT");
+      // Import validates each encoded record's byte budget before decoding it.
+      if (depth > 32) throw new Error("PROFILE_COMPLEXITY_LIMIT");
       if (item === null || typeof item !== "object") return item;
       const row = objectValue(item);
       if (typeof row.ref === "number") {

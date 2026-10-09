@@ -154,7 +154,7 @@ class BusinessStepsTest(unittest.TestCase):
         self.assertEqual(2, self.listing()["total"])
         self.assertEqual(browser, self.current()["browser"]["id"])
 
-    def test_unknown_wait_user_pause_and_stop(self):
+    def test_unknown_wait_user_manual_control_and_stop(self):
         self.create()
         step = self.step("START", self.declare())
         self.declare(2)
@@ -165,7 +165,8 @@ class BusinessStepsTest(unittest.TestCase):
         self.assertEqual("WAITING", self.actual_step(step)["status"])
         self.command(self.task, "ANSWER", text="Обычную цену")
         self.assertEqual("RUNNING", self.actual_step(step)["status"])
-        self.command(self.task, "PAUSE")
+        self.browser_action(step, "observe", {})
+        self.client.return_control_without_continuing(self.task["id"])
         self.assertEqual("WAITING", self.actual_step(step)["status"])
         self.command(self.task, "RESUME")
         self.assertEqual("RUNNING", self.actual_step(step)["status"])

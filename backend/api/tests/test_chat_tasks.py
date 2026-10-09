@@ -93,7 +93,6 @@ class ChatTaskTest(unittest.TestCase):
         for error, replay, _ in repeated:
             self.assertFalse(error, replay)
             self.assertEqual(state, replay)
-        self.command(task, "PAUSE")
         error, refusal, _ = self.client.tool("tasks.create", self.create_input())
         self.assertTrue(error)
         self.assertEqual(task["id"], refusal["currentTaskId"])
@@ -187,6 +186,9 @@ class ChatTaskTest(unittest.TestCase):
         state = self.start()
         task = state["task"]
         binding = {"taskId": task["id"], "generation": state["generation"]}
+        self.client.observe_task_browser(task["id"])
+        self.client.return_control_without_continuing(task["id"])
+        self.command(task, "RESUME")
 
         def ask():
             error, value, _ = self.client.tool("tasks.ask", {"taskId": task["id"],
@@ -217,7 +219,7 @@ class ChatTaskTest(unittest.TestCase):
         self.assertIsNone(response["connectionId"])
         self.assertTrue(response["answeredAt"])
         self.assertEqual("ACCEPTED", pending["continuationStatus"])
-        self.command(task, "PAUSE")
+        self.client.return_control_without_continuing(task["id"])
         self.command(task, "RESUME")
         pending = self.client.tool("widget.state", binding)[1]
         shown = self.client.tool("tasks.view", {"taskId": task["id"], "operationKey": str(uuid.uuid4())})[1]
@@ -519,7 +521,7 @@ class ChatTaskTest(unittest.TestCase):
             requestVersion=replay["request"]["version"], text="Answer after application update")
         self.assertEqual(task["instructionRevision"], answered["lastResponse"]["instructionRevision"])
 
-    def test_autonomous_steps_and_one_specific_confirmation_survive_pause(self):
+    def test_autonomous_steps_and_confirmation_after_manual_control(self):
         state = self.start()
         task = state["task"]
 
@@ -540,6 +542,9 @@ class ChatTaskTest(unittest.TestCase):
             self.assertNotEqual("AWAITING_CONFIRMATION", receipt["status"])
             self.assertEqual("SUCCEEDED", self.wait_operation(command["operationId"], self.client)["status"])
         live = self.current(task)["browser"]["id"]
+        paused = self.client.return_control_without_continuing(task["id"])
+        self.assertEqual(("PAUSED", live), (paused["status"], paused["browser"]["id"]))
+        self.mcp_command(task, "RESUME")
         command, receipt = action("newTab", {"url": "https://example.com"}, "Open one additional tab?")
         self.assertEqual("AWAITING_CONFIRMATION", receipt["status"])
         error, refusal, _ = self.client.execute_in_scenario_step({"taskId": task["id"],
@@ -547,13 +552,9 @@ class ChatTaskTest(unittest.TestCase):
         self.assertTrue(error)
         self.assertEqual("IDEMPOTENCY_CONFLICT", refusal["code"])
         request = self.current(task)["request"]
-        self.command(task, "PAUSE")
         accepted, approval = self.mcp_command(task, "CONFIRM", requestId=request["id"],
             requestVersion=request["version"])
-        self.assertEqual(("PAUSED", live, "LIVE"),
-            (accepted["status"], accepted["browser"]["id"], accepted["browser"]["status"]))
-        self.assertEqual("ACCEPTED", self.client.tool("operations.get", {"operationId": command["operationId"]})[1]["status"])
-        self.mcp_command(task, "RESUME")
+        self.assertEqual((live, "LIVE"), (accepted["browser"]["id"], accepted["browser"]["status"]))
         self.assertEqual("SUCCEEDED", self.wait_operation(command["operationId"], self.client)["status"])
         self.assertEqual(accepted["lastResponse"], self.client.tool("tasks.respond", approval)[1]["lastResponse"])
         observation, _ = action("observe", {})

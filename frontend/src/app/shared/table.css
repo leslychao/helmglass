@@ -112,6 +112,9 @@ hg-data-table .hg-grid td {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+hg-data-table .hg-grid tbody > tr > td:first-child:not(.hg-detail-cell) {
+  padding-inline: var(--table-inset);
+}
 hg-data-table .hg-grid tbody > tr:hover > td {
   background: #fafbfc;
 }
@@ -274,11 +277,6 @@ hg-data-table .hg-grid .entity-cell .site-cell {
   display: block;
   font-weight: 500;
 }
-.hg-grid .task-cell-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .hg-grid .task-summary-text {
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -366,7 +364,7 @@ hg-column-picker .button {
   min-width: 30px;
 }
 .table-footer {
-  padding: 11px 14px;
+  padding: 11px var(--table-inset);
   font-size: 11px;
 }
 .table-footer .icon-button {
@@ -388,9 +386,6 @@ hg-column-picker .button {
   }
 }
 @media (max-width: 560px) {
-  .table-columns-button > span {
-    display: none;
-  }
   .table-tools {
     padding: 8px 10px;
     flex-wrap: wrap;

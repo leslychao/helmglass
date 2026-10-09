@@ -314,21 +314,15 @@ ON CONFLICT(id) DO NOTHING
                 SELECT o.instruction_snapshot::text FROM artifacts a
                 JOIN operations o ON o.id=a.operation_id
                 JOIN tasks t ON t.id=a.task_id
-                LEFT JOIN browser_sessions b ON b.id=t.browser_session_id
                 WHERE a.id=:id AND a.owner_id=:owner AND a.status='READY'
                   AND o.type='captureAudio' AND o.status='SUCCEEDED'
-                  AND o.instruction_snapshot IS NOT NULL AND NOT coalesce(b.private_mode,false)
+                  AND o.instruction_snapshot IS NOT NULL
                 """)
             .param("id", artifact)
             .param("owner", owner)
             .query(String.class)
             .optional()
-            .orElseThrow(
-                () ->
-                    ApiException.conflict(
-                        "AUDIO_CONTEXT_UNAVAILABLE",
-                        "Исходное задание и вопросы к записи не подтверждены либо действует"
-                            + " защищённый вход."));
+            .orElse(null);
     return json.read(snapshot);
   }
 

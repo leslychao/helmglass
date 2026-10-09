@@ -162,7 +162,7 @@ class ForeignResourceTest(unittest.TestCase):
                 ("tasks.get", {"taskId": task_id}),
                 ("artifacts.list", {"taskId": task_id}),
                 ("operations.get", {"operationId": screenshot["operationId"]}),
-                ("audio.get", {"taskId": own_task, "artifactId": artifact_id}),
+                ("audio.analyze", {"artifactId": artifact_id, "mode": "transcript"}),
             ]
             for name, arguments in denied_tools:
                 with self.subTest(role=role, mcp_tool=name):

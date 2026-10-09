@@ -4,24 +4,17 @@
   </button>
   <header class="page-heading detail-heading">
     <h1 class="sr-only">{{ task.title || 'Задача без названия' }}</h1>
+  <div class="inline-meta task-detail-meta">
+    <hg-status [value]="task.status" />
+    <span class="duration-chip" tabindex="0"
+      hgTooltip="От подготовки до завершения задачи, включая ожидания и паузы. Черновик не учитывается."
+      ><hg-icon name="clock" />Длительность задачи: <hg-task-duration [timing]="task.timing" /></span
+    >
+    <span><hg-icon name="globe" />{{ task.site || 'Сайт не задан' }}</span>
+    <span>{{ task.source === 'MCP' ? 'Из ChatGPT' : 'Веб-интерфейс' }}</span>
+    <span><hg-icon name="clock" />{{ task.createdAt | date: 'dd.MM.yyyy HH:mm' }}</span>
+  </div>
     <div class="actions">
-      @if (can('PAUSE')) {
-        <button
-          class="icon-button"
-          [disabled]="busy()"
-          hgTooltip="Приостановить задачу"
-          aria-label="Приостановить задачу"
-          (click)="command('PAUSE')"
-        >
-          <hg-icon name="pause" />
-        </button>
-      }
-      @if (can('RESUME')) {
-        <button class="button primary small" [disabled]="busy()" (click)="command('RESUME')">
-          <hg-icon name="play" />Продолжить
-        </button>
-      }
-
       @if (task.status === 'DRAFT') {
         <a
           class="button primary"
@@ -30,9 +23,6 @@
           ><hg-icon name="edit" />Редактировать</a
         >
         <button class="button" [disabled]="busy()" (click)="command('PREPARE')">Подготовить</button>
-        @if (task.chatBound && can('STOP')) {
-          <button class="button" [disabled]="busy()" (click)="command('STOP')">Остановить</button>
-        }
         <button
           class="icon-button"
           aria-label="Удалить черновик"
@@ -41,36 +31,49 @@
         >
           <hg-icon name="trash" />
         </button>
-      } @else {
-        @if (can('STOP')) {
-          <button
-            class="icon-button"
-            [cdkMenuTriggerFor]="taskActions"
-            aria-label="Действия с задачей"
-            hgTooltip="Действия задачи"
-          >
-            <hg-icon name="more" />
-          </button>
-          <ng-template #taskActions>
-            <div cdkMenu class="menu-popover anchored-menu">
-              <button cdkMenuItem class="danger-text" [disabled]="busy()" (click)="command('STOP')">
-                Остановить задачу
-              </button>
-            </div>
-          </ng-template>
-        }
       }
+      <button
+        class="icon-button"
+        aria-label="Действия задачи"
+        hgTooltip="Действия задачи"
+        [cdkMenuTriggerFor]="taskMenu"
+      >
+        <hg-icon name="more" />
+      </button>
+      <ng-template #taskMenu>
+        <div cdkMenu class="menu-popover anchored-menu task-menu" aria-label="Действия задачи">
+          <a
+            cdkMenuItem
+            hgTooltip="Откроется новая форма с параметрами задачи. Результаты и браузер не копируются."
+            [routerLink]="['/tasks/new']"
+            [queryParams]="{ copy: task.id, return: currentUrl }"
+            ><hg-icon name="copy" />Создать дубликат</a
+          >
+          @if ((task.status !== 'DRAFT' || task.chatBound) && (can('STOP') || task.status === 'STOPPING')) {
+            <button
+              cdkMenuItem
+              class="danger-text"
+              [cdkMenuItemDisabled]="busy() || task.status === 'STOPPING'"
+              [disabled]="busy() || task.status === 'STOPPING'"
+              hgTooltip="Остановить задачу и закрыть её браузер"
+              (cdkMenuItemTriggered)="command('STOP')"
+            >
+              <hg-icon name="stop" />{{ task.status === 'STOPPING' ? 'Останавливается…' : 'Остановить задачу' }}
+            </button>
+          }
+        </div>
+      </ng-template>
     </div>
   </header>
-  <div class="inline-meta task-detail-meta">
-    <hg-status [value]="task.outcome || task.status" />
-    <span class="duration-chip"
-      ><hg-icon name="clock" />Время выполнения: {{ task.usage.executionSeconds | duration }}</span
-    >
-    <span><hg-icon name="globe" />{{ task.site || 'Сайт не задан' }}</span>
-    <span>{{ task.source === 'MCP' ? 'Из ChatGPT' : 'Веб-интерфейс' }}</span>
-    <span><hg-icon name="clock" />{{ task.createdAt | date: 'dd.MM.yyyy HH:mm' }}</span>
-  </div>
+
+  @if (task.waitReason === 'BROWSER_OPEN_REQUESTED') {
+    <p class="muted">Браузер запускается. После готовности задача продолжится автоматически, если нет других причин ожидания.</p>
+  } @else if (can('RESUME') && !can('OPEN_BROWSER') && task.status !== 'STOPPING') {
+    <p class="muted">{{ task.chatBound
+      ? 'Для продолжения вернитесь в исходный чат ChatGPT.'
+      : 'Для продолжения откройте задачу в ChatGPT.' }}</p>
+  }
+
   @if (error()) {
     <div class="error-banner" role="alert">{{ error() }}</div>
   }
@@ -78,10 +81,14 @@
     <div class="notice">
       <strong>Задача готова для ChatGPT</strong>
       @if (task.chatBound) {
-        <p>
-          Вернитесь в исходный чат ChatGPT и попросите продолжить задачу {{ task.id }}. Прямой
-          переход в этот чат недоступен.
-        </p>
+        @switch (task.continuation?.status) {
+          @case ('PENDING') { <p>Ожидает исходный ChatGPT. Откройте чат с актуальным виджетом — продолжение будет передано автоматически.</p> }
+          @case ('SENDING') { <p>Передаём сигнал продолжения в ChatGPT. Следующий шаг ещё не подтверждён.</p> }
+          @case ('MESSAGE_SENT') { <p>Сигнал продолжения отправлен. Ожидается следующее действие ChatGPT.</p> }
+          @case ('ACCEPTED') { <p>ChatGPT принял продолжение. Здесь появится состояние следующего действия.</p> }
+          @case ('UNAVAILABLE') { <p>{{ task.continuation.reason }} Продолжите задачу {{ task.id }} в исходном чате.</p> }
+          @default { <p>Ожидается следующее действие в исходном чате ChatGPT.</p> }
+        }
       } @else {
         <p>
           В нужном чате ChatGPT с подключением Helm Glass попросите привязать и продолжить задачу
@@ -109,7 +116,10 @@
       <section class="notice" role="status">
         @if (request.type === 'LOGIN') {
           <strong>Нужен вход на сайт</strong>
-          <p>Возьмите управление и войдите прямо на сайте. Сохранение входа необязательно.</p>
+          <p>Восстановите вход в подключении. Браузер и состояние задачи сохранятся.</p>
+          <button class="button small"
+            [disabled]="busy() || (!task.browser?.connectionId && !can('BEGIN_LOGIN'))"
+            (click)="openLogin()">Открыть подключение</button>
         } @else {
           <strong>Ожидается ответ в GPT</strong>
           <p>
@@ -129,7 +139,6 @@
       [canOpen]="can('OPEN_BROWSER')"
       (closeBrowser)="command('CLOSE_BROWSER')"
       (openBrowser)="command('OPEN_BROWSER')"
-      [allowSession]="can('FINISH_LOGIN')"
       (stepsOpen)="historyOpen.set($event)"
       (sessionChanged)="sessionChanged($event)"
       [summary]="task.summary || ''"
@@ -140,7 +149,7 @@
         <button
           class="button small browser-control-button"
           [disabled]="busy()"
-          (click)="command('BEGIN_LOGIN', { viewerId: viewerId })"
+          (click)="command('TAKE_CONTROL', { viewerId: viewerId })"
         >
           <hg-icon name="pointer" />Взять управление
         </button>
@@ -149,7 +158,7 @@
         <button
           class="button small browser-control-button"
           [disabled]="busy()"
-          hgTooltip="Действующие паузы и запросы подтверждения сохранятся"
+          hgTooltip="Действующие паузы и запросы сохранятся"
           (click)="command('RETURN_CONTROL', { viewerId: viewerId, resume: true })"
         >
           <hg-icon name="play" />Передать агенту
@@ -178,23 +187,7 @@
             {{ historySearch() ? 'Шаги не найдены.' : 'Бизнес-шаги для этой задачи не записаны.' }}
           </p>
         }
-        <ol class="history-list">
-          @for (event of history()?.items; track event.id) {
-            <li [attr.data-event]="event.status">
-              <span class="history-mark"
-                ><hg-icon [name]="historyIcons[event.status] || 'info'"
-              /></span>
-              <div class="history-event-heading">
-                <strong>{{ event.title }}</strong
-                ><time>{{ event.createdAt | date: 'HH:mm:ss' }}</time>
-              </div>
-              <small>{{ stepLabels[event.status] }}</small>
-              @if (event.result) {
-                <p>{{ event.result }}</p>
-              }
-            </li>
-          }
-        </ol>
+        <hg-browser-steps [steps]="history()?.items" />
         @if (history(); as data) {
           <hg-pager
             summaryLabel="Шаги"
@@ -232,15 +225,13 @@
         >
       </dt>
       <dd>{{ task.usage.browserSeconds | duration }}</dd>
+      <dt>
+        <span tabindex="0" hgTooltip="Суммарное время выполнения команд браузера, без ожиданий между командами и работы ChatGPT."
+          >Команды браузера</span>
+      </dt>
+      <dd>{{ task.usage.executionSeconds | duration }}</dd>
     </dl>
   </details>
-  <a
-    class="button small duplicate-task"
-    hgTooltip="Откроется новая форма с параметрами задачи. Результаты и браузер не копируются."
-    [routerLink]="['/tasks/new']"
-    [queryParams]="{ copy: task.id, return: currentUrl }"
-    ><hg-icon name="copy" />Создать дубликат</a
-  >
 } @else if (loading()) {
   <div class="loading" role="status">Загружаем задачу…</div>
 } @else if (unavailable()) {

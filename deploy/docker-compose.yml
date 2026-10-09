@@ -132,8 +132,9 @@ services:
       KEYCLOAK_LIFECYCLE_SECRET: ${KEYCLOAK_LIFECYCLE_SECRET:?KEYCLOAK_LIFECYCLE_SECRET is required}
       WORKER_URL: http://browser-node:8090
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+      AUDIO_TOKEN: ${AUDIO_TOKEN:?AUDIO_TOKEN is required}
     volumes: [artifacts:/data/artifacts]
-    networks: [data, identity, control]
+    networks: [data, identity, control, audio]
   docker-proxy:
     image: tecnativa/docker-socket-proxy:v0.4.2
     restart: unless-stopped
@@ -226,6 +227,9 @@ volumes:
   vault-tls: {}
   vault-ca: {}
 networks:
+  audio:
+    external: true
+    name: helmglass-audio
   secrets: {internal: true}
   data: {internal: true}
   identity:

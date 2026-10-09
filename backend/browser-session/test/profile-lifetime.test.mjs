@@ -19,9 +19,23 @@ test('explicit save owns profile updates and failed export cannot block close', 
   let session;
   async function create(restore = false) {
     session = randomUUID(); sessions.push(session);
-    const created = await request('/sessions', { sessionId: session, ownerId: owner,
+    const creation = request('/sessions', { sessionId: session, ownerId: owner,
       startUrl: fixture, ...(restore ? { connectionId: profile } : {}) });
+    let observed;
+    if (restore) {
+      for (let attempt = 0; attempt < 100; attempt++) {
+        observed = await request('/sessions/' + session);
+        if (observed.status !== 404) break;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+    }
+    const created = await creation;
     assert.equal(created.value.status, 'LIVE');
+    if (restore) {
+      assert.equal(observed.status, 200);
+      assert.equal(observed.value.status, 'LIVE',
+        'Concurrent GET must wait for restoration instead of publishing an empty context');
+    }
     assert.equal((await request('/sessions/' + session + '/control', {
       controlEpoch: 1, owner: 'CHATGPT', privateMode: false })).status, 200);
   }

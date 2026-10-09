@@ -40,149 +40,40 @@
       отправленные параметры сохранены.
     </div>
   }
-  <form [formGroup]="form" (ngSubmit)="save(true)" class="form-layout v12-task-form">
-    <div class="form-sections">
-      <section class="card form-section">
-        <span class="step-number">1</span>
-        <div class="form-step-content">
-          <h2>Что нужно сделать</h2>
-          <p class="form-sub">Опишите задачу и ожидаемый результат.</p>
-          <label class="field"
-            ><span class="sr-only">Цель задачи</span>
-            <textarea
-              formControlName="goal"
-              rows="3"
-              maxlength="20000"
-              placeholder="Например: Найти 10 увлажняющих шампуней на Ozon, сравнить цены и сохранить результат в таблицу."
-              [attr.aria-invalid]="!!fieldErrors()['goal']"
-              [attr.aria-describedby]="fieldErrors()['goal'] ? 'goal-help goal-error' : 'goal-help'"
-            ></textarea>
-          </label>
-          <span class="character-count">{{ form.controls.goal.value.length }} символов</span>
-          <small id="goal-help" class="form-hint"
-            >Пароли и одноразовые коды сюда не вставляйте.</small
-          >
-          @if (fieldErrors()['goal']) {
-            <p id="goal-error" class="field-error" role="alert">{{ fieldErrors()['goal'] }}</p>
-          }
-        </div>
-      </section>
-      <section class="card form-section">
-        <span class="step-number">2</span>
-        <div class="form-step-content">
-          <h2>Сайт и стартовая страница</h2>
-          <p class="form-sub">Укажите, с какого сайта начать выполнение.</p>
-          <label class="form-url"
-            ><hg-icon name="plug" /><span class="sr-only">Начальный сайт</span>
-            <input
-              formControlName="startUrl"
-              type="url"
-              placeholder="https://"
-              [attr.aria-invalid]="
-                !!fieldErrors()['startUrl'] ||
-                (form.controls.startUrl.invalid && form.controls.startUrl.touched)
-              "
-              [attr.aria-describedby]="
-                fieldErrors()['startUrl'] ? 'start-url-error' : 'start-url-hint'
-              "
-            />
-          </label>
-          <small id="start-url-hint" class="form-hint">Например: https://www.ozon.ru</small>
-          @if (form.controls.startUrl.invalid && form.controls.startUrl.touched) {
-            <p class="field-error">Укажите полный адрес с https:// или http://.</p>
-          }
-          @if (fieldErrors()['startUrl']) {
-            <p id="start-url-error" class="field-error" role="alert">
-              {{ fieldErrors()['startUrl'] }}
-            </p>
-          }
-        </div>
-      </section>
-      <section class="card form-section">
-        <span class="step-number">3</span>
-        <div class="form-step-content">
-          <h2>Предпочтительные подключения</h2>
-          <p class="form-sub">Аккаунты для своих сайтов. Можно оставить автоматический подбор.</p>
-          <hg-connection-picker
-            [disabled]="pending() !== null"
-            [selected]="form.controls.preferredConnectionIds.value"
-            (changed)="selectConnections($event)"
-          />
-          <small class="form-hint"
-            >Аккаунт определяется после входа. Подключения не обязательны для публичных
-            страниц.</small
-          >
-          @if (fieldErrors()['preferredConnectionIds']) {
-            <p class="field-error" role="alert">{{ fieldErrors()['preferredConnectionIds'] }}</p>
-          }
-        </div>
-      </section>
-      <section class="card form-section">
-        <span class="step-number">4</span>
-        <div class="form-step-content">
-          <h2>В каком виде нужен результат</h2>
-          <p class="form-sub">Выбранный вариант будет включён в поручение.</p>
-          <div class="radio-cards output-cards">
-            <label
-              ><hg-icon name="grid" /><span
-                ><strong>Таблица</strong><small>Строки и столбцы</small></span
-              ><input type="radio" formControlName="outputFormat" value="TABLE"
-            /></label>
-            <label
-              ><hg-icon name="file" /><span
-                ><strong>Отчёт</strong><small>Показать внутри задачи</small></span
-              ><input type="radio" formControlName="outputFormat" value="REPORT"
-            /></label>
-            <label
-              ><hg-icon name="list" /><span
-                ><strong>Текстовый ответ</strong><small>Краткий результат</small></span
-              ><input type="radio" formControlName="outputFormat" value="TEXT"
-            /></label>
-          </div>
-        </div>
-      </section>
-    </div>
-    <aside class="card form-summary">
-      <h2>Краткая информация</h2>
-      <div class="summary-block">
-        <span class="service-mark chatgpt"><hg-icon name="gpt" /></span>
-        <div>
-          <small>Исполнитель</small><strong>ChatGPT через MCP</strong
-          ><small>Действия в вашем браузере</small>
-        </div>
+  <form [formGroup]="form" (ngSubmit)="save(true)" class="task-form">
+    <section class="card form-body">
+      <div class="field">
+        <div class="form-label-row"><label for="goal">Что сделать</label><small>{{ form.controls.goal.value.length }} символов</small></div>
+        <textarea id="goal" formControlName="goal" rows="4" maxlength="20000" placeholder="Опишите задачу и ожидаемый результат."
+          [attr.aria-invalid]="!!fieldErrors()['goal']" [attr.aria-describedby]="fieldErrors()['goal'] ? 'goal-help goal-error' : 'goal-help'"></textarea>
+        <small id="goal-help">Для подготовки нужна полная цель. Черновик может быть неполным. Пароли и коды сюда не вставляйте.</small>
+        @if (fieldErrors()['goal']) { <p id="goal-error" class="field-error" role="alert">{{ fieldErrors()['goal'] }}</p> }
       </div>
-      <div class="summary-block">
-        <hg-icon name="clock" />
-        <div>
-          <small>Продолжительность</small><strong>Без ограничения времени</strong
-          ><small>Тот же браузер до завершения задачи.</small>
-        </div>
+      <div class="field">
+        <label for="start-url">Начальная страница</label>
+        <input id="start-url" formControlName="startUrl" type="url" placeholder="https://"
+          [attr.aria-invalid]="!!fieldErrors()['startUrl'] || (form.controls.startUrl.invalid && form.controls.startUrl.touched)"
+          [attr.aria-describedby]="fieldErrors()['startUrl'] ? 'start-url-error' : 'start-url-hint'" />
+        <small id="start-url-hint">Это точка начала, а не ограничение дальнейших сайтов.</small>
+        @if (form.controls.startUrl.invalid && form.controls.startUrl.touched) { <p class="field-error">Укажите полный адрес с https:// или http://.</p> }
+        @if (fieldErrors()['startUrl']) { <p id="start-url-error" class="field-error" role="alert">{{ fieldErrors()['startUrl'] }}</p> }
       </div>
-      <div class="summary-block next-steps">
-        <hg-icon name="tasks" />
-        <div>
-          <span>Что произойдёт дальше</span>
-          <ol>
-            <li>Поручение сохранится в этой задаче</li>
-            <li>Вы передадите задачу в ChatGPT</li>
-            <li>ChatGPT выполнит действия в браузере</li>
-            <li>Результат появится в кабинете</li>
-          </ol>
-        </div>
+      <div class="field">
+        <label>Предпочитаемые подключения</label>
+        <hg-connection-picker [disabled]="pending() !== null" [selected]="form.controls.preferredConnectionIds.value" (changed)="selectConnections($event)" />
+        <small>Выбранные аккаунты имеют приоритет для своих сайтов. Подключения не обязательны для публичных страниц.</small>
+        @if (fieldErrors()['preferredConnectionIds']) { <p class="field-error" role="alert">{{ fieldErrors()['preferredConnectionIds'] }}</p> }
       </div>
-      <button type="submit" class="button primary" [disabled]="!canSubmit(true)">
-        <hg-icon name="play" />
-        {{ busy() ? 'Сохраняем…' : 'Подготовить для ChatGPT' }}
-      </button>
-      <button type="button" class="button" [disabled]="!canSubmit(false)" (click)="save(false)">
-        <hg-icon name="save" />Сохранить как черновик
-      </button>
-      <p class="summary-foot">
-        <hg-icon name="info" /><span
-          >Сохранение поручения не запускает браузер. Выполнение начинается после команды из
-          ChatGPT.</span
-        >
-      </p>
-    </aside>
+      <div class="field output-field"><label for="output-format">Формат результата</label>
+        <select id="output-format" formControlName="outputFormat"><option value="TABLE">Таблица</option><option value="REPORT">Отчёт</option><option value="TEXT">Текстовый ответ</option></select>
+      </div>
+      <div class="form-security"><hg-icon name="shield" /><span>Результаты страниц передаются ChatGPT. Пароль и код вводятся на сайте после передачи управления.</span></div>
+    </section>
+    <footer class="form-footer">
+      <button type="button" class="back-link" (click)="back()">Отмена</button>
+      <button type="button" class="button" [disabled]="!canSubmit(false)" (click)="save(false)"><hg-icon name="save" />Сохранить черновик</button>
+      <button type="submit" class="button primary" [disabled]="!canSubmit(true)"><hg-icon name="gpt" />{{ busy() ? 'Сохраняем…' : 'Подготовить для ChatGPT' }}</button>
+    </footer>
+    <p class="draft-note">Подготовка сохраняет тот же ID и ожидает команды ChatGPT. Браузер ещё не запускается.</p>
   </form>
 }

@@ -8,7 +8,7 @@ import { pipeline } from "node:stream/promises";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocket, WebSocketServer, createWebSocketStream } from "ws";
 import { z } from "zod";
-import { CredentialConflict, ConnectionStore } from "./connection-store.js";
+import { CookieCheck, CredentialConflict, ConnectionStore } from "./connection-store.js";
 import { StorageError, Vault } from "./vault.js";
 
 function required(name: string): string {
@@ -37,11 +37,13 @@ const Session = z.object({
   id: z.uuid(), ownerId: z.string().min(1).max(200), taskId: z.string().max(200).optional(),
   startUrl: z.string().max(8192), connectionId: z.string().max(200).optional(), token: z.string(),
   restoreProfile: z.boolean().optional(),
+  initializing: z.boolean().default(false),
   status: z.enum(["STARTING", "LIVE", "CLOSING", "CLOSED", "UNKNOWN", "LOST"]),
   networkId: z.string().optional(), containerId: z.string().optional(), egressId: z.string().optional(),
   address: z.string().optional(), policy: Policy,
   profileRevision: z.number().int().nonnegative().optional(), profileSavedAt: z.string().optional(),
   profileSaveError: z.string().optional(),
+  cookieCheck: CookieCheck.optional(),
 });
 type Session = z.infer<typeof Session>;
 type Policy = z.infer<typeof Policy>;
@@ -96,7 +98,8 @@ function summaries(): Session[] {
 function summary(session: Session): object {
   return { id: session.id, ownerId: session.ownerId, taskId: session.taskId, nodeId: config.nodeId, status: session.status, controlEpoch: session.policy.controlEpoch, controlOwner: session.policy.owner, privateMode: session.policy.privateMode,
     profileConnectionId: session.connectionId, profileRevision: session.profileRevision,
-    profileSavedAt: session.profileSavedAt, profileSaveError: session.profileSaveError ?? null };
+    profileSavedAt: session.profileSavedAt, profileSaveError: session.profileSaveError ?? null,
+    cookieCheck: session.cookieCheck ?? null };
 }
 async function docker(endpoint: string, method = "GET", value?: unknown): Promise<Response> {
   const response = await fetch(config.docker + endpoint, {
@@ -160,13 +163,16 @@ async function exportSavedProfile(session: Session, connectionId: string, origin
     let profile = await credentials.saved(connectionId, session.ownerId, operationId);
     if (!profile) {
       const exported = await sessionRequest(session, "/profile/export", "POST", { origins, includeLoginOrigins });
-      if (!exported.ok || !exported.body) {
-        await exported.body?.cancel(); throw new StorageError("PROFILE_SAVE_FAILED", exported.status);
+      if (!exported.ok) {
+        const failure = z.object({ code: z.string().regex(/^PROFILE_[A-Z_]+$/).max(80) })
+          .safeParse(await exported.json());
+        throw new StorageError(failure.success ? failure.data.code : "PROFILE_SAVE_FAILED", exported.status);
       }
+      if (!exported.body) throw new StorageError("PROFILE_SAVE_FAILED", 502);
       profile = await credentials.save(connectionId, session.ownerId, operationId, Readable.fromWeb(exported.body));
     }
-    save({ ...saved(session.id), connectionId, profileRevision: profile.revision, profileSavedAt: profile.savedAt, profileSaveError: undefined });
-    return { profileRef: connectionId, saved: true, revision: profile.revision, savedAt: profile.savedAt, origins: profile.origins };
+    save({ ...saved(session.id), connectionId, profileRevision: profile.revision, profileSavedAt: profile.savedAt, profileSaveError: undefined, cookieCheck: profile.cookieCheck });
+    return { profileRef: connectionId, saved: true, revision: profile.revision, savedAt: profile.savedAt, origins: profile.origins, cookieCheck: profile.cookieCheck ?? null };
   } finally { savingProfiles.delete(session.id); }
 }
 
@@ -176,7 +182,7 @@ function reconcileAppliedConnection(sessionId: string, result: unknown): void {
     const current = saved(sessionId);
     if (current.connectionId !== applied.data.result.connectionId) save({ ...current,
       connectionId: applied.data.result.connectionId, profileRevision: undefined,
-      profileSavedAt: undefined, profileSaveError: undefined });
+      profileSavedAt: undefined, profileSaveError: undefined, cookieCheck: undefined });
   }
 }
 async function createSession(input: z.infer<typeof CreateSession>): Promise<Session> {
@@ -184,13 +190,13 @@ async function createSession(input: z.infer<typeof CreateSession>): Promise<Sess
   try {
     session = saved(input.sessionId);
     if (session.ownerId !== input.ownerId || session.taskId !== input.taskId) throw new HttpError(409, "Session identity conflict");
-    if (session.status !== "STARTING") return session;
+    if (session.status !== "STARTING" && !session.initializing) return session;
   } catch (error) {
     if (!(error instanceof HttpError) || error.status !== 404) throw error;
     if (db.prepare("SELECT value FROM settings WHERE id='draining'").get()?.["value"] === "true") throw new HttpError(409, "Node does not accept new browsers");
     if (summaries().length >= config.capacity) throw new HttpError(409, "Browser capacity reached");
     if (input.startUrl !== "about:blank" && !["http:", "https:"].includes(new URL(input.startUrl).protocol)) throw new HttpError(400, "Invalid start URL");
-    session = save({ id: input.sessionId, ownerId: input.ownerId, taskId: input.taskId, startUrl: input.startUrl, connectionId: input.connectionId, restoreProfile: input.restoreProfile, token: randomBytes(32).toString("base64url"), status: "STARTING", policy: { controlEpoch: 0, owner: "NONE", privateMode: false } });
+    session = save({ id: input.sessionId, ownerId: input.ownerId, taskId: input.taskId, startUrl: input.startUrl, connectionId: input.connectionId, restoreProfile: input.restoreProfile, initializing: true, token: randomBytes(32).toString("base64url"), status: "STARTING", policy: { controlEpoch: 0, owner: "NONE", privateMode: false } });
   }
   const prefix = `helm-browser-${session.id}`;
   if (!session.networkId) {
@@ -256,13 +262,19 @@ async function createSession(input: z.infer<typeof CreateSession>): Promise<Sess
         await prepareProfile(session, session.connectionId, session.id);
         result = z.object({ status: z.enum(["LIVE", "LOST"]) }).parse(await sessionJson(session, "/profile/activate", "POST", { id: session.id, startUrl: session.startUrl }));
       }
-      return save({ ...session, status: result.status });
+      return save({ ...session, status: result.status, initializing: false, profileSaveError: undefined });
     } catch (error) {
+      if (error instanceof StorageError) return save({ ...session, status: "LOST", initializing: false, profileSaveError: error.code });
       if (error instanceof HttpError && error.status < 500) throw error;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }
   return save({ ...session, status: "UNKNOWN" });
+}
+async function startSession(input: z.infer<typeof CreateSession>): Promise<Session> {
+  let pending = starting.get(input.sessionId);
+  if (!pending) { pending = createSession(input); starting.set(input.sessionId, pending); }
+  try { return await pending; } finally { if (starting.get(input.sessionId) === pending) starting.delete(input.sessionId); }
 }
 function disconnectViewers(id: string): void {
   for (const viewer of viewers.get(id) ?? []) { viewer.socket.terminate(); viewer.upstream.terminate(); }
@@ -341,7 +353,7 @@ async function assets(url: URL, response: ServerResponse): Promise<void> {
     const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Helm Glass browser</title><style>html,body,#screen{width:100%;height:100%;margin:0;background:#111827;overflow:hidden}canvas{outline:none}</style></head><body><div id="screen"></div><script type="module">
       import RFB from './core/rfb.js';
       const parentOrigin = ${JSON.stringify(parent.origin)};
-      let rfb, pending, activeEpoch, generation = 0;
+      let rfb, pending, activeEpoch, navigating = false, generation = 0;
       const report = (state, epoch) => {
         const canvas = document.querySelector('#screen canvas');
         window.parent.postMessage({type:'helm-viewer',state,viewerEpoch:epoch,width:canvas?.width,height:canvas?.height}, parentOrigin);
@@ -371,19 +383,30 @@ async function assets(url: URL, response: ServerResponse): Promise<void> {
           else report('disconnected', epoch);
         });
       }
-      window.addEventListener('message', event => {
+      window.addEventListener('message', async event => {
         if (event.source !== window.parent || event.origin !== parentOrigin || typeof event.data?.url !== 'string') return;
         if (event.data.type === 'helm-viewer-navigate') {
-          if (!rfb || rfb.viewOnly || event.data.viewerEpoch !== activeEpoch) return;
+          if (!rfb || rfb.viewOnly || navigating || event.data.viewerEpoch !== activeEpoch) return;
+          const connection = rfb, epoch = activeEpoch;
           try {
             const target = new URL(event.data.url);
             if (!['https:', 'http:'].includes(target.protocol) || target.username || target.password || target.href.length > 4096) return;
-            rfb.sendKey(0xffe3, 'ControlLeft', true);
-            rfb.sendKey(0x6c, 'KeyL');
-            rfb.sendKey(0xffe3, 'ControlLeft', false);
-            for (const character of target.href) rfb.sendKey(character.codePointAt(0));
-            rfb.sendKey(0xff0d, 'Enter');
-          } catch { report('error', activeEpoch); }
+            navigating = true;
+            // Clipboard transfer and remote focus are asynchronous in X11.
+            // Keep the whole address together and never finish in a newer viewer.
+            connection.clipboardPasteFrom(target.href);
+            connection.sendKey(0xffe3, 'ControlLeft', true);
+            connection.sendKey(0x6c, 'KeyL');
+            connection.sendKey(0xffe3, 'ControlLeft', false);
+            await new Promise(resolve => setTimeout(resolve, 150));
+            if (rfb !== connection || activeEpoch !== epoch || connection.viewOnly) return;
+            connection.sendKey(0xffe3, 'ControlLeft', true);
+            connection.sendKey(0x76, 'KeyV');
+            connection.sendKey(0xffe3, 'ControlLeft', false);
+            await new Promise(resolve => setTimeout(resolve, 150));
+            if (rfb === connection && activeEpoch === epoch && !connection.viewOnly) connection.sendKey(0xff0d, 'Enter');
+          } catch { report('error', epoch); }
+          finally { navigating = false; }
           return;
         }
         if (event.data.type !== 'helm-viewer-reconnect') return;
@@ -393,6 +416,9 @@ async function assets(url: URL, response: ServerResponse): Promise<void> {
           if (rfb) { pending = next; rfb.disconnect(); } else connect(next);
         } catch { report('error', ''); }
       });
+      window.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && activeEpoch !== undefined) report('escape', activeEpoch);
+      }, true);
       try { connect(new URL(location.href)); } catch { report('error', new URL(location.href).searchParams.get('viewerEpoch') ?? ''); }
     </script></body></html>`;
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); response.end(html); return;
@@ -448,16 +474,19 @@ const server = http.createServer(async (request, response) => {
     if (url.pathname === "/sessions" && request.method === "GET") { reply(response, 200, { sessions: summaries().map(summary) }); return; }
     if (url.pathname === "/sessions" && request.method === "POST") {
       const input = CreateSession.parse(await body(request));
-      let pending = starting.get(input.sessionId);
-      if (!pending) { pending = createSession(input); starting.set(input.sessionId, pending); }
-      try { reply(response, 200, summary(await pending)); } finally { starting.delete(input.sessionId); }
+      reply(response, 200, summary(await startSession(input)));
       return;
     }
     if (segments[0] !== "sessions" || !segments[1]) throw new HttpError(404, "Route not found");
     let session = saved(z.uuid().parse(segments[1]));
     if (segments.length === 2 && request.method === "DELETE") { reply(response, 200, summary(await closeSession(session))); return; }
     if (segments.length === 2 && request.method === "GET") {
-      if (session.status === "CLOSED") { reply(response, 200, summary(session)); return; }
+      if (session.status === "CLOSED" || session.status === "LOST") { reply(response, 200, summary(session)); return; }
+      if (session.initializing) {
+        const result = await startSession({ sessionId: session.id, ownerId: session.ownerId, taskId: session.taskId,
+          startUrl: session.startUrl, connectionId: session.connectionId, restoreProfile: session.restoreProfile ?? true });
+        reply(response, 200, summary(result)); return;
+      }
       try {
         const state = RuntimeState.parse(await sessionJson(session, "/health"));
         session = recordRuntimeState(session.id, state); reply(response, 200, { ...summary(session), ...(!session.policy.privateMode ? { currentUrl: state.currentUrl, navigationError: state.navigationError } : {}) });
@@ -479,7 +508,7 @@ const server = http.createServer(async (request, response) => {
       if (input.ownerId !== session.ownerId || !session.policy.privateMode || session.policy.owner !== "NONE") throw new HttpError(403, "Protected login required");
       await sessionJson(session, "/login-context", "POST", { startUrl: input.startUrl });
       session = save({ ...session, connectionId: input.connectionId, startUrl: input.startUrl,
-        profileRevision: undefined, profileSavedAt: undefined, profileSaveError: undefined });
+        profileRevision: undefined, profileSavedAt: undefined, profileSaveError: undefined, cookieCheck: undefined });
       reply(response, 200, summary(session)); return;
     }
     if (segments[2] === "credentials" && request.method === "POST") {
@@ -614,9 +643,10 @@ server.on("upgrade", (request, socket, head) => {
       const upstream = new WebSocket(`ws://${session.address}:8080/view?role=${ticket.role}&epoch=${session.policy.controlEpoch}&viewerId=${encodeURIComponent(ticket.viewerId)}`, { headers: { "X-Worker-Token": session.token }, perMessageDeflate: false, maxPayload: 16_777_216 });
       const viewer = { socket: client, upstream, viewerId: ticket.viewerId, role: ticket.role, access: ticket.access }; group.add(viewer); viewers.set(session.id, group);
       const clientStream = createWebSocketStream(client); const upstreamStream = createWebSocketStream(upstream);
-      clientStream.pipe(upstreamStream); upstreamStream.pipe(clientStream);
       const clean = () => { group.delete(viewer); clientStream.destroy(); upstreamStream.destroy(); };
       client.on("close", clean); upstream.on("close", clean); client.on("error", clean); upstream.on("error", clean);
+      clientStream.on("error", clean); upstreamStream.on("error", clean);
+      clientStream.pipe(upstreamStream); upstreamStream.pipe(clientStream);
     });
   } catch { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); }
 });

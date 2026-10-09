@@ -85,6 +85,17 @@ class UsageAdministrationTest(unittest.TestCase):
     def sql(self, statement):
         return self.fixture_sql(self.identity, statement)
 
+    def close_observed_browser(self, task):
+        self.client.observe_task_browser(task["id"])
+        self.command(task, "CLOSE_BROWSER")
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            current = self.client.api("/api/tasks/" + task["id"])[1]
+            if current["browser"]["status"] == "CLOSED":
+                return current
+            time.sleep(.2)
+        self.fail("Browser close was not confirmed")
+
     def interval(self, task, kind, start, seconds, incomplete=False):
         task_id = "NULL" if task is None else "'" + task["id"] + "'"
         self.sql("INSERT INTO usage_intervals(id,owner_id,task_id,kind,started_at,ended_at,incomplete) "
@@ -135,6 +146,63 @@ class UsageAdministrationTest(unittest.TestCase):
         status, report = self.client.api("/api/usage?" + urlencode(query))
         self.assertEqual(200, status, report)
         return report
+
+    def test_task_duration_tracks_lifetime_separately_from_browser_commands(self):
+        draft = self.create("Task duration regression", prepare=False)
+        self.assertEqual({"elapsedSeconds": None, "running": False}, draft["timing"])
+        self.sql(f"UPDATE tasks SET created_at=now()-interval '1 day' "
+                 f"WHERE owner_id=:owner AND id='{draft['id']}';")
+        task = self.command(draft, "PREPARE")
+        self.assertTrue(task["timing"]["running"])
+        self.assertLess(task["timing"]["elapsedSeconds"], 15,
+                        "Time spent as a draft is not task duration")
+        time.sleep(.2)
+        current = self.client.api("/api/tasks/" + task["id"])[1]
+        self.assertGreater(current["timing"]["elapsedSeconds"], task["timing"]["elapsedSeconds"])
+        self.assertEqual(0, current["usage"]["executionSeconds"])
+
+        self.interval(task, "EXECUTION", "2026-07-01T12:00:00Z", .366)
+        self.sql(f"UPDATE tasks SET status='SUCCEEDED',accepted_at='2026-07-01T12:00:00Z',"
+                 "completed_at='2026-07-01T12:03:42Z',updated_at='2026-07-02T12:00:00Z' "
+                 f"WHERE owner_id=:owner AND id='{task['id']}';")
+        finished = self.client.api("/api/tasks/" + task["id"])[1]
+        self.assertEqual({"elapsedSeconds": 222, "running": False}, finished["timing"])
+        self.assertEqual(.366, finished["usage"]["executionSeconds"])
+        self.assertEqual(finished["timing"],
+                         self.client.api("/api/tasks/" + task["id"])[1]["timing"])
+
+        shorter = self.create("Shorter task duration regression")
+        self.sql("UPDATE tasks SET status='FAILED',accepted_at='2026-07-01T12:00:00Z',"
+                 "completed_at='2026-07-01T12:00:10Z' "
+                 f"WHERE owner_id=:owner AND id='{shorter['id']}';")
+        unused = self.create("Unprepared duration regression", prepare=False)
+        status, page = self.client.api("/api/tasks?sort=elapsedSeconds&direction=desc")
+        self.assertEqual(200, status, page)
+        self.assertEqual([task["id"], shorter["id"], unused["id"]],
+                         [item["id"] for item in page["items"]])
+        self.assertEqual(finished["timing"], page["items"][0]["timing"])
+        self.client.login_mcp()
+        error, mcp_task, _ = self.client.tool("tasks.get", {"taskId": task["id"]})
+        self.assertFalse(error, mcp_task)
+        self.assertEqual(finished["timing"], mcp_task["timing"])
+        tools = self.client.rpc("tools/list", {})["tools"]
+        presentation = next(tool for tool in tools if tool["name"] == "tasks.view")["outputSchema"]
+        timing_schema = presentation["properties"]["task"]["properties"]["timing"]
+        self.assertEqual({"elapsedSeconds", "running"}, set(timing_schema["required"]))
+        stopped_draft = self.command(unused, "STOP")
+        self.assertEqual({"elapsedSeconds": None, "running": False}, stopped_draft["timing"])
+
+        self.sql(f"UPDATE tasks SET accepted_at=now()-interval '60 seconds' "
+                 f"WHERE owner_id=:owner AND id='{task['id']}';")
+        resumed = self.command(finished, "RESUME")
+        self.assertTrue(resumed["timing"]["running"])
+        self.assertGreaterEqual(resumed["timing"]["elapsedSeconds"], 60)
+        stopped = self.command(resumed, "STOP")
+        self.assertFalse(stopped["timing"]["running"])
+        time.sleep(.2)
+        self.assertEqual(stopped["timing"],
+                         self.client.api("/api/tasks/" + task["id"])[1]["timing"])
+        self.assertEqual(.366, self.usage()["usage"]["executionSeconds"])
 
     def admin_command(self, kind, **fields):
         path = "/api/admin/users/" + self.identity.id
@@ -193,9 +261,9 @@ class UsageAdministrationTest(unittest.TestCase):
             else:
                 self.fail("Prepared task did not notify administrators")
             self.assertEqual({**baseline, "waitingTasks": baseline["waitingTasks"] + 1}, summary())
-        task = self.command(task, "PAUSE")
+        task = self.close_observed_browser(task)
         self.assertEqual(baseline, summary())
-        task = self.command(task, "RESUME")
+        task = self.command(task, "RESUME", confirmBrowserLoss=True)
         self.assertEqual({**baseline, "waitingTasks": baseline["waitingTasks"] + 1}, summary())
         self.command(task, "STOP")
         self.assertEqual(baseline, summary())
@@ -511,15 +579,15 @@ class UsageAdministrationTest(unittest.TestCase):
             statements.append(f"UPDATE tasks SET created_at='2026-07-01'::timestamptz+interval '{number} seconds' "
                               f"WHERE owner_id=:owner AND id='{task['id']}';")
         self.sql("\n".join(statements))
-        self.assertEqual("PAUSED",self.command(tasks[0],"PAUSE")["status"])
+        self.assertEqual("PAUSED",self.close_observed_browser(tasks[0])["status"])
         status,detail=self.admin.api(endpoint)
         self.assertEqual(51,detail["user"]["waitingCount"])
         self.assertEqual(0,detail["user"]["browserCount"])
         self.assertIsNotNone(detail["user"]["lastAccessAt"])
         status,user=self.admin_command("LIMITS",browserLimitMode="CUSTOM",browserLimit=1,waitingLimit=1)
         self.assertEqual(200,status,user)
-        self.assertEqual("WAITING_CHATGPT",self.command(tasks[0],"RESUME")["status"],
-                         "Lowering a waiting limit must not reject accepted work returning from pause")
+        self.assertEqual("WAITING_CHATGPT",self.command(tasks[0],"RESUME",confirmBrowserLoss=True)["status"],
+                         "Lowering a waiting limit must not reject work returning after browser closure")
         status,refusal=self.client.api("/api/tasks","POST",{
             "title":"Denied new admission","goal":"The queue is full","startUrl":"https://example.com","prepare":True})
         self.assertEqual((409,"WAITING_LIMIT"),(status,refusal["code"]))
@@ -575,11 +643,11 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(400,status,error)
         self.assertEqual("VALIDATION",error["code"])
 
-    def test_pause_settles_dispatched_step_and_unknown_preserves_saved_results(self):
+    def test_browser_close_settles_dispatched_step_and_unknown_preserves_saved_results(self):
         self.client.login_mcp()
         error,presentation,_=self.client.tool("tasks.create",{
             "operationKey":str(uuid.uuid4()),"task":{
-                "title":"Pause and saved result contract","goal":"Verify known outcomes before pausing",
+                "title":"Browser closure and saved result contract","goal":"Verify outcomes before closing the browser",
                 "startUrl":"https://example.com","outputFormat":"TABLE",
                 "prepare":True}})
         self.assertFalse(error,presentation)
@@ -632,20 +700,56 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual("DISPATCHED",receipt["status"])
         self.assertEqual("RUNNING",current()["status"])
         queued=execute("observe",{})
-        pausing=self.command(task,"PAUSE")
-        self.assertEqual("PAUSING",pausing["status"])
-        self.assertEqual(browser,pausing["browser"]["id"])
+        running=current()
+        rejected={"type":"PAUSE","expectedVersion":running["version"]}
+        key=str(uuid.uuid4())
+        for _ in range(2):
+            status,refusal=self.client.api("/api/tasks/"+task_id+"/commands","POST",rejected,key=key)
+            self.assertEqual((400,"INVALID_REQUEST"),(status,refusal.get("code")),refusal)
+            retained=current()
+            self.assertEqual((running["version"],"RUNNING",browser),
+                             (retained["version"],retained["status"],retained["browser"]["id"]))
         self.assertEqual("ACCEPTED",self.client.tool("operations.get",{"operationId":queued})[1]["status"])
         self.assertEqual("FAILED",self.wait_operation(pending,self.client)["status"])
-        paused=current()
-        self.assertEqual("PAUSED",paused["status"])
-        self.assertEqual((browser,"LIVE"),(paused["browser"]["id"],paused["browser"]["status"]))
+        self.assertEqual("SUCCEEDED",self.wait_operation(queued,self.client)["status"])
+        paused=self.client.return_control_without_continuing(task_id)
         elapsed=paused["usage"]["executionSeconds"]
         time.sleep(.5)
-        self.assertEqual(elapsed,current()["usage"]["executionSeconds"],"Paused time is not execution time")
+        self.assertEqual(elapsed,current()["usage"]["executionSeconds"],"Manual waiting is not execution time")
         self.assertGreater(current()["usage"]["browserSeconds"],paused["usage"]["browserSeconds"])
         self.command(task,"RESUME")
-        self.assertEqual("SUCCEEDED",self.wait_operation(queued,self.client)["status"])
+        closing_action=execute("waitFor",{"selector":"[data-v16-never-visible]"})
+        deadline=time.monotonic()+15
+        while time.monotonic()<deadline:
+            receipt=self.client.tool("operations.get",{"operationId":closing_action})[1]
+            if receipt["status"]=="DISPATCHED":
+                break
+            time.sleep(.1)
+        self.assertEqual("DISPATCHED",receipt["status"])
+        closing=self.command(current(),"CLOSE_BROWSER")
+        self.assertEqual("PAUSING",closing["status"])
+        self.assertNotEqual("CLOSED",closing["browser"]["status"])
+        self.assertIsNone(closing["browser"]["closedAt"])
+        self.assertEqual("FAILED",self.wait_operation(closing_action,self.client)["status"])
+        deadline=time.monotonic()+45
+        while time.monotonic()<deadline:
+            closed=current()
+            if closed["browser"]["status"]=="CLOSED":
+                break
+            time.sleep(.3)
+        self.assertEqual(("PAUSED","CLOSED"),(closed["status"],closed["browser"]["status"]))
+        self.assertIsNotNone(closed["browser"]["closedAt"])
+        self.command(closed,"OPEN_BROWSER")
+        deadline=time.monotonic()+45
+        while time.monotonic()<deadline:
+            reopened=current()
+            if reopened["browser"]["status"]=="LIVE":
+                break
+            time.sleep(.3)
+        self.assertEqual(("PAUSED","LIVE"),(reopened["status"],reopened["browser"]["status"]))
+        self.assertNotEqual(browser,reopened["browser"]["id"])
+        self.assertEqual(closed["stepCount"],reopened["stepCount"])
+        self.command(reopened,"RESUME")
         unknown=execute("click",{"selector":"[data-acceptance-never-visible]"})
         self.assertEqual("UNKNOWN",self.wait_operation(unknown,self.client)["status"])
         task=current()
@@ -663,6 +767,20 @@ class UsageAdministrationTest(unittest.TestCase):
         status,refusal=self.client.api("/api/tasks/"+task_id+"/commands","POST",{
             "type":"RESUME","expectedVersion":task["version"]})
         self.assertEqual((409,"UNKNOWN_RESULT"),(status,refusal["code"]))
+        self.command(task,"CLOSE_BROWSER")
+        deadline=time.monotonic()+45
+        while time.monotonic()<deadline:
+            closed=current()
+            if closed["browser"]["status"]=="CLOSED":
+                break
+            time.sleep(.3)
+        self.assertEqual(("PAUSED","CLOSED"),(closed["status"],closed["browser"]["status"]))
+        self.assertEqual("UNKNOWN_RESULT",closed["request"]["type"])
+        self.assertEqual("UNKNOWN",self.client.tool("operations.get",{"operationId":unknown})[1]["status"])
+        self.assertNotIn("OPEN_BROWSER",closed["allowedCommands"])
+        self.assertEqual(409,self.client.api("/api/tasks/"+task_id+"/commands","POST",{
+            "type":"OPEN_BROWSER","expectedVersion":closed["version"]})[0])
+        self.assertEqual("Preserved before uncertain action",closed["result"]["summary"])
 
     def test_platform_unlimited_lowered_limit_and_stop_all_standalone_browsers(self):
         self.client.login_mcp()
@@ -742,14 +860,14 @@ class UsageAdministrationTest(unittest.TestCase):
         for stopped in (task,queued):
             self.assertEqual("STOPPED",self.client.api("/api/tasks/"+stopped["id"])[1]["status"])
         self.assertEqual("DRAFT",self.client.api("/api/tasks/"+draft["id"])[1]["status"])
-        self.assertTrue(all(self.client.api("/api/connections/"+item)[1]["browser"] is None for item in connection_ids))
+        self.assertTrue(all(self.client.api("/api/connections/"+item)[1]["browser"]["status"] == "CLOSED" for item in connection_ids))
         future_transport,_,future_operation=admitted("Explicit future browser start remains available")
         self.assertEqual("SUCCEEDED",self.wait_operation(future_operation,future_transport)["status"])
         self.assertEqual(1,self.admin.api(endpoint)[1]["user"]["browserCount"])
 
     def test_paused_manual_control_can_return_without_resuming(self):
         self.client.login_mcp()
-        task=self.create("Manual control preserves an explicit pause")
+        task=self.create("Manual control preserves waiting without continuation")
         error,_,_=self.client.tool("tasks.bind",{"taskId":task["id"],"operationKey":str(uuid.uuid4())})
         self.assertFalse(error)
         operation=str(uuid.uuid4())
@@ -758,7 +876,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertFalse(error,receipt)
         completed=self.wait_operation(operation,self.client)
         self.assertEqual("SUCCEEDED",completed["status"],completed)
-        paused=self.command(task,"PAUSE")
+        paused=self.client.return_control_without_continuing(task["id"])
         self.assertEqual("PAUSED",paused["status"])
         self.assertTrue({"RESUME","STOP","TAKE_CONTROL","BEGIN_LOGIN"}.issubset(paused["allowedCommands"]),
                         paused["allowedCommands"])
@@ -852,10 +970,10 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(200,self.client.api(endpoint+"/login","POST",{"action":"CLOSE","viewerId":viewer})[0])
         deadline=time.monotonic()+20
         while time.monotonic()<deadline:
-            if self.client.api(endpoint)[1]["browser"] is None:
+            if self.client.api(endpoint)[1]["browser"]["status"] == "CLOSED":
                 break
             time.sleep(.2)
-        self.assertIsNone(self.client.api(endpoint)[1]["browser"])
+        self.assertEqual("CLOSED", self.client.api(endpoint)[1]["browser"]["status"])
         stopped=self.admin.api("/api/admin/users/"+self.identity.id)[1]["usage"]["usage"]
         time.sleep(.5)
         self.assertEqual(stopped,self.admin.api("/api/admin/users/"+self.identity.id)[1]["usage"]["usage"])

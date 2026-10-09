@@ -1,0 +1,284 @@
+{
+  "normalization": "Unicode lowercase, ё→е, punctuation to spaces, whitespace collapsed; numbers unchanged. Corpus WER = summed edit distance / summed reference word count.",
+  "samples": [
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1697/10669014641440041936.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "file": "fleurs-10669014641440041936.wav",
+      "sha256": "fc64ec5bd3df53bcfe5c5cf6395af1d7c2139d6bec1c71880f29842748756220",
+      "category": "read_speech",
+      "samples": 120960
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1762/11203877422067099161.wav",
+      "reference": "переносчиками являются свиньи от которых через комаров болезнь затем передаётся человеку",
+      "file": "fleurs-11203877422067099161.wav",
+      "sha256": "93eabe874fb5bb153558bd3f3b2bb09dbee3c28fb91b07e290953091adcde542",
+      "category": "read_speech",
+      "samples": 113280
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1697/11692271085770319239.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "file": "fleurs-11692271085770319239.wav",
+      "sha256": "8e50424865dcd7e0414d68492900fc6a9f84ab131929d507ca3c28d885fb0df8",
+      "category": "read_speech",
+      "samples": 109440
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1693/13542654457123658758.wav",
+      "reference": "однако после потери калитки капитана индия совершила лишь 36 пробегов потеряв 7 калиток для завершения иннингсов",
+      "file": "fleurs-13542654457123658758.wav",
+      "sha256": "d4894765312a6528048fc2e67fae30c20d3832b295c28b74bdd4df2b842578a5",
+      "category": "read_speech",
+      "samples": 177600
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1799/13632175593719991398.wav",
+      "reference": "помимо соревнований в среду карпендо принимал участие в двух индивидуальных соревнованиях на чемпионатах",
+      "file": "fleurs-13632175593719991398.wav",
+      "sha256": "c7c32932e2e718aca0a81aacf731072314079bf3109c3727462c8054ef6ffa69",
+      "category": "read_speech",
+      "samples": 113280
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1693/1465434251837536297.wav",
+      "reference": "однако после потери калитки капитана индия совершила лишь 36 пробегов потеряв 7 калиток для завершения иннингсов",
+      "file": "fleurs-1465434251837536297.wav",
+      "sha256": "f7362d319b01ef9977ff5c32c63d1d5f3f9f0c88b50a99211adb2ee059d8357e",
+      "category": "read_speech",
+      "samples": 205440
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1694/17899007345629936324.wav",
+      "reference": "дети передаются под опеку по множеству разнообразных причин от беспризорности до жестокого обращения и даже вымогательств",
+      "file": "fleurs-17899007345629936324.wav",
+      "sha256": "283a809359ec2130ba1f06cf292865a96029ad3ea916117e57b3381ff47e06b1",
+      "category": "read_speech",
+      "samples": 144000
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1694/2874428416017053943.wav",
+      "reference": "дети передаются под опеку по множеству разнообразных причин от беспризорности до жестокого обращения и даже вымогательств",
+      "file": "fleurs-2874428416017053943.wav",
+      "sha256": "b4f6b32d66d1836001f6a9eb4eae043d0d5b326b8aaef16a5e8f7e33b0f227f1",
+      "category": "read_speech",
+      "samples": 178560
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1799/4573705590156444548.wav",
+      "reference": "помимо соревнований в среду карпендо принимал участие в двух индивидуальных соревнованиях на чемпионатах",
+      "file": "fleurs-4573705590156444548.wav",
+      "sha256": "ccac1adf2d94742aefb318adb8c59d21e4bb0a77b9f2b17e5334548077951ccd",
+      "category": "read_speech",
+      "samples": 117120
+    },
+    {
+      "dataset": "google/fleurs",
+      "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+      "split": "test",
+      "config": "ru_ru",
+      "id": "1799/6640574236129932707.wav",
+      "reference": "помимо соревнований в среду карпендо принимал участие в двух индивидуальных соревнованиях на чемпионатах",
+      "file": "fleurs-6640574236129932707.wav",
+      "sha256": "e359cf04119758e3e860c0f9cee833c13676249be749ee0f959046231db9d7a4",
+      "category": "read_speech",
+      "samples": 119040
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 0,
+      "reference": "болит нога",
+      "file": "sova-0.wav",
+      "sha256": "ebf1012b3053ea1c730323ffde359008583f6ca4600cdb5401910ef1466c1134",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 1,
+      "reference": "ну поверь мне зная адрес дома не проблема узнать и квартиру",
+      "file": "sova-1.wav",
+      "sha256": "d8f2f9c7c8b87a7549b33306318f4068bc37fe4e9a3322bb50adf27155181292",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 2,
+      "reference": "мне так хуева была здесь пиздец я рыгал рыгал рыгал",
+      "file": "sova-2.wav",
+      "sha256": "3d059a537f31b1e80851e563b81bae33dc9d3fb75c26f6757da0fe537f9a33fe",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 3,
+      "reference": "которая на ладони",
+      "file": "sova-3.wav",
+      "sha256": "e4ad8d55ff3ca095b61721c0f70ef6e9bb389ab56c905568a4d81c9b32fd43ca",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 4,
+      "reference": "я же говорю девочки не ссорьтесь",
+      "file": "sova-4.wav",
+      "sha256": "dbb25973cc6a9b719d332311175101207f4021bff2f8d582bbc33d67c55325e6",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 5,
+      "reference": "давай давай ты ты ты ты ты брат ты давай на хуй не спорь со мной блять",
+      "file": "sova-5.wav",
+      "sha256": "ca549842e78238f29845a2ff94e380a4afde6c81d64df0c77a0d2e4f0c56519b",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 6,
+      "reference": "привет красавица",
+      "file": "sova-6.wav",
+      "sha256": "df81f90fd9f272d696745a8a70eb4cdbd9d1407e0ecc0d355de612a9ecf7af9c",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 7,
+      "reference": "но при этом в настройках е-каталога фильтрах",
+      "file": "sova-7.wav",
+      "sha256": "3b035dc853fc1c084acd228ec1b22bb6621b295afbc455804fa834e3c45cc559",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 8,
+      "reference": "и считать что территория в полтора раза больше её",
+      "file": "sova-8.wav",
+      "sha256": "81022f90206681ae5b72c400d008fd4bd6a976728f62473f496954a6e5136a15",
+      "category": "device_speech"
+    },
+    {
+      "dataset": "bond005/sova_rudevices",
+      "revision": "d9197eacfb0afff29d90a2d4e7d0d98a5dfb54bc",
+      "split": "test",
+      "id": 9,
+      "reference": "это сильнейший антиоксидант",
+      "file": "sova-9.wav",
+      "sha256": "fd3465ef655c8e9a8b7360483d9c5211a9c5be228d6aaf351687297c2561a7db",
+      "category": "device_speech"
+    }
+  ],
+  "derivedSamples": [
+    {
+      "file": "quiet.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "sha256": "c8fe3903244c824c44ff374966c86b5d7be932c69357d2499701d1e013ee5058",
+      "category": "quiet_minus25dB",
+      "source": "fleurs-10669014641440041936.wav",
+      "artificial": true
+    },
+    {
+      "file": "noise.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "sha256": "6a1a5e1d7abd7786318f89d0f80887eb6e765709b6f8d12bfcfb0ff76bcdd98f",
+      "category": "noise_15dB_SNR",
+      "source": "fleurs-10669014641440041936.wav",
+      "artificial": true
+    },
+    {
+      "file": "fast.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "sha256": "b88086f358c49487b15f1e1dafd86e8094a9227a1d107a5e46cdc17d62ca0cd7",
+      "category": "varispeed_1.3",
+      "source": "fleurs-10669014641440041936.wav",
+      "artificial": true
+    },
+    {
+      "file": "pauses.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "sha256": "6b9319db8be0b077e8012df7d2742695da034096057cbbb990e4b638ebeaacf4",
+      "category": "inserted_pauses",
+      "source": "fleurs-10669014641440041936.wav",
+      "artificial": true
+    },
+    {
+      "file": "overlap.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "sha256": "959cfc81675661b31c82cc64dee547dbddf275a85a6ec562249516475607c7dd",
+      "category": "same_voice_overdub_artificial",
+      "source": "fleurs-10669014641440041936.wav",
+      "artificial": true
+    },
+    {
+      "file": "long-45.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "sha256": "68590594441769797f46ffa5c4a46c843a494f53c6dd88eb4587ece7c06a0413",
+      "category": "repeated_sentence_45",
+      "source": "fleurs-10669014641440041936.wav",
+      "artificial": true
+    },
+    {
+      "file": "continuous.wav",
+      "reference": "он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх он не смог принять препараты необходимые для облегчения боли так как они запрещены в играх",
+      "sha256": "d9c490cfe18c0b4ed1d274b76256d9cc7cdd7e6d760ea362fa2a9713b971be7e",
+      "category": "continuous_speech_artificial",
+      "artificial": true,
+      "source": "fleurs-10669014641440041936.wav",
+      "duration": 45.248
+    }
+  ]
+}

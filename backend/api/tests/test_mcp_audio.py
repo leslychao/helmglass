@@ -1,196 +1,232 @@
-"""Original audio transport contract on deployed dev; no acoustic model is invoked."""
-
-import base64
+"""Real CPU audio analysis contracts on deployed dev."""
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
 import time
 import unittest
 import uuid
-
+import wave
 from test_dev_contract import DevClient
 
-
-class McpOriginalAudioTest(unittest.TestCase):
+class AudioAnalysisTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        settings = dict(line.split("=", 1) for line in Path(
-            os.environ.get("HELM_TEST_ENV", "deploy/.env.dev")
-        ).read_text(encoding="utf-8").splitlines() if line and not line.startswith("#") and "=" in line)
-        cls.settings = settings
-        cls.client = DevClient(settings, "test", "KEYCLOAK_TEST_PASSWORD")
-        cls.owner = cls.client.login_web()["id"]
+        cls.settings = dict(line.split('=', 1) for line in Path(os.environ.get('HELM_TEST_ENV', 'deploy/.env.dev')).read_text().splitlines() if line and not line.startswith('#') and '=' in line)
+        cls.client = DevClient(cls.settings, 'test', 'KEYCLOAK_TEST_PASSWORD')
+        cls.owner = cls.client.login_web()['id']
         cls.client.login_mcp()
-        cls.client.rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
-                                    "clientInfo": {"name": "helm-original-audio-contract", "version": "1"}})
+        cls.docker = ['docker', '--host', 'tcp://' + cls.settings['DEV_HOST'] + ':2375']
 
-    def task(self, task_id):
-        status, task = self.client.api("/api/tasks/" + task_id)
-        self.assertEqual(200, status)
-        return task
+    @classmethod
+    def tearDownClass(cls):
+        cls.client.close_mcp()
 
-    def change_fixture_metadata(self, artifact_id, complete=True, size_bytes=39868):
-        # Only the artifact freshly created by this test, for its authenticated owner.
-        artifact = str(uuid.UUID(artifact_id))
-        owner = str(uuid.UUID(self.owner))
-        sql = ("UPDATE artifacts SET complete=" + ("true" if complete else "false")
-               + ",size_bytes=" + str(int(size_bytes)) + " WHERE id='" + artifact
-               + "' AND owner_id='" + owner + "' RETURNING id;")
-        result = subprocess.run(["docker", "--host", "tcp://" + self.settings["DEV_HOST"] + ":2375",
-            "exec", "-i", "helmglass-postgres-1", "psql", "-U", "postgres", "-d", "helmglass",
-            "-At", "-v", "ON_ERROR_STOP=1"], input=sql, text=True, capture_output=True, timeout=20)
-        self.assertEqual(0, result.returncode, "Test-owned artifact metadata update failed")
-        self.assertEqual(artifact, result.stdout.splitlines()[0])
+    def sql(self, statement):
+        result = subprocess.run(self.docker + ['exec', '-i', 'helmglass-postgres-1', 'psql', '-U', 'postgres', '-d', 'helmglass', '-At', '-v', 'ON_ERROR_STOP=1'], input=statement, text=True, capture_output=True, timeout=30)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result.stdout.strip()
+
+    def fixture(self, path, name):
+        # Dedicated draft and random artifact ID: never mutate user originals.
+        status, task = self.client.api('/api/tasks', 'POST', {'title': 'Audio regression: ' + name, 'goal': 'Verify local processing of a test fixture.', 'startUrl': 'https://example.com', 'outputFormat': 'TEXT', 'prepare': False})
+        self.assertIn(status, (200, 201), task)
+        artifact = str(uuid.uuid4())
+        task_id, owner = str(uuid.UUID(task['id'])), str(uuid.UUID(self.owner))
+        with path.open('rb') as stream:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        subprocess.run(self.docker + ['cp', str(path), 'helmglass-api-1:/data/artifacts/' + artifact], check=True, capture_output=True, timeout=30)
+        self.sql(f"INSERT INTO artifacts(id,owner_id,task_id,name,mime_type,status,size_bytes,sha256,complete,relative_path) VALUES ('{artifact}','{owner}','{task_id}','fixture.wav','audio/wav','READY',{path.stat().st_size},'{digest}',true,'{artifact}');")
+        return artifact, task_id, digest
+
+    def tool(self, name, arguments, client=None):
+        failed, data, raw = (client or self.client).tool(name, arguments)
+        self.assertFalse(failed, data)
+        self.assertTrue(all(item['type'] == 'text' for item in raw['content']))
+        self.assertLessEqual(len(json.dumps(data, ensure_ascii=False).encode()), 65536)
+        return data
+
+    def wait(self, analysis):
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            try:
+                page = self.tool('audio.get', {'analysisId': analysis})
+            except AssertionError as error:
+                if 'returned HTTP 502' not in str(error) and 'returned HTTP 503' not in str(error):
+                    raise
+                time.sleep(2)
+                continue
+            if page['status'] in ('SUCCEEDED', 'PARTIAL', 'FAILED'):
+                return page
+            time.sleep(1)
+        self.fail('Analysis did not reach a terminal state')
 
     def action(self, task_id, kind, arguments):
-        task = self.task(task_id)
-        action = {"operationId": str(uuid.uuid4()), "type": kind, "arguments": arguments,
-                  "instructionRevision": task["instructionRevision"]}
-        if task.get("browser"):
-            action["controlEpoch"] = task["browser"]["controlEpoch"]
-        error, _, _ = self.client.execute_in_scenario_step({"taskId": task_id, "action": action})
-        self.assertFalse(error, "MCP browser action must be accepted")
+        task = self.client.api('/api/tasks/' + task_id)[1]
+        action = {'operationId': str(uuid.uuid4()), 'type': kind, 'arguments': arguments,
+                  'instructionRevision': task['instructionRevision']}
+        if task.get('browser'):
+            action['controlEpoch'] = task['browser']['controlEpoch']
+        failed, data, _ = self.client.execute_in_scenario_step({'taskId': task_id, 'action': action})
+        self.assertFalse(failed, data)
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            error, receipt, _ = self.client.tool("operations.get", {"operationId": action["operationId"]})
-            self.assertFalse(error)
-            if receipt["status"] in ("SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"):
-                self.assertEqual("SUCCEEDED", receipt["status"], "Browser operation must succeed")
+            receipt = self.tool('operations.get', {'operationId': action['operationId']})
+            if receipt['status'] in ('SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'):
+                self.assertEqual('SUCCEEDED', receipt['status'], receipt)
+                if kind == 'captureAudio':
+                    self.client.complete_scenario_step(task_id, action['operationId'])
                 return receipt
-            time.sleep(0.5)
-        self.fail("MCP operation did not complete within the bounded wait")
+            time.sleep(.5)
+        self.fail('Browser action timeout')
 
-    def stop_task(self, task_id):
-        task = self.task(task_id)
-        if task["status"] == "STOPPED":
-            return
-        status, _ = self.client.api("/api/tasks/" + task_id + "/commands", "POST",
-                                  {"type": "STOP", "expectedVersion": task["version"]})
-        self.assertEqual(200, status)
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            if self.task(task_id)["status"] == "STOPPED":
-                return
-            time.sleep(0.5)
-        self.fail("The test browser was not confirmed closed")
-
-    def test_original_audio_bytes_and_immutable_assignment_context(self):
-        original_url = "https://interactive-examples.mdn.mozilla.net/media/cc0-audio/t-rex-roar.mp3"
-        original_hash = "41191d0727073bf848bcc8f0bd851d71a0b0058e901abb1c1b236ad327bda52e"
-        title = "Original audio contract"
-        goal = "Preserve original bytes and their assignment; acoustic understanding is not tested here."
-        error, presentation, _ = self.client.tool("tasks.create", {
-            "operationKey": str(uuid.uuid4()), "task": {"title": title, "goal": goal,
-                "startUrl": original_url, "prepare": True}})
-        self.assertFalse(error)
-        task_id = presentation["task"]["id"]
-        source_context = {"assignmentId": "synthetic-audio-transport-" + str(uuid.uuid4()),
-                          "instruction": "Inspect the original recording and answer the attached question.",
-                          "questions": ["What sound is present in the recording?"]}
+    def test_browser_capture_transcript_upgrade_and_other_chat(self):
+        failed, presentation, _ = self.client.tool('tasks.create', {
+            'operationKey': str(uuid.uuid4()), 'task': {'title': 'Local audio browser regression',
+                'goal': 'Obtain text through local Helm processing.', 'prepare': True,
+                'startUrl': 'https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/example.wav'}})
+        self.assertFalse(failed, presentation)
+        self.assertIn('audio', presentation)
+        task_id = presentation['task']['id']
         try:
-            listing = self.action(task_id, "listMedia", {})
-            sources = listing["result"]["media"]
-            source = next(item for item in sources if item["sourceUrl"] == original_url)
-            captured = self.action(task_id, "captureAudio", {
-                "sourceId": source["id"], "sourceRef": source_context["assignmentId"],
-                "sourceContext": source_context, "name": "original-roar.mp3"})
-            artifact = captured["result"]["artifact"]
-            task = self.task(task_id)
-            revision = task["instructionRevision"]
-
-            def read_audio(delivery=None):
-                arguments = {"taskId": task_id, "artifactId": artifact["id"]}
-                if delivery is not None:
-                    arguments["delivery"] = delivery
-                failed, metadata, result = self.client.tool("audio.get", arguments)
-                self.assertFalse(failed, "Original audio and its immutable assignment must be available")
-                self.assertEqual("READY", metadata["artifact"]["status"])
-                self.assertTrue(metadata["artifact"]["complete"])
-                self.assertTrue(metadata["originalBytes"])
-                self.assertEqual(39868, metadata["artifact"]["sizeBytes"])
-                self.assertEqual(original_hash, metadata["artifact"]["sha256"])
-                file_delivery = delivery != "audio"
-                content_type = "resource" if file_delivery else "audio"
-                content = [item for item in result["content"] if item["type"] == content_type]
-                self.assertEqual(1, len(content))
-                source = content[0]["resource"] if file_delivery else content[0]
-                self.assertEqual("audio/mpeg", source["mimeType"])
-                if file_delivery:
-                    self.assertEqual("helmglass://artifacts/" + artifact["id"]
-                                     + "/original-roar.mp3", source["uri"])
-                    self.assertFalse(any(item["type"] == "audio" for item in result["content"]))
-                # This fixed public 39 KiB sample is deliberately below the inline 8 MiB limit.
-                payload = base64.b64decode(source["blob" if file_delivery else "data"], validate=True)
-                self.assertEqual(39868, len(payload))
-                self.assertEqual(original_hash, hashlib.sha256(payload).hexdigest())
-                self.assertEqual({"revision": revision, "title": title, "goal": goal,
-                                  "sourceContext": source_context}, metadata["instructionContext"])
-                return metadata
-
-            first = read_audio()
-            self.assertEqual(first, read_audio("file"), "Delivery format must preserve the original and context")
-            self.assertEqual(first, read_audio("audio"), "Explicit AudioContent preserves the same original")
-            for invalid_delivery in ("url", None):
-                failed, refusal, result = self.client.tool("audio.get", {
-                    "taskId": task_id, "artifactId": artifact["id"], "delivery": invalid_delivery})
-                self.assertTrue(failed)
-                self.assertIn("input validation failed", refusal["message"])
-                self.assertIn("/delivery", refusal["message"])
-                self.assertFalse(any(item["type"] in ("audio", "resource")
-                                     for item in result.get("content", [])))
-            stranger = DevClient(self.settings, "admin", "KEYCLOAK_APP_ADMIN_PASSWORD")
-            stranger.login_web()
-            stranger.login_mcp()
-            failed, own_presentation, _ = stranger.tool("tasks.create", {
-                "operationKey": str(uuid.uuid4()), "task": {
-                    "title": "Audio file owner boundary", "goal": "Refuse a foreign audio artifact",
-                    "startUrl": "https://example.com", "prepare": False}})
-            self.assertFalse(failed)
-            own_task = own_presentation["task"]["id"]
-
-            def delete_foreign_check_draft():
-                self.assertEqual(200, stranger.api("/api/tasks/" + own_task, "DELETE")[0])
-
-            self.addCleanup(delete_foreign_check_draft)
-            failed, refusal, result = stranger.tool("audio.get", {
-                "taskId": own_task, "artifactId": artifact["id"], "delivery": "file"})
-            self.assertTrue(failed)
-            self.assertEqual("NOT_FOUND", refusal["code"])
-            self.assertFalse(any(item["type"] == "resource" for item in result.get("content", [])))
-            status, changed = self.client.api("/api/tasks/" + task_id + "/commands", "POST", {
-                "type": "AMEND", "expectedVersion": task["version"], "title": "Revised current task",
-                "goal": "A later instruction must not rewrite an already saved audio assignment.",
-                "startUrl": original_url})
-            self.assertEqual(200, status)
-            self.assertGreater(changed["instructionRevision"], revision)
-            self.assertEqual(first, read_audio())
-            self.assertEqual(first, read_audio("audio"))
+            listing = self.action(task_id, 'listMedia', {})
+            media = listing['result']['media'][0]
+            captured = self.action(task_id, 'captureAudio', {'sourceId': media['id'],
+                'sourceRef': 'local-audio-regression', 'sourceContext': {
+                    'assignmentId': 'audio-regression', 'instruction': 'Historical source data.',
+                    'questions': ['What is said in the recording?']},
+                'name': 'gigaam-example.wav'})
+            artifact = captured['result']['artifact']
+            self.assertNotIn('sourceUrl', artifact)
+            self.assertNotIn('downloadUrl', artifact)
+            listing = self.tool('artifacts.list', {'taskId': task_id})
+            self.assertNotIn('sourceUrl', listing['items'][0])
+            first = self.tool('audio.analyze', {'artifactId': artifact['id'], 'mode': 'transcript'})
+            page = self.wait(first['analysisId'])
+            self.assertEqual('SUCCEEDED', page['status'], page)
+            self.assertGreater(page['tempo']['recognizedWords'], 15)
+            calls = page['metrics']['asrCalls']
+            saved_context = page['instructionContext']
+            other = DevClient(self.settings, 'test', 'KEYCLOAK_TEST_PASSWORD')
+            other.token = self.client.token
+            before = self.client.api('/api/tasks/' + task_id)[1]
             try:
-                for complete, size, expected in [(False, 39868, "FILE_NOT_READY"),
-                                                  (True, 8_388_609, "AUDIO_INLINE_LIMIT")]:
-                    self.change_fixture_metadata(artifact["id"], complete, size)
-                    for delivery in ("audio", "file"):
-                        failed, refusal, result = self.client.tool("audio.get", {
-                            "taskId": task_id, "artifactId": artifact["id"], "delivery": delivery})
-                        self.assertTrue(failed)
-                        self.assertEqual(expected, refusal["code"])
-                        self.assertFalse(any(item["type"] in ("audio", "resource")
-                                             for item in result.get("content", [])))
-                    if not complete:
-                        status, download_refusal = self.client.api(
-                            "/api/artifacts/" + artifact["id"] + "/download")
-                        self.assertEqual(409, status, "Incomplete originals must be refused before download headers")
-                        self.assertEqual("FILE_NOT_READY", download_refusal["code"])
+                upgraded = self.tool('audio.analyze', {'artifactId': artifact['id'], 'mode': 'full'}, other)
+                self.assertEqual(first['analysisId'], upgraded['analysisId'])
+                page = self.wait(first['analysisId'])
+                self.assertEqual('SUCCEEDED', page['status'], page)
+                self.assertEqual(calls, page['metrics']['asrCalls'])
+                self.assertEqual(saved_context, page['instructionContext'])
+                unscoped = other.rpc('tools/call', {'name':'audio.get','arguments':{'analysisId':first['analysisId']}})
+                self.assertFalse(unscoped.get('isError',False))
+                self.assertTrue(all(x['type']=='text' for x in unscoped['content']))
+                self.assertEqual(before['version'], self.client.api('/api/tasks/' + task_id)[1]['version'])
+                after_browser = self.client.api('/api/tasks/' + task_id)[1]['browser']
+                # Worker heartbeat revisions can advance independently of analysis.
+                for field in ('id', 'status', 'controlOwner', 'controlEpoch', 'privateMode', 'idleCloseAt'):
+                    self.assertEqual(before['browser'][field], after_browser[field])
             finally:
-                self.change_fixture_metadata(artifact["id"])
-            self.assertEqual(first, read_audio())
-            self.stop_task(task_id)
-            self.assertEqual(first, read_audio(), "Confirmed original remains available after browser closure")
-            self.assertEqual(first, read_audio("audio"))
+                other.close_mcp()
+            status, raw, _ = self.client.request(self.client.base + '/api/artifacts/' + artifact['id'] + '/download')
+            self.assertEqual(200,status)
+            self.assertEqual(artifact['sha256'],hashlib.sha256(raw).hexdigest())
         finally:
-            self.stop_task(task_id)
+            task = self.client.api('/api/tasks/' + task_id)[1]
+            status, _ = self.client.api('/api/tasks/' + task_id + '/commands', 'POST',
+                {'type':'STOP','expectedVersion':task['version']})
+            self.assertEqual(200,status)
 
+    def test_silence_corruption_and_access(self):
+        directory = Path('.work/audio-fixtures')
+        directory.mkdir(parents=True, exist_ok=True)
+        silence = directory / 'silence.wav'
+        with wave.open(str(silence), 'wb') as output:
+            output.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+            output.writeframes(bytes(3 * 16000 * 2))
+        artifact, task, digest = self.fixture(silence, 'silence')
+        before = self.client.api('/api/tasks/' + task)[1]
+        first = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'transcript'})
+        analysis = first['analysisId']
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            def start(_):
+                peer = DevClient(self.settings, 'test', 'KEYCLOAK_TEST_PASSWORD')
+                peer.token = self.client.token
+                try:
+                    return self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'transcript'}, peer)
+                finally:
+                    peer.close_mcp()
+            repeats = list(executor.map(start, range(4)))
+        self.assertEqual({analysis}, {item['analysisId'] for item in repeats})
+        page = self.wait(analysis)
+        self.assertEqual('SUCCEEDED', page['status'], page)
+        self.assertTrue(page['sectionComplete'])
+        self.assertEqual([], page['items'])
+        self.assertEqual('NO_SPEECH_DETECTED', page['tempo']['reason'])
+        self.assertEqual(0, page['metrics']['asrCalls'])
+        self.assertEqual(digest, page['sourceSha256'])
+        upgraded = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'full'})
+        self.assertEqual(analysis, upgraded['analysisId'])
+        page = self.wait(analysis)
+        self.assertEqual('SUCCEEDED', page['status'], page)
+        self.assertEqual(0, page['metrics']['asrCalls'])
+        acoustics = self.tool('audio.get', {'analysisId': analysis, 'section': 'acoustics', 'limit': 20})
+        self.assertTrue(acoustics['hasMore'])
+        self.assertTrue(acoustics['sectionComplete'])
+        self.assertTrue(all(item['digitalSilence'] for item in acoustics['items'] if item['kind']=='loudness'))
+        self.assertTrue(all(item['f0Hz'] is None for item in acoustics['items'] if item['kind']=='pitch'))
+        second = self.tool('audio.get', {'analysisId': analysis, 'section': 'acoustics', 'cursor': acoustics['nextCursor'], 'limit': 20})
+        self.assertGreater(second['items'][0]['start'], acoustics['items'][-1]['start'])
+        stranger = DevClient(self.settings, 'admin', 'KEYCLOAK_APP_ADMIN_PASSWORD')
+        stranger.login_web()
+        stranger.login_mcp()
+        try:
+            for name, args in [('audio.analyze', {'artifactId': artifact, 'mode': 'full'}), ('audio.get', {'analysisId': analysis})]:
+                failed, refusal, raw = stranger.tool(name, args)
+                self.assertTrue(failed)
+                self.assertEqual('NOT_FOUND', refusal['code'])
+                self.assertTrue(all(item['type'] == 'text' for item in raw['content']))
+        finally:
+            stranger.close_mcp()
+        self.assertEqual(before['version'], self.client.api('/api/tasks/' + task)[1]['version'])
+        invalid = directory / 'corrupt.wav'
+        invalid.write_bytes(b'not an audio container')
+        broken, _, _ = self.fixture(invalid, 'corrupt')
+        job = self.tool('audio.analyze', {'artifactId': broken, 'mode': 'full'})
+        result = self.wait(job['analysisId'])
+        self.assertEqual('FAILED', result['status'], result)
+        self.assertEqual('DECODE_FAILED', result['errorCode'])
+        self.assertFalse(result['sectionComplete'])
 
-if __name__ == "__main__":
+        truncated = directory / 'truncated.wav'
+        truncated.write_bytes(silence.read_bytes()[:-1001])
+        artifact, _, _ = self.fixture(truncated, 'truncated')
+        job = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'full'})
+        result = self.wait(job['analysisId'])
+        self.assertIn(result['status'], ('FAILED', 'PARTIAL'), result)
+        self.assertEqual('DECODE_FAILED', result['errorCode'])
+
+        # Recover an explicitly failed emotion checkpoint, with other stages intact.
+        partial, _, _ = self.fixture(silence, 'stage failure checkpoint')
+        partial_id = str(uuid.uuid4())
+        self.sql(f"""INSERT INTO audio_analyses
+            (id,owner_id,artifact_id,source_sha256,processing_version,metadata,
+             requested_mode,status,checkpoint,next_attempt_at)
+            SELECT '{partial_id}',owner_id,'{partial}',source_sha256,processing_version,metadata,
+              'full','QUEUED','{{"errors":{{"emotions":"EMOTION_FAILED"}}}}',now()+interval '1 day'
+            FROM audio_analyses WHERE id='{analysis}';""")
+        pending = self.tool('audio.get', {'analysisId': partial_id, 'section': 'emotions'})
+        self.assertFalse(pending['hasMore'])
+        self.assertFalse(pending['sectionComplete'])
+        self.sql(f"UPDATE audio_analyses SET next_attempt_at=now() WHERE id='{partial_id}';")
+        result = self.wait(partial_id)
+        self.assertEqual('PARTIAL', result['status'])
+        self.assertTrue(result['transcriptComplete'])
+        self.assertTrue(result['acousticsComplete'])
+        self.assertFalse(result['emotionsComplete'])
+        self.assertEqual('FAILED', result['stages']['emotions'])
+        self.assertEqual('EMOTION_FAILED', result['stageErrors']['emotions'])
+
+if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -1,12 +1,17 @@
 import { z } from 'zod';
 
 const browserSchema = z.object({ id: z.uuid(), status: z.string(), privateMode: z.boolean(),
-  currentUrl: z.string().nullable(), version: z.number().int() });
+  currentUrl: z.string().nullable(), version: z.number().int(), controlOwner: z.string(),
+  startedAt: z.string().nullable(), closedAt: z.string().nullable(),
+  idleCloseAt: z.string().nullable(), closeReason: z.enum(['USER', 'IDLE_TIMEOUT']).nullable() });
 export const presentationSchema = z.object({
+  audio: z.array(z.object({ analysisId: z.uuid(), name: z.string(), mode: z.enum(['transcript', 'full']),
+    status: z.string(), transcriptComplete: z.boolean(), acousticsComplete: z.boolean(),
+    emotionsComplete: z.boolean(), errorCode: z.string().nullable() })).max(10).default([]),
   generation: z.uuid(), continuationStatus: z.string(), continuationRevision: z.number().nullable(),
   continuationId: z.uuid().nullable(),
   continuationReason: z.string().nullable(), task: z.object({ id: z.uuid(), title: z.string(), goal: z.string(),
-    status: z.string(), summary: z.string().nullable(), waitReason: z.string().nullable(), version: z.number(), instructionRevision: z.number(), browser: browserSchema.nullable(),
+    status: z.string(), summary: z.string().nullable(), waitReason: z.string().nullable(), version: z.number(), instructionRevision: z.number(), stepCount: z.number().int().nonnegative(), browser: browserSchema.nullable(),
     request: z.object({ type: z.string(), prompt: z.string() }).nullable(),
     result: z.object({ summary: z.string().optional(), limitations: z.array(z.string()).optional() }).passthrough().nullable(),
   }),

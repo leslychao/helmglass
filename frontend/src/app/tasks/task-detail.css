@@ -6,6 +6,12 @@
   font-weight: 600;
 }
 
+.task-menu [cdkMenuItem] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .current-step-heading {
   display: flex;
   align-items: center;
@@ -51,77 +57,6 @@
   gap: 12px;
 }
 
-.history-list {
-  padding: 12px 0 0;
-}
-
-.history-list li {
-  position: relative;
-  padding: 0 0 22px 32px;
-  border-bottom: 0;
-}
-
-.history-list li::before {
-  content: '';
-  position: absolute;
-  top: 24px;
-  bottom: 2px;
-  left: 11px;
-  border-left: 1px solid var(--line);
-}
-
-.history-list li:last-child::before {
-  display: none;
-}
-
-.history-mark {
-  position: absolute;
-  left: 0;
-  top: 0;
-  display: grid;
-  place-items: center;
-  width: 23px;
-  height: 23px;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  color: var(--blue);
-  background: #f3f7ff;
-}
-
-.history-mark hg-icon {
-  width: 12px;
-  height: 12px;
-}
-
-.history-list [data-event$='SUCCEEDED'] .history-mark {
-  color: #31967a;
-  background: #f3faf7;
-}
-
-.history-list [data-event$='FAILED'] .history-mark,
-.history-list [data-event='UNKNOWN'] .history-mark {
-  color: #b87821;
-  background: #fff8ed;
-}
-
-.history-event-heading {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 23px;
-}
-
-.history-event-heading time {
-  flex: none;
-  margin: 0;
-}
-
-.history-list p {
-  margin: 3px 0 0;
-  line-height: 1.8;
-}
-
 @media (max-width: 580px) {
   .detail-heading {
     align-items: flex-start;
@@ -136,11 +71,9 @@
   }
 }
 
-.history-event-heading strong { min-width: 0; overflow-wrap: anywhere; }
-.history-list p { overflow-wrap: anywhere; white-space: pre-wrap; }
-.history-list small { color: var(--muted); }
-.detail-heading { justify-content: flex-end; margin-bottom: 10px; }
-.detail-heading .actions { flex-wrap: wrap; }
+.detail-heading { justify-content: space-between; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 18px; }
+.detail-heading .task-detail-meta { flex: 1 1 300px; min-width: 0; margin: 0; gap: 9px 17px; }
+.detail-heading .actions { flex-wrap: wrap; margin-left: auto; }
+.detail-heading .actions .button { font-size: 12px; min-height: 36px; padding: 8px 12px; }
 .task-result { margin: 16px 0; padding: 16px; }
 .task-result > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
-.duplicate-task { margin-top: 12px; }

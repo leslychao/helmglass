@@ -6,7 +6,6 @@ import io.modelcontextprotocol.server.McpServerFeatures.SyncToolSpecification;
 import io.modelcontextprotocol.server.McpSyncServerExchange;
 import io.modelcontextprotocol.spec.McpSchema;
 import java.io.IOException;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -32,6 +31,7 @@ import ru.helmglass.api.Idempotency;
 import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.ListQuery;
 import ru.helmglass.api.artifacts.ArtifactService;
+import ru.helmglass.api.audio.AudioAnalysisService;
 import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.browsers.BrowserService;
@@ -45,7 +45,7 @@ import tools.jackson.databind.JsonNode;
 @Service
 public class McpTools {
   private static final Logger log = LoggerFactory.getLogger(McpTools.class);
-  private static final int AUDIO_LIMIT = 8 * 1024 * 1024;
+  private static final int IMAGE_LIMIT = 8 * 1024 * 1024;
   private static final int WIDGET_LIMIT = 1024 * 1024;
   private final Identity identity;
   private final TaskService tasks;
@@ -55,6 +55,7 @@ public class McpTools {
   private final BrowserService browsers;
   private final ConnectionService connections;
   private final ArtifactService artifacts;
+  private final AudioAnalysisService audioAnalyses;
   private final ChatBindings chats;
   private final TaskElicitation elicitation;
   private final Idempotency idempotency;
@@ -73,6 +74,7 @@ public class McpTools {
       BrowserService browsers,
       ConnectionService connections,
       ArtifactService artifacts,
+      AudioAnalysisService audioAnalyses,
       ChatBindings chats,
       TaskElicitation elicitation,
       Idempotency idempotency,
@@ -87,6 +89,7 @@ public class McpTools {
     this.browsers = browsers;
     this.connections = connections;
     this.artifacts = artifacts;
+    this.audioAnalyses = audioAnalyses;
     this.chats = chats;
     this.elicitation = elicitation;
     this.idempotency = idempotency;
@@ -207,8 +210,9 @@ public class McpTools {
     result.add(
         tool(
             "tasks.view",
-            "Показать карточку текущей задачи в начале нового ответа, продолжающего работу."
-                + " Вызывать один раз за ответ, не после каждого шага. Не привязывает и не запускает задачу.",
+            "Показать карточку текущей задачи по новому обращению пользователя, если она нужна."
+                + " Только один раз за ответ; tasks.create уже показывает карточку. При автоматическом"
+                + " продолжении не вызывать: прежний виджет обновляется событиями. Не привязывает и не запускает задачу.",
             object(Map.of("taskId", uuid(), "operationKey", key()), "taskId", "operationKey"),
             false,
             false));
@@ -232,6 +236,7 @@ public class McpTools {
     result.add(tool("widget.steps", "Бизнес-шаги актуального виджета: одна запись на предметную операцию над объектом.",
         object(Map.of("taskId", uuid(), "generation", uuid(),
             "page", Map.of("type", "integer", "minimum", 1),
+            "search", Map.of("type", "string", "maxLength", 1000),
             "beforeSequence", Map.of("type", "integer", "minimum", 1)),
             "taskId", "generation"), true, false));
     result.add(
@@ -303,33 +308,22 @@ public class McpTools {
             object(Map.of("operationId", uuid()), "operationId"),
             true,
             false));
-    result.add(
-        tool(
-            "audio.get",
-            "Получить сохранённый оригинал аудио. delivery=file (по умолчанию) возвращает файл"
-                + " через MCP EmbeddedResource. Host может запросить разрешение на загрузку."
-                + " Для расшифровки речи использовать доступное распознавание ChatGPT и вернуть"
-                + " произнесённые слова; Python подходит только при наличии работающего"
-                + " распознавателя в его окружении. Анализ спектра, длительности и пауз не"
-                + " распознаёт слова. Для вопросов о звучании исследовать нужные свойства"
-                + " оригинала: одной расшифровки недостаточно. delivery=audio использовать"
-                + " только при подтверждённой поддержке MCP AudioContent клиентом; этот формат"
-                + " сам по себе не гарантирует, что модель услышит запись. Максимум 8 MiB без"
-                + " обрезания. Если файл, распознавание или нужный анализ недоступны, сообщить"
-                + " конкретное ограничение. Не выдумывать слова и ответы по метаданным. Helm"
-                + " не предоставляет модель речи; отдельные модели и платные аудиосервисы"
-                + " не вызывать.",
-            object(
-                Map.of(
-                    "taskId", uuid(),
-                    "artifactId", uuid(),
-                    "delivery",
-                        Map.of(
-                            "type", "string", "enum", List.of("file", "audio"), "default", "file")),
-                "taskId",
-                "artifactId"),
-            true,
-            false));
+    result.add(tool("audio.analyze",
+        "Запустить локальный анализ собственного сохранённого аудио. Для текста mode=transcript;"
+            + " для звучания mode=full. Повтор переиспользует анализ, повышение режима сохраняет"
+            + " расшифровку. Доступен из любого своего чата без передачи управления задачей.",
+        object(Map.of("artifactId", uuid(), "mode", Map.of("type", "string", "enum",
+            List.of("transcript", "full"))), "artifactId", "mode"), false, false));
+    result.add(tool("audio.get",
+        "Прочитать состояние и текстовые результаты локального анализа. Разделы: transcript,"
+            + " intervals, acoustics, emotions. Прочитайте все страницы по nextCursor/hasMore;"
+            + " sectionComplete отдельно показывает полноту стадии. PARTIAL/FAILED не являются"
+            + " полным успехом. Аудиофайл модели не передаётся.",
+        object(Map.of("analysisId", uuid(), "section", Map.of("type", "string", "enum",
+                List.of("transcript", "intervals", "acoustics", "emotions")),
+            "cursor", Map.of("type", "string", "pattern", "^[0-9]{1,19}$"),
+            "limit", Map.of("type", "integer", "minimum", 1, "maximum", 100)), "analysisId"),
+        true, false));
     result.add(
         tool(
             "results.publish",
@@ -361,6 +355,10 @@ public class McpTools {
             object(presentation, "taskId", "generation"),
             true,
             false));
+    result.add(tool("widget.keep-open", "Оставить браузер ещё на 15 минут без запуска задачи.",
+        object(Map.of("taskId", uuid(), "generation", uuid(), "browserId", uuid(),
+            "operationKey", key()), "taskId", "generation", "browserId", "operationKey"),
+        false, false));
     result.add(
         tool(
             "widget.claim",
@@ -452,6 +450,9 @@ public class McpTools {
       JsonNode input = json.tree(arguments);
       UUID owner = actor.id();
       String name = request.name();
+      if (!name.startsWith("widget.") && input.has("taskId")) {
+        browsers.modelActivity(owner, uuid(input, "taskId"));
+      }
       if ("tasks.respond".equals(name)
           && !arguments.keySet().equals(Set.of("taskId", "requestId", "requestVersion", "operationKey"))) {
         throw ApiException.invalid("arguments", "Ответ пользователя нельзя передать аргументами модели.");
@@ -467,13 +468,28 @@ public class McpTools {
             input.has("stepId") ? uuid(input, "stepId") : null, listQuery(arguments).page()));
       }
       if ("operations.get".equals(name)) {
-        return operation(owner, uuid(input, "operationId"));
+        UUID operationId = uuid(input, "operationId");
+        return operation(owner, operationId);
       }
       if ("tasks.get".equals(name)) {
         return textResult(tasks.get(owner, uuid(input, "taskId")));
       }
       if ("artifacts.list".equals(name)) {
         return textResult(artifacts.list(owner, uuid(input, "taskId"), listQuery(arguments)));
+      }
+      if ("audio.get".equals(name)) {
+        if (!Set.of("analysisId", "section", "cursor", "limit").containsAll(arguments.keySet())) {
+          throw ApiException.invalid("arguments", "Недопустимые параметры audio.get.");
+        }
+        return textResult(audioAnalyses.page(owner, uuid(input, "analysisId"),
+            input.path("section").asString("transcript"),
+            Long.parseLong(input.path("cursor").asString("0")), input.path("limit").asInt(100), null, null));
+      }
+      if ("audio.analyze".equals(name)) {
+        if (!arguments.keySet().equals(Set.of("artifactId", "mode"))) {
+          throw ApiException.invalid("arguments", "Требуются artifactId и mode.");
+        }
+        return textResult(audioAnalyses.analyze(owner, uuid(input, "artifactId"), string(input, "mode")));
       }
       if ("steps.list".equals(name)) {
         var values = new LinkedMultiValueMap<String, String>();
@@ -607,7 +623,6 @@ public class McpTools {
                       return tasks.get(owner, taskId);
                     }));
         case "browser.execute" -> execute(owner, taskId, chat, input.path("action"));
-        case "audio.get" -> audio(owner, taskId, uuid(input, "artifactId"), input);
         case "results.publish" ->
             textResult(
                 idempotency.execute(
@@ -634,6 +649,7 @@ public class McpTools {
           chats.state(owner, taskId, chat, uuid(input, "generation"));
           var values = new LinkedMultiValueMap<String, String>();
           values.add("page", String.valueOf(input.path("page").asInt(1)));
+          if (input.has("search")) values.add("search", input.path("search").asString());
           if (input.has("beforeSequence")) {
             values.add("beforeSequence", input.path("beforeSequence").asString());
           }
@@ -649,6 +665,17 @@ public class McpTools {
                         chat,
                         uuid(input, "generation"),
                         uuid(input, "continuationId"))));
+        case "widget.keep-open" -> {
+          UUID generation = uuid(input, "generation");
+          var state = data(owner, chats.state(owner, taskId, chat, generation));
+          UUID browserId = uuid(input, "browserId");
+          if (state.task().browser() == null || !browserId.equals(state.task().browser().id())) {
+            throw ApiException.conflict("BROWSER_UNAVAILABLE", "Браузер задачи изменился.");
+          }
+          idempotency.execute(owner, string(input, "operationKey"), name, arguments,
+              Contracts.Browser.class, () -> browsers.keepOpen(owner, browserId));
+          yield presentation(data(owner, chats.state(owner, taskId, chat, generation)));
+        }
         case "widget.browser" -> {
           var state = data(owner, chats.state(owner, taskId, chat, uuid(input, "generation")));
           if (state.task().browser() == null) {
@@ -728,6 +755,7 @@ public class McpTools {
 
   private McpSchema.CallToolResult operation(UUID owner, UUID id) {
     Contracts.Operation operation = actions.result(owner, id);
+    browsers.modelActivity(owner, operation.taskId());
     JsonNode result = operation.result();
     if ("screenshot".equals(operation.type())
         && "SUCCEEDED".equals(operation.status())
@@ -739,7 +767,7 @@ public class McpTools {
           .addTextContent(json.write(Map.of("operationId", id, "status", operation.status())))
           .addContent(
               McpSchema.ImageContent.builder(
-                      Base64.getEncoder().encodeToString(originalBytes(owner, artifact)),
+                      Base64.getEncoder().encodeToString(imageBytes(owner, artifact)),
                       artifact.mimeType())
                   .build())
           .build();
@@ -747,69 +775,14 @@ public class McpTools {
     return textResult(operation);
   }
 
-  private McpSchema.CallToolResult audio(UUID owner, UUID task, UUID id, JsonNode input) {
-    String delivery = input.has("delivery") ? input.path("delivery").asString("") : "file";
-    if (!Set.of("audio", "file").contains(delivery)) {
-      throw ApiException.invalid("delivery", "Допустимы только audio и file.");
-    }
-    tasks.get(owner, task);
-    boolean belongs =
-        jdbc.sql(
-                "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id=:id AND owner_id=:owner AND"
-                    + " task_id=:task)")
-            .param("id", id)
-            .param("owner", owner)
-            .param("task", task)
-            .query(Boolean.class)
-            .single();
-    if (!belongs) {
-      throw ApiException.notFound();
-    }
-    Contracts.Artifact artifact = artifacts.getReady(owner, id);
-    if (!artifact.mimeType().startsWith("audio/")) {
-      throw ApiException.conflict(
-          "AUDIO_MIME_UNCONFIRMED", "Формат исходника не подтверждён как аудио.");
-    }
-    if (artifact.sizeBytes() > AUDIO_LIMIT) {
-      throw ApiException.conflict(
-          "AUDIO_INLINE_LIMIT",
-          "Оригинал сохранён без обрезания, но превышает предел передачи ChatGPT 8 MiB.");
-    }
-    var result =
-        McpSchema.CallToolResult.builder()
-            .addTextContent(
-                json.write(
-                    Map.of(
-                        "artifact",
-                        artifact,
-                        "instructionContext",
-                        artifacts.audioContext(owner, id),
-                        "originalBytes",
-                        true)));
-    String encoded = Base64.getEncoder().encodeToString(originalBytes(owner, artifact));
-    if ("file".equals(delivery)) {
-      String filename =
-          URLEncoder.encode(artifact.name(), StandardCharsets.UTF_8).replace("+", "%20");
-      var resource =
-          McpSchema.BlobResourceContents.builder(
-                  "helmglass://artifacts/" + id + "/" + filename, encoded)
-              .mimeType(artifact.mimeType())
-              .build();
-      return result.addContent(McpSchema.EmbeddedResource.builder(resource).build()).build();
-    }
-    return result
-        .addContent(McpSchema.AudioContent.builder(encoded, artifact.mimeType()).build())
-        .build();
-  }
-
-  private byte[] originalBytes(UUID owner, Contracts.Artifact artifact) {
-    if (artifact.sizeBytes() > AUDIO_LIMIT) {
+  private byte[] imageBytes(UUID owner, Contracts.Artifact artifact) {
+    if (artifact.sizeBytes() > IMAGE_LIMIT) {
       throw ApiException.conflict(
           "CONTENT_INLINE_LIMIT",
           "Оригинал сохранён без обрезания, но превышает предел передачи 8 MiB.");
     }
     try (var stream = artifacts.openOwnerArtifact(owner, artifact.id())) {
-      byte[] bytes = stream.readNBytes(AUDIO_LIMIT + 1);
+      byte[] bytes = stream.readNBytes(IMAGE_LIMIT + 1);
       String hash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
       if (bytes.length != artifact.sizeBytes() || !hash.equals(artifact.sha256())) {
         throw ApiException.conflict(
@@ -825,11 +798,13 @@ public class McpTools {
   }
 
   public record Presentation(Contracts.Task task, UUID generation, UUID continuationId,
-      String continuationStatus, Long continuationRevision, String continuationReason) {}
+      String continuationStatus, Long continuationRevision, String continuationReason,
+      List<AudioAnalysisService.Summary> audio) {}
 
   private Presentation data(UUID owner, ChatBindings.State state) {
     return new Presentation(tasks.get(owner, state.taskId()), state.generation(), state.continuationId(),
-        state.continuationStatus(), state.continuationRevision(), state.continuationReason());
+        state.continuationStatus(), state.continuationRevision(), state.continuationReason(),
+        audioAnalyses.summaries(owner, state.taskId()));
   }
 
   private McpSchema.CallToolResult presentation(Presentation state) {
@@ -856,7 +831,29 @@ public class McpTools {
   }
 
   private McpSchema.CallToolResult textResult(Object value) {
-    return McpSchema.CallToolResult.builder().addTextContent(json.write(value)).build();
+    return McpSchema.CallToolResult.builder().addTextContent(json.write(modelData(json.tree(value)))).build();
+  }
+
+  private Object modelData(JsonNode value) {
+    if (value.isObject()) {
+      boolean audio = value.path("mimeType").asString("").startsWith("audio/");
+      Map<String, Object> result = new LinkedHashMap<>();
+      for (var entry : value.properties()) {
+        if (audio && Set.of("sourceUrl", "downloadUrl", "url", "blob", "base64").contains(entry.getKey())) {
+          continue;
+        }
+        result.put(entry.getKey(), modelData(entry.getValue()));
+      }
+      return result;
+    }
+    if (value.isArray()) {
+      List<Object> result = new ArrayList<>(value.size());
+      for (JsonNode item : value) {
+        result.add(modelData(item));
+      }
+      return result;
+    }
+    return value;
   }
 
   public List<SyncResourceSpecification> resources() {
@@ -972,7 +969,7 @@ public class McpTools {
   private static Map<String, Object> commandSchema() {
     return object(
         Map.ofEntries(
-            Map.entry("type", choice("PREPARE", "AMEND", "PAUSE", "RESUME", "STOP", "FINISH",
+            Map.entry("type", choice("PREPARE", "AMEND", "RESUME", "STOP", "FINISH",
                 "REQUIRE_LOGIN")),
             Map.entry("expectedVersion", Map.of("type", "integer", "minimum", 1)),
             Map.entry("title", text(200)),

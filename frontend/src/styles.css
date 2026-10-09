@@ -3,6 +3,7 @@
 :root {
   color-scheme: light;
   --surface: #fff;
+  --table-inset: 16px;
   font-size: 14px;
   line-height: 1.5;
   color: var(--ink);
@@ -789,7 +790,7 @@ button.metric:hover,
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 16px;
+  padding: 16px var(--table-inset);
 }
 .search {
   display: flex;
@@ -1953,6 +1954,9 @@ hg-date-filter {
   }
 }
 @media (max-width: 820px) {
+  :root {
+    --table-inset: 14px;
+  }
   .back-link {
     min-height: 44px;
     margin-bottom: 6px;
@@ -2012,7 +2016,7 @@ hg-date-filter {
     font-size: 25px;
   }
   .toolbar {
-    padding: 14px;
+    padding: 14px var(--table-inset);
     gap: 8px;
   }
   .toolbar .search {
@@ -2036,6 +2040,9 @@ hg-date-filter {
   }
 }
 @media (max-width: 560px) {
+  :root {
+    --table-inset: 12px;
+  }
   .main-content {
     padding: 20px 14px;
   }
@@ -2065,7 +2072,7 @@ hg-date-filter {
   }
   .toolbar {
     gap: 7px;
-    padding: 12px;
+    padding: 12px var(--table-inset);
   }
   .button,
   .filter,

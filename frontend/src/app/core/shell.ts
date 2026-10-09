@@ -114,8 +114,9 @@ export class Shell {
             resource?.kind === 'connections' && resource.id === parts[1]
               ? resource.label
               : 'Подключение',
-          url: this.router.parseUrl(this.current().split('?')[0]),
+          url: urlFor('/connections/' + parts[1]),
         },
+        { label: 'Браузер', url: this.router.parseUrl(this.current().split('?')[0]) },
       ];
     }
     return parts.map((part, index) => ({
@@ -131,7 +132,6 @@ export class Shell {
     }));
   });
   private generation = 0;
-  private preserveNotifications = false;
   private readonly bell = viewChild<ElementRef<HTMLButtonElement>>('bell');
   private readonly profileButton = viewChild<ElementRef<HTMLButtonElement>>('profileButton');
   private readonly profileLink = viewChild<ElementRef<HTMLAnchorElement>>('profileLink');
@@ -166,8 +166,7 @@ export class Shell {
       this.current.set(this.router.url);
       if (!changedPath) return;
       this.mobile.set(false);
-      if (!this.preserveNotifications) this.popup.set(null);
-      this.preserveNotifications = false;
+      this.popup.set(null);
       if (!this.notificationsOpen()) queueMicrotask(() => this.main()?.nativeElement.focus());
     });
     inject(DestroyRef).onDestroy(() => {
@@ -202,9 +201,11 @@ export class Shell {
       )
         this.notifications.set(data);
       else await this.loadNotifications();
-      this.preserveNotifications = true;
-      await this.router.navigate(['/tasks', item.taskId]);
-      this.notificationHeading()?.nativeElement.focus();
+      const navigated = await this.router.navigate(['/tasks', item.taskId]);
+      if (navigated || this.router.url.split('?')[0] === '/tasks/' + item.taskId) {
+        this.popup.set(null);
+        this.main()?.nativeElement.focus();
+      }
     } catch (error: unknown) {
       this.notificationError.set(errorMessage(error));
     } finally {

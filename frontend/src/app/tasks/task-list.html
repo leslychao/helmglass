@@ -97,6 +97,7 @@
       [selected]="query.values('site')"
       [load]="siteSuggestions"
       (picked)="selectSite($event)"
+      (cleared)="query.set({ site: null })"
     />
     <hg-multi-filter
       label="Источник"
@@ -141,6 +142,9 @@
         <ng-template hgCell="status" [hgCellOf]="page.items" let-task
           ><hg-status [value]="task.outcome || task.status"
         /></ng-template>
+        <ng-template hgCell="elapsedSeconds" [hgCellOf]="page.items" let-task>
+          <hg-task-duration [timing]="task.timing" />
+        </ng-template>
         <ng-template hgCell="executionSeconds" [hgCellOf]="page.items" let-task>{{
           task.usage.executionSeconds | duration
         }}</ng-template>
@@ -165,37 +169,17 @@
           >
         </ng-template>
         <ng-template hgCell="actions" [hgCellOf]="page.items" let-task>
-          <button
-            class="icon-button"
-            [cdkMenuTriggerFor]="taskActions"
-            [attr.aria-label]="'Действия задачи ' + task.title"
-            hgTooltip="Действия задачи"
-          >
-            <hg-icon name="more" />
-          </button>
-          <ng-template #taskActions>
-            <div cdkMenu class="menu-popover anchored-menu">
-              <a
-                cdkMenuItem
-                [routerLink]="['/tasks', task.id]"
-                [queryParams]="{ back: query.context() }"
-                >Открыть задачу</a
-              ><a
-                cdkMenuItem
-                [routerLink]="['/tasks', task.id]"
-                [queryParams]="{ back: query.context(), tab: 'result' }"
-                >Результат</a
-              >
-              @if (task.status === 'DRAFT' && task.allowedCommands.includes('AMEND')) {
-                <a
-                  cdkMenuItem
-                  [routerLink]="['/tasks', task.id, 'edit']"
-                  [queryParams]="{ back: query.context() }"
-                  >Редактировать</a
-                >
-              }
-            </div>
-          </ng-template>
+          @if (task.allowedCommands.includes('STOP') || task.status === 'STOPPING') {
+            <button
+              class="icon-button danger-text"
+              [disabled]="stopping() !== null || task.status === 'STOPPING'"
+              [attr.aria-label]="'Остановить задачу ' + (task.title || task.goal || task.id)"
+              [hgTooltip]="task.status === 'STOPPING' ? 'Останавливается…' : 'Остановить задачу'"
+              (click)="stop(task)"
+            >
+              <hg-icon name="stop" />
+            </button>
+          }
         </ng-template>
       </hg-data-table>
     } @else {

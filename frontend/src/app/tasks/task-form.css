@@ -1,18 +1,21 @@
-.page-heading {
-  margin-bottom: 14px;
-}
-
+:host { display: block; max-width: 880px; margin: 0 auto; }
+.form-body { padding: 24px; }
+.field { margin-bottom: 22px; }
+.field > label, .form-label-row > label { font-size: 13px; font-weight: 550; }
+.form-label-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.field small, .form-label-row small { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.field textarea { min-height: 126px; }
+.output-field { max-width: 280px; }
+.form-security { display: flex; align-items: flex-start; gap: 10px; padding: 13px 14px; border-radius: 7px; background: #f5f8fc; color: #687e98; font-size: 12px; line-height: 1.7; }
+.form-security hg-icon { flex: none; margin-top: 3px; width: 16px; height: 16px; }
+.form-footer { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 10px; padding: 20px 0 0; }
+.form-footer .back-link { margin: 0 auto 0 0; }
+.form-footer .button { font-size: 12px; }
+.draft-note { color: var(--muted); font-size: 11px; text-align: right; margin: 12px 0; }
 @media (max-width: 580px) {
-  .v12-task-form .form-summary {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-  }
-
-  .v12-task-form .form-summary .button {
-    flex: none;
-    width: 100%;
-    min-width: 0;
-    white-space: normal;
-  }
+  .form-body { padding: 18px 16px; }
+  .form-footer { align-items: stretch; }
+  .form-footer .back-link { flex-basis: 100%; padding: 7px 0; }
+  .form-footer .button { flex: 1 1 100%; white-space: normal; }
+  .draft-note { text-align: left; }
 }

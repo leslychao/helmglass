@@ -1,11 +1,12 @@
-import { Icon, IconName } from '../shared/icon';
-import { DatePipe } from '@angular/common';
+import { Icon } from '../shared/icon';
 import { CdkMenuModule } from '@angular/cdk/menu';
+import { DatePipe } from '@angular/common';
 import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed, toSignal } from '@angular/core/rxjs-interop';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import * as z from 'zod/mini';
 import { BrowserViewer, browserViewerId } from '../browser/viewer';
+import { BrowserSteps } from '../browser/steps';
 import { Tooltip } from '../shared/tooltip';
 import { PageContext, pageReturnLabel, pageReturnUrl } from '../core/page-context';
 import { Api, ApiError, errorMessage } from '../core/api';
@@ -16,7 +17,6 @@ import {
   Command,
   Page,
   Task,
-  stepLabels,
   stepSchema,
   pageSchema,
   taskSchema,
@@ -26,6 +26,9 @@ import { DurationPipe, LabelPipe, Pager, Status } from '../shared/ui';
 import { ResultView } from './result-view';
 import { SearchInput } from '../shared/search-input';
 import { QueryState } from '../shared/query-state';
+import { TaskStop } from './task-stop';
+import { TaskDuration } from './task-duration';
+import { BrowserPageLifetime } from '../browser/page-lifetime';
 
 @Component({
   selector: 'hg-task-detail',
@@ -36,8 +39,10 @@ import { QueryState } from '../shared/query-state';
     DatePipe,
     RouterLink,
     BrowserViewer,
+    BrowserSteps,
     ResultView,
     DurationPipe,
+    TaskDuration,
     LabelPipe,
     Pager,
     Status,
@@ -53,6 +58,8 @@ export class TaskDetail {
   private readonly router = inject(Router);
   private readonly api = inject(Api);
   private readonly dialog = inject(Dialog);
+  private readonly taskStop = inject(TaskStop);
+  private readonly lifetime = inject(BrowserPageLifetime);
   private readonly destroy = inject(DestroyRef);
   private readonly pageContext = inject(PageContext);
   readonly query = inject(QueryState);
@@ -86,17 +93,6 @@ export class TaskDetail {
   readonly historyError = signal('');
   readonly historyLoading = signal(false);
   readonly historySearch = signal('');
-  readonly stepLabels = stepLabels;
-  readonly historyIcons: Readonly<Record<string, IconName>> = {
-    PLANNED: 'info',
-    RUNNING: 'gpt',
-    SUCCEEDED: 'check',
-    FAILED: 'alert',
-    UNKNOWN: 'alert',
-    PARTIAL: 'alert',
-    WAITING: 'pause',
-    SKIPPED: 'stop',
-  };
   readonly viewerId = browserViewerId();
   readonly controller = signal(false);
   get currentUrl() {
@@ -132,23 +128,15 @@ export class TaskDetail {
       const needsLogin = task.request?.type === 'LOGIN' || task.waitReason === 'LOGIN';
       if (
         !needsLogin ||
-        browser.controlOwner === 'USER' ||
         ['CLOSED', 'LOST'].includes(browser.status)
       ) {
         untracked(() => this.query.set({ login: null }, false));
         return;
       }
-      if (!this.can('BEGIN_LOGIN')) return;
-      const key = 'helm-login-intent:' + task.id + ':' + (task.request?.id ?? browser.id);
+      if (!browser.connectionId && !this.can('BEGIN_LOGIN')) return;
       untracked(() => {
         this.query.set({ login: null, tab: 'overview' }, false);
-        if (sessionStorage.getItem(key)) return;
-        sessionStorage.setItem(key, 'consumed');
-        void this.command('BEGIN_LOGIN', {
-          viewerId: this.viewerId,
-          requestId: task.request?.id,
-          requestVersion: task.request?.version,
-        });
+        void this.openLogin();
       });
     });
     inject(LiveEvents)
@@ -174,6 +162,43 @@ export class TaskDetail {
   }
   can(type: string) {
     return this.task()?.allowedCommands.includes(type) ?? false;
+  }
+
+  async canLeave(nextUrl: string): Promise<boolean> {
+    if (this.lifetime.retains(this.task()?.browser, nextUrl)) return true;
+    if (this.busy()) {
+      this.error.set('Дождитесь завершения действия с браузером перед выходом.');
+      return false;
+    }
+    try {
+      await this.lifetime.follow(this.task()?.browser);
+      await this.lifetime.leave();
+      return true;
+    } catch (error: unknown) {
+      this.error.set(errorMessage(error));
+      return false;
+    }
+  }
+  async openLogin() {
+    const task = this.task();
+    if (!task?.browser || this.busy()) return;
+    let connectionId = task.browser.connectionId;
+    if (!connectionId) {
+      if (!this.can('BEGIN_LOGIN')) return;
+      const updated = await this.command('BEGIN_LOGIN', {
+        viewerId: this.viewerId,
+        requestId: task.request?.id,
+        requestVersion: task.request?.version,
+      });
+      connectionId = updated?.browser?.connectionId ?? null;
+    }
+    if (!connectionId || this.destroy.destroyed || this.params().get('id') !== task.id) return;
+    const returnUrl = this.router.createUrlTree(['/tasks', task.id], {
+      queryParams: { ...this.route.snapshot.queryParams, login: null },
+    }).toString();
+    await this.router.navigate(['/connections', connectionId, 'login'], {
+      queryParams: { return: returnUrl },
+    });
   }
   async load() {
     const generation = ++this.generation;
@@ -218,43 +243,22 @@ export class TaskDetail {
       'Закрыть браузер', [], true,
     ))) return;
     if (type === 'OPEN_BROWSER' && !(await this.dialog.ask(
-      'Открыть новый браузер?',
-      'Будет использован последний сохранённый вход. Задача останется на паузе; прежние действия не повторятся.',
-      'Открыть браузер',
+      'Возобновить браузер?',
+      'Будет использован последний сохранённый вход. Несохранённая страница прежнего браузера не восстановится. Задача продолжится автоматически, если нет других причин ожидания.',
+      'Возобновить браузер',
     ))) return;
-    if (
-      type === 'STOP' &&
-      !(await this.dialog.ask(
-        'Остановить задачу?',
-        'После завершения отправленного действия браузер будет закрыт. Результаты сохранятся. Возобновить остановленную задачу нельзя.',
-        'Остановить',
-        [],
-        true,
-      ))
-    )
-      return;
-    if (type === 'RESUME' && ['LOST', 'CLOSED', 'OFFLINE'].includes(task.browser?.status ?? '')) {
-      if (
-        !(await this.dialog.ask(
-          'Открыть новый браузер?',
-          (task.browser?.status === 'CLOSED'
-            ? 'Предыдущий браузер закрыт.'
-            : 'Предыдущий браузер потерян.') +
-            ' Новый начнёт работу без его вкладок и несохранённого состояния.',
-          'Открыть новый',
-        ))
-      )
-        return;
-      extra = { ...extra, confirmBrowserLoss: true };
-    }
     this.busy.set(true);
     this.error.set('');
     try {
-      const updated = await this.api.mutate(
-        '/api/tasks/' + task.id + '/commands',
-        { type, expectedVersion: task.version, ...extra },
-        taskSchema,
-      );
+      const updated =
+        type === 'STOP'
+          ? await this.taskStop.stop(task)
+          : await this.api.mutate(
+              '/api/tasks/' + task.id + '/commands',
+              { type, expectedVersion: task.version, ...extra },
+              taskSchema,
+            );
+      if (!updated) return;
       if (this.destroy.destroyed || this.params().get('id') !== task.id) return;
       this.generation++;
       if (this.task()?.id === updated.id && updated.version >= (this.task()?.version ?? 0))
@@ -265,6 +269,7 @@ export class TaskDetail {
         }
         this.syncController(this.task() ?? updated);
       }
+      return updated;
     } catch (error: unknown) {
       if (this.destroy.destroyed || this.params().get('id') !== task.id) return;
       this.error.set(errorMessage(error));
@@ -279,6 +284,7 @@ export class TaskDetail {
     } finally {
       if (!this.destroy.destroyed && this.params().get('id') === task.id) this.busy.set(false);
     }
+    return undefined;
   }
   openHistory() {
     this.historyOpen.set(!this.historyOpen());
@@ -305,6 +311,10 @@ export class TaskDetail {
     this.syncController(task);
   }
   private syncController(task: Task) {
+    void this.lifetime.follow(task.browser).catch((error: unknown) => {
+      if (!this.destroy.destroyed && this.task()?.id === task.id)
+        this.error.set(errorMessage(error));
+    });
     const browser = task.browser;
     if (!browser) {
       this.controller.set(false);

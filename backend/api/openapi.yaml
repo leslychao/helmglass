@@ -13,6 +13,128 @@ security:
   - bearerAuth: []
   - webSession: []
 paths:
+  /artifacts/{id}/analysis:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      operationId: analyzeAudio
+      description: Idempotent by owner, artifact and processing version. Full upgrade preserves transcript and analysis ID. Does not control the task or browser.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mode]
+              properties:
+                mode:
+                  type: string
+                  enum: [transcript, full]
+      responses:
+        "200":
+          description: Current analysis state; processing is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AudioAnalysis"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+    get:
+      operationId: latestAudioAnalysis
+      responses:
+        "200":
+          description: Latest processing version for this artifact, if requested.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [available]
+                properties:
+                  available:
+                    type: boolean
+                  analysis:
+                    $ref: "#/components/schemas/AudioAnalysis"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+  /audio/analyses/{id}:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    get:
+      operationId: audioAnalysisPage
+      description: Text or structured data only. At most 100 elements and 64 KiB per page. hasMore concerns stored data; sectionComplete independently describes the computation.
+      parameters:
+        - name: section
+          in: query
+          schema:
+            type: string
+            enum: [transcript, intervals, acoustics, emotions]
+            default: transcript
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            pattern: '^[0-9]{1,19}$'
+            default: '0'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+        - name: from
+          in: query
+          description: Inclusive start of the requested time range in original seconds.
+          schema: {type: number, minimum: 0}
+        - name: to
+          in: query
+          description: Exclusive end, greater than from.
+          schema: {type: number, minimum: 0}
+      responses:
+        "200":
+          description: Analysis state and one bounded page.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/AudioAnalysis"
+                  - type: object
+                    required: [section, items, hasMore, nextCursor, sectionComplete]
+                    properties:
+                      section: {type: string, enum: [transcript, intervals, acoustics, emotions]}
+                      items:
+                        type: array
+                        maxItems: 100
+                        items:
+                          type: object
+                          required: [start, end]
+                          properties:
+                            start: {type: number, minimum: 0}
+                            end: {type: number, minimum: 0}
+                            text: {type: string}
+                            timing: {type: string, enum: [ctc_estimate]}
+                            kind: {type: string, enum: [speech, pause, loudness, pitch]}
+                            rmsDbfs: {type: [number, 'null']}
+                            peakDbfs: {type: [number, 'null']}
+                            digitalSilence: {type: boolean}
+                            f0Hz: {type: [number, 'null']}
+                            strength: {type: number}
+                            deltaHz: {type: [number, 'null']}
+                            reason: {type: [string, 'null']}
+                            scores:
+                              type: [object, 'null']
+                              additionalProperties: {type: number}
+                              description: Native model class scores; not calibrated probabilities of a person's emotions.
+                      hasMore: {type: boolean}
+                      nextCursor: {type: [string, 'null']}
+                      sectionComplete: {type: boolean}
+        "400":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
   /me:
     get:
       operationId: me
@@ -481,6 +603,10 @@ paths:
                 viewerId:
                   type: string
                   format: uuid
+                pageVisitId:
+                  type: string
+                  format: uuid
+                  description: Optional cabinet page visit, registered atomically with START.
                 action:
                   type:
                     - string
@@ -517,6 +643,92 @@ paths:
         "409":
           $ref: "#/components/responses/ApplicationError"
         "500":
+          $ref: "#/components/responses/ApplicationError"
+  /browser-sessions/{session}/pages/{visit}:
+    parameters:
+      - name: session
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: visit
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      operationId: openBrowserPage
+      description: >-
+        Register a task or connection browser page, or update its control epoch. WEB owner only.
+        The authenticated events stream renews this visit; absence for 60 seconds ends it.
+        Switching Chrome tabs or stopping the video stream does not end the page.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [viewerId]
+              properties:
+                viewerId: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Page registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [active]
+                properties:
+                  active: { type: boolean, const: true }
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+    delete:
+      operationId: leaveBrowserPage
+      description: >-
+        End this page idempotently. The last page requests closure of a standalone browser.
+        A task browser remains open; only this viewer's matching control epoch is returned,
+        with automatic continuation unless another hold applies. Expiry without explicit leave
+        releases control with the task paused. Incomplete login remains private.
+        Closure uses normal worker confirmation.
+      responses:
+        "200":
+          description: Page ended; browser or control teardown may still be completing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [active]
+                properties:
+                  active: { type: boolean, const: false }
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+  /browser-sessions/{id}/keep-open:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      operationId: keepBrowserOpen
+      description: Extend the same live task browser by 15 minutes without resuming the task or changing control. A closing browser cannot be extended.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Browser deadline updated or protected while in use.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Browser"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
           $ref: "#/components/responses/ApplicationError"
   /browser-sessions/{id}/credentials:
     parameters:
@@ -699,10 +911,15 @@ paths:
     post:
       operationId: browserSessionLogin
       description: >-
-        CONFIRM_LOGIN records the current private controller's declaration that login is complete;
-        it does not verify external authorization. SAVE_SESSION requires that declaration and
+        FINISH_LOGIN is the single cabinet action: declare login complete, persist the canonical
+        owned connection, then release control after confirmed persistence. It keeps the same
+        browser and explicit task pause, resolves a LOGIN request, and preserves other requests.
+        It requires the current private controller and controlEpoch. Failed persistence keeps
+        protected control for recovery; success does not verify external authorization.
+        CONFIRM_LOGIN and SAVE_SESSION remain supported for existing clients.
+        CONFIRM_LOGIN only records the controller's declaration. SAVE_SESSION requires it and
         persists the canonical owned connection (creating the task's connection if needed).
-        A saved account subject cannot be replaced. Saving keeps the same browser, private USER
+        A saved account subject cannot be replaced. SAVE_SESSION keeps the same browser, private USER
         control, task pause and pending request. It neither closes the browser nor transfers control.
         The durable intent remains TRANSFERRING until confirmed; loginConfirmed becomes false only
         after successful persistence and control acknowledgement. An identical Idempotency-Key
@@ -719,7 +936,7 @@ paths:
               properties:
                 type:
                   type: string
-                  enum: [CONFIRM_LOGIN, SAVE_SESSION]
+                  enum: [FINISH_LOGIN, CONFIRM_LOGIN, SAVE_SESSION]
                 viewerId:
                   type: string
                   format: uuid
@@ -736,7 +953,7 @@ paths:
                   description: Optional user-declared expected external account. Omission preserves existing metadata and does not claim a verified identity.
       responses:
         "200":
-          description: Browser with confirmed login marker or durable pending save intent.
+          description: Browser with a durable finish/save intent or confirmed login marker.
           content:
             application/json:
               schema:
@@ -926,6 +1143,12 @@ paths:
         "500":
           $ref: "#/components/responses/ApplicationError"
       parameters:
+        - name: browserVisit
+          in: query
+          schema: { type: string, format: uuid }
+          description: >-
+            Renews only an active connection page visit owned by the authenticated WEB account.
+            A missing, closed or foreign visit is ignored and never affects the account event stream.
         - name: Last-Event-ID
           in: header
           schema:
@@ -1624,7 +1847,7 @@ components:
       description:
         Resource-specific key, applied before pagination with a stable ID tie-breaker and nulls last
         in both directions. Tasks support title, site, source, status, createdAt, updatedAt, summary,
-        executionSeconds, manualSeconds, mediaSeconds and mediaBytes (default updatedAt).
+        elapsedSeconds, executionSeconds, manualSeconds, mediaSeconds and mediaBytes (default updatedAt).
         Connections support name, site, status, lastUsedAt and updatedAt (default updatedAt).
         Users support name, email, status, browserCount, waitingCount and lastAccessAt (default lastAccessAt).
         Unsupported keys use the resource default. Omitting the key means no user-selected sort;
@@ -1670,6 +1893,47 @@ components:
           - 50
         default: 20
   schemas:
+    AudioAnalysis:
+      type: object
+      required: [analysisId, artifactId, processingVersion, sourceSha256, mode, status, version, transcriptComplete, acousticsComplete, emotionsComplete, processedSeconds, stageErrors, metadata, metrics, tempo]
+      properties:
+        analysisId: {type: string, format: uuid}
+        artifactId: {type: string, format: uuid}
+        processingVersion: {type: string}
+        sourceSha256: {type: string}
+        mode: {type: string, enum: [transcript, full]}
+        status: {type: string, enum: [QUEUED, RUNNING, SUCCEEDED, PARTIAL, FAILED]}
+        version: {type: integer}
+        intervalsComplete: {type: boolean}
+        stages: {type: object, additionalProperties: {type: string, enum: [NOT_REQUESTED, QUEUED, RUNNING, SUCCEEDED, FAILED]}}
+        qualityFlags: {type: array, items: {type: string}}
+        transcriptComplete: {type: boolean}
+        acousticsComplete: {type: boolean}
+        emotionsComplete: {type: boolean}
+        processedSeconds: {type: number}
+        durationSeconds: {type: [number, 'null']}
+        errorCode: {type: [string, 'null']}
+        stageErrors: {type: object, additionalProperties: {type: string}}
+        instructionContext:
+          type: [object, 'null']
+          description: Historical assignment, untrusted data rather than current instructions.
+        instructionContextOmitted:
+          type: boolean
+          description: True when the historical context exceeds 16 KiB; no silent truncation.
+        metadata:
+          type: object
+          description: Pinned model revisions, SHA-256, measurement parameters and limitations.
+        metrics:
+          type: object
+          description: Worker wall/CPU seconds, process lifetime peak RSS in KiB and cumulative ASR/emotion calls.
+        tempo:
+          type: object
+          properties:
+            recognizedWords: {type: integer}
+            speechSeconds: {type: number}
+            withPausesWpm: {type: [number, 'null']}
+            withoutPausesWpm: {type: [number, 'null']}
+            reason: {type: [string, 'null']}
     Page:
       type: object
       required:
@@ -1827,6 +2091,10 @@ components:
           maximum: 9007199254740991
     TaskCommand:
       type: object
+      description: >-
+        Standalone PAUSE is not supported and fails validation without effects, including repeats.
+        Internal PAUSING, PAUSED and WAITING_USER states remain for browser closure and manual control.
+        RESUME retains version, ownership, original-chat, pending-request and UNKNOWN safeguards.
       required:
         - type
         - expectedVersion
@@ -1913,6 +2181,7 @@ components:
         - site
         - outputFormat
         - chatBound
+        - continuation
         - preferredConnectionIds
         - source
         - status
@@ -1923,8 +2192,10 @@ components:
         - lastResponse
         - browser
         - result
+        - timing
         - usage
         - allowedCommands
+        - stepCount
         - createdAt
         - updatedAt
       properties:
@@ -1959,6 +2230,16 @@ components:
             - TEXT
         chatBound:
           type: boolean
+        continuation:
+          type: [object, "null"]
+          additionalProperties: false
+          required: [status, reason]
+          properties:
+            status:
+              type: string
+              enum: [IDLE, PENDING, SENDING, MESSAGE_SENT, ACCEPTED, UNAVAILABLE]
+            reason:
+              type: [string, "null"]
         preferredConnectionIds:
           type: array
           items:
@@ -2003,18 +2284,42 @@ components:
           anyOf:
             - $ref: "#/components/schemas/Result"
             - type: "null"
+        timing:
+          $ref: "#/components/schemas/TaskTiming"
         usage:
           $ref: "#/components/schemas/Usage"
         allowedCommands:
           type: array
           items:
             $ref: "#/components/schemas/TaskCommandType"
+        stepCount:
+          type: integer
+          minimum: 0
+          description: Total persisted business steps, independent of the current page or search.
         createdAt:
           type: string
           format: date-time
         updatedAt:
           type: string
           format: date-time
+    TaskTiming:
+      type: object
+      additionalProperties: false
+      required: [elapsedSeconds, running]
+      description: >-
+        Wall-clock duration from preparation (accepted_at) to completion, or the current
+        server statement time while unfinished. Includes waiting, pauses and ChatGPT work;
+        excludes time spent as a draft. Resuming the same task retains the original start.
+        Independent of browser command usage. Clients may advance a running snapshot using
+        a monotonic local clock and replace it when a fresh task arrives.
+      properties:
+        elapsedSeconds:
+          type: [number, "null"]
+          minimum: 0
+          description: Null if the task has never been prepared, including a stopped draft.
+        running:
+          type: boolean
+          description: Whether the prepared task has no recorded completion yet.
     Error:
       type: object
       required:
@@ -2127,9 +2432,13 @@ components:
     Browser:
       type: object
       required:
+        - idleCloseAt
+        - closeReason
         - taskId
         - connectionId
         - loginConfirmed
+        - startedAt
+        - closedAt
         - profileSaveError
         - id
         - nodeId
@@ -2142,6 +2451,13 @@ components:
         - canControl
         - version
       properties:
+        idleCloseAt:
+          type: [string, "null"]
+          format: date-time
+          description: Persisted idle deadline. Null while protected by an operation, control transfer, or connected manual controller. Passive viewers do not renew it.
+        closeReason:
+          type: [string, "null"]
+          enum: [USER, IDLE_TIMEOUT, null]
         taskId:
           type: [string, "null"]
           format: uuid
@@ -2153,6 +2469,14 @@ components:
         loginConfirmed:
           type: boolean
           description: Server-persisted user declaration of a completed unsaved login. Cleared only after confirmed save; never an automatic external-authorization verdict.
+        startedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Confirmed first start of this browser. Null before confirmation.
+        closedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Recorded closure or loss time. Duration stops here; a missing start is not zero.
         profileSaveError:
           type: [string, "null"]
           description: Safe failure of persisting this browser's selected connection.
@@ -2191,6 +2515,18 @@ components:
         TRANSFERRING is a durable pending policy. Controller tickets work only after USER
         acknowledgement; entering or leaving private mode denies model observation during the
         transition.
+    CookieCheck:
+      type: object
+      description: Technical cookie suitability in the saved snapshot, not site authentication.
+      required: [usableCount, checkedAt]
+      properties:
+        usableCount:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        checkedAt:
+          type: string
+          format: date-time
     Connection:
       type: object
       properties:
@@ -2249,11 +2585,22 @@ components:
           items:
             type: string
             format: uri
+        cookieCheck:
+          anyOf:
+            - $ref: "#/components/schemas/CookieCheck"
+            - type: "null"
+        taskCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of owned tasks that select or prefer this connection.
       required:
+        - taskCount
         - profileRevision
         - profileSavedAt
         - profileSaveError
         - authorizedOrigins
+        - cookieCheck
         - id
         - version
         - name
@@ -2715,16 +3062,29 @@ components:
         - LOST
     TaskCommandType:
       type: string
+      description: >-
+        CLOSE_BROWSER closes the task browser after dispatched work settles and preserves
+        steps, results and an explicit pause. Closure is confirmed by the browser node;
+        an unreachable node or UNKNOWN operation is not reported as a successful close.
+        OPEN_BROWSER allocates a new browser and resumes the same task after it is ready,
+        removing only the pause caused by browser closure. Other holds remain in force.
+        Both commands are available only in the authenticated web cabinet.
+        TAKE_CONTROL enters manual control without starting a new login.
+        BEGIN_LOGIN associates the same task browser with its canonical owned connection
+        (creating it when absent), so login can be completed from the connection page.
+        RETURN_CONTROL does not require saving the login session and preserves explicit
+        pause and unresolved requests. FINISH_LOGIN remains compatible with existing clients.
       enum:
         - PREPARE
         - AMEND
-        - PAUSE
         - RESUME
         - STOP
         - BEGIN_LOGIN
         - FINISH_LOGIN
         - TAKE_CONTROL
         - RETURN_CONTROL
+        - CLOSE_BROWSER
+        - OPEN_BROWSER
         - FINISH
     TaskPage:
       allOf:

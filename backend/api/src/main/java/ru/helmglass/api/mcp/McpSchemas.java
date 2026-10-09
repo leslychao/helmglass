@@ -35,6 +35,8 @@ final class McpSchemas {
                 Map.entry("site", nullable(string())),
                 Map.entry("outputFormat", string()),
                 Map.entry("chatBound", Map.of("type", "boolean")),
+                Map.entry("continuation", nullable(object(Map.of(
+                    "status", string(), "reason", nullable(string()))))),
                 Map.entry("preferredConnectionIds", array(string())),
                 Map.entry("source", string()),
                 Map.entry("status", string()),
@@ -45,6 +47,9 @@ final class McpSchemas {
                 Map.entry("lastResponse", nullable(response())),
                 Map.entry("browser", nullable(browser())),
                 Map.entry("result", nullable(Map.of("type", "object"))),
+                Map.entry("timing", object(Map.of(
+                    "elapsedSeconds", nullable(Map.of("type", "number", "minimum", 0)),
+                    "running", Map.of("type", "boolean")))),
                 Map.entry("usage", Map.of("type", "object")),
                 Map.entry("allowedCommands", array(string())),
                 Map.entry("stepCount", integer()),
@@ -52,6 +57,13 @@ final class McpSchemas {
                 Map.entry("updatedAt", string())));
     return object(
         Map.of(
+            "audio",
+            Map.of("type", "array", "maxItems", 10, "items", object(Map.of(
+                "analysisId", string(), "name", string(), "mode", string(), "status", string(),
+                "transcriptComplete", Map.of("type", "boolean"),
+                "acousticsComplete", Map.of("type", "boolean"),
+                "emotionsComplete", Map.of("type", "boolean"),
+                "errorCode", nullable(string())))),
             "task",
             task,
             "generation",
@@ -103,7 +115,9 @@ final class McpSchemas {
             Map.entry("connectionId", nullable(string())),
             Map.entry("loginConfirmed", Map.of("type", "boolean")),
             Map.entry("startedAt", nullable(string())),
-            Map.entry("closedAt", nullable(string()))));
+            Map.entry("closedAt", nullable(string())),
+            Map.entry("idleCloseAt", nullable(string())),
+            Map.entry("closeReason", nullable(string()))));
   }
 
   private static Map<String, Object> response() {

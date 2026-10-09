@@ -27,6 +27,7 @@ export { adminActionLabel } from './audit-table';
   imports: [Icon, RouterLink, Pager, AdminAuditTable],
   providers: [QueryState],
   template: `
+    @if (!overview()) { <h1 class="sr-only">Журнал действий</h1> }
     <section class="card table-card">
       <div class="section-heading padded">
         <h2>Журнал действий</h2>

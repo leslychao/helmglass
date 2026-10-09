@@ -12,6 +12,7 @@ import { Dialog } from '../shared/dialog';
 import { Empty, Pager, Status } from '../shared/ui';
 import { QueryState } from '../shared/query-state';
 import { TextArtifact } from './text-artifact';
+import { AudioAnalysis } from './audio-analysis';
 import { Tooltip } from '../shared/tooltip';
 
 @Component({
@@ -27,6 +28,7 @@ import { Tooltip } from '../shared/tooltip';
     Status,
     RouterLink,
     TextArtifact,
+    AudioAnalysis,
     Tooltip,
   ],
   providers: [QueryState],
@@ -147,6 +149,8 @@ import { Tooltip } from '../shared/tooltip';
                   file.mimeType.split(';')[0].trim() === 'text/plain'
                 ) {
                   <hg-text-artifact [id]="file.id" [name]="file.name" />
+                } @else if (file.status === 'READY' && file.complete && file.mimeType.startsWith('audio/')) {
+                  <hg-audio-analysis [id]="file.id" [name]="file.name" />
                 } @else {
                   <div class="file-row">
                     <span class="file-mark"><hg-icon name="file" /></span

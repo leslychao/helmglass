@@ -22,6 +22,18 @@
   border-color: #719de4;
   outline: 2px solid #dce9fc;
 }
+.autocomplete-field.selected {
+  border-color: #719de4;
+  background: #f4f8ff;
+}
+.autocomplete-count {
+  flex: none;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #e3edfc;
+  color: #415e83;
+  font-size: 11px;
+}
 .autocomplete-field > hg-icon {
   flex: none;
 }
@@ -79,9 +91,30 @@
 .autocomplete-option > hg-icon {
   flex: none;
 }
-.autocomplete-option > span {
+.autocomplete-option > span:not(.autocomplete-checkbox) {
   flex: 1;
   min-width: 0;
+}
+.autocomplete-checkbox {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1px solid #bac9dc;
+  border-radius: 3px;
+}
+.autocomplete-checkbox.checked {
+  border-color: #477bc8;
+  background: #477bc8;
+  color: white;
+}
+.autocomplete-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-top: 1px solid #edf1f6;
 }
 .autocomplete-option strong,
 .autocomplete-option small {

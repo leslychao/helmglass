@@ -1,0 +1,15 @@
+{
+  "gigaamRevision": "7447938d791c4f3e643386ee22c33777004293a5",
+  "sileroRevision": "5cd7945676eb32225748052e2e6a0580e4686a08",
+  "weights": {
+    "emo.ckpt": "ee2da14e307a2af78a8935a5519f29c5b590d1f8a7c77ebc8c3061c440052a26",
+    "v3_ctc.ckpt": "a20a9b5b8ed929c4a60141753cd3dd1284138879a46fb4a1cef6430ec019a02f"
+  },
+  "assets": {
+    "emo.onnx": "a5ad28bf48d19f3bc3c68a6dc31b27c54eeb0d3d3bdc6e878e0ee822f84870a6",
+    "emo.yaml": "9211da81fc7018babed37b253700e2d58d3ce33ae4478ce9f8f771197c726103",
+    "silero_vad.onnx": "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+    "v3_ctc.onnx": "0fd19d8e51d78b93c6c3f2d7ede697f49921c8287ed555dc461d5664170364ec",
+    "v3_ctc.yaml": "37790b3abd82bcd090db277b2ec79489a20fdabfc3d205463f0c4ad17022fbf0"
+  }
+}

@@ -1,0 +1,24 @@
+name: helmglass-models
+services:
+  audio-processor:
+    image: helmglass-audio-processor:current
+    build: ../backend/audio-processor
+    restart: unless-stopped
+    cpus: 4
+    pids_limit: 96
+    read_only: true
+    tmpfs: ['/tmp:size=64m,mode=1777']
+    environment:
+      AUDIO_TOKEN: ${AUDIO_TOKEN:?AUDIO_TOKEN is required}
+      AUDIO_API_URL: http://api:8080
+    volumes: [artifacts:/data/artifacts:ro]
+    networks: [audio]
+    stop_grace_period: 30s
+volumes:
+  artifacts:
+    external: true
+    name: helmglass_artifacts
+networks:
+  audio:
+    name: helmglass-audio
+    internal: true

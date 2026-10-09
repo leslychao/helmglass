@@ -14,7 +14,7 @@ import {
 } from '@angular/core';
 import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { Api, ApiError, errorMessage } from '../core/api';
-import { BrowserSession, Connection, Task, ticketSchema } from '../core/models';
+import { BrowserSession, Connection, Task, browserSchema, ticketSchema } from '../core/models';
 import { Status } from '../shared/ui';
 import { A11yModule } from '@angular/cdk/a11y';
 import { Tooltip } from '../shared/tooltip';
@@ -64,37 +64,32 @@ export function browserViewerId(): string {
           (input)="addressInput($event)" (keydown.enter)="navigate($event)" />
       </label>
       <div class="browser-controls">
-        <ng-content />
-        @if (sessionPanel()?.canConfirm() && !browser()?.loginConfirmed) {
-          <button
-            class="button small"
-            [disabled]="sessionPanel()?.busy()"
-            (click)="sessionPanel()?.confirm()"
-          >
-            Я завершил вход
-          </button>
-        }
-        @if (browser()?.loginConfirmed) {
-          <span
-            [hgTooltip]="sessionPanel()?.saveDisabledReason() || ''"
-            [attr.tabindex]="sessionPanel()?.saveDisabledReason() ? 0 : null"
-          >
+        <div class="browser-control-actions">
+          @if (connection() && !loginSaved() && !sessionPanel()?.completed()) {
             <button
               class="button primary small"
-              [disabled]="!!sessionPanel()?.saveDisabledReason()"
-              (click)="saveSession()"
+              [disabled]="busy() || !sessionPanel()?.canFinish() || sessionPanel()?.busy()"
+              [hgTooltip]="busy() ? 'Дождитесь завершения действия с браузером.' : (sessionPanel() ? (sessionPanel()?.finishDisabledReason() || 'Сохранить сессию и вернуться в подключение') : 'Дождитесь доступности браузера.')"
+              (click)="sessionPanel()?.finish()"
             >
-              Сохранить сессию
+              {{ sessionPanel()?.finishing() || sessionPanel()?.busy() ? 'Сохраняем…' : 'Завершить вход' }}
             </button>
-          </span>
-        }
+          }
+          <ng-content />
+        </div>
         <div class="browser-view-tools">
-        @if (browser() && !['CLOSED', 'LOST'].includes(browser()?.status || '')) {
+        @if (allowStreamPause() && browser() && !['CLOSED', 'LOST'].includes(browser()?.status || '')) {
           <button class="icon-button" [attr.aria-label]="streamEnabled() ? 'Остановить трансляцию' : 'Возобновить трансляцию'"
             [hgTooltip]="streamEnabled() ? 'Остановить трансляцию' : 'Возобновить трансляцию'"
             [attr.aria-pressed]="!streamEnabled()" (click)="toggleStream()">
             <hg-icon [name]="streamEnabled() ? 'video-off' : 'video'" />
           </button>
+        }
+        @if (canClose()) {
+          <button class="icon-button browser-close"
+            aria-label="Закрыть браузер" hgTooltip="Закрыть браузер"
+            [disabled]="busy() || sessionPanel()?.busy() || browser()?.controlOwner === 'TRANSFERRING'"
+            (click)="closeBrowser.emit()"><hg-icon name="power" /></button>
         }
         <button #expandButton
           class="icon-button"
@@ -105,21 +100,24 @@ export function browserViewerId(): string {
           <hg-icon [name]="expanded() ? 'collapse' : 'expand'" />
         </button>
         </div>
-        @if (canClose()) {
-          <button class="button small browser-close" [disabled]="busy() || browser()?.controlOwner === 'TRANSFERRING'"
-            (click)="closeBrowser.emit()"><hg-icon name="power" />Закрыть браузер</button>
-        }
       </div>
     </header>
     @if (addressError()) { <p class="error-banner" role="alert">{{ addressError() }}</p> }
     @if (role() === 'CONTROLLER' && task()) {
-      <div class="browser-inline-notice"><hg-icon name="pause" />Агент на паузе. Вы управляете этим браузером.</div>
+      <div class="browser-inline-notice"><hg-icon name="pause" />Вы управляете браузером. При выходе управление вернётся агенту; незавершённый вход и другие запросы сохранятся.</div>
     }
+    @if (idleSeconds(); as seconds) {
+      <div class="browser-inline-notice" role="status">
+        Браузер закроется из-за простоя через {{ idleCountdown() }}. Задача сохранится.
+        <button class="button small" [disabled]="busy() || extending()" (click)="keepOpen()">Оставить ещё на 15 минут</button>
+      </div>
+    }
+    @if (idleError()) { <p class="error-banner" role="alert">{{ idleError() }}</p> }
     @if (sessionPanel()?.error() || browser()?.profileSaveError) {
       <p class="error-banner" role="alert">
         {{ sessionPanel()?.error() || profileError() }}
-        @if (sessionPanel()?.saveDisabledReason()) {
-          {{ sessionPanel()?.saveDisabledReason() }}
+        @if (sessionPanel()?.finishDisabledReason()) {
+          {{ sessionPanel()?.finishDisabledReason() }}
         }
       </p>
     }
@@ -131,18 +129,26 @@ export function browserViewerId(): string {
         @if (!browser() || ['CLOSED', 'LOST'].includes(browser()?.status || '')) {
           <div class="viewer-placeholder">
             <span class="viewer-mark"><hg-icon name="browser" /></span>
-            <h3>{{ browser() ? 'Браузер закрыт' : 'Браузер ещё не запущен' }}</h3>
-            <p>{{ task() ? 'Шаги и результаты задачи сохранены.' : 'Подключение и сохранённый вход доступны.' }}</p>
+            <h3>
+              @if (!browser()) { Браузер ещё не запущен }
+              @else if (browser()?.status === 'LOST') { Браузер утрачен }
+              @else { Браузер закрыт }
+            </h3>
+            <p>
+              @if (task()) { Шаги и результаты задачи сохранены. }
+              @else if (connection()?.profileSavedAt) { Подключение и сохранённый вход доступны. }
+              @else { Откройте браузер и войдите на сайт, чтобы сохранить сессию. }
+            </p>
+            @if (browser()?.closeReason === 'IDLE_TIMEOUT') { <p>Браузер закрыт после 15 минут бездействия.</p> }
             @if (canOpen()) {
-              <button class="button" [disabled]="busy()" (click)="openBrowser.emit()"><hg-icon name="browser" />Открыть браузер</button>
+              <button class="button" [disabled]="busy()" (click)="openBrowser.emit()"><hg-icon name="browser" />{{ browser() ? 'Возобновить браузер' : 'Открыть браузер' }}</button>
             }
           </div>
         } @else if (!streamEnabled()) {
           <div class="viewer-placeholder" role="status">
             <span class="viewer-mark"><hg-icon name="video-off" /></span>
             <h3>Трансляция остановлена</h3>
-            <p>{{ role() === 'CONTROLLER' ? 'Браузер открыт. Управление остаётся у вас; ввод временно отключён.' : 'Браузер продолжает работать. Состояние задачи не изменено.' }}</p>
-            <button class="button" (click)="toggleStream()"><hg-icon name="video" />Возобновить трансляцию</button>
+            <p>{{ role() === 'CONTROLLER' ? 'Браузер открыт. Управление остаётся у вас; ввод временно отключён.' : 'Браузер продолжает работать.' }}</p>
           </div>
         } @else if (!viewAllowed()) {
           <div class="viewer-placeholder">
@@ -155,7 +161,7 @@ export function browserViewerId(): string {
               } @else {
                 {{
                   browser()?.controlOwner === 'TRANSFERRING'
-                    ? browser()?.loginConfirmed
+                    ? sessionPanel()?.finishing() || browser()?.loginConfirmed
                       ? 'Сохраняем сессию'
                       : 'Передаём управление'
                     : browser()?.privateMode
@@ -172,7 +178,7 @@ export function browserViewerId(): string {
               } @else {
                 {{
                   browser()?.controlOwner === 'TRANSFERRING'
-                    ? browser()?.loginConfirmed
+                    ? sessionPanel()?.finishing() || browser()?.loginConfirmed
                       ? 'Ожидаем подтверждения записи сессии.'
                       : 'Дождитесь подтверждения браузера.'
                     : browser()?.privateMode
@@ -253,14 +259,15 @@ export function browserViewerId(): string {
               [active]="panel() === 'session'"
               [connectionContext]="connection() !== null"
               (changed)="sessionChanged.emit($event)"
+              (finished)="loginFinished.emit($event)"
             />
           </div>
         }
       </aside>
     </div>
     <footer #footer class="browser-footer">
-      <span class="connection-dot" [class.online]="connected()"></span
-      >{{
+      <span class="connection-dot" [class.online]="connected()"></span>
+      {{
         connected()
           ? role() === 'CONTROLLER'
             ? 'Вы управляете'
@@ -290,7 +297,7 @@ export function browserViewerId(): string {
           class="text-button"
           [class.active]="panel() === 'session'"
           [attr.aria-expanded]="panel() === 'session'"
-          hgTooltip="Авторизация и сохранение сессии"
+          hgTooltip="Сведения о сессии браузера"
           (click)="togglePanel('session')"
         >
           <hg-icon name="info" />Сессия
@@ -300,11 +307,40 @@ export function browserViewerId(): string {
   </section>`,
 })
 export class BrowserViewer {
+  private readonly idleNow = signal(Date.now());
+  readonly extending = signal(false);
+  readonly idleError = signal('');
+  readonly idleSeconds = computed(() => {
+    const browser = this.browser();
+    if (browser?.status !== 'LIVE' || !browser.idleCloseAt) return null;
+    const seconds = Math.max(1, Math.ceil((Date.parse(browser.idleCloseAt) - this.idleNow()) / 1000));
+    return seconds <= 300 ? seconds : null;
+  });
+  readonly idleCountdown = computed(() => {
+    const seconds = this.idleSeconds() ?? 0;
+    return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+  });
+
+  async keepOpen() {
+    const browser = this.browser();
+    if (!browser || this.extending()) return;
+    this.extending.set(true);
+    this.idleError.set('');
+    try {
+      const updated = await this.api.mutate('/api/browser-sessions/' + browser.id + '/keep-open', {}, browserSchema);
+      if (!this.destroy.destroyed && this.browser()?.id === browser.id) this.sessionChanged.emit(updated);
+    } catch (error: unknown) {
+      if (!this.destroy.destroyed && this.browser()?.id === browser.id) this.idleError.set(errorMessage(error));
+    } finally {
+      if (!this.destroy.destroyed) this.extending.set(false);
+    }
+  }
   readonly steps = input(false);
   readonly stepCount = input(0);
   readonly canClose = input(false);
   readonly canOpen = input(false);
   readonly busy = input(false);
+  readonly allowStreamPause = input(true);
   readonly closeBrowser = output<void>();
   readonly openBrowser = output<void>();
   readonly streamEnabled = signal(true);
@@ -345,21 +381,26 @@ export class BrowserViewer {
   readonly allowSession = input(true);
   readonly stepsOpen = output<boolean>();
   readonly sessionChanged = output<BrowserSession>();
+  readonly loginFinished = output<BrowserSession>();
   readonly panel = signal<'steps' | 'session' | null>(null);
-  readonly sessionPanel = viewChild(BrowserSessionPanel);
+  private readonly sessionPanelRef = viewChild(BrowserSessionPanel);
+  readonly sessionPanel = computed(() => {
+    const panel = this.sessionPanelRef();
+    return panel?.initialized() ? panel : undefined;
+  });
+  readonly loginSaved = input(false);
   togglePanel(panel: 'steps' | 'session' | null) {
     this.panel.set(this.panel() === panel ? null : panel);
     this.stepsOpen.emit(this.panel() === 'steps');
-  }
-  saveSession() {
-    void this.sessionPanel()?.save();
   }
   readonly profileError = computed(() => {
     const messages: Record<string, string> = {
       PROFILE_TOO_LARGE: 'Профиль сайта превышает 256 МиБ. Прежняя сессия не изменена.',
       PROFILE_RECORD_TOO_LARGE: 'Отдельная запись сайта превышает 16 МиБ. Прежняя сессия не изменена.',
-      PROFILE_COMPLEXITY_LIMIT: 'Структура данных сайта превышает допустимую сложность. Прежняя сессия не изменена.',
-      PROFILE_STORAGE_UNAVAILABLE: 'Хранилище сессий временно недоступно. Ожидаем подтверждения сохранения.',
+      PROFILE_COMPLEXITY_LIMIT: 'Не удалось сохранить новый вход: данные сайта превысили ограничение сохранения сессии. Прежний сохранённый вход не изменён.',
+      PROFILE_ORIGIN_LIMIT: 'Не удалось сохранить вход: сессия содержит более 50 доменов с данными. Прежняя сохранённая сессия не изменена.',
+      PROFILE_STORAGE_UNAVAILABLE: 'Хранилище сессий временно недоступно. Сохранение и восстановление требуют связи с хранилищем.',
+      PROFILE_UNAVAILABLE: 'Сохранённый профиль недоступен. Откройте новый вход для этого подключения.',
       PROFILE_INVALID: 'Не удалось проверить целостность профиля. Прежняя сессия не изменена.',
       PROFILE_SNAPSHOT_CHANGED: 'Данные сайта изменились во время сохранения. Повторите сохранение.',
       PROFILE_UNSUPPORTED_VALUE: 'Сайт использует неподдерживаемый тип данных. Прежняя сессия не изменена.',
@@ -423,11 +464,18 @@ export class BrowserViewer {
       : '';
   });
   constructor() {
+    effect(cleanup => {
+      const browser = this.browser();
+      if (browser?.status !== 'LIVE' || !browser.idleCloseAt) return;
+      this.idleNow.set(Date.now());
+      const timer = setInterval(() => this.idleNow.set(Date.now()), 1000);
+      cleanup(() => clearInterval(timer));
+    });
     effect(() => {
       const browser = this.browser();
       if ((browser?.id ?? '') !== this.preferenceBrowserId) {
         this.preferenceBrowserId = browser?.id ?? '';
-        this.streamEnabled.set(!browser || sessionStorage.getItem('helm-stream:' + browser.id) !== 'off');
+        this.streamEnabled.set(!this.allowStreamPause() || !browser || sessionStorage.getItem('helm-stream:' + browser.id) !== 'off');
         this.addressError.set('');
       }
       if (!this.editingAddress()) this.address.set(browser?.currentUrl ?? '');
@@ -498,6 +546,10 @@ export class BrowserViewer {
         return;
       const state = event.data.state;
       if (typeof state !== 'string') return;
+      if (state === 'escape') {
+        this.collapse();
+        return;
+      }
       if ('width' in event.data && 'height' in event.data) {
         const width = event.data.width;
         const height = event.data.height;

@@ -34,6 +34,7 @@ import ru.helmglass.api.accounts.ProfileImage;
 import ru.helmglass.api.artifacts.ArtifactService;
 import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
+import ru.helmglass.api.browsers.BrowserPages;
 import ru.helmglass.api.browsers.BrowserService;
 import ru.helmglass.api.connections.ConnectionService;
 import ru.helmglass.api.events.EventService;
@@ -50,6 +51,7 @@ public class ApiController {
   private final TaskService tasks;
   private final TaskStepService steps;
   private final BrowserService browsers;
+  private final BrowserPages browserPages;
   private final ConnectionService connections;
   private final NotificationService notifications;
   private final UsageService usage;
@@ -67,6 +69,7 @@ public class ApiController {
       TaskService tasks,
       TaskStepService steps,
       BrowserService browsers,
+      BrowserPages browserPages,
       ConnectionService connections,
       NotificationService notifications,
       UsageService usage,
@@ -82,6 +85,7 @@ public class ApiController {
     this.tasks = tasks;
     this.steps = steps;
     this.browsers = browsers;
+    this.browserPages = browserPages;
     this.connections = connections;
     this.notifications = notifications;
     this.usage = usage;
@@ -232,6 +236,9 @@ public class ApiController {
             if ("FINISH_LOGIN".equals(type)) {
               connections.finishTaskLogin(owner, task.browser().id(), control);
             } else {
+              if ("BEGIN_LOGIN".equals(type)) {
+                connections.connectionForLogin(owner, task.browser().id());
+              }
               browsers.control(owner, task.browser().id(), control);
             }
             return tasks.get(owner, id);
@@ -342,6 +349,13 @@ public class ApiController {
         owner, key, "browsers:control:" + id, input, () -> browsers.control(owner, id, input));
   }
 
+  @PostMapping("/browser-sessions/{id}/keep-open")
+  Object keepBrowserOpen(@PathVariable UUID id, @RequestHeader("Idempotency-Key") String key) {
+    UUID owner = web().id();
+    return command(owner, key, "browsers:keep-open:" + id, Map.of(),
+        () -> browsers.keepOpen(owner, id));
+  }
+
   @PostMapping("/browser-sessions/{id}/login")
   Object browserLogin(
       @PathVariable UUID id,
@@ -413,13 +427,20 @@ public class ApiController {
   SseEmitter events(
       @RequestHeader(value = "Last-Event-ID", required = false) String last,
       @RequestParam(required = false) Long cursor,
+      @RequestParam(required = false) UUID browserVisit,
       @org.springframework.security.core.annotation.AuthenticationPrincipal
           org.springframework.security.oauth2.jwt.Jwt jwt) {
+    UUID owner = web().id();
     return events.subscribe(
-        web().id(),
+        owner,
         last == null || last.isBlank() ? cursor : Long.valueOf(last),
         () -> identity.authorized(jwt),
-        change -> true);
+        change -> true,
+        () -> {
+          if (browserVisit != null) {
+            browserPages.heartbeat(owner, browserVisit);
+          }
+        });
   }
 
   @GetMapping("/integrations/chatgpt")

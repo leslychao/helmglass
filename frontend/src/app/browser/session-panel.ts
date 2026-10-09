@@ -1,6 +1,7 @@
 import {
   Component,
   DestroyRef,
+  OnInit,
   computed,
   effect,
   inject,
@@ -106,11 +107,12 @@ const browserStates: Record<string, string> = {
       <div><dt>Управление</dt><dd>{{ control() }}</dd></div>
     </dl>
     @if (connectionContext()) {
-      <hg-saved-credentials [browserId]="browser().id" [enabled]="active() && canConfirm()" />
+      <hg-saved-credentials [browserId]="browser().id" [enabled]="active() && canFinish()" />
     }
   `,
 })
-export class BrowserSessionPanel {
+export class BrowserSessionPanel implements OnInit {
+  readonly initialized = signal(false);
   readonly browser = input.required<BrowserSession>();
   readonly controller = input(false);
   readonly allowed = input(true);
@@ -123,7 +125,8 @@ export class BrowserSessionPanel {
     if (['CLOSED', 'LOST', 'QUEUED'].includes(browser.status)) return '—';
     if (browser.controlOwner === 'TRANSFERRING') return 'Передача управления';
     if (browser.controlOwner === 'USER') return this.controller() ? 'Вы' : 'Другое окно';
-    return browser.controlOwner === 'CHATGPT' ? 'Агент' : 'Не передано';
+    if (browser.controlOwner === 'CHATGPT') return 'Агент';
+    return browser.controlOwner === 'NONE' ? 'Свободно' : 'Нет данных';
   });
   readonly elapsed = computed(() => {
     const browser = this.browser();
@@ -133,41 +136,54 @@ export class BrowserSessionPanel {
     return [Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60), seconds % 60].map(value => String(value).padStart(2, '0')).join(':');
   });
   readonly changed = output<BrowserSession>();
+  readonly finished = output<BrowserSession>();
   readonly busy = signal(false);
   readonly error = signal('');
   readonly copied = signal(false);
   readonly copyError = signal('');
-  private readonly submitted = signal<{
-    id: string;
-    type: 'CONFIRM_LOGIN' | 'SAVE_SESSION';
-  } | null>(null);
-  readonly message = computed(() => {
+  private readonly submitted = signal<{ id: string; controlEpoch: number } | null>(null);
+  readonly finishing = computed(() =>
+    this.submitted()?.id === this.browser().id
+      && this.submitted()?.controlEpoch === this.browser().controlEpoch
+      && this.browser().controlOwner === 'TRANSFERRING',
+  );
+  readonly completed = computed(() => {
     const submitted = this.submitted(),
       browser = this.browser();
-    if (!submitted || submitted.id !== browser.id || this.error() || browser.profileSaveError)
-      return '';
-    if (submitted.type === 'CONFIRM_LOGIN')
-      return browser.loginConfirmed ? 'Завершение входа подтверждено.' : '';
-    if (!browser.loginConfirmed) return 'Сессия сохранена.';
-    return browser.controlOwner === 'TRANSFERRING' ? '' : 'Сохранение ещё не подтверждено.';
+    if (submitted?.id !== browser.id || submitted.controlEpoch !== browser.controlEpoch
+        || this.error() || browser.profileSaveError)
+      return false;
+    return browser.status === 'LIVE' && !browser.privateMode
+      && (browser.controlOwner === 'NONE' || browser.controlOwner === 'CHATGPT');
   });
+  readonly message = computed(() => this.completed() ? 'Сессия сохранена.' : '');
   private readonly accessReason = computed(() => {
+    if (!this.connectionContext()) return 'Вход и сохранение сессии доступны в подключении.';
     if (this.browser().controlOwner === 'TRANSFERRING')
       return 'Дождитесь подтверждения операции браузером.';
     if (this.browser().status !== 'LIVE') return 'Дождитесь доступности браузера.';
     if (!this.controller() || this.browser().controlOwner !== 'USER')
-      return 'Возьмите управление, чтобы сохранить новый вход.';
-    if (!this.browser().privateMode) return 'Откройте защищённый вход, чтобы сохранить сессию.';
+      return 'Управление находится в другом окне.';
+    if (!this.browser().privateMode) return 'Дождитесь защищённого управления браузером.';
     return this.allowed() ? '' : 'Сохранение сейчас недоступно для этой задачи.';
   });
-  readonly canConfirm = computed(() => !this.accessReason());
-  readonly saveDisabledReason = computed(() =>
+  readonly canFinish = computed(() => !this.accessReason());
+  readonly finishDisabledReason = computed(() =>
     this.busy() ? 'Дождитесь завершения текущего действия.' : this.accessReason(),
   );
   private readonly api = inject(Api);
   private readonly destroy = inject(DestroyRef);
 
   constructor() {
+    let emitted: string | null = null;
+    effect(() => {
+      const browser = this.browser();
+      const key = browser.id + ':' + browser.controlEpoch;
+      if (this.completed() && emitted !== key) {
+        emitted = key;
+        this.finished.emit(browser);
+      }
+    });
     effect(onCleanup => {
       if (!this.active() || !this.browser().startedAt || this.browser().closedAt) return;
       this.now.set(Date.now());
@@ -201,19 +217,14 @@ export class BrowserSessionPanel {
     }
   }
 
-  async confirm() {
-    if (!this.canConfirm() || this.busy()) return;
-    await this.submit('CONFIRM_LOGIN');
+  ngOnInit() {
+    this.initialized.set(true);
   }
-  async save() {
-    if (!this.canConfirm() || !this.browser().loginConfirmed || this.busy()) return;
-    await this.submit('SAVE_SESSION');
-  }
-  private async submit(
-    type: 'CONFIRM_LOGIN' | 'SAVE_SESSION',
-    epoch = this.browser().controlEpoch,
-  ) {
+
+  async finish() {
+    if (!this.canFinish() || this.busy()) return;
     const id = this.browser().id;
+    const epoch = this.browser().controlEpoch;
     this.busy.set(true);
     this.error.set('');
     this.submitted.set(null);
@@ -221,7 +232,7 @@ export class BrowserSessionPanel {
       const updated = await this.api.mutate(
         '/api/browser-sessions/' + id + '/login',
         {
-          type,
+          type: 'FINISH_LOGIN',
           viewerId: browserViewerId(),
           controlEpoch: epoch,
         },
@@ -229,7 +240,7 @@ export class BrowserSessionPanel {
       );
       if (this.destroy.destroyed || this.browser().id !== id) return;
       this.changed.emit(updated);
-      this.submitted.set({ id, type });
+      this.submitted.set({ id, controlEpoch: updated.controlEpoch });
     } catch (error: unknown) {
       if (!this.destroy.destroyed && this.browser().id === id) this.error.set(errorMessage(error));
     } finally {

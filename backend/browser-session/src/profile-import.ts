@@ -10,7 +10,6 @@ const cookieSchema = z.object({ name: z.string(), value: z.string(), domain: z.s
 
 export async function importProfile(context: BrowserContext, input: AsyncIterable<Uint8Array>, selectedOrigins?: string[]): Promise<void> {
   const page = await context.newPage();
-  const cdp = await context.newCDPSession(page);
   let origins: string[] | undefined;
   let origin = "";
   let database: string | undefined;
@@ -18,6 +17,7 @@ export async function importProfile(context: BrowserContext, input: AsyncIterabl
   let ended = false;
   let cookieCount = 0;
   try {
+    const cdp = await context.newCDPSession(page);
     await cdp.send("Network.setBypassServiceWorker", { bypass: true });
     await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Restoring connection</title>" }));
     for await (const raw of profileRecords(input)) {
@@ -71,18 +71,18 @@ export async function importProfile(context: BrowserContext, input: AsyncIterabl
         if (!database || !stores.has(value.store)) throw new ProfileExportError(422, "Invalid record store", "PROFILE_INVALID");
         if (enabled) await page.evaluate(async (value) => {
           await new Promise<void>((resolve, reject) => {
-              const db = window.__helmProfileDatabase;
-              if (!db) { reject(new Error("PROFILE_INVALID")); return; }
-              const transaction = db.transaction(value.store, "readwrite");
-              transaction.oncomplete = () => resolve();
-              transaction.onerror = transaction.onabort = () => reject(new Error("PROFILE_INVALID"));
-              try {
-                const decode = window.__helmProfileCodec.decode;
-                const store = transaction.objectStore(value.store);
-                const key = decode(value.keyEncoded);
-                if (key !== undefined && typeof key !== "string" && typeof key !== "number" && !(key instanceof Date) && !(key instanceof ArrayBuffer) && !ArrayBuffer.isView(key) && !Array.isArray(key)) throw new Error("PROFILE_INVALID");
-                store.add(decode(value.valueEncoded), key as IDBValidKey | undefined);
-              } catch { transaction.abort(); }
+            const db = window.__helmProfileDatabase;
+            if (!db) { reject(new Error("PROFILE_INVALID")); return; }
+            const transaction = db.transaction(value.store, "readwrite");
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = transaction.onabort = () => reject(new Error("PROFILE_INVALID"));
+            try {
+              const decode = window.__helmProfileCodec.decode;
+              const store = transaction.objectStore(value.store);
+              const key = decode(value.keyEncoded);
+              if (key !== undefined && typeof key !== "string" && typeof key !== "number" && !(key instanceof Date) && !(key instanceof ArrayBuffer) && !ArrayBuffer.isView(key) && !Array.isArray(key)) throw new Error("PROFILE_INVALID");
+              store.add(decode(value.valueEncoded), key as IDBValidKey | undefined);
+            } catch { transaction.abort(); }
           });
         }, value);
       } else if (type === "database-end") {
@@ -95,5 +95,5 @@ export async function importProfile(context: BrowserContext, input: AsyncIterabl
       } else throw new ProfileExportError(422, "Invalid profile record", "PROFILE_INVALID");
     }
     if (!origins || !ended) throw new ProfileExportError(422, "Incomplete profile", "PROFILE_INVALID");
-  } finally { await cdp.detach(); await page.close(); }
+  } finally { await page.close(); }
 }
