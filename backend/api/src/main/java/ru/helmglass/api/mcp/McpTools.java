@@ -49,6 +49,14 @@ public class McpTools {
   private static final Logger log = LoggerFactory.getLogger(McpTools.class);
   private static final int IMAGE_LIMIT = 8 * 1024 * 1024;
   private static final int WIDGET_LIMIT = 1024 * 1024;
+  static final String WIDGET_PRESENTATION_INSTRUCTIONS =
+      "Обновляемая карточка задачи Helm Glass с просмотром того же браузера."
+          + " Текущие статус задачи, состояние браузера, прогресс и ожидание показывайте"
+          + " только в обновляемом виджете. Не добавляйте статические статусные плашки,"
+          + " бейджи, заголовки или дубли текущего состояния в текст ответа ChatGPT:"
+          + " они сохраняются в истории чата и устаревают. После карточки допустимы"
+          + " подтверждённый итог и необходимые пояснения; прежнее ожидание описывайте"
+          + " как прошлое событие, а не как текущий статус.";
   private final Identity identity;
   private final TaskService tasks;
   private final TaskStepService steps;
@@ -619,6 +627,7 @@ public class McpTools {
         List.of(Map.of("type", "oauth2", "scopes", List.of("openid", "offline_access"))));
     if (Set.of("tasks.view", "tasks.create").contains(name)) {
       metadata.put("ui", Map.of("resourceUri", widgetUri));
+      description = description + " " + WIDGET_PRESENTATION_INSTRUCTIONS;
     } else if (name.startsWith("widget.")) {
       metadata.put("ui", Map.of("visibility", List.of("app")));
     }
@@ -1323,7 +1332,7 @@ public class McpTools {
                                 "openai/widgetCSP",
                                 Map.of("redirect_domains", List.of(publicUrl)),
                                 "openai/widgetDescription",
-                                "Исходная задача Helm Glass и просмотр того же браузера."))
+                                WIDGET_PRESENTATION_INSTRUCTIONS))
                         .build();
                 var result = McpSchema.ReadResourceResult.builder(List.of(contents)).build();
                 outcome = "OK";

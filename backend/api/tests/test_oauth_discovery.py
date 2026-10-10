@@ -9,6 +9,30 @@ from test_dev_contract import DevClient
 
 
 class OAuthDiscoveryTest(unittest.TestCase):
+    def test_current_status_is_owned_by_the_live_widget(self):
+        settings = dict(line.split("=", 1) for line in Path(os.environ.get(
+            "HELM_TEST_ENV", "deploy/.env.dev")).read_text(encoding="utf-8").splitlines()
+                        if line and not line.startswith("#") and "=" in line)
+        client = DevClient(settings, "test", "KEYCLOAK_TEST_PASSWORD")
+        try:
+            client.login_mcp()
+            initialized = client.rpc("initialize", {"protocolVersion": "2025-11-25",
+                "capabilities": client.mcp_capabilities,
+                "clientInfo": {"name": "helm-widget-status-regression", "version": "1"}})
+            resource = next(resource for resource in client.rpc("resources/list", {})["resources"]
+                            if resource["uri"].startswith("ui://helmglass/task-"))
+            contents = client.rpc("resources/read", {"uri": resource["uri"]})["contents"][0]
+            guidance = contents["_meta"]["openai/widgetDescription"]
+            self.assertIn("только в обновляемом виджете", guidance)
+            self.assertIn("Не добавляйте статические статусные плашки", guidance)
+            self.assertIn("устаревают", guidance)
+            self.assertIn(guidance, initialized["instructions"])
+            tools = {tool["name"]: tool for tool in client.rpc("tools/list", {})["tools"]}
+            for name in ("tasks.create", "tasks.view"):
+                self.assertIn(guidance, tools[name]["description"], name)
+        finally:
+            client.close_mcp()
+
     def test_anonymous_discovery_pkce_and_bearer_challenge(self):
         settings = dict(line.split("=", 1) for line in Path(os.environ.get("HELM_TEST_ENV", "deploy/.env.dev")).read_text(encoding="utf-8").splitlines()
                         if line and not line.startswith("#") and "=" in line)

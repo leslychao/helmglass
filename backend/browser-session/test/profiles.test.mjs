@@ -11,8 +11,9 @@ async function request(route, body, method = body ? 'POST' : 'GET') {
   return { status: response.status, value: await response.json() };
 }
 test('bounded saved profiles retain structured IDB and reject oversize without replacing prior identity', { timeout: 90_000 }, async () => {
-  const owner = randomUUID(), id = randomUUID(), base = '/sessions/' + id, profileA = randomUUID(), profileB = randomUUID();
-  let createdSession = false;
+  const owner = randomUUID(), profileA = randomUUID(), profileB = randomUUID();
+  let id = randomUUID(), base = '/sessions/' + id;
+  const sessions = new Set();
   async function command(type, args) {
     const response = await request(base + '/commands', { operationId: randomUUID(), type, arguments: args, instructionRevision: 0, controlEpoch: 1,
       deadlineAt: new Date(Date.now() + 60_000).toISOString() });
@@ -38,7 +39,7 @@ test('bounded saved profiles retain structured IDB and reject oversize without r
   }
   try {
     const created = await request('/sessions', { sessionId: id, ownerId: owner, startUrl: fixture });
-    createdSession = created.status >= 200 && created.status < 300;
+    if (created.status >= 200 && created.status < 300) sessions.add(id);
     assert.equal(created.value.status, 'LIVE', JSON.stringify(created.value));
     await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false });
     for (const [value, profile] of [['a', profileA], ['b', profileB]]) {
@@ -50,20 +51,30 @@ test('bounded saved profiles retain structured IDB and reject oversize without r
       await command('click', { ...await target(request, base, type === 'oversize' ? 'Write oversized IDB value' : 'Write unsupported IDB value') }); await waitForText('Stored ' + type);
       assert.equal((await save(profileA)).status, type === 'oversize' ? 413 : 422,
         'Size limits and unsupported values must remain distinct without replacing the saved profile');
+      // A rejected export fences its source session; restore the committed profile
+      // only after the node acknowledges that this source has stopped.
+      assert.equal((await request(base, undefined, 'DELETE')).value.status, 'CLOSED');
+      id = randomUUID(); base = '/sessions/' + id;
+      const restored = await request('/sessions', { sessionId: id, ownerId: owner,
+        connectionId: profileA, startUrl: fixture });
+      if (restored.status >= 200 && restored.status < 300) sessions.add(id);
+      assert.equal(restored.value.status, 'LIVE', JSON.stringify(restored.value));
+      assert.equal((await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false })).status, 200);
       await apply(profileA, 'a');
     }
     assert.equal((await request(base + '/profile/export', { connectionId: profileA, ownerId: randomUUID(), origins: [new URL(fixture).origin] })).status, 403);
   } finally {
-    if (createdSession) {
+    for (const session of sessions) {
+      const route = '/sessions/' + session;
+      assert.equal((await request(route, undefined, 'DELETE')).value.status, 'CLOSED');
+      const deadline = Date.now() + 15_000;
+      let cleanup = await request(route + '/cleanup', undefined, 'DELETE');
+      while (cleanup.status === 409 && cleanup.value.error === 'Archive reader busy' && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        cleanup = await request(route + '/cleanup', undefined, 'DELETE');
+      }
+      assert.equal(cleanup.status, 200, JSON.stringify(cleanup.value));
+    }
     for (const profile of [profileA, profileB]) await request('/profiles/' + profile, undefined, 'DELETE');
-    assert.equal((await request(base, undefined, 'DELETE')).value.status, 'CLOSED');
-    const deadline = Date.now() + 15_000;
-    let cleanup = await request(base + '/cleanup', undefined, 'DELETE');
-    while (cleanup.status === 409 && cleanup.value.error === 'Archive reader busy' && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 200));
-      cleanup = await request(base + '/cleanup', undefined, 'DELETE');
-    }
-    assert.equal(cleanup.status, 200, JSON.stringify(cleanup.value));
-    }
   }
 });

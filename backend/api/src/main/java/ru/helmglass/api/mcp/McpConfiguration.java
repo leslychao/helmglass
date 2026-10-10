@@ -75,7 +75,9 @@ public class McpConfiguration {
         .jsonMapper(mcpMessageMapper)
         .serverInfo("Helm Glass", "1.0.0")
         .instructions(
-            """
+            McpTools.WIDGET_PRESENTATION_INSTRUCTIONS
+                + "\n\n"
+                + """
 Helm Glass executes user-assigned browser tasks autonomously. One original chat has one
 unfinished task, including pause, queue and every wait. Continue the same taskId for
 clarifications. Only an explicit new assignment creates a task after the previous one ends.
