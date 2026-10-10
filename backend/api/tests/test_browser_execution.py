@@ -51,10 +51,7 @@ class BrowserExecutionTest(unittest.TestCase):
     def action(self, kind, arguments=None, **fields):
         return {'operationId': str(uuid.uuid4()), 'type': kind, 'arguments': arguments or {},
                 'instructionRevision': self.task['instructionRevision'],
-                'controlEpoch': self.task['browser']['controlEpoch'], 'step': {
-                    'operationKey': 'verify-execution', 'objectKey': self.task['id'],
-                    'title': 'Проверить результат действий',
-                    'completionCriterion': 'Счётчик и текст совпадают с заданным результатом'}, **fields}
+                'controlEpoch': self.task['browser']['controlEpoch'], **fields}
 
     def execute(self, **fields):
         error, result, _ = self.client.tool('browser.execute', {'taskId': self.task['id'], **fields})
@@ -564,15 +561,6 @@ if (response.status !== 200) throw new Error('Resolve status ' + response.status
         self.assertEqual('MCP_VERIFICATION|PROCEED', self.fixture_sql(self.identity,
             "SELECT answer_source || '|' || answer_command FROM task_requests WHERE owner_id=:owner"
             " AND id='" + pending['request']['id'] + "';"))
-        step = self.client.tool('steps.list', {'taskId': self.task['id']})[1]['items'][0]
-        error, completed, _ = self.client.tool('steps.command', {
-            'taskId': self.task['id'], 'operationKey': str(uuid.uuid4()), 'command': {
-                'type': 'COMPLETE', 'stepId': step['id'], 'expectedVersion': step['version'],
-                'instructionRevision': self.task['instructionRevision'], 'outcome': 'SUCCEEDED',
-                'result': 'Observed the required counter=2 without replaying the uncertain click.',
-                'evidence': [{'type': 'MODEL_RESULT', 'text': 'The page reports counter=2.',
-                    'sources': [{'title': 'Counter fixture', 'url': self.fixture_url}]}]}})
-        self.assertFalse(error, completed)
         current = primary.api(path)[1]
         error, finished, _ = self.client.tool('tasks.command', {
             'taskId': self.task['id'], 'operationKey': str(uuid.uuid4()), 'command': {

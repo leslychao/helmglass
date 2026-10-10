@@ -72,7 +72,7 @@ class UnknownOccupancyTest(unittest.TestCase):
             task = shown["task"]
             tasks.append(task["id"])
             operation = str(uuid.uuid4())
-            error, _, _ = transport.execute_in_scenario_step({"taskId": task["id"], "action": {
+            error, _, _ = transport.execute_browser({"taskId": task["id"], "action": {
                 "operationId": operation, "type": "observe", "arguments": {},
                 "instructionRevision": task["instructionRevision"]}})
             self.assertFalse(error)

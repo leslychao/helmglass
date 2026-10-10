@@ -71,15 +71,13 @@ class AudioAnalysisTest(unittest.TestCase):
                   'instructionRevision': task['instructionRevision']}
         if task.get('browser'):
             action['controlEpoch'] = task['browser']['controlEpoch']
-        failed, data, _ = self.client.execute_in_scenario_step({'taskId': task_id, 'action': action})
+        failed, data, _ = self.client.execute_browser({'taskId': task_id, 'action': action})
         self.assertFalse(failed, data)
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             receipt = self.tool('operations.get', {'operationId': action['operationId']})
             if receipt['status'] in ('SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'):
                 self.assertEqual('SUCCEEDED', receipt['status'], receipt)
-                if kind == 'captureAudio':
-                    self.client.complete_scenario_step(task_id, action['operationId'])
                 return receipt
             time.sleep(.5)
         self.fail('Browser action timeout')

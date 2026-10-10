@@ -20,9 +20,11 @@ export class McpExecutionUnconfirmed extends Error {
 const outputDirectory = "/tmp/helm-mcp";
 const refSchema = z.string().regex(/^(f\d+)?e\d+$/).max(40);
 const targetSchema = z.object({ observationId: z.uuid(), ref: refSchema });
+const pointSchema = z.object({ screenshotId: z.uuid(), x: z.number().int().nonnegative().max(10_000),
+  y: z.number().int().nonnegative().max(10_000) }).strict();
 const fields = targetSchema.shape;
 const schemas: Record<string, z.ZodType> = {
-  click: z.object(fields).strict(),
+  click: z.union([z.object(fields).strict(), pointSchema]),
   fill: z.object({ ...fields, text: z.string().max(50_000) }).strict(),
   press: z.object({ key: z.string().min(1).max(100) }).strict(),
   selectOption: z.object({ ...fields, values: z.array(z.string().max(1000)).min(1).max(100) }).strict(),
@@ -57,6 +59,8 @@ type Observation = {
   id: string; time: string; page: Page; epoch: number; generation: number;
   entries: Entry[]; issued: Map<string, NativeNode>; cursor?: string; offset: number; scope: Scope;
 };
+type ObservationContext = Pick<Observation, "time" | "page" | "epoch" | "generation">;
+type ScreenshotTarget = ObservationContext & { id: string; width: number; height: number };
 export type Sequence = { operationIds: string[] };
 const observeSchema = z.union([z.object({}).strict(), targetSchema.strict(),
   z.object({ cursor: z.string().min(1).max(100) }).strict()]);
@@ -71,6 +75,7 @@ export class BrowserMcp {
   private generation = 0;
   private selected?: Page;
   private observation?: Observation;
+  private screenshotTarget?: ScreenshotTarget;
   private sequence?: { operationIds: string[]; next: number; observation: Observation };
   private pending?: ReturnType<Client["callTool"]>;
   private unconfirmed = false;
@@ -108,6 +113,7 @@ export class BrowserMcp {
   private invalidate(): void {
     this.generation++;
     this.observation = undefined;
+    this.screenshotTarget = undefined;
     this.sequence = undefined;
   }
 
@@ -217,7 +223,7 @@ export class BrowserMcp {
     }
   }
 
-  private checkObservation(value: Observation): void {
+  private checkObservation(value: ObservationContext): void {
     this.assertAllowed();
     if (value.page !== this.currentPage() || value.generation !== this.generation
       || value.epoch !== this.controlEpoch() || Date.now() - Date.parse(value.time) > 60_000)
@@ -341,6 +347,64 @@ export class BrowserMcp {
     }
   }
 
+  private async checkPoint(page: Page, args: Record<string, unknown>, signal: AbortSignal): Promise<void> {
+    const point = pointSchema.parse(args);
+    const screenshot = this.screenshotTarget;
+    if (!screenshot || screenshot.id !== point.screenshotId)
+      throw new BrowserRejection("Screenshot was not issued or was revoked; take another screenshot");
+    this.checkObservation(screenshot);
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    if (viewport.width !== screenshot.width || viewport.height !== screenshot.height
+      || point.x >= screenshot.width || point.y >= screenshot.height)
+      throw new BrowserRejection("Screenshot viewport changed or point is outside it");
+    let frame = page.mainFrame();
+    let position = { x: point.x, y: point.y };
+    for (let depth = 0; depth < 16; depth++) {
+      signal.throwIfAborted();
+      const handle = await frame.evaluateHandle(({ x, y }) => {
+        let element = document.elementFromPoint(x, y);
+        for (let depth = 0; element?.shadowRoot && depth < 16; depth++) {
+          const inner = element.shadowRoot.elementFromPoint(x, y);
+          if (!inner || inner === element) break;
+          element = inner;
+        }
+        const label = element?.closest("label");
+        if (label instanceof HTMLLabelElement && label.control) return label.control;
+        return element?.closest('input, textarea, select, [contenteditable], [role="textbox"]') ?? element;
+      }, position);
+      try {
+        const element = handle.asElement();
+        if (!element) throw new BrowserRejection("Screenshot point has no target");
+        const inspected = await element.evaluate(inspectPrivateInput, "");
+        signal.throwIfAborted();
+        if (inspected.protectedInput) throw new BrowserRejection("Private input requires the user");
+        const child = await element.contentFrame();
+        if (!child) {
+          this.checkObservation(screenshot);
+          return;
+        }
+        const geometry = await element.evaluate(element => {
+          if (!(element instanceof HTMLIFrameElement)) return null;
+          let inspected = 0;
+          for (let parent: Element | null = element; parent;) {
+            if (++inspected > 128) return null;
+            const style = getComputedStyle(parent);
+            if (style.transform !== "none" || style.rotate !== "none" || style.scale !== "none"
+              || style.perspective !== "none" || !["1", "normal"].includes(style.zoom)) return null;
+            const root = parent.getRootNode();
+            parent = parent.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+          }
+          const rect = element.getBoundingClientRect();
+          return { x: rect.x + element.clientLeft, y: rect.y + element.clientTop };
+        });
+        if (!geometry) throw new BrowserRejection("Frame point could not be verified");
+        position = { x: position.x - geometry.x, y: position.y - geometry.y };
+        frame = child;
+      } finally { await handle.dispose(); }
+    }
+    throw new BrowserRejection("Screenshot target exceeds frame limit");
+  }
+
   async act(type: string, args: Record<string, unknown>, operationId: string, sequence: Sequence | undefined,
     signal: AbortSignal): Promise<void> {
     let dispatched = false;
@@ -353,28 +417,36 @@ export class BrowserMcp {
         throw new BrowserRejection("Invalid operation sequence");
       if (this.sequence && (!sequence
         || JSON.stringify(sequence.operationIds) !== JSON.stringify(this.sequence.operationIds))) this.sequence = undefined;
-      const targeted = ["click", "fill", "selectOption", "check"].includes(type);
+      const coordinateClick = type === "click" && "screenshotId" in args;
+      const targeted = !coordinateClick && ["click", "fill", "selectOption", "check"].includes(type);
       let ref: string | undefined;
       let target: ReturnType<BrowserMcp["issuedTarget"]> | undefined;
-      if (targeted) {
+      if (targeted || coordinateClick) {
         const preflightStarted = performance.now();
         this.metrics.preflights++;
         try {
-          target = this.issuedTarget(args, operationId, sequence);
-          ref = target.ref;
-          await this.checkPrivateInput(page, ref, target.issued.name ?? "", signal);
-          this.checkObservation(target.observation);
+          if (coordinateClick) await this.checkPoint(page, args, signal);
+          else {
+            target = this.issuedTarget(args, operationId, sequence);
+            ref = target.ref;
+            await this.checkPrivateInput(page, ref, target.issued.name ?? "", signal);
+            this.checkObservation(target.observation);
+          }
         } finally { this.metrics.preflightMillis += performance.now() - preflightStarted; }
       }
       if (type === "press") await this.checkFocus(page, signal);
       signal.throwIfAborted();
       this.observation = undefined;
+      this.screenshotTarget = undefined;
       dispatched = true;
       const actionStarted = performance.now();
       if (type === "waitFor") this.metrics.waits++; else this.metrics.actions++;
       try {
         switch (type) {
-          case "click": await this.call("browser_click", { target: ref }, signal); break;
+          case "click":
+            await this.call(coordinateClick ? "browser_mouse_click_xy" : "browser_click",
+              coordinateClick ? { x: args["x"], y: args["y"] } : { target: ref }, signal);
+            break;
           case "fill": await this.call("browser_type", { target: ref, text: args["text"] }, signal); break;
           case "check": await this.call("browser_fill_form", { fields: [{ target: ref, name: "Field", type: "checkbox", value: String(args["checked"]) }] }, signal); break;
           case "selectOption": await this.call("browser_select_option", { target: ref, values: args["values"] }, signal); break;
@@ -407,12 +479,21 @@ export class BrowserMcp {
     }
   }
 
-  async screenshot(operationId: string, signal: AbortSignal): Promise<string> {
-    await this.synchronize(signal);
+  async screenshot(operationId: string, signal: AbortSignal): Promise<{ filename: string; target: object }> {
+    const page = await this.synchronize(signal);
+    this.screenshotTarget = undefined;
+    const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+    const target: ScreenshotTarget = { id: z.uuid().parse(operationId), page,
+      epoch: this.controlEpoch(), generation: this.generation, time: new Date().toISOString(), ...viewport };
     const filename = path.posix.join(outputDirectory, `screenshot-${z.uuid().parse(operationId)}.png`);
-    try { await this.call("browser_take_screenshot", { type: "png", filename, fullPage: false }, signal); }
+    try {
+      await this.call("browser_take_screenshot", { type: "png", filename, fullPage: false, scale: "css" }, signal);
+      this.checkObservation(target);
+      this.screenshotTarget = target;
+    }
     catch (error) { await rm(filename, { force: true }); throw error; }
-    return filename;
+    return { filename, target: { screenshotId: target.id, width: target.width, height: target.height,
+      observedAt: target.time, expiresAt: new Date(Date.parse(target.time) + 60_000).toISOString() } };
   }
 
   close(): Promise<void> {

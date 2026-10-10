@@ -36,7 +36,7 @@ export type Presentation = z.infer<typeof presentationSchema>;
 
 export const stepsSchema = z.object({
   items: z.array(z.object({ id: z.uuid(), sequence: z.number().int(), version: z.number().int(),
-    status: z.enum(['PLANNED', 'RUNNING', 'WAITING', 'SUCCEEDED', 'PARTIAL', 'FAILED', 'UNKNOWN', 'SKIPPED']),
+    status: z.enum(['RUNNING', 'SUCCEEDED', 'FAILED']), tool: z.string(), durationMs: z.number().int().nonnegative().nullable(),
     title: z.string(), result: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() })).max(10),
   total: z.number().int().nonnegative(), page: z.number().int().positive(), pageSize: z.literal(10),
 });

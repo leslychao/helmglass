@@ -437,11 +437,11 @@ async function perform(command: Command, signal: AbortSignal): Promise<object> {
     case "captureAudio": return captureAudio(args, signal);
     case "screenshot": {
       z.object({}).strict().parse(args);
-      const filename = await (await mcp()).screenshot(command.operationId, signal);
+      const { filename, target } = await (await mcp()).screenshot(command.operationId, signal);
       try {
         observationAllowed();
         const artifact = await saveArtifact(createReadStream(filename), { name: "screenshot.png", mimeType: "image/png", sourceUrl: page.url(), complete: true, operationId: activeOperation }, signal);
-        return { artifact };
+        return { artifact, screenshotTarget: target };
       } finally { await rm(filename, { force: true }); }
     }
     default: {

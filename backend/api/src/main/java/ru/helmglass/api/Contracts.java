@@ -211,32 +211,16 @@ public final class Contracts {
 
   public record BrowserAction(
       UUID operationId,
-      UUID stepId,
       String type,
       JsonNode arguments,
       long instructionRevision,
       Long controlEpoch,
       String confirmationPrompt,
-      StepDefinition step,
       Boolean observeAfter) {}
 
-  public record StepDefinition(
-      String operationKey, String objectKey, String title, String completionCriterion) {}
-
-  public record StepSource(String title, String url) {}
-
-  public record StepEvidence(
-      String type, UUID operationId, UUID artifactId, String text, List<StepSource> sources) {}
-
-  public record StepCommand(
-      String type, UUID stepId, Long expectedVersion, long instructionRevision,
-      String operationKey, String objectKey, String title, String completionCriterion,
-      String outcome, String result, List<StepEvidence> evidence) {}
-
   public record TaskStep(
-      UUID id, UUID taskId, long sequence, String operationKey, String objectKey,
-      String title, String completionCriterion, String status, long version, String result,
-      JsonNode evidence, Instant createdAt, Instant updatedAt, Instant startedAt,
+      UUID id, UUID taskId, long sequence, String tool, String title, String status,
+      long version, String result, Long durationMs, Instant createdAt, Instant updatedAt, Instant startedAt,
       Instant completedAt) {}
 
   public record Operation(

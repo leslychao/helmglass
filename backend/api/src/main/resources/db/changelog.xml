@@ -112,4 +112,7 @@
   <changeSet id="34-unconfirmed-verification-command" author="helmglass">
     <sqlFile path="034-unconfirmed-verification-command.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="35-agent-tool-steps" author="helmglass">
+    <sqlFile path="035-agent-tool-steps.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

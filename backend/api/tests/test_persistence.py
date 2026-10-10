@@ -38,7 +38,7 @@ class ApplicationPersistenceTest(unittest.TestCase):
         status, current = self.client.api('/api/tasks/' + task['id'])
         self.assertEqual(200, status)
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.execute_in_scenario_step({'taskId': task['id'], 'action': {
+        error, receipt, _ = self.client.execute_browser({'taskId': task['id'], 'action': {
             'operationId': operation, 'type': kind, 'arguments': arguments or {},
             'instructionRevision': current['instructionRevision'],
             'controlEpoch': current['browser']['controlEpoch']}})
@@ -79,7 +79,7 @@ class ApplicationPersistenceTest(unittest.TestCase):
         task_id=task["id"]
         self.browser_action(task, 'click', self.client.browser_target(task['id'], 'Use account A'))
         operation=str(uuid.uuid4())
-        error,receipt,_=self.client.execute_in_scenario_step({"taskId":task_id,"action":{
+        error,receipt,_=self.client.execute_browser({"taskId":task_id,"action":{
             "operationId":operation,"type":"screenshot","arguments":{},"instructionRevision":task["instructionRevision"],
             "controlEpoch":task["browser"]["controlEpoch"]}})
         self.assertFalse(error,receipt)
@@ -95,7 +95,6 @@ class ApplicationPersistenceTest(unittest.TestCase):
                       "columns":[{"key":"answer","label":"Answer","type":"string"}]},
             "rows":[{"answer":"Preserved across deployment"}]})
         self.assertFalse(error,result)
-        self.client.complete_scenario_step(task_id, operation)
         self.command(task,"FINISH",outcome="SUCCEEDED",text="Persisted complete result")
         deadline=time.monotonic()+30
         while time.monotonic()<deadline:

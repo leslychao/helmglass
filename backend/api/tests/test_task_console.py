@@ -73,7 +73,7 @@ class TaskConsoleTest(unittest.TestCase):
                       "instructionRevision": task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"] = task["browser"]["controlEpoch"]
-            error, receipt, _ = self.admin.execute_in_scenario_step({"taskId": task_id, "action": action})
+            error, receipt, _ = self.admin.execute_browser({"taskId": task_id, "action": action})
             self.assertFalse(error, receipt)
             return self.wait_operation(operation, self.admin)
 

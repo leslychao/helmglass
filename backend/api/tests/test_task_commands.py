@@ -73,7 +73,7 @@ class TaskCommandsTest(unittest.TestCase):
                         "command": {"type": "PREPARE", "expectedVersion": task["version"]}})
                     self.assertFalse(error, prepared)
                     operation = str(uuid.uuid4())
-                    error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task_id,
+                    error, receipt, _ = self.client.execute_browser({"taskId": task_id,
                         "action": {"operationId": operation, "type": "observe", "arguments": {},
                                    "instructionRevision": presentation["task"]["instructionRevision"]}})
                     self.assertFalse(error, receipt)

@@ -62,23 +62,11 @@ class TaskContinuationTest(unittest.TestCase):
                 error, receipt, _ = self.client.tool('browser.execute', {'taskId': task['id'], 'action': {
                     'operationId': operation, 'type': 'observe', 'arguments': {},
                     'instructionRevision': state['task']['instructionRevision'],
-                    'controlEpoch': state['task']['browser']['controlEpoch'],
-                    'step': {'operationKey': 'verify-continuation-' + stage.lower(), 'objectKey': task['id'],
-                             'title': 'Проверить принятое продолжение',
-                             'completionCriterion': 'Свежая страница прочитана после ожидания'}}})
+                    'controlEpoch': state['task']['browser']['controlEpoch']}})
                 self.assertFalse(error, receipt)
                 receipt = self.wait_operation(operation, self.client)
                 self.assertEqual('SUCCEEDED', receipt['status'])
                 self.assertEqual('ACCEPTED', self.client.tool('widget.state', widget)[1]['continuationStatus'])
-                step = next(item for item in self.client.tool('steps.list', {'taskId': task['id']})[1]['items']
-                            if item['id'] == receipt['stepId'])
-                error, completed, _ = self.client.tool('steps.command', {
-                    'taskId': task['id'], 'operationKey': str(uuid.uuid4()), 'command': {
-                        'type': 'COMPLETE', 'stepId': step['id'], 'expectedVersion': step['version'],
-                        'instructionRevision': state['task']['instructionRevision'], 'outcome': 'SUCCEEDED',
-                        'result': 'Продолжение принято и страница прочитана',
-                        'evidence': [{'type': 'OPERATION', 'operationId': operation}]}})
-                self.assertFalse(error, completed)
 
     def test_stale_widget_read_is_typed_but_stale_commands_remain_denied(self):
         self.client.login_mcp()
@@ -233,7 +221,7 @@ class TaskContinuationTest(unittest.TestCase):
                       "instructionRevision": value["instructionRevision"]}
             if value.get("browser") and value["browser"]["status"] == "LIVE":
                 action["controlEpoch"] = value["browser"]["controlEpoch"]
-            error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": action})
+            error, receipt, _ = self.client.execute_browser({"taskId": task["id"], "action": action})
             self.assertFalse(error, receipt)
             return action["operationId"]
 
@@ -338,7 +326,7 @@ class TaskContinuationTest(unittest.TestCase):
                       "instructionRevision": current["instructionRevision"]}
             if current.get("browser"):
                 action["controlEpoch"] = current["browser"]["controlEpoch"]
-            error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": action})
+            error, receipt, _ = self.client.execute_browser({"taskId": task["id"], "action": action})
             self.assertFalse(error, receipt)
             return self.wait_operation(action["operationId"], self.client)
 
@@ -347,7 +335,6 @@ class TaskContinuationTest(unittest.TestCase):
         browser_id = self.client.api(path)[1]["browser"]["id"]
         for outcome in ("PARTIAL", "NOT_ACHIEVED"):
             with self.subTest(outcome=outcome):
-                self.client.complete_scenario_step(task["id"], initial_observation["id"], "PARTIAL")
                 finished = self.command(task, "FINISH", outcome=outcome, text="Retained result")
                 self.assertEqual(outcome, finished["status"])
                 self.assertIn("STOP", finished["allowedCommands"])
@@ -383,7 +370,7 @@ class TaskContinuationTest(unittest.TestCase):
         task = presentation["task"]
         path = "/api/tasks/" + task["id"]
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.execute_in_scenario_step({
+        error, receipt, _ = self.client.execute_browser({
             "taskId": task["id"], "action": {
                 "operationId": operation, "type": "click",
                 "arguments": self.client.browser_target(task['id'], 'Slow effect', uncertain=True),
@@ -391,7 +378,7 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertFalse(error, receipt)
         self.assertEqual("UNKNOWN", self.wait_operation(operation, self.client)["status"])
         observation = str(uuid.uuid4())
-        error, observed, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
+        error, observed, _ = self.client.execute_browser({"taskId": task["id"], "action": {
             "operationId": observation, "type": "observe", "arguments": {},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, observed)

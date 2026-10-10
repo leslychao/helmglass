@@ -65,7 +65,7 @@ class UnlimitedFairnessTest(unittest.TestCase):
                 self.assertFalse(error, state)
                 task = state["task"]
                 operation = str(uuid.uuid4())
-                error, receipt, _ = transport.execute_in_scenario_step({"taskId": task["id"], "action": {
+                error, receipt, _ = transport.execute_browser({"taskId": task["id"], "action": {
                     "operationId": operation, "type": "observe", "arguments": {},
                     "instructionRevision": task["instructionRevision"]}})
                 self.assertFalse(error, receipt)

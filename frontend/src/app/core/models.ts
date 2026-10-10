@@ -148,12 +148,12 @@ export const connectionSchema = z.object({
 export type Connection = z.infer<typeof connectionSchema>;
 export const stepSchema = z.object({
   id: z.string(), taskId: z.string(), sequence: z.number(), version: z.number(),
-  title: z.string(), status: z.enum(['PLANNED', 'RUNNING', 'WAITING', 'SUCCEEDED', 'PARTIAL', 'FAILED', 'UNKNOWN', 'SKIPPED']),
+  tool: z.string(), durationMs: z.nullable(z.number()),
+  title: z.string(), status: z.enum(['RUNNING', 'SUCCEEDED', 'FAILED']),
   result: z.nullable(z.string()), createdAt: z.string(), updatedAt: z.string(),
 });
 export const stepLabels: Readonly<Record<z.infer<typeof stepSchema>['status'], string>> = {
-  PLANNED: 'Запланирован', RUNNING: 'Выполняется', WAITING: 'Ожидает', SUCCEEDED: 'Выполнен',
-  PARTIAL: 'Частично выполнен', FAILED: 'Не выполнен', UNKNOWN: 'Результат неизвестен', SKIPPED: 'Пропущен',
+  RUNNING: 'Ожидает ответа', SUCCEEDED: 'Ответ получен', FAILED: 'Вызов отклонён',
 };
 export const notificationSchema = z.object({
   id: z.string(),

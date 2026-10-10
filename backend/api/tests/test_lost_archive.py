@@ -56,7 +56,7 @@ class LostArchiveTest(unittest.TestCase):
                   "instructionRevision": current["instructionRevision"]}
         if current.get("browser") and current["browser"]["status"] == "LIVE":
             action["controlEpoch"] = current["browser"]["controlEpoch"]
-        error, result, _ = client.execute_in_scenario_step({"taskId": task["id"], "action": action})
+        error, result, _ = client.execute_browser({"taskId": task["id"], "action": action})
         self.assertFalse(error, result)
         receipt = self.wait_operation(action["operationId"], client)
         self.assertEqual("SUCCEEDED", receipt["status"])

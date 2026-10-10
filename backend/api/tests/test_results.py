@@ -90,7 +90,7 @@ process.stdout.write(result.outputFiles[0].text);
         panels = InitialPanels()
         panels.feed(html)
         self.assertNotIn("hidden", panels.elements["steps-panel"],
-                         "Business steps open beside the browser on first render")
+                         "Agent steps open beside the browser on first render")
         self.assertEqual("true", panels.elements["steps-toggle"].get("aria-expanded"))
         self.assertIn("hidden", panels.elements["session-panel"])
         self.assertEqual("false", panels.elements["session-toggle"].get("aria-expanded"))
@@ -262,7 +262,7 @@ process.stdout.write(result.outputFiles[0].text);
         original = {"operationId": str(uuid.uuid4()), "type": "observe", "arguments": {},
                     "instructionRevision": presentation["task"]["instructionRevision"]}
         try:
-            self.assertFalse(self.user.execute_in_scenario_step({"taskId": task_id, "action": original})[0])
+            self.assertFalse(self.user.execute_browser({"taskId": task_id, "action": original})[0])
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 error, receipt, _ = self.user.tool("operations.get", {"operationId": original["operationId"]})
@@ -276,7 +276,7 @@ process.stdout.write(result.outputFiles[0].text);
                                      {"type": "RESUME", "expectedVersion": task["version"]})
             self.assertEqual(200, status)
             self.assertEqual("PENDING", self.user.tool("widget.state", widget)[1]["continuationStatus"])
-            self.assertFalse(self.user.execute_in_scenario_step({"taskId": task_id, "action": original})[0])
+            self.assertFalse(self.user.execute_browser({"taskId": task_id, "action": original})[0])
             self.assertEqual("PENDING", self.user.tool("widget.state", widget)[1]["continuationStatus"],
                              "Re-reading a completed operation must not claim a new step was accepted")
             pending = self.user.tool("widget.state", widget)[1]
@@ -289,7 +289,7 @@ process.stdout.write(result.outputFiles[0].text);
             current = self.user.api("/api/tasks/" + task_id)[1]
             next_action = {**original, "operationId": str(uuid.uuid4()),
                            "controlEpoch": current["browser"]["controlEpoch"]}
-            self.assertFalse(self.user.execute_in_scenario_step({"taskId": task_id, "action": next_action})[0])
+            self.assertFalse(self.user.execute_browser({"taskId": task_id, "action": next_action})[0])
             self.assertEqual("ACCEPTED", self.user.tool("widget.state", widget)[1]["continuationStatus"])
         finally:
             self.stop_task(task_id)

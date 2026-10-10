@@ -184,7 +184,7 @@ MCP-схемы публикуются самим сервером через `to
 подключённого Helm Glass Dev в ChatGPT; затем начните новый ответ. До обновления
 ChatGPT может продолжать использовать прежние схемы и HTML виджета.
 Изменяющие REST-команды требуют `Idempotency-Key`; браузерные операции — постоянный
-`operationId`, обязательный `stepId`, ревизию поручения и поколение управления. После потери ответа
+`operationId`, обязательный `callId`, ревизию поручения и поколение управления. После потери ответа
 проверяйте сохранённый исход, а не отправляйте действие заново. `UNKNOWN` сохраняется
 до достоверной проверки и блокирует дальнейшие изменения.
 
@@ -203,7 +203,7 @@ python backend/api/tests/test_dev_contract.py
 python backend/api/tests/test_browser_execution.py
 python backend/api/tests/test_connection_contract.py
 python backend/api/tests/test_results.py
-python backend/api/tests/test_business_steps.py
+python backend/api/tests/test_agent_steps.py
 python backend/api/tests/test_mcp_audio.py
 python backend/api/tests/test_viewer_revocation.py
 node --test backend/browser-node/test/clipboard.test.mjs

@@ -66,7 +66,7 @@ class ForeignResourceTest(unittest.TestCase):
                       "instructionRevision": task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"] = task["browser"]["controlEpoch"]
-            error, receipt, _ = owner.execute_in_scenario_step({"taskId": task_id, "action": action})
+            error, receipt, _ = owner.execute_browser({"taskId": task_id, "action": action})
             return error, receipt, action["operationId"]
 
         def complete(kind):

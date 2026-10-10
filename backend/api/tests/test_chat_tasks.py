@@ -403,26 +403,21 @@ class ChatTaskTest(unittest.TestCase):
         binding = {"taskId": task["id"], "generation": state["generation"]}
         self.command(task, "AMEND", title=task["title"], goal="Updated instruction",
             startUrl=task["startUrl"])
-        self.assertEqual(0, self.client.tool("widget.steps", binding)[1]["total"])
-        revision = self.current(task)["instructionRevision"]
+        baseline = self.client.tool("widget.steps", binding)[1]["total"]
 
-        def declare(index):
-            error, step, _ = self.client.tool("steps.command", {
-                "taskId": task["id"], "operationKey": str(uuid.uuid4()), "command": {
-                    "type": "DECLARE", "instructionRevision": revision,
-                    "operationKey": "compare-product", "objectKey": "product-" + str(index),
-                    "title": "Compare product " + str(index),
-                    "completionCriterion": "Source price and delivery have been compared"}})
-            self.assertFalse(error, step)
+        def read_state():
+            error, result, _ = self.client.tool("tasks.get", {"taskId": task["id"]})
+            self.assertFalse(error, result)
 
-        for index in range(12):
-            declare(index)
+        for _ in range(12):
+            read_state()
         error, first, _ = self.client.tool("widget.steps", binding)
         self.assertFalse(error, first)
-        self.assertEqual((10, 10, 12), (len(first["items"]), first["pageSize"], first["total"]))
+        self.assertEqual((10, 10, baseline + 12),
+                         (len(first["items"]), first["pageSize"], first["total"]))
         older = {**binding, "page": 2, "beforeSequence": first["items"][0]["sequence"]}
         retained = self.client.tool("widget.steps", older)[1]
-        declare(12)
+        read_state()
         self.assertEqual(retained, self.client.tool("widget.steps", older)[1])
         wrong = self.transport("unrelated-chat")
         for name in ("widget.steps", "widget.state"):
@@ -694,7 +689,7 @@ class ChatTaskTest(unittest.TestCase):
                 command["controlEpoch"] = current["browser"]["controlEpoch"]
             if prompt:
                 command["confirmationPrompt"] = prompt
-            error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": command})
+            error, receipt, _ = self.client.execute_browser({"taskId": task["id"], "action": command})
             self.assertFalse(error, receipt)
             return command, receipt
 
@@ -708,7 +703,7 @@ class ChatTaskTest(unittest.TestCase):
         self.mcp_command(task, "RESUME")
         command, receipt = action("newTab", {"url": self.client.browser_fixture_url()}, "Open one additional tab?")
         self.assertEqual("AWAITING_CONFIRMATION", receipt["status"])
-        error, refusal, _ = self.client.execute_in_scenario_step({"taskId": task["id"],
+        error, refusal, _ = self.client.execute_browser({"taskId": task["id"],
             "action": {**command, "confirmationPrompt": "Changed decision"}})
         self.assertTrue(error)
         self.assertEqual("IDEMPOTENCY_CONFLICT", refusal["code"])
@@ -741,7 +736,7 @@ class ChatTaskTest(unittest.TestCase):
     def test_stop_waits_for_dispatched_outcome_and_confirmed_browser_close(self):
         task = self.start()["task"]
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
+        error, receipt, _ = self.client.execute_browser({"taskId": task["id"], "action": {
             "operationId": operation, "type": "waitFor", "arguments": {'textGone': 'Increment'},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)

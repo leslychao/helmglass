@@ -240,7 +240,7 @@ class AdministrativeAuditTest(unittest.TestCase):
             "taskId": task["id"], "operationKey": str(uuid.uuid4())})
         self.assertFalse(error, state)
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
+        error, receipt, _ = self.client.execute_browser({"taskId": task["id"], "action": {
             "operationId": operation, "type": "observe", "arguments": {},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)
@@ -335,7 +335,7 @@ class AdministrativeAuditTest(unittest.TestCase):
         self.assertFalse(error, state)
         task = state["task"]
         operation = str(uuid.uuid4())
-        error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
+        error, receipt, _ = self.client.execute_browser({"taskId": task["id"], "action": {
             "operationId": operation, "type": "screenshot", "arguments": {},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)

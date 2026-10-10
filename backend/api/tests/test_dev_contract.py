@@ -199,7 +199,7 @@ class DevClient:
                   "instructionRevision": task["instructionRevision"]}
         if task.get("browser"):
             action["controlEpoch"] = task["browser"]["controlEpoch"]
-        error, receipt, _ = self.execute_in_scenario_step({"taskId": task_id, "action": action})
+        error, receipt, _ = self.execute_browser({"taskId": task_id, "action": action})
         if error:
             raise AssertionError(receipt)
         deadline = time.monotonic() + 60
@@ -212,7 +212,6 @@ class DevClient:
             time.sleep(.2)
         if receipt["status"] != "SUCCEEDED":
             raise AssertionError(receipt)
-        self.complete_scenario_step(task_id, operation)
         return self.api("/api/tasks/" + task_id)[1]
 
     def close_mcp(self):
@@ -285,7 +284,7 @@ class DevClient:
             observation = content.get("observationOperationId")
             if observation is None:
                 observation = str(uuid.uuid4())
-                error, receipt, _ = self.execute_in_scenario_step({"taskId": task["id"], "action": {
+                error, receipt, _ = self.execute_browser({"taskId": task["id"], "action": {
                     "operationId": observation, "type": "observe", "arguments": {},
                     "instructionRevision": task["instructionRevision"], "observeAfter": False}})
                 if error:
@@ -318,49 +317,17 @@ class DevClient:
             self.refresh_token = value.get("refresh_token", self.refresh_token)
         return status
 
-    def scenario_step(self, task_id):
-        """Explicit business-step fixture for pre-existing browser acceptance scenarios."""
-        error, page, _ = self.tool("steps.list", {"taskId": task_id})
-        if error:
-            raise AssertionError(f"Cannot read scenario step: {page}")
-        step = next((item for item in page["items"]
-                     if item["operationKey"] == "verify-acceptance-scenario"), None)
-        error, task, _ = self.tool("tasks.get", {"taskId": task_id})
-        if error:
-            raise AssertionError(f"Cannot read scenario task: {task}")
-
-        def command(kind, **fields):
-            error, result, _ = self.tool("steps.command", {
-                "taskId": task_id, "operationKey": str(uuid.uuid4()), "command": {
-                    "type": kind, "instructionRevision": task["instructionRevision"], **fields}})
-            if error:
-                raise AssertionError(f"Cannot {kind} scenario step: {result}")
-            return result
-
-        if step is None:
-            step = command("DECLARE", operationKey="verify-acceptance-scenario", objectKey=task_id,
-                           title="Проверить условия сценария приёмки",
-                           completionCriterion="Результаты действий соответствуют проверяемому сценарию")
-        if task["status"] in ("QUEUED", "RUNNING", "STARTING", "WAITING_CHATGPT"):
-            if step["status"] == "PLANNED":
-                step = command("START", stepId=step["id"], expectedVersion=step["version"])
-            elif step["status"] in ("FAILED", "PARTIAL", "SKIPPED"):
-                step = command("RETRY", stepId=step["id"], expectedVersion=step["version"])
-        return step
-
-    def execute_in_scenario_step(self, arguments):
+    def execute_browser(self, arguments):
         action = arguments["action"]
-        if "stepId" not in action:
-            action["stepId"] = self.scenario_step(arguments["taskId"])["id"]
-            if "controlEpoch" not in action:
-                error, task, _ = self.tool("tasks.get", {"taskId": arguments["taskId"]})
-                if error:
-                    raise AssertionError(f"Cannot read scenario browser: {task}")
-                if task.get("browser"):
-                    action["controlEpoch"] = task["browser"]["controlEpoch"]
+        if "controlEpoch" not in action:
+            error, task, _ = self.tool("tasks.get", {"taskId": arguments["taskId"]})
+            if error:
+                raise AssertionError(task)
+            if task.get("browser"):
+                action["controlEpoch"] = task["browser"]["controlEpoch"]
         return self.tool("browser.execute", arguments)
 
-    def browser_observation(self, task_id, step_id=None, navigate=None):
+    def browser_observation(self, task_id, navigate=None):
         deadline = time.monotonic() + 60
         while True:
             error, task, _ = self.tool("tasks.get", {"taskId": task_id})
@@ -371,10 +338,9 @@ class DevClient:
             if time.monotonic() > deadline:
                 raise AssertionError("Browser did not become live")
             time.sleep(.2)
-        step_id = step_id or self.scenario_step(task_id)["id"]
         operation = str(uuid.uuid4())
         error, receipt, _ = self.tool("browser.execute", {"taskId": task_id, "action": {
-            "operationId": operation, "stepId": step_id, "type": "navigate" if navigate else "observe",
+            "operationId": operation, "type": "navigate" if navigate else "observe",
             "arguments": {"url": navigate} if navigate else {},
             "instructionRevision": task["instructionRevision"], "controlEpoch": task["browser"]["controlEpoch"]}})
         while not error and receipt["status"] in ("ACCEPTED", "DISPATCHED") and time.monotonic() < deadline:
@@ -397,32 +363,19 @@ class DevClient:
             self._browser_fixture_url = self.base + '/' + filename
         return self._browser_fixture_url
 
-    def browser_target(self, task_id, name, step_id=None, uncertain=False):
+    def browser_target(self, task_id, name, uncertain=False):
         """Select only a reference actually issued by the deployed browser contract."""
         navigate = self.browser_fixture_url() if uncertain else None
-        observation = self.browser_observation(task_id, step_id, navigate)
+        observation = self.browser_observation(task_id, navigate=navigate)
         nodes = [entry['node'] for entry in observation['snapshot'] if isinstance(entry['node'], dict)
                  and entry['node'].get('name') == name and entry['node'].get('ref')]
         if len(nodes) != 1:
             raise AssertionError('Expected one native reference for ' + name)
         return {'observationId': observation['observationId'], 'ref': nodes[0]['ref']}
 
-    def complete_scenario_step(self, task_id, operation_id, outcome="SUCCEEDED"):
-        step = self.scenario_step(task_id)
-        error, task, _ = self.tool("tasks.get", {"taskId": task_id})
-        if error:
-            raise AssertionError(f"Cannot read scenario task: {task}")
-        error, result, _ = self.tool("steps.command", {
-            "taskId": task_id, "operationKey": str(uuid.uuid4()), "command": {
-                "type": "COMPLETE", "stepId": step["id"], "expectedVersion": step["version"],
-                "instructionRevision": task["instructionRevision"], "outcome": outcome,
-                "result": "Результат проверяемого действия зафиксирован",
-                "evidence": [{"type": "OPERATION", "operationId": operation_id}]}})
-        if error:
-            raise AssertionError(f"Cannot complete scenario step: {result}")
-        return result
-
     def tool(self, name, arguments):
+        if not name.startswith("widget.") and name not in ("tasks.list", "connections.list"):
+            arguments.setdefault("callId", str(uuid.uuid4()))
         result = self.rpc("tools/call", {"name": name, "arguments": arguments,
                                           "_meta": {"openai/session": self.chat}})
         if "structuredContent" in result:
@@ -769,7 +722,7 @@ class DevContractTest(unittest.TestCase):
 
             def enqueue(queue):
                 for entry in queue:
-                    error,receipt,_ = entry["client"].execute_in_scenario_step({"taskId":entry["task"]["id"],"action":{
+                    error,receipt,_ = entry["client"].execute_browser({"taskId":entry["task"]["id"],"action":{
                         "operationId":entry["operationId"],"type":"observe","arguments":{},
                         "instructionRevision":entry["task"]["instructionRevision"]}})
                     self.assertFalse(error,receipt)
@@ -889,7 +842,7 @@ class DevContractTest(unittest.TestCase):
         task_id = task["id"]
         try:
             old_id = str(uuid.uuid4())
-            error, pending, _ = self.user.execute_in_scenario_step({"taskId": task_id,
+            error, pending, _ = self.user.execute_browser({"taskId": task_id,
                 "action": {"operationId": old_id, "type": "newTab", "confirmationPrompt": "Open the additional tab?", "arguments": {"url": "https://example.com"},
                            "instructionRevision": task["instructionRevision"]}})
             self.assertFalse(error)
@@ -912,7 +865,7 @@ class DevContractTest(unittest.TestCase):
             self.assertFalse(error)
             self.assertEqual("CANCELLED", cancelled["status"])
             new_id = str(uuid.uuid4())
-            error, pending, _ = self.user.execute_in_scenario_step({"taskId": task_id,
+            error, pending, _ = self.user.execute_browser({"taskId": task_id,
                 "action": {"operationId": new_id, "type": "newTab", "confirmationPrompt": "Open the additional tab?", "arguments": {"url": "https://example.com"},
                            "instructionRevision": task["instructionRevision"]}})
             self.assertFalse(error)
@@ -935,7 +888,7 @@ class DevContractTest(unittest.TestCase):
             self.assertEqual("SUCCEEDED", receipt["status"])
             _, task = self.user.api("/api/tasks/" + task_id)
             observation_id = str(uuid.uuid4())
-            error, _, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": {
+            error, _, _ = self.user.execute_browser({"taskId": task_id, "action": {
                 "operationId": observation_id, "type": "observe", "arguments": {},
                 "instructionRevision": task["instructionRevision"], "controlEpoch": task["browser"]["controlEpoch"]}})
             self.assertFalse(error)
@@ -984,7 +937,7 @@ class DevContractTest(unittest.TestCase):
             observation_id = str(uuid.uuid4())
             action = {"operationId": observation_id, "type": "observe", "arguments": {},
                       "instructionRevision": task["instructionRevision"]}
-            error, _, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": action})
+            error, _, _ = self.user.execute_browser({"taskId": task_id, "action": action})
             self.assertFalse(error)
             task = self.wait_task(task_id, lambda value: value.get("browser") is not None
                 and value["browser"]["status"] == "LIVE" and value["status"] == "WAITING_CHATGPT")
@@ -1023,7 +976,7 @@ class DevContractTest(unittest.TestCase):
             self.assertEqual(200, status)
             self.assertEqual("READY", connection["status"])
             self.assertEqual(original_browser, connection["browser"]["id"])
-            error, stale, _ = self.user.execute_in_scenario_step({"taskId": task_id,
+            error, stale, _ = self.user.execute_browser({"taskId": task_id,
                 "action": {"operationId": str(uuid.uuid4()), "type": "observe", "arguments": {},
                            "instructionRevision": task["instructionRevision"], "controlEpoch": original_epoch}})
             self.assertTrue(error)
@@ -1031,19 +984,19 @@ class DevContractTest(unittest.TestCase):
             missing = {"operationId": str(uuid.uuid4()), "type": "click",
                        "arguments": self.user.browser_target(task_id, 'Slow effect', uncertain=True),
                        "instructionRevision": task["instructionRevision"], "controlEpoch": task["browser"]["controlEpoch"]}
-            error, _, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": missing})
+            error, _, _ = self.user.execute_browser({"taskId": task_id, "action": missing})
             self.assertFalse(error)
             task = self.wait_task(task_id, lambda value: value.get("request") is not None
                                   and value["request"]["type"] == "UNKNOWN_RESULT")
-            error, receipt, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": missing})
+            error, receipt, _ = self.user.execute_browser({"taskId": task_id, "action": missing})
             self.assertFalse(error)
             self.assertEqual("UNKNOWN", receipt["status"])
-            error, blocked, _ = self.user.execute_in_scenario_step({"taskId": task_id,
+            error, blocked, _ = self.user.execute_browser({"taskId": task_id,
                 "action": {**missing, "operationId": str(uuid.uuid4()), "type": "click"}})
             self.assertTrue(error)
             self.assertEqual("UNKNOWN_RESULT", blocked["code"])
             observed_id = str(uuid.uuid4())
-            error, observed, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": {
+            error, observed, _ = self.user.execute_browser({"taskId": task_id, "action": {
                 "operationId": observed_id, "type": "observe", "arguments": {},
                 "instructionRevision": task["instructionRevision"]}})
             self.assertFalse(error, observed)

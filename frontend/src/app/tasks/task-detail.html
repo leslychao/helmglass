@@ -191,7 +191,7 @@
           <p class="loading" role="status">Загружаем шаги…</p>
         } @else if (history() && !history()?.items?.length) {
           <p class="empty-small">
-            {{ historySearch() ? 'Шаги не найдены.' : 'Бизнес-шаги для этой задачи не записаны.' }}
+            {{ historySearch() ? 'Шаги не найдены.' : 'Шаги агента для этой задачи ещё не записаны.' }}
           </p>
         }
         <hg-browser-steps [steps]="history()?.items" />

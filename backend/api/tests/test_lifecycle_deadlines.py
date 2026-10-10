@@ -391,7 +391,7 @@ console.log(JSON.stringify({receipt,manifest,restoredReceipt:await get(receiptRo
     def test_hung_read_is_failed_and_late_completion_does_not_resume_stopped_task(self):
         identity, client, model, task = self.ready()
         operation = str(uuid.uuid4())
-        error, receipt, _ = model.execute_in_scenario_step({'taskId': task['id'], 'action': {
+        error, receipt, _ = model.execute_browser({'taskId': task['id'], 'action': {
             'operationId': operation, 'type': 'waitFor', 'arguments': {'textGone': 'Increment'},
             'instructionRevision': task['instructionRevision']}})
         self.assertFalse(error, receipt)

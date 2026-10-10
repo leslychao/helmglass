@@ -51,7 +51,7 @@ class BrowserLifetimeTest(unittest.TestCase):
                       "instructionRevision": task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"] = task["browser"]["controlEpoch"]
-            error, result, _ = client.execute_in_scenario_step({"taskId": task_id, "action": action})
+            error, result, _ = client.execute_browser({"taskId": task_id, "action": action})
             return error, result, action["operationId"]
 
         def completed(kind, arguments):

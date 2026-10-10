@@ -17,7 +17,9 @@ import { Icon, IconName } from '../shared/icon';
             <strong>{{ event.title }}</strong
             ><time>{{ event.createdAt | date: 'HH:mm:ss' }}</time>
           </div>
-          <small>{{ stepLabels[event.status] }}</small>
+          <small>{{ stepLabels[event.status] }} · {{ event.tool }}
+            @if (event.durationMs !== null) { · {{ event.durationMs }} мс }
+          </small>
           @if (event.result) {
             <p>{{ event.result }}</p>
           }
@@ -30,13 +32,8 @@ export class BrowserSteps {
   readonly steps = input<readonly z.infer<typeof stepSchema>[]>();
   readonly stepLabels = stepLabels;
   readonly icons: Readonly<Record<z.infer<typeof stepSchema>['status'], IconName>> = {
-    PLANNED: 'info',
     RUNNING: 'gpt',
     SUCCEEDED: 'check',
     FAILED: 'alert',
-    UNKNOWN: 'alert',
-    PARTIAL: 'alert',
-    WAITING: 'pause',
-    SKIPPED: 'stop',
   };
 }

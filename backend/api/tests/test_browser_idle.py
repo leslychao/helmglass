@@ -72,7 +72,7 @@ class BrowserIdleTest(unittest.TestCase):
         self.assertIn('observationOperationId', instructions,
             'Initialize must explain model verification independently of human consent')
         operation = str(uuid.uuid4())
-        error, value, _ = model.execute_in_scenario_step({
+        error, value, _ = model.execute_browser({
             'taskId': task['id'], 'action': {
                 'operationId': operation, 'type': 'click',
                 'arguments': model.browser_target(task['id'], 'Slow effect', uncertain=True),
@@ -92,7 +92,7 @@ class BrowserIdleTest(unittest.TestCase):
         self.assertEqual('PENDING', self.fixture_sql(identity,
             "SELECT continuation_status FROM mcp_chats WHERE owner_id=:owner AND task_id='"
             + task['id'] + "';"))
-        error, observed, _ = model.execute_in_scenario_step({'taskId': task['id'], 'action': {
+        error, observed, _ = model.execute_browser({'taskId': task['id'], 'action': {
             'operationId': str(uuid.uuid4()), 'type': 'observe', 'arguments': {},
             'instructionRevision': task['instructionRevision']}})
         self.assertFalse(error, observed)
@@ -139,7 +139,7 @@ class BrowserIdleTest(unittest.TestCase):
                 'Unknown effects must not prevent opening a browser for read-only verification')
             read = {'operationId': str(uuid.uuid4()), 'type': 'observe', 'arguments': {},
                     'instructionRevision': closed['instructionRevision']}
-            error, refusal, _ = model.execute_in_scenario_step({
+            error, refusal, _ = model.execute_browser({
                 'taskId': task['id'], 'action': dict(read)})
             self.assertTrue(error)
             self.assertEqual('TASK_NOT_RUNNING', refusal['code'])
@@ -191,7 +191,7 @@ try {
                 self.assertIn('RESUME', opened['allowedCommands'])
             self.assertEqual(request, opened['request'])
             read_id = str(uuid.uuid4())
-            error, accepted, _ = model.execute_in_scenario_step({
+            error, accepted, _ = model.execute_browser({
                 'taskId': task['id'], 'action': {**read, 'operationId': read_id}})
             self.assertFalse(error, accepted)
             until = time.monotonic() + 45
@@ -205,7 +205,7 @@ try {
             self.assertNotEqual(closed['browser']['id'], current['browser']['id'])
             self.assertEqual(('WAITING_CHATGPT', 'UNKNOWN_RESULT', request),
                 (current['status'], current['waitReason'], current['request']))
-            error, refusal, _ = model.execute_in_scenario_step({
+            error, refusal, _ = model.execute_browser({
                 'taskId': task['id'], 'action': {**read, 'operationId': str(uuid.uuid4()),
                     'type': 'click', 'arguments': {}}})
             self.assertTrue(error)
@@ -222,7 +222,7 @@ try {
         self.assertEqual(('WAITING_USER', 'LOGIN', request),
             (protected['status'], protected['waitReason'], protected['request']))
         error, refused, _ = model.tool('browser.execute', {'taskId': task['id'], 'action': {
-            'operationId': str(uuid.uuid4()), 'stepId': verified['stepId'], 'type': 'observe',
+            'operationId': str(uuid.uuid4()), 'type': 'observe',
             'arguments': {}, 'instructionRevision': protected['instructionRevision'],
             'controlEpoch': protected['browser']['controlEpoch']}})
         self.assertTrue(error)
@@ -396,7 +396,7 @@ try {
     def test_dispatched_operation_blocks_idle_close_and_resets_deadline(self):
         identity, client, model, task = self.ready()
         operation = str(uuid.uuid4())
-        error, receipt, _ = model.execute_in_scenario_step({'taskId': task['id'], 'action': {
+        error, receipt, _ = model.execute_browser({'taskId': task['id'], 'action': {
             'operationId': operation, 'type': 'waitFor',
             'arguments': {**model.browser_target(task['id'], 'Increment'), 'state': 'hidden'},
             'instructionRevision': task['instructionRevision']}})
@@ -473,7 +473,7 @@ try {
                         'taskId': task['id'], 'instructionRevision': task['instructionRevision'],
                         'operationKey': operation, 'prompt': 'Choose before continuing'})
                 else:
-                    error, result, _ = model.execute_in_scenario_step({
+                    error, result, _ = model.execute_browser({
                         'taskId': task['id'], 'action': {'operationId': operation,
                             'type': 'newTab', 'arguments': {'url': 'https://example.com'},
                             'confirmationPrompt': 'Open an additional public tab?',
@@ -511,7 +511,7 @@ try {
                         'prompt': 'Choose before continuing after closure'})
                 else:
                     target = model.browser_target(task['id'], 'Increment')
-                    error, _, _ = model.execute_in_scenario_step({'taskId': task['id'], 'action': {
+                    error, _, _ = model.execute_browser({'taskId': task['id'], 'action': {
                         'operationId': operation, 'type': 'click', 'arguments': target,
                         'confirmationPrompt': 'Increment the synthetic counter once?',
                         'instructionRevision': task['instructionRevision']}})

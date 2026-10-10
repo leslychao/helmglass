@@ -93,7 +93,7 @@ class ViewerRevocationTest(unittest.TestCase):
 
         try:
             observation_id = str(uuid.uuid4())
-            error, _, _ = client.execute_in_scenario_step({"taskId": task_id, "action": {
+            error, _, _ = client.execute_browser({"taskId": task_id, "action": {
                 "operationId": observation_id, "type": "observe", "arguments": {},
                 "instructionRevision": presentation["task"]["instructionRevision"]}})
             self.assertFalse(error)

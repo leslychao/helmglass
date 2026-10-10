@@ -114,16 +114,12 @@ public class ActionService {
   }
 
   @Transactional
-  public Contracts.Operation submit(UUID owner, UUID taskId, Contracts.BrowserAction action) {
-    return submit(owner, taskId, action, List.of());
-  }
-
-  @Transactional
   public Contracts.Operation submit(
       UUID owner,
       UUID taskId,
       Contracts.BrowserAction action,
-      List<UUID> sequence) {
+      List<UUID> sequence,
+      UUID stepId) {
     identity.requireActive(owner);
     tasks.lockOwner(owner);
     tasks.lockTask(owner, taskId);
@@ -145,9 +141,6 @@ public class ActionService {
         action.confirmationPrompt() == null
             ? null
             : TaskService.required(action.confirmationPrompt(), "confirmationPrompt", 4000);
-    if ((action.stepId() == null) == (action.step() == null)) {
-      throw ApiException.invalid("step", "Укажите stepId или описание нового бизнес-шага.");
-    }
     var previous =
         jdbc.sql("SELECT id FROM operations WHERE id=:id AND owner_id=:owner")
             .param("id", action.operationId())
@@ -157,9 +150,7 @@ public class ActionService {
     if (previous.isPresent()) {
       boolean same =
           jdbc.sql(
-                  "SELECT task_id=:task AND ((CAST(:definition AS jsonb) IS NULL AND"
-                      + " step_id=CAST(:step AS uuid)) OR coalesce("
-                      + " instruction_snapshot->'step'=CAST(:definition AS jsonb),false)) AND"
+                  "SELECT task_id=:task AND"
                       + " (:observe IS NULL OR"
                       + " coalesce((instruction_snapshot->>'observeAfter')::boolean,true)=:observe)"
                       + " AND coalesce(instruction_snapshot->'sequence','[]'::jsonb)="
@@ -170,8 +161,6 @@ public class ActionService {
                       + " instruction_snapshot->>'confirmationPrompt' IS NOT DISTINCT FROM"
                       + " CAST(:confirmation AS text) FROM operations WHERE id=:id")
               .param("task", taskId)
-              .param("step", action.stepId())
-              .param("definition", action.step() == null ? null : json.write(action.step()))
               .param("observe", action.observeAfter(), Types.BOOLEAN)
               .param("sequence", json.write(sequence))
               .param("type", action.type())
@@ -218,11 +207,7 @@ public class ActionService {
             || task.browser().privateMode())) {
       throw ApiException.conflict("CONTROL_NOT_OWNED", "Браузером управляет пользователь.");
     }
-    UUID stepId =
-        action.step() == null
-            ? action.stepId()
-            : steps.startForAction(owner, taskId, action.instructionRevision(), action.step());
-    steps.requireRunning(owner, taskId, stepId);
+    steps.requireBrowserCall(owner, taskId, stepId);
     boolean mutating = !READ_ONLY.contains(action.type());
     if ("captureAudio".equals(action.type())) {
       validateAudioContext(action.arguments().path("sourceContext"));
@@ -241,9 +226,6 @@ public class ActionService {
         action.observeAfter() == null
             ? !Set.of("listMedia", "captureAudio", "screenshot").contains(action.type())
             : action.observeAfter());
-    if (action.step() != null) {
-      instruction.put("step", action.step());
-    }
     if (confirmation != null) {
       instruction.put("confirmationPrompt", confirmation);
     }
@@ -1375,9 +1357,6 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
               .param("session", operation.session())
               .update();
           Contracts.Task task = tasks.get(operation.owner(), operation.task());
-          if ("UNKNOWN".equals(status)) {
-            steps.operationUnknown(operation.owner(), operation.task(), operation.id());
-          }
           tasks.history(
               operation.owner(), operation.task(), "ACTION_" + status, operation.type(), message);
           if ("UNKNOWN".equals(status)

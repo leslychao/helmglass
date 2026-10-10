@@ -87,21 +87,18 @@ FROM tasks t
   private final EventService events;
   private final Identity identity;
   private final ChatBindings chats;
-  private final TaskStepService steps;
 
   public TaskService(
       JdbcClient jdbc,
       JsonSupport json,
       EventService events,
       Identity identity,
-      ChatBindings chats,
-      TaskStepService steps) {
+      ChatBindings chats) {
     this.jdbc = jdbc;
     this.json = json;
     this.events = events;
     this.identity = identity;
     this.chats = chats;
-    this.steps = steps;
   }
 
   public Contracts.Task get(UUID owner, UUID id) {
@@ -1098,7 +1095,6 @@ UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format
     if (hasUnknown(task.id()) || hasDispatched(task.id())) {
       throw unavailable();
     }
-    steps.requireSettled(owner, task.id(), outcome);
     required(summary, "summary", 20000);
     jdbc.sql(
             "UPDATE tasks SET"
@@ -1210,7 +1206,6 @@ WHERE id=:id AND owner_id=:owner RETURNING version
     events.emit(owner, "usage", id, version);
     events.emitAdministrators("admin-user", owner, version);
     history(owner, id, status, description, null);
-    steps.taskState(owner, id, status, description);
     if (TERMINAL.contains(status) || "WAITING_USER".equals(status)) {
       jdbc.sql(
               """

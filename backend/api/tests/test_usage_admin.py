@@ -695,7 +695,7 @@ class UsageAdministrationTest(unittest.TestCase):
                     "instructionRevision":task["instructionRevision"]}
             if task.get("browser"):
                 action["controlEpoch"]=task["browser"]["controlEpoch"]
-            error,receipt,_=self.client.execute_in_scenario_step({"taskId":task_id,"action":action})
+            error,receipt,_=self.client.execute_browser({"taskId":task_id,"action":action})
             self.assertFalse(error,receipt)
             return operation
 
@@ -842,7 +842,7 @@ class UsageAdministrationTest(unittest.TestCase):
             self.assertFalse(error,state)
             task=state["task"]
             operation=str(uuid.uuid4())
-            error,receipt,_=transport.execute_in_scenario_step({"taskId":task["id"],"action":{
+            error,receipt,_=transport.execute_browser({"taskId":task["id"],"action":{
                 "operationId":operation,"type":"observe","arguments":{},"instructionRevision":task["instructionRevision"]}})
             self.assertFalse(error,receipt)
             return transport,task,operation
@@ -903,7 +903,7 @@ class UsageAdministrationTest(unittest.TestCase):
         error,_,_=self.client.tool("tasks.bind",{"taskId":task["id"],"operationKey":str(uuid.uuid4())})
         self.assertFalse(error)
         operation=str(uuid.uuid4())
-        error,receipt,_=self.client.execute_in_scenario_step({"taskId":task["id"],"action":{
+        error,receipt,_=self.client.execute_browser({"taskId":task["id"],"action":{
             "operationId":operation,"type":"observe","arguments":{},"instructionRevision":task["instructionRevision"]}})
         self.assertFalse(error,receipt)
         completed=self.wait_operation(operation,self.client)
@@ -936,7 +936,7 @@ class UsageAdministrationTest(unittest.TestCase):
             "startUrl":"https://example.org","prepare":True}})
         self.assertFalse(error,queued_state)
         queued_task=queued_state["task"]
-        error,receipt,_=queued_client.execute_in_scenario_step({"taskId":queued_task["id"],"action":{
+        error,receipt,_=queued_client.execute_browser({"taskId":queued_task["id"],"action":{
             "operationId":str(uuid.uuid4()),"type":"observe","arguments":{},"instructionRevision":queued_task["instructionRevision"]}})
         self.assertFalse(error,receipt)
         deadline=time.monotonic()+10
@@ -958,7 +958,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(browser,current["browser"]["id"])
         self.assertEqual("LIVE",current["browser"]["status"])
         self.assertEqual(1,self.admin.api(endpoint)[1]["user"]["waitingCount"])
-        error,refusal,_=self.client.execute_in_scenario_step({"taskId":task["id"],"action":{
+        error,refusal,_=self.client.execute_browser({"taskId":task["id"],"action":{
             "operationId":str(uuid.uuid4()),"type":"observe","arguments":{},
             "instructionRevision":current["instructionRevision"],"controlEpoch":current["browser"]["controlEpoch"]}})
         self.assertTrue(error)

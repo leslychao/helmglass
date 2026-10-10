@@ -31,7 +31,7 @@ public class Idempotency {
         .param("id", owner)
         .query(UUID.class)
         .single();
-    String hash = hash(json.canonical(request));
+    String hash = requestHash(request);
     var existing =
         jdbc.sql(
                 """
@@ -79,6 +79,10 @@ public class Idempotency {
         .param("key", key)
         .update();
     return result;
+  }
+
+  public String requestHash(Object request) {
+    return hash(json.canonical(request));
   }
 
   private static String hash(String request) {

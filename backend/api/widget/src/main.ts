@@ -80,8 +80,7 @@ const labels: Record<string, string> = {
   NOT_ACHIEVED: 'Цель не достигнута', FAILED: 'Ошибка', UNKNOWN: 'Исход неизвестен',
 };
 const stepLabels: Record<z.infer<typeof stepsSchema>['items'][number]['status'], string> = {
-  PLANNED: 'Запланирован', RUNNING: 'Выполняется', WAITING: 'Ожидает', SUCCEEDED: 'Выполнен',
-  PARTIAL: 'Частично выполнен', FAILED: 'Не выполнен', UNKNOWN: 'Результат неизвестен', SKIPPED: 'Пропущен',
+  RUNNING: 'Ожидает ответа', SUCCEEDED: 'Ответ получен', FAILED: 'Вызов отклонён',
 };
 const stepRows = new Map<string, { row: HTMLLIElement; disclosure: HTMLButtonElement; heading: HTMLElement; details: HTMLElement;
   description: HTMLParagraphElement; version: number }>();
@@ -526,7 +525,8 @@ async function loadHistory(): Promise<void> {
         if (entry.version > view.version) {
           view.heading.textContent = entry.title;
           const created = new Date(entry.createdAt);
-          view.details.textContent = stepLabels[entry.status] + ' · '
+          view.details.textContent = stepLabels[entry.status] + ' · ' + entry.tool
+            + (entry.durationMs === null ? '' : ' · ' + entry.durationMs + ' мс') + ' · '
             + created.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
           view.details.title = created.toLocaleString('ru-RU');
           view.description.textContent = entry.result ?? '';
@@ -551,7 +551,7 @@ async function loadHistory(): Promise<void> {
       historyStatus.textContent = '';
       if (history.total === 0) {
         historyStatus.textContent = stepsSearch.value.trim()
-          ? 'По запросу шаги не найдены.' : 'Бизнес-шаги для этой задачи не записаны.';
+          ? 'По запросу шаги не найдены.' : 'Шаги агента для этой задачи ещё не записаны.';
       }
     } while (historyDirty && !superseded && !tornDown);
   } catch {

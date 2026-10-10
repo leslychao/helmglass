@@ -50,7 +50,7 @@ class ConnectionContractTest(unittest.TestCase):
         action = {"operationId":operation,"type":"observe","arguments":{},"instructionRevision":task["instructionRevision"]}
         if task.get("browser"):
             action["controlEpoch"] = task["browser"]["controlEpoch"]
-        error, receipt, _ = client.execute_in_scenario_step({"taskId":task["id"],"action":action})
+        error, receipt, _ = client.execute_browser({"taskId":task["id"],"action":action})
         self.assertFalse(error,receipt)
         return operation
 
@@ -174,7 +174,7 @@ class ConnectionContractTest(unittest.TestCase):
                   'instructionRevision': task['instructionRevision']}
         if task.get('browser'):
             action['controlEpoch'] = task['browser']['controlEpoch']
-        error, _, _ = client.execute_in_scenario_step({'taskId': task['id'], 'action': action})
+        error, _, _ = client.execute_browser({'taskId': task['id'], 'action': action})
         self.assertFalse(error)
         self.fixture_sql(identity, """
 INSERT INTO usage_intervals(id,owner_id,kind,started_at,ended_at,incomplete)
@@ -479,7 +479,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
                 time.sleep(.2)
             self.assertEqual('LIVE', current['browser']['status'])
             operation = str(uuid.uuid4())
-            error, receipt, _ = transport.execute_in_scenario_step({'taskId': current['id'], 'action': {
+            error, receipt, _ = transport.execute_browser({'taskId': current['id'], 'action': {
                 'operationId': operation, 'type': 'click', 'arguments': transport.browser_target(current['id'], name),
                 'instructionRevision': current['instructionRevision'],
                 'controlEpoch': current['browser']['controlEpoch']}})
@@ -1243,8 +1243,6 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertEqual(current["browser"]["id"], primary.api("/api/connections/" + first)[1]["browser"]["id"])
 
         def finish(task_id, transport=None, operation_id=None):
-            if operation_id:
-                transport.complete_scenario_step(task_id, operation_id)
             current = primary.api("/api/tasks/" + task_id)[1]
             status, receipt = primary.api("/api/tasks/" + task_id + "/commands", "POST", {
                 "type": "FINISH", "expectedVersion": current["version"],
@@ -1309,10 +1307,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             operation = str(uuid.uuid4())
             error, receipt, _ = transport.tool("browser.execute", {"taskId": value["id"], "action": {
                 "operationId": operation, "type": "observe", "arguments": {},
-                "instructionRevision": value["instructionRevision"],
-                "step": {"operationKey": "verify-reopened-connection", "objectKey": value["id"],
-                         "title": "Проверить подключение после продолжения",
-                         "completionCriterion": "Выбранное подключение открыто и страница прочитана"}}})
+                "instructionRevision": value["instructionRevision"]}})
             self.assertFalse(error, receipt)
             value = primary.api("/api/tasks/" + stopped["id"])[1]
             self.assertEqual("ACCOUNT_CHOICE", value["request"]["type"])
@@ -1323,16 +1318,6 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertFalse(error, chosen)
             receipt = self.wait_operation(operation, transport)
             self.assertEqual("SUCCEEDED", receipt["status"])
-            error, page, _ = transport.tool("steps.list", {"taskId": value["id"]})
-            self.assertFalse(error, page)
-            step = next(item for item in page["items"] if item["id"] == receipt["stepId"])
-            error, completed, _ = transport.tool("steps.command", {
-                "taskId": value["id"], "operationKey": str(uuid.uuid4()), "command": {
-                    "type": "COMPLETE", "stepId": step["id"], "expectedVersion": step["version"],
-                    "instructionRevision": value["instructionRevision"], "outcome": "SUCCEEDED",
-                    "result": "Выбранное подключение открыто",
-                    "evidence": [{"type": "OPERATION", "operationId": operation}]}})
-            self.assertFalse(error, completed)
             finish(stopped["id"])
 
     def test_busy_connection_does_not_block_other_owner(self):
