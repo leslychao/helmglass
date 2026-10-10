@@ -90,6 +90,7 @@ public class McpTools {
   private final String publicUrl;
   private final String widgetUri;
   private final String widgetHtml;
+  private final Map<String, Object> widgetMetadata;
 
   public McpTools(
       Identity identity,
@@ -122,15 +123,27 @@ public class McpTools {
     this.json = json;
     this.jdbc = jdbc;
     this.publicUrl = publicUrl;
+    Map<String, Object> csp = Map.of(
+        "connectDomains", List.of(publicUrl),
+        "resourceDomains", List.of(publicUrl),
+        "frameDomains", List.of(publicUrl));
+    widgetMetadata = Map.of(
+        "ui", Map.of("prefersBorder", true, "csp", csp,
+            "permissions", Map.of("clipboardWrite", Map.of())),
+        "openai/widgetCSP", Map.of("redirect_domains", List.of(publicUrl)),
+        "openai/widgetDescription", WIDGET_PRESENTATION_INSTRUCTIONS);
     try (var stream = new ClassPathResource("mcp-widget/index.html").getInputStream()) {
       byte[] bytes = stream.readNBytes(WIDGET_LIMIT + 1);
       if (bytes.length > WIDGET_LIMIT) {
         throw new IOException("Widget resource exceeds its bound");
       }
       widgetHtml = new String(bytes, StandardCharsets.UTF_8);
-      String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-      // Hosts cache UI resources by URI, independently of the current tool result.
-      widgetUri = "ui://helmglass/task-" + digest + ".html";
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      digest.update(bytes);
+      digest.update((byte) 0);
+      // Sandbox permissions are cached with the HTML under the resource URI.
+      byte[] hash = digest.digest(json.canonical(widgetMetadata).getBytes(StandardCharsets.UTF_8));
+      widgetUri = "ui://helmglass/task-" + HexFormat.of().formatHex(hash) + ".html";
     } catch (IOException | NoSuchAlgorithmException exception) {
       throw new IllegalStateException("Widget resource unavailable", exception);
     }
@@ -1387,25 +1400,10 @@ public class McpTools {
               String outcome = "ERROR";
               try {
                 actor(exchange.transportContext());
-                Map<String, Object> csp =
-                    Map.of(
-                        "connectDomains",
-                        List.of(publicUrl),
-                        "resourceDomains",
-                        List.of(publicUrl),
-                        "frameDomains",
-                        List.of(publicUrl));
                 var contents =
                     McpSchema.TextResourceContents.builder(widgetUri, widgetHtml)
                         .mimeType("text/html;profile=mcp-app")
-                        .meta(
-                            Map.of(
-                                "ui",
-                                Map.of("prefersBorder", true, "csp", csp),
-                                "openai/widgetCSP",
-                                Map.of("redirect_domains", List.of(publicUrl)),
-                                "openai/widgetDescription",
-                                WIDGET_PRESENTATION_INSTRUCTIONS))
+                        .meta(widgetMetadata)
                         .build();
                 var result = McpSchema.ReadResourceResult.builder(List.of(contents)).build();
                 outcome = "OK";

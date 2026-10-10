@@ -521,6 +521,8 @@ if (response.status !== 200) throw new Error('Resolve status ' + response.status
         self.assertFalse(error, resolved)
         self.assertEqual('WAITING_CHATGPT', resolved['status'])
         self.assertIsNone(resolved['request'])
+        self.assertEqual('ACCEPTED', resolved['continuation']['status'],
+                         'Verification continues the current chat turn without another message')
         error, receipt, _ = self.client.tool('operations.get', {'operationId': action['operationId']})
         self.assertFalse(error, receipt)
         self.assertEqual('SUCCEEDED', receipt['status'])
@@ -572,12 +574,23 @@ if (response.status !== 200) throw new Error('Resolve status ' + response.status
         self.assertFalse(error, resumed)
         self.assertEqual('WAITING_CHATGPT', resumed['status'])
         self.assertIsNone(resumed['request'])
+        self.assertEqual('ACCEPTED', resumed['continuation']['status'],
+                         'Verification continues the current chat turn without another message')
+        error, shown, _ = self.client.tool('tasks.view', {
+            'taskId': self.task['id'], 'operationKey': str(uuid.uuid4())})
+        self.assertFalse(error, shown)
+        self.assertEqual('ACCEPTED', shown['continuationStatus'])
+        binding = {'taskId': self.task['id'], 'generation': shown['generation'],
+                   'continuationId': shown['continuationId']}
+        self.assertFalse(self.client.tool('widget.claim', binding)[1]['claimed'],
+                         'The widget must not start another turn after model verification')
         receipt = self.client.tool('operations.get', {'operationId': original['operationId']})[1]
         self.assertEqual(('UNCONFIRMED', 'RESULT_UNCONFIRMED'),
             (receipt['status'], receipt['errorCode']))
         self.assertEqual(observed['id'], receipt['result']['observationOperationId'])
         self.assertEqual(receipt, self.execute(action=original))
         self.assertEqual(resumed, self.client.tool('tasks.respond', arguments)[1])
+        self.assertEqual('ACCEPTED', primary.api(path)[1]['continuation']['status'])
         self.assertEqual('SUCCEEDED', self.click('Increment')['status'])
         self.assertIn('"counter":2', str(self.observation()))
         error, conflict, _ = self.client.tool('tasks.respond', {**arguments,

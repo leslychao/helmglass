@@ -339,7 +339,6 @@ public class ActionService {
                 "UNCONFIRMED".equals(verification.outcome())
                     ? "Результат не установлен; разрешено продолжение без повтора действия."
                     : "Результат проверен по состоянию сайта.");
-            tasks.requestContinuation(taskId);
             return tasks.get(actor.id(), taskId);
           });
     } finally {

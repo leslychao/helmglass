@@ -94,9 +94,13 @@ process.stdout.write(result.outputFiles[0].text);
         self.assertEqual("true", panels.elements["steps-toggle"].get("aria-expanded"))
         self.assertIn("hidden", panels.elements["session-panel"])
         self.assertEqual("false", panels.elements["session-toggle"].get("aria-expanded"))
-        digest = hashlib.sha256(html.encode("utf-8")).hexdigest()
+        metadata = resource["contents"][0]["_meta"]
+        self.assertEqual({"clipboardWrite": {}}, metadata["ui"].get("permissions"),
+                         "The host must grant clipboard writes for keyboard ID copying")
+        canonical = json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(html.encode("utf-8") + b"\0" + canonical.encode("utf-8")).hexdigest()
         self.assertEqual("ui://helmglass/task-" + digest + ".html", uri,
-                         "Changed widget bytes must have a different host cache identity")
+                         "Changed widget bytes or sandbox metadata must have a different host cache identity")
         self.assertEqual(uri, resource["contents"][0]["uri"])
         tools = self.user.rpc("tools/list", {})["tools"]
         for tool in tools:
