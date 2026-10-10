@@ -152,7 +152,10 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual({"elapsedSeconds": None, "running": False}, draft["timing"])
         self.sql(f"UPDATE tasks SET created_at=now()-interval '1 day' "
                  f"WHERE owner_id=:owner AND id='{draft['id']}';")
-        task = self.command(draft, "PREPARE")
+        self.client.login_mcp()
+        error, task, _ = self.client.tool("tasks.bind", {
+            "taskId": draft["id"], "operationKey": str(uuid.uuid4())})
+        self.assertFalse(error, task)
         self.assertTrue(task["timing"]["running"])
         self.assertLess(task["timing"]["elapsedSeconds"], 15,
                         "Time spent as a draft is not task duration")
@@ -198,6 +201,11 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertTrue(resumed["timing"]["running"])
         self.assertGreaterEqual(resumed["timing"]["elapsedSeconds"], 60)
         stopped = self.command(resumed, "STOP")
+        deadline = time.monotonic() + 45
+        while stopped["status"] != "STOPPED" and time.monotonic() < deadline:
+            time.sleep(.2)
+            stopped = self.client.api("/api/tasks/" + task["id"])[1]
+        self.assertEqual("STOPPED", stopped["status"])
         self.assertFalse(stopped["timing"]["running"])
         time.sleep(.2)
         self.assertEqual(stopped["timing"],

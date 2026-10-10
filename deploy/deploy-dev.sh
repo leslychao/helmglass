@@ -59,8 +59,11 @@ fi
 compose config --quiet
 if [ "${2:-}" = '--config-only' ]; then exit 0; fi
 docker info --format '{{.OSType}}' | grep -qx linux
-compose --profile build build --pull
-
+server_api=$(docker version --format '{{.Server.APIVersion}}')
+if ! printf '%s\n' "$server_api" | awk -F. '{ exit !(($1 + 0) > 1 || (($1 + 0) == 1 && ($2 + 0) >= 45)) }'; then
+  printf '%s\n' 'Docker Engine 26.0 or newer is required for isolated volume subpaths.' >&2
+  exit 1
+fi
 manager=$(compose ps -q browser-node)
 if [ -n "$manager" ]; then
   docker exec "$manager" node --input-type=module -e '
@@ -93,13 +96,16 @@ if [ -n "$manager" ]; then
     sleep 5
   done
 fi
+compose --profile build build --pull
 compose up -d --no-deps vault
 attempt=0
 until compose exec -T vault sh -c 'VAULT_ADDR=https://vault:8200 VAULT_CACERT=/vault/ca/ca.crt vault status >/dev/null'; do
   attempt=$((attempt + 1)); [ "$attempt" -lt 60 ] || exit 1; sleep 2
 done
+compose stop api browser-node
+# The one-time transfer runs with execution and registration stopped; a failure preserves sources.
+compose run --rm --no-deps browser-node node dist/migrate-session-storage.js
 if [ -n "${PROFILE_ENCRYPTION_KEY:-}" ]; then
-  compose stop browser-node
   compose run --rm --no-deps -e PROFILE_ENCRYPTION_KEY browser-node node dist/migrate-profiles.js
   umask 077
   awk '!/^PROFILE_ENCRYPTION_KEY=/' "$ENV_FILE" > "$ENV_FILE.vault-migration"

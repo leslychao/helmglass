@@ -49,7 +49,7 @@ public class AudioAnalysisService {
   private final AudioProcessorClient processor;
   private final ExecutorService executor = Executors.newSingleThreadExecutor();
   private final AtomicBoolean active = new AtomicBoolean();
-  private final Map<UUID, Completion> completions = new ConcurrentHashMap<>();
+  private final Map<AnalysisRead, Completion> completions = new ConcurrentHashMap<>();
   private final Semaphore waitingCalls = new Semaphore(16);
 
   public AudioAnalysisService(
@@ -71,17 +71,36 @@ public class AudioAnalysisService {
     return state(owner, enqueue(owner, artifactId, mode));
   }
 
-  /** Returns a bounded first transcript page, waiting only for committed results. */
+  /** Returns the first transcript page and, in full mode, a bounded sound summary. */
   public Map<String, Object> analyzeAndRead(UUID owner, UUID artifactId, String mode) {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(50);
     UUID id = enqueue(owner, artifactId, mode);
+    awaitAnalysis(owner, new AnalysisRead(id, mode), deadline);
+    Map<String, Object> result = new LinkedHashMap<>(state(owner, id));
+    if ("full".equals(mode)) {
+      result.put("soundSummary", soundSummary(id, result));
+    }
+    return readPage(id, result, "transcript", 0, 100, null, null, 65536);
+  }
+
+  /** Waits for the requested stage before reading a bounded MCP result page. */
+  public Map<String, Object> readWhenReady(
+      UUID owner, UUID id, String section, long cursor, int limit, Double from, Double to) {
+    validatePage(section, cursor, limit, from, to);
+    String mode = "summary".equals(section) ? "full" : section;
+    awaitAnalysis(
+        owner, new AnalysisRead(id, mode), System.nanoTime() + TimeUnit.SECONDS.toNanos(50));
+    return page(owner, id, section, cursor, limit, from, to);
+  }
+
+  private void awaitAnalysis(UUID owner, AnalysisRead read, long deadline) {
     if (System.nanoTime() < deadline && waitingCalls.tryAcquire()) {
-      Completion completion = completions.compute(id, (key, current) -> current == null
+      Completion completion = completions.compute(read, (key, current) -> current == null
           ? new Completion(new CompletableFuture<>(), 1)
           : new Completion(current.signal(), current.waiters() + 1));
       try {
         // Register before reading: completion between enqueue and registration is not lost.
-        boolean ready = transcriptReady(owner, id);
+        boolean ready = analysisReady(owner, read);
         long remaining = deadline - System.nanoTime();
         if (!ready && remaining > 0) {
           try {
@@ -95,23 +114,30 @@ public class AudioAnalysisService {
           }
         }
       } finally {
-        completions.computeIfPresent(id, (key, current) -> current.waiters() == 1
+        completions.computeIfPresent(read, (key, current) -> current.waiters() == 1
             ? null : new Completion(current.signal(), current.waiters() - 1));
         waitingCalls.release();
       }
     }
-    return page(owner, id, "transcript", 0, 100, null, null);
   }
 
-  private boolean transcriptReady(UUID owner, UUID id) {
-    return jdbc.sql("SELECT transcript_complete OR status IN ('SUCCEEDED','PARTIAL','FAILED')"
+  private boolean analysisReady(UUID owner, AnalysisRead read) {
+    return jdbc.sql("SELECT CASE :mode"
+            + " WHEN 'transcript' THEN transcript_complete"
+            + " WHEN 'intervals' THEN coalesce(checkpoint->>'intervalsComplete'='true',false)"
+            + " WHEN 'acoustics' THEN acoustics_complete"
+            + " WHEN 'emotions' THEN emotions_complete ELSE false END"
+            + " OR status IN ('SUCCEEDED','PARTIAL','FAILED')"
             + " FROM audio_analyses WHERE id=:id AND owner_id=:owner")
-        .param("id", id)
+        .param("id", read.id())
+        .param("mode", read.mode())
         .param("owner", owner)
         .query(Boolean.class)
         .optional()
         .orElseThrow(ApiException::notFound);
   }
+
+  private record AnalysisRead(UUID id, String mode) {}
 
   private record Completion(CompletableFuture<Void> signal, int waiters) {}
 
@@ -241,9 +267,12 @@ public class AudioAnalysisService {
     TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
       @Override
       public void afterCommit() {
-        Completion completion = completions.get(id);
-        if (completion != null && transcriptReady(owner, id)) {
-          completion.signal().complete(null);
+        for (String mode : List.of("transcript", "intervals", "acoustics", "emotions", "full")) {
+          AnalysisRead read = new AnalysisRead(id, mode);
+          Completion completion = completions.get(read);
+          if (completion != null && analysisReady(owner, read)) {
+            completion.signal().complete(null);
+          }
         }
       }
     });
@@ -349,7 +378,24 @@ public class AudioAnalysisService {
 
   public Map<String, Object> page(
       UUID owner, UUID id, String section, long cursor, int limit, Double from, Double to) {
-    if (!SECTIONS.contains(section)
+    validatePage(section, cursor, limit, from, to);
+    Map<String, Object> result = new LinkedHashMap<>(state(owner, id));
+    if ("summary".equals(section)) {
+      result.put("section", section);
+      result.put("sectionComplete", Boolean.TRUE.equals(result.get("acousticsComplete"))
+          && Boolean.TRUE.equals(result.get("emotionsComplete")));
+      result.put("soundSummary", soundSummary(id, result));
+      result.put("items", List.of());
+      result.put("hasMore", false);
+      result.put("nextCursor", null);
+      return result;
+    }
+    return readPage(id, result, section, cursor, limit, from, to, 65536);
+  }
+
+  private static void validatePage(
+      String section, long cursor, int limit, Double from, Double to) {
+    if ((!SECTIONS.contains(section) && !"summary".equals(section))
         || cursor < 0
         || limit < 1
         || limit > 100
@@ -357,7 +403,45 @@ public class AudioAnalysisService {
         || to != null && (!Double.isFinite(to) || to < 0 || from != null && to <= from)) {
       throw ApiException.invalid("page", "Недопустимый раздел, диапазон или размер страницы.");
     }
-    Map<String, Object> result = new LinkedHashMap<>(state(owner, id));
+    if ("summary".equals(section) && (cursor != 0 || from != null || to != null)) {
+      throw ApiException.invalid(
+          "page", "Сводка относится ко всей записи, без cursor и диапазона.");
+    }
+  }
+
+  private Map<String, Object> soundSummary(UUID id, Map<String, Object> state) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("acousticsComplete", state.get("acousticsComplete"));
+    result.put("emotionsComplete", state.get("emotionsComplete"));
+    result.put("acoustics", jdbc.sql("""
+        SELECT count(*) FILTER (WHERE payload->>'kind'='loudness') AS "loudnessSamples",
+          coalesce(sum(end_seconds-start_seconds)
+            FILTER (WHERE payload->>'kind'='loudness'),0) AS "coveredSeconds",
+          coalesce(sum(end_seconds-start_seconds)
+            FILTER (WHERE payload->>'digitalSilence'='true'),0) AS "digitalSilenceSeconds",
+          10 * ln(nullif(sum(coalesce(power(10::double precision,
+              (payload->>'rmsDbfs')::double precision/10),0)*(end_seconds-start_seconds))
+            FILTER (WHERE payload->>'kind'='loudness'),0)
+            / nullif(sum(end_seconds-start_seconds)
+              FILTER (WHERE payload->>'kind'='loudness'),0)) / ln(10::double precision)
+            AS "rmsDbfs",
+          max((payload->>'peakDbfs')::double precision) AS "peakDbfs",
+          count(*) FILTER (WHERE payload->>'kind'='pitch') AS "pitchSamples",
+          count(payload->>'f0Hz') AS "voicedSamples",
+          min((payload->>'f0Hz')::double precision) AS "f0HzMin",
+          max((payload->>'f0Hz')::double precision) AS "f0HzMax",
+          avg((payload->>'f0Hz')::double precision) AS "f0HzMean",
+          avg(abs((payload->>'deltaHz')::double precision)) AS "meanAbsoluteDeltaHz"
+        FROM audio_analysis_items WHERE analysis_id=:id AND section='acoustics'
+        """).param("id", id).query().singleRow());
+    Map<String, Object> emotions = new LinkedHashMap<>();
+    emotions.put("emotionsComplete", state.get("emotionsComplete"));
+    result.put("emotions", readPage(id, emotions, "emotions", 0, 100, null, null, 16384));
+    return result;
+  }
+
+  private Map<String, Object> readPage(UUID id, Map<String, Object> result, String section,
+      long cursor, int limit, Double from, Double to, int byteLimit) {
     String field =
         switch (section) {
           case "transcript" -> "transcriptComplete";
@@ -389,7 +473,7 @@ public class AudioAnalysisService {
     long next = cursor;
     for (Item row : rows) {
       int size = row.payload().getBytes(StandardCharsets.UTF_8).length + 1;
-      if (items.size() == limit || bytes + size > 65536) {
+      if (items.size() == limit || bytes + size > byteLimit) {
         break;
       }
       items.add(json.read(row.payload()));

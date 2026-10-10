@@ -231,6 +231,16 @@ export class BrowserMcp {
       throw new BrowserRejection("Observation expired or page changed; observe again", "OBSERVATION_EXPIRED");
   }
 
+  async evaluate(functionSource: string, target: string, signal: AbortSignal): Promise<unknown> {
+    await this.synchronize(signal);
+    this.observation = undefined; this.screenshotTarget = undefined; this.sequence = undefined;
+    try {
+      const response = z.object({ result: z.string().max(4096) }).parse(
+        await this.call("browser_evaluate", { function: functionSource, target }, signal));
+      return JSON.parse(response.result) as unknown;
+    } catch (error) { await this.close(); throw error; }
+  }
+
   async observe(args: Record<string, unknown> = {}, signal?: AbortSignal,
     operationId?: string, sequence?: Sequence): Promise<object> {
     const input = observeSchema.parse(args);
@@ -304,7 +314,7 @@ export class BrowserMcp {
     { observation: Observation; issued: NativeNode; ref: string } {
     const input = targetSchema.parse(args);
     const position = sequence?.operationIds.indexOf(operationId ?? "");
-    if (sequence && (position === -1 || sequence.operationIds.length > 8
+    if (sequence && (position === -1
       || new Set(sequence.operationIds).size !== sequence.operationIds.length))
       throw new BrowserRejection("Invalid operation sequence");
     if (this.sequence && (!sequence || JSON.stringify(sequence.operationIds) !== JSON.stringify(this.sequence.operationIds)))

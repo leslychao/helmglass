@@ -8,7 +8,9 @@
 deploy/.env.local
 deploy/.env.dev
 .work/
+/.tmp-*
 *.log
 backend/api/src/main/resources/mcp-widget/
 .idea/
+*.iml
 !.run/

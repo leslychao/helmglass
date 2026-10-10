@@ -9,6 +9,7 @@ export interface TableColumn {
   minWidth?: number;
   required?: boolean;
   hidden?: boolean;
+  sortable?: boolean;
   action?: boolean;
   help?: string;
   className?: string;
@@ -130,6 +131,7 @@ export class TableView {
     );
   }
   sort(key: string) {
+    if (this.definitions().find((column) => column.key === key)?.sortable === false) return;
     this.query.sort(key, this.keys);
   }
   ariaSort(key: string) {

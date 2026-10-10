@@ -70,6 +70,32 @@ class ChatTaskTest(unittest.TestCase):
             time.sleep(.2)
         self.fail("Task did not reach the required state: " + value["status"])
 
+    def test_bound_draft_stops_without_a_browser_and_releases_its_chat(self):
+        arguments = self.create_input('Bound draft stop regression')
+        arguments['task']['prepare'] = False
+        error, state, _ = self.client.tool('tasks.create', arguments)
+        self.assertFalse(error, state)
+        task = state['task']
+        self.assertEqual('DRAFT', task['status'])
+        self.assertTrue(task['chatBound'])
+        self.assertIsNone(task['browser'])
+        self.assertIn('STOP', task['allowedCommands'])
+        next_task = {**arguments, 'operationKey': str(uuid.uuid4())}
+        error, refusal, _ = self.client.tool('tasks.create', next_task)
+        self.assertTrue(error, refusal)
+        self.assertEqual(('CHAT_TASK_IN_PROGRESS', task['id']),
+                         (refusal.get('code'), refusal.get('currentTaskId')))
+        stopped = self.command(task, 'STOP')
+        self.assertEqual('STOPPED', stopped['status'])
+        self.assertIsNone(stopped['browser'])
+        self.assertNotIn('STOP', stopped['allowedCommands'])
+        error, replacement, _ = self.client.tool('tasks.create', {
+            **next_task, 'operationKey': str(uuid.uuid4())})
+        self.assertFalse(error, replacement)
+        self.assertNotEqual(task['id'], replacement['task']['id'])
+        self.mcp_command(replacement['task'], 'STOP')
+        self.assertEqual('STOPPED', self.current(replacement['task'])['status'])
+
     def test_concurrent_create_rolls_back_losers_and_replays_winner(self):
         # Concurrent calls must resolve ownership and idempotency in the database.
         requests = [self.create_input("Creation race " + str(i)) for i in range(2)]
@@ -115,7 +141,8 @@ class ChatTaskTest(unittest.TestCase):
         cabinet = self.create("Existing cabinet task", site=self.client.browser_fixture_url().removeprefix("https://"))
         commands = [
             ("tasks.command", {"taskId": first["id"], "operationKey": str(uuid.uuid4()),
-                "command": {"type": "RESUME", "expectedVersion": completed["version"]}}),
+                "command": {"type": "RESUME", "expectedVersion": completed["version"],
+                    "confirmBrowserLoss": True}}),
             ("tasks.bind", {"taskId": cabinet["id"], "operationKey": str(uuid.uuid4())}),
             ("tasks.create", self.create_input("Competing new task")),
         ]

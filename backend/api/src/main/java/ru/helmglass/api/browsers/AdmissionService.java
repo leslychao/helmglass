@@ -281,7 +281,7 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
       UUID session = candidate.get();
       reconciler.execute(
           () -> {
-            String failureCode = "ARTIFACT_DELIVERY_FAILED";
+            String failureCode = "RESULT_REGISTRATION_FAILED";
             try {
               boolean receipts = actions.archiveReceipts(session);
               boolean files = artifacts.importSessionBatch(session);
@@ -358,7 +358,7 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
             """
             INSERT INTO administrative_audit
               (id,actor_id,target_id,action,reason,before_value,after_value,status)
-            VALUES (:id,:actor,:target,'RETRY_BROWSER_CLEANUP','Повтор сохранения и очистки',
+            VALUES (:id,:actor,:target,'RETRY_BROWSER_CLEANUP','Повтор проверки результатов и очистки',
               '{"cleanupState":"FAILED"}','{"cleanupState":"PENDING"}','SUCCEEDED')
             """)
         .param("id", UUID.randomUUID())

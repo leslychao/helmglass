@@ -13,8 +13,7 @@ import { Tooltip } from '../shared/tooltip';
 import { combineLatest, distinctUntilChanged, map } from 'rxjs';
 
 const pendingFormSchema = z.object({
-  phase: z.enum(['CREATE', 'AMEND', 'PREPARE']),
-  prepare: z.boolean(),
+  phase: z.enum(['CREATE', 'AMEND']),
   taskId: z.nullable(z.string()),
   version: z.number(),
 });
@@ -86,11 +85,10 @@ export class TaskForm {
     if (value) sessionStorage.setItem(this.inputKey + ':operation', JSON.stringify(value));
     else sessionStorage.removeItem(this.inputKey + ':operation');
   }
-  canSubmit(prepare: boolean) {
+  canSubmit() {
     return (
       !this.busy() &&
-      (!this.versionConflict() || !!this.pending()) &&
-      (!this.pending() || this.pending()?.prepare === prepare)
+      (!this.versionConflict() || !!this.pending())
     );
   }
   private preserveInput() {
@@ -215,18 +213,11 @@ export class TaskForm {
     this.form.markAsDirty();
     this.form.controls.preferredConnectionIds.setValue(ids);
   }
-  async save(prepare: boolean) {
-    if (!this.canSubmit(prepare)) return;
+  async save() {
+    if (!this.canSubmit()) return;
     this.form.markAllAsTouched();
-    const fields: Record<string, string> = {};
-    if (prepare) {
-      if (!this.form.controls.goal.value.trim()) fields['goal'] = 'Опишите цель задачи.';
-      if (!this.form.controls.startUrl.value.trim())
-        fields['startUrl'] = 'Укажите начальный сайт для подготовки задачи.';
-    }
-    this.fieldErrors.set(fields);
-    if (this.form.invalid || Object.keys(fields).length) {
-      this.error.set('Опишите цель задачи и проверьте адрес сайта.');
+    if (this.form.invalid) {
+      this.error.set('Проверьте поручение и адрес сайта.');
       return;
     }
     this.busy.set(true);
@@ -241,43 +232,19 @@ export class TaskForm {
       if (!this.pending())
         this.rememberPending({
           phase: original ? 'AMEND' : 'CREATE',
-          prepare,
           taskId: original?.id ?? null,
           version: this.baseVersion() ?? 0,
         });
       const pending = this.pending();
       if (!pending) return;
       let saved: Task;
-      if (pending.phase === 'PREPARE')
-        saved = await this.api.mutate(
-          '/api/tasks/' + pending.taskId + '/commands',
-          { type: 'PREPARE', expectedVersion: pending.version },
-          taskSchema,
-        );
-      else if (pending.phase === 'AMEND') {
+      if (pending.phase === 'AMEND') {
         saved = await this.api.mutate(
           '/api/tasks/' + pending.taskId + '/commands',
           { type: 'AMEND', expectedVersion: pending.version, ...values },
           taskSchema,
         );
-        if (generation !== this.generation) return;
-        this.task.set(saved);
-        this.baseVersion.set(saved.version);
-        this.preserveInput();
-        if (prepare) {
-          this.rememberPending({
-            phase: 'PREPARE',
-            prepare,
-            taskId: saved.id,
-            version: saved.version,
-          });
-          saved = await this.api.mutate(
-            '/api/tasks/' + saved.id + '/commands',
-            { type: 'PREPARE', expectedVersion: saved.version },
-            taskSchema,
-          );
-        }
-      } else saved = await this.api.mutate('/api/tasks', { ...values, prepare }, taskSchema);
+      } else saved = await this.api.mutate('/api/tasks', values, taskSchema);
       if (generation !== this.generation) return;
       sessionStorage.removeItem(this.inputKey);
       this.rememberPending(null);

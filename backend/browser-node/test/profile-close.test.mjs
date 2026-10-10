@@ -56,9 +56,9 @@ test('revoking control settles a running command before saving the final profile
     assert.equal(closed.value.status, 'CLOSED');
     assert.equal(closed.value.profileSaveError ?? null, null);
   } finally {
-    await request(base, undefined, 'DELETE');
+    assert.equal((await request(base, undefined, 'DELETE')).value.status, 'CLOSED');
     await command;
-    await request(base + '/cleanup', undefined, 'DELETE');
-    await request('/profiles/' + profile, undefined, 'DELETE');
+    assert.equal((await request(base + '/cleanup', undefined, 'DELETE')).status, 200);
+    assert.equal((await request('/profiles/' + profile, undefined, 'DELETE')).status, 200);
   }
 });

@@ -7,7 +7,7 @@
   <div class="inline-meta task-detail-meta">
     <hg-status [value]="task.status" />
     <span class="duration-chip" tabindex="0"
-      hgTooltip="От подготовки до завершения задачи, включая ожидания и паузы. Черновик не учитывается."
+      hgTooltip="От принятия к выполнению до завершения задачи, включая ожидания и паузы. Черновик не учитывается."
       ><hg-icon name="clock" />Длительность задачи: <hg-task-duration [timing]="task.timing" /></span
     >
     <span><hg-icon name="globe" />{{ task.site || 'Сайт не задан' }}</span>
@@ -22,15 +22,6 @@
           queryParamsHandling="preserve"
           ><hg-icon name="edit" />Редактировать</a
         >
-        <button class="button" [disabled]="busy()" (click)="command('PREPARE')">Подготовить</button>
-        <button
-          class="icon-button"
-          aria-label="Удалить черновик"
-          hgTooltip="Удалить черновик"
-          (click)="deleteDraft()"
-        >
-          <hg-icon name="trash" />
-        </button>
       }
       <button
         class="icon-button"
@@ -49,7 +40,19 @@
             [queryParams]="{ copy: task.id, return: currentUrl }"
             ><hg-icon name="copy" />Создать дубликат</a
           >
-          @if ((task.status !== 'DRAFT' || task.chatBound) && (can('STOP') || task.status === 'STOPPING')) {
+          @if (task.status === 'DRAFT') {
+            <hr />
+            <button
+              cdkMenuItem
+              class="danger-text"
+              [cdkMenuItemDisabled]="busy()"
+              [disabled]="busy()"
+              (cdkMenuItemTriggered)="deleteDraft()"
+            >
+              <hg-icon name="trash" />Удалить черновик
+            </button>
+          }
+          @if (can('STOP') || task.status === 'STOPPING') {
             <button
               cdkMenuItem
               class="danger-text"
@@ -68,7 +71,7 @@
 
   @if (task.waitReason === 'BROWSER_OPEN_REQUESTED') {
     <p class="muted">Браузер запускается. После готовности задача продолжится автоматически, если нет других причин ожидания.</p>
-  } @else if (can('RESUME') && !can('OPEN_BROWSER') && task.status !== 'STOPPING') {
+  } @else if (can('RESUME') && !can('OPEN_BROWSER') && task.status !== 'DRAFT' && task.status !== 'STOPPING') {
     <p class="muted">{{ task.chatBound
       ? 'Для продолжения вернитесь в исходный чат ChatGPT.'
       : 'Для продолжения откройте задачу в ChatGPT.' }}</p>
@@ -79,7 +82,7 @@
   }
   @if (task.status === 'WAITING_CHATGPT') {
     <div class="notice">
-      <strong>Задача готова для ChatGPT</strong>
+      <strong>Ожидается продолжение задачи в чате</strong>
       @if (task.chatBound) {
         @switch (task.continuation?.status) {
           @case ('PENDING') { <p>Ожидает исходный ChatGPT. Откройте чат с актуальным виджетом — продолжение будет передано автоматически.</p> }
@@ -112,8 +115,8 @@
     <section class="notice draft-notice">
       <hg-icon name="info" />
       <div>
-        <strong>Черновик не запущен</strong>
-        <p>Дополните поручение и подготовьте его для ChatGPT.</p>
+        <strong>Черновик сохранён</strong>
+        <p>Для выполнения укажите номер задачи в чате: {{ task.id }}.</p>
       </div>
     </section>
   } @else {

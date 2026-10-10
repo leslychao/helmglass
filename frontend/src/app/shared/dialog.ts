@@ -1,5 +1,5 @@
 import { A11yModule } from '@angular/cdk/a11y';
-import { Component, Injectable, inject, signal } from '@angular/core';
+import { Component, Injectable, inject, linkedSignal, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
 import { NavigationEnd, Router } from '@angular/router';
@@ -28,6 +28,7 @@ export interface DialogPresentation {
   note?: string;
   facts?: { label: string; value: string; status?: string }[];
   compact?: boolean;
+  image?: { src: string; alt: string };
 }
 interface DialogRequest {
   title: string;
@@ -190,10 +191,11 @@ export class Dialog {
   imports: [FormsModule, A11yModule, Icon, Tooltip, Status],
   styleUrl: './dialog.css',
   template: ` @if (dialog.current(); as request) {
-    <div class="modal-shade" (keydown.escape)="dialog.close(null)">
+    <div class="modal-shade" (keydown.escape)="dialog.close(null)" (click)="closeBackdrop($event)">
       <section
         class="dialog"
         [class.dialog-compact]="request.presentation.compact"
+        [class.dialog-image]="!!request.presentation.image"
         role="dialog"
         aria-modal="true"
         aria-labelledby="dialog-title"
@@ -242,120 +244,153 @@ export class Dialog {
             }
           </dl>
         }
-        <form
-          #form
-          (submit)="submit($event, form)"
-          (input)="clearValidity($event); dialog.preserve(form)"
-          (change)="dialog.preserve(form)"
-        >
-          @if (request.conflict) {
-            <div class="notice warning" role="alert">
-              <strong>Сохранённый ввод относится к прежней версии.</strong>
-              <p>Данные изменились. Сравните текущие значения с вашим вводом перед сохранением.</p>
-              <dl>
-                @for (field of request.currentFields; track field.key) {
-                  @if (field.value !== undefined) {
-                    <dt>{{ field.label }}</dt>
-                    <dd>{{ field.value || 'Пусто' }}</dd>
-                  }
-                }
-              </dl>
-              <button type="button" class="button" (click)="dialog.acceptCurrentVersion(form)">
-                Использовать мой ввод для текущей версии
-              </button>
-            </div>
-          }
-          @for (section of request.sections; track section.key) {
-            @if (section.key === 'fields' && request.presentation.note) {
-              <p class="dialog-note">{{ request.presentation.note }}</p>
+        @if (request.presentation.image; as image) {
+          <div
+            class="dialog-image-viewport"
+            role="region"
+            aria-label="Просмотр изображения"
+            [attr.aria-busy]="imageState() === 'loading'"
+          >
+            @if (imageState() === 'loading') {
+              <p class="loading" role="status">Загружаем изображение…</p>
+            } @else if (imageState() === 'error') {
+              <p class="error-banner" role="alert">Не удалось загрузить изображение.</p>
             }
-            <fieldset class="dialog-field-group" [class.grouped]="!!section.label">
-              @if (section.label) {
-                <legend>{{ section.label }}</legend>
-              }
-              <div class="dialog-field-grid" [class.paired]="!!section.label">
-                @for (field of section.fields; track field.key) {
-                  <label class="field" [hidden]="!visible(field, form)"
-                    >{{ field.label }}
-                    @switch (field.type) {
-                      @case ('textarea') {
-                        <textarea
-                          [name]="field.key"
-                          [value]="field.value ?? ''"
-                          [required]="field.required ?? false"
-                          [disabled]="!visible(field, form)"
-                          [maxLength]="field.max ?? 20000"
-                          rows="4"
-                        ></textarea>
-                      }
-                      @case ('select') {
-                        <select
-                          [name]="field.key"
-                          [required]="field.required ?? false"
-                          [disabled]="!visible(field, form)"
-                        >
-                          @for (option of field.options; track option.value) {
-                            <option
-                              [value]="option.value"
-                              [selected]="option.value === field.value"
-                            >
-                              {{ option.label }}
-                            </option>
-                          }
-                        </select>
-                      }
-                      @default {
-                        <input
-                          [type]="field.type ?? 'text'"
-                          [name]="field.key"
-                          [value]="field.value ?? ''"
-                          [required]="field.required ?? false"
-                          [disabled]="!visible(field, form)"
-                          [min]="field.min ?? null"
-                          [max]="field.type === 'number' ? (field.max ?? null) : null"
-                          [maxLength]="field.type === 'number' ? 30 : (field.max ?? 4096)"
-                          [placeholder]="field.placeholder ?? ''"
-                        />
-                      }
+            <img
+              [src]="image.src"
+              [alt]="image.alt"
+              [hidden]="imageState() === 'error'"
+              (load)="imageState.set('ready')"
+              (error)="imageState.set('error')"
+            />
+          </div>
+        } @else {
+          <form
+            #form
+            (submit)="submit($event, form)"
+            (input)="clearValidity($event); dialog.preserve(form)"
+            (change)="dialog.preserve(form)"
+          >
+            @if (request.conflict) {
+              <div class="notice warning" role="alert">
+                <strong>Сохранённый ввод относится к прежней версии.</strong>
+                <p>
+                  Данные изменились. Сравните текущие значения с вашим вводом перед сохранением.
+                </p>
+                <dl>
+                  @for (field of request.currentFields; track field.key) {
+                    @if (field.value !== undefined) {
+                      <dt>{{ field.label }}</dt>
+                      <dd>{{ field.value || 'Пусто' }}</dd>
                     }
-                  </label>
-                }
+                  }
+                </dl>
+                <button type="button" class="button" (click)="dialog.acceptCurrentVersion(form)">
+                  Использовать мой ввод для текущей версии
+                </button>
               </div>
-              @if (section.caption) {
-                <p class="dialog-group-caption">{{ section.caption }}</p>
-              }
-            </fieldset>
-          }
-          <footer class="actions">
-            @if (request.kind === 'information') {
-              <button type="button" class="button primary" (click)="dialog.close(null)">
-                Закрыть
-              </button>
-            } @else {
-              <button
-                type="button"
-                class="button"
-                [attr.cdkFocusInitial]="request.presentation.compact ? '' : null"
-                (click)="dialog.close(null)"
-              >
-                Отмена</button
-              ><button
-                class="button primary"
-                [class.danger]="request.danger"
-                type="submit"
-                [disabled]="request.conflict"
-              >
-                {{ request.confirm }}
-              </button>
             }
-          </footer>
-        </form>
+            @for (section of request.sections; track section.key) {
+              @if (section.key === 'fields' && request.presentation.note) {
+                <p class="dialog-note">{{ request.presentation.note }}</p>
+              }
+              <fieldset class="dialog-field-group" [class.grouped]="!!section.label">
+                @if (section.label) {
+                  <legend>{{ section.label }}</legend>
+                }
+                <div class="dialog-field-grid" [class.paired]="!!section.label">
+                  @for (field of section.fields; track field.key) {
+                    <label class="field" [hidden]="!visible(field, form)"
+                      >{{ field.label }}
+                      @switch (field.type) {
+                        @case ('textarea') {
+                          <textarea
+                            [name]="field.key"
+                            [value]="field.value ?? ''"
+                            [required]="field.required ?? false"
+                            [disabled]="!visible(field, form)"
+                            [maxLength]="field.max ?? 20000"
+                            rows="4"
+                          ></textarea>
+                        }
+                        @case ('select') {
+                          <select
+                            [name]="field.key"
+                            [required]="field.required ?? false"
+                            [disabled]="!visible(field, form)"
+                          >
+                            @for (option of field.options; track option.value) {
+                              <option
+                                [value]="option.value"
+                                [selected]="option.value === field.value"
+                              >
+                                {{ option.label }}
+                              </option>
+                            }
+                          </select>
+                        }
+                        @default {
+                          <input
+                            [type]="field.type ?? 'text'"
+                            [name]="field.key"
+                            [value]="field.value ?? ''"
+                            [required]="field.required ?? false"
+                            [disabled]="!visible(field, form)"
+                            [min]="field.min ?? null"
+                            [max]="field.type === 'number' ? (field.max ?? null) : null"
+                            [maxLength]="field.type === 'number' ? 30 : (field.max ?? 4096)"
+                            [placeholder]="field.placeholder ?? ''"
+                          />
+                        }
+                      }
+                    </label>
+                  }
+                </div>
+                @if (section.caption) {
+                  <p class="dialog-group-caption">{{ section.caption }}</p>
+                }
+              </fieldset>
+            }
+            <footer class="actions">
+              @if (request.kind === 'information') {
+                <button type="button" class="button primary" (click)="dialog.close(null)">
+                  Закрыть
+                </button>
+              } @else {
+                <button
+                  type="button"
+                  class="button"
+                  [attr.cdkFocusInitial]="request.presentation.compact ? '' : null"
+                  (click)="dialog.close(null)"
+                >
+                  Отмена</button
+                ><button
+                  class="button primary"
+                  [class.danger]="request.danger"
+                  type="submit"
+                  [disabled]="request.conflict"
+                >
+                  {{ request.confirm }}
+                </button>
+              }
+            </footer>
+          </form>
+        }
       </section>
     </div>
   }`,
 })
 export class DialogHost {
   readonly dialog = inject(Dialog);
+  readonly imageState = linkedSignal<'loading' | 'ready' | 'error'>(() => {
+    this.dialog.current();
+    return 'loading';
+  });
+  closeBackdrop(event: MouseEvent) {
+    if (event.target === event.currentTarget && this.dialog.current()?.presentation.image) {
+      this.dialog.close(null);
+    }
+  }
   initials(name: string) {
     return name
       .trim()

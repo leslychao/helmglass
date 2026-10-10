@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 class Element {
   contentWindow = { postMessage(message) { viewerMessages.push(message); } };
   listeners = new Map(); children = []; disabled = true; hidden = false;
-  classList = { add() {}, toggle() {} }; style = { setProperty(name, value) { this[name] = value; } }; value = "";
+  classList = { add() {}, remove() {}, toggle() {} }; style = { setProperty(name, value) { this[name] = value; } }; value = "";
   focus() {}
   addEventListener(type, callback) { this.listeners.set(type, callback); }
   removeAttribute(name) { delete this[name]; }
@@ -21,6 +21,13 @@ for (const name of ['HTMLElement', 'HTMLHeadingElement', 'HTMLSpanElement', 'HTM
 let elements, sources, app, call, send, capabilities, hostContext, moduleId = 0;
 const messages = [], links = [], viewerMessages = [], timers = new Map(), windowListeners = new Map(), documentListeners = new Map();
 const intervals = new Map();
+let copiedText, copyAllowed = true, copyThrows = false;
+const selection = {
+  range: undefined,
+  removeAllRanges() { this.range = undefined; },
+  addRange(range) { this.range = range; },
+  toString() { return this.range?.node.textContent ?? ''; },
+};
 let timerId = 0;
 globalThis.setTimeout = (callback, delay) => { const id = ++timerId; timers.set(id, { callback, delay }); return id; };
 globalThis.clearTimeout = id => timers.delete(id);
@@ -31,10 +38,19 @@ globalThis.document = {
   visibilityState: 'visible',
   getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); if (id === "session-panel" && !elements.get(id).initialized) { elements.get(id).hidden = true; elements.get(id).initialized = true; } return elements.get(id); },
   createElement() { return new Element(); },
+  createRange() { return { selectNodeContents(node) { this.node = node; } }; },
+  execCommand(command) {
+    assert.equal(command, 'copy');
+    if (copyThrows) throw new DOMException('Copy refused', 'NotAllowedError');
+    if (!copyAllowed) return false;
+    copiedText = selection.toString();
+    return true;
+  },
   addEventListener(type, callback) { documentListeners.set(type, callback); },
   removeEventListener(type, callback) { if (documentListeners.get(type) === callback) documentListeners.delete(type); },
 };
 globalThis.window = {
+  getSelection() { return selection; },
   addEventListener(type, callback) { windowListeners.set(type, callback); },
   removeEventListener(type, callback) { if (windowListeners.get(type) === callback) windowListeners.delete(type); },
 };
@@ -99,8 +115,9 @@ async function nextTimer() {
   assert.ok(entry, 'An automatic recovery attempt must be scheduled');
   timers.delete(entry[0]); entry[1].callback(); await settled();
 }
-async function mount() {
+async function mount(widgetHost) {
   if (app) await app.onteardown();
+  window.openai = widgetHost;
   elements = new Map(); sources = []; timers.clear(); messages.length = 0; links.length = 0; viewerMessages.length = 0;
   document.visibilityState = 'visible';
   navigator.onLine = true;
@@ -169,12 +186,50 @@ assert.equal(offlineBootstrapCalls, 0);
 navigator.onLine = true; windowListeners.get('online')(); await settled();
 assert.equal(elements.get('title').textContent, active.task.title, 'A reference received offline restores when the network returns');
 
-await mount();
+let retirementWrites = 0;
+const retiredHost = { widgetState: null, setWidgetState(value) {
+  retirementWrites++;
+  this.widgetState = structuredClone(value);
+} };
+await mount(retiredHost);
 call = () => Promise.resolve({ ...stale, isError: true });
 show({ generation: active.generation, task: { id: active.task.id } }); await settled();
-assert.match(elements.get('state').textContent, /Неактивная карточка/);
+assert.equal(elements.get('header-status').hidden, true);
+assert.equal(elements.get('state').hidden, true);
 assert.equal(timers.size, 0, 'A stale reference is retired before any current state exists');
 assert.equal(messages.length, 0);
+assert.deepEqual(retiredHost.widgetState, { privateContent: {
+  retiredPresentation: { generation: active.generation, task: { id: active.task.id } },
+} }, 'Only the confirmed retired presentation is saved in widget-private state');
+
+await mount(retiredHost);
+const retiredReloadCalls = [];
+call = request => { retiredReloadCalls.push(request.name); return Promise.resolve(stale); };
+show({ generation: active.generation, task: { id: active.task.id } }); await settled();
+windowListeners.get('online')(); documentListeners.get('visibilitychange')(); await settled();
+assert.deepEqual(retiredReloadCalls, [], 'A restored inactive widget makes no server requests');
+assert.equal(elements.get('card').inert, true);
+assert.equal(elements.get('state').hidden, true);
+assert.equal(sources.length, 0, 'A restored inactive widget creates no event subscription');
+assert.equal(timers.size, 0);
+assert.equal(intervals.size, 0);
+assert.equal(retirementWrites, 1, 'Restoring retirement must not write unchanged host state again');
+
+for (const storedReference of [
+  { generation: crypto.randomUUID(), task: { id: active.task.id } },
+  { generation: active.generation, task: { id: crypto.randomUUID() } },
+  { generation: active.generation, task: null },
+]) {
+  await mount({ widgetState: { privateContent: { retiredPresentation: storedReference } } });
+  const checkedCalls = [];
+  call = request => {
+    checkedCalls.push(request.name);
+    return Promise.resolve(request.name === 'widget.state' ? response(active) : history());
+  };
+  show({ generation: active.generation, task: { id: active.task.id } }); await settled();
+  assert.ok(checkedCalls.includes('widget.state'), 'Unrelated or invalid saved state must not retire this presentation');
+  assert.equal(elements.get('title').textContent, active.task.title);
+}
 
 await mount();
 call = () => { throw new Error('An invalid tool result must not call the server'); };
@@ -212,7 +267,7 @@ call = request => {
 };
 show(frozenPresentation); await settled();
 viewerState('connected');
-const frozenVisual = () => Object.fromEntries(['title', 'header-status', 'state', 'browser-state', 'viewer',
+const frozenVisual = () => Object.fromEntries(['title', 'header-status', 'browser-state', 'viewer',
   'event-count', 'steps-count', 'history-state', 'session-duration'].map(id => {
     const element = elements.get(id);
     return [id, { text: element.textContent, hidden: element.hidden, src: element.src }];
@@ -221,6 +276,8 @@ const beforeRetirement = frozenVisual(), retiredSource = sources.at(-1);
 retire = true;
 retiredSource.change('step'); await settled();
 assert.deepEqual(frozenVisual(), beforeRetirement, 'Retiring preserves the displayed status, steps and browser frame');
+assert.equal(elements.get('state').hidden, true, 'Inactive cards have no status banner below their content');
+assert.equal(elements.get('idle-warning').hidden, true, 'A retired browser has no idle extension control');
 assert.equal(viewerMessages.at(-1).type, 'helm-viewer-freeze', 'The viewer disconnects without clearing its last frame');
 assert.ok(retiredSource.closed);
 assert.equal(timers.size, 0);
@@ -234,6 +291,7 @@ show(presentation('PENDING', liveBrowser()));
 await settled();
 assert.equal(frozenCalls.length, retiredCallCount, 'Retired cards never request status, steps or viewer tickets again');
 assert.deepEqual(frozenVisual(), beforeRetirement, 'Late replies and host events cannot repaint a retired card');
+assert.equal(elements.get('state').hidden, true);
 assert.equal(messages.length, 0);
 
 await mount();
@@ -283,6 +341,24 @@ assert.equal(elements.get('steps-toggle')['aria-expanded'], 'false');
 assert.equal(elements.get('steps-toggle')['aria-label'], 'Показать шаги');
 assert.equal(elements.get('session-id').textContent, state.task.browser.id);
 assert.equal(elements.get('viewer').src, viewerSource, 'Session facts reuse the same viewer');
+
+navigator.clipboard = { writeText() { return Promise.reject(new DOMException('Clipboard API blocked by the host', 'NotAllowedError')); } };
+elements.get('copy-session').disabled = false;
+elements.get('copy-session').click(); await settled();
+assert.equal(copiedText, state.task.browser.id, 'Copy works even when the host blocks the Clipboard API');
+assert.equal(elements.get('state').textContent, 'Идентификатор браузера скопирован.');
+copyAllowed = false;
+elements.get('copy-session').click(); await settled();
+assert.match(elements.get('state').textContent, /Ctrl\+C/);
+assert.equal(elements.get('state').className, 'error');
+assert.equal(selection.toString(), state.task.browser.id, 'A refused copy leaves the exact ID selected for manual copying');
+copyAllowed = true; copyThrows = true;
+elements.get('copy-session').click(); await settled();
+assert.match(elements.get('state').textContent, /Ctrl\+C/, 'Copy exceptions remain actionable');
+copyThrows = false; navigator.clipboard = undefined; copiedText = undefined;
+elements.get('copy-session').click(); await settled();
+assert.equal(copiedText, state.task.browser.id, 'Copy also works when the Clipboard API is absent');
+
 elements.get('session-toggle').click();
 const sourceBeforeVideoOff = sources.at(-1);
 elements.get('video-toggle').click();

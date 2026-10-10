@@ -41,6 +41,7 @@ export class DataTable<T extends object> {
   readonly view = input.required<TableView>();
   readonly rows = input.required<readonly T[]>();
   readonly label = input.required<string>();
+  readonly sortable = input(true);
   readonly rowKey = input<keyof T>();
   readonly expanded = input<readonly string[]>([]);
   readonly cells = contentChildren<TableCell<T>>(TableCell);

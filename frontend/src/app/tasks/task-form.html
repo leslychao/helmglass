@@ -40,13 +40,13 @@
       отправленные параметры сохранены.
     </div>
   }
-  <form [formGroup]="form" (ngSubmit)="save(true)" class="task-form">
+  <form [formGroup]="form" (ngSubmit)="save()" class="task-form">
     <section class="card form-body">
       <div class="field">
         <div class="form-label-row"><label for="goal">Что сделать</label><small>{{ form.controls.goal.value.length }} символов</small></div>
         <textarea id="goal" formControlName="goal" rows="4" maxlength="20000" placeholder="Опишите задачу и ожидаемый результат."
           [attr.aria-invalid]="!!fieldErrors()['goal']" [attr.aria-describedby]="fieldErrors()['goal'] ? 'goal-help goal-error' : 'goal-help'"></textarea>
-        <small id="goal-help">Для подготовки нужна полная цель. Черновик может быть неполным. Пароли и коды сюда не вставляйте.</small>
+        <small id="goal-help">Черновик может быть неполным. Пароли и коды сюда не вставляйте.</small>
         @if (fieldErrors()['goal']) { <p id="goal-error" class="field-error" role="alert">{{ fieldErrors()['goal'] }}</p> }
       </div>
       <div class="field">
@@ -71,9 +71,8 @@
     </section>
     <footer class="form-footer">
       <button type="button" class="back-link" (click)="back()">Отмена</button>
-      <button type="button" class="button" [disabled]="!canSubmit(false)" (click)="save(false)"><hg-icon name="save" />Сохранить черновик</button>
-      <button type="submit" class="button primary" [disabled]="!canSubmit(true)"><hg-icon name="gpt" />{{ busy() ? 'Сохраняем…' : 'Подготовить для ChatGPT' }}</button>
+      <button type="submit" class="button primary" [disabled]="!canSubmit()"><hg-icon name="save" />{{ busy() ? 'Сохраняем…' : 'Сохранить черновик' }}</button>
     </footer>
-    <p class="draft-note">Подготовка сохраняет тот же ID и ожидает команды ChatGPT. Браузер ещё не запускается.</p>
+    <p class="draft-note">Черновик сохраняется без запуска. Для выполнения укажите номер задачи в чате.</p>
   </form>
 }

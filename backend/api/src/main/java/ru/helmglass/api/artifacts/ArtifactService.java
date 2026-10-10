@@ -2,17 +2,27 @@ package ru.helmglass.api.artifacts;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.channels.Channels;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
+import java.nio.file.SecureDirectoryStream;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributeView;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -23,8 +33,11 @@ import java.util.concurrent.TimeoutException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Contracts;
+import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.ListQuery;
 import ru.helmglass.api.browsers.WorkerClient;
 import ru.helmglass.api.events.EventService;
@@ -36,8 +49,9 @@ public class ArtifactService {
   private final WorkerClient worker;
   private final EventService events;
   private final Path directory;
-  private final ru.helmglass.api.JsonSupport json;
-  private final Semaphore transfers = new Semaphore(2);
+  private final JsonSupport json;
+  private final TransactionTemplate transactions;
+  private final Semaphore registrations = new Semaphore(2);
   private final Semaphore waitingCalls = new Semaphore(16);
   private final Map<UUID, Delivery> deliveries = new ConcurrentHashMap<>();
 
@@ -45,10 +59,12 @@ public class ArtifactService {
       JdbcClient jdbc,
       WorkerClient worker,
       EventService events,
-      ru.helmglass.api.JsonSupport json,
+      PlatformTransactionManager manager,
+      JsonSupport json,
       @Value("${helm.artifact-directory}") String directory)
       throws IOException {
     this.jdbc = jdbc;
+    this.transactions = new TransactionTemplate(manager);
     this.worker = worker;
     this.events = events;
     this.json = json;
@@ -89,7 +105,7 @@ public class ArtifactService {
     JsonNode page =
         worker.call(
             "GET",
-            "/sessions/" + session + "/artifacts?archive=true&after=" + source.cursor(),
+            "/sessions/" + session + "/artifacts?after=" + source.cursor(),
             null);
     if (!page.path("artifacts").isArray()
         || page.path("artifacts").size() > 100
@@ -120,93 +136,68 @@ public class ArtifactService {
   private void importArtifact(
       UUID owner, UUID task, UUID session, UUID operation, JsonNode metadata) {
     try {
-      transfers.acquire();
+      registrations.acquire();
       try {
-        transferArtifact(owner, task, session, operation, metadata);
+        registerArtifact(owner, task, session, operation, metadata);
       } finally {
-        transfers.release();
+        registrations.release();
       }
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
       throw ApiException.conflict(
-          "TRANSFER_INTERRUPTED", "Передача файла прервана; она будет продолжена.");
+          "REGISTRATION_INTERRUPTED", "Проверка результата прервана; она будет продолжена.");
     }
   }
 
-  private synchronized void transferArtifact(
+  private void registerArtifact(
       UUID owner, UUID task, UUID session, UUID operation, JsonNode metadata) {
     if (!metadata.path("sizeBytes").isIntegralNumber()
-        || metadata.path("sizeBytes").asLong() < 0
+        || metadata.path("sizeBytes").asLong() <= 0
         || metadata.path("sizeBytes").asLong() > 2_147_483_648L
         || !metadata.path("sha256").isString()
         || !metadata.path("sha256").asString().matches("[a-fA-F0-9]{64}")) {
-      throw ApiException.invalid(
-          "artifact", "Для переноса нужны размер и SHA-256 исходного файла.");
+      throw ApiException.invalid("artifact", "Для проверки нужны размер и SHA-256 файла.");
     }
     long expectedSize = metadata.path("sizeBytes").asLong();
-    String expectedHash = metadata.path("sha256").asString();
+    String expectedHash = metadata.path("sha256").asString().toLowerCase(Locale.ROOT);
     UUID id = UUID.fromString(metadata.path("id").asString());
-    if (jdbc.sql(
-            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id=:id AND (owner_id<>:owner OR task_id IS"
-                + " DISTINCT FROM :task))")
-        .param("id", id)
-        .param("owner", owner)
-        .param("task", task)
-        .query(Boolean.class)
-        .single()) {
+    boolean belongs =
+        jdbc.sql(
+                "SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE id=:session"
+                    + " AND owner_id=:owner AND task_id=:task)")
+            .param("session", session)
+            .param("owner", owner)
+            .param("task", task)
+            .query(Boolean.class)
+            .single();
+    if (!belongs) {
       throw ApiException.notFound();
     }
-    if (operation != null) {
-      boolean belongs =
-          jdbc.sql(
-                  "SELECT EXISTS(SELECT 1 FROM operations WHERE id=:operation AND owner_id=:owner"
-                      + " AND task_id=:task AND session_id=:session)")
-              .param("operation", operation)
-              .param("owner", owner)
-              .param("task", task)
-              .param("session", session)
-              .query(Boolean.class)
-              .single();
-      if (!belongs) {
-        throw ApiException.notFound();
-      }
-      jdbc.sql(
-              "UPDATE artifacts SET operation_id=:operation WHERE id=:id AND owner_id=:owner AND"
-                  + " task_id=:task AND operation_id IS NULL")
-          .param("operation", operation)
-          .param("id", id)
-          .param("owner", owner)
-          .param("task", task)
-          .update();
-    }
-    var delivered =
-        jdbc.sql(
-                "SELECT size_bytes=:size AND lower(sha256)=lower(:hash) FROM artifacts"
-                    + " WHERE id=:id AND owner_id=:owner AND status='READY'")
-            .param("id", id)
+    if (operation != null
+        && !jdbc.sql(
+                "SELECT EXISTS(SELECT 1 FROM operations WHERE id=:operation AND owner_id=:owner"
+                    + " AND task_id=:task AND session_id=:session)")
+            .param("operation", operation)
             .param("owner", owner)
-            .param("size", expectedSize)
-            .param("hash", expectedHash)
+            .param("task", task)
+            .param("session", session)
             .query(Boolean.class)
-            .optional();
-    if (delivered.isPresent()) {
-      if (!delivered.get()) {
-        throw ApiException.conflict(
-            "ARTIFACT_INTEGRITY_MISMATCH", "Квитанция исходного файла изменилась.");
-      }
-      return;
+            .single()) {
+      throw ApiException.notFound();
     }
     String name = metadata.path("name").asString("file");
     String mime = metadata.path("mimeType").asString("application/octet-stream");
     if (name.length() > 300 || mime.length() > 150) {
       throw ApiException.invalid("artifact", "Некорректные свойства файла.");
     }
+    // Persist the receipt before publication so a crash after rename can finish the same record.
     jdbc.sql(
-"""
-INSERT INTO artifacts(id,owner_id,task_id,operation_id,name,mime_type,status,complete,source_url,source_ref,duration_seconds,relative_path)
-VALUES (:id,:owner,:task,:operation,:name,:mime,'UPLOADING',:complete,:url,:ref,:duration,:path)
-ON CONFLICT(id) DO NOTHING
-""")
+            """
+            INSERT INTO artifacts(id,owner_id,task_id,operation_id,name,mime_type,status,
+              complete,source_url,source_ref,duration_seconds,relative_path,size_bytes,sha256)
+            VALUES (:id,:owner,:task,:operation,:name,:mime,'UPLOADING',:complete,:url,:ref,
+              :duration,:path,:size,:hash) ON CONFLICT(id) DO NOTHING
+            """)
         .param("id", id)
         .param("owner", owner)
         .param("task", task)
@@ -222,60 +213,156 @@ ON CONFLICT(id) DO NOTHING
                 ? metadata.path("durationSeconds").decimalValue()
                 : null)
         .param("path", id.toString())
+        .param("size", expectedSize)
+        .param("hash", expectedHash)
         .update();
-    Path temporary = directory.resolve(id + ".part");
-    Path destination = directory.resolve(id.toString());
     try {
-      MessageDigest digest = MessageDigest.getInstance("SHA-256");
-      long bytes = 0;
-      try (InputStream input =
-              worker.artifact("/sessions/" + session + "/artifacts/" + id + "?archive=true");
-          var output = Files.newOutputStream(temporary)) {
-        byte[] buffer = new byte[65536];
-        for (int count; (count = input.read(buffer)) != -1; ) {
-          bytes = Math.addExact(bytes, count);
-          if (bytes > expectedSize) {
-            throw new IOException("Artifact exceeds declared size");
-          }
-          output.write(buffer, 0, count);
-          digest.update(buffer, 0, count);
-        }
-      }
-      String hash = HexFormat.of().formatHex(digest.digest());
-      if (expectedSize != bytes || !hash.equalsIgnoreCase(expectedHash)) {
-        throw new IOException("Artifact integrity mismatch");
-      }
-      Files.move(
-          temporary,
-          destination,
-          StandardCopyOption.ATOMIC_MOVE,
-          StandardCopyOption.REPLACE_EXISTING);
+      transactions.executeWithoutResult(
+          transaction -> {
+            var receipt =
+                jdbc.sql(
+                        "SELECT owner_id,task_id,status,size_bytes,sha256"
+                            + " FROM artifacts WHERE id=:id FOR UPDATE")
+                    .param("id", id)
+                    .query(
+                        (row, index) ->
+                            new Registration(
+                                row.getObject("owner_id", UUID.class),
+                                row.getObject("task_id", UUID.class),
+                                row.getString("status"),
+                                row.getObject("size_bytes", Long.class),
+                                row.getString("sha256")))
+                    .single();
+            if (!owner.equals(receipt.owner()) || !task.equals(receipt.task())) {
+              throw ApiException.notFound();
+            }
+            if (receipt.size() != null
+                && (receipt.size() != expectedSize
+                    || !expectedHash.equalsIgnoreCase(receipt.hash()))) {
+              throw ApiException.conflict(
+                  "ARTIFACT_INTEGRITY_MISMATCH",
+                  "Квитанция исходного файла изменилась.");
+            }
+            if (operation != null) {
+              jdbc.sql(
+                      "UPDATE artifacts SET operation_id=:operation WHERE id=:id"
+                          + " AND operation_id IS NULL")
+                  .param("id", id)
+                  .param("operation", operation)
+                  .update();
+            }
+            if ("READY".equals(receipt.status())) {
+              return;
+            }
+            try {
+              publishFile(session, id, expectedSize, expectedHash);
+            } catch (IOException exception) {
+              throw new UncheckedIOException(exception);
+            }
+            jdbc.sql(
+                    "UPDATE artifacts SET status='READY',size_bytes=:size,sha256=:hash"
+                        + " WHERE id=:id")
+                .param("id", id)
+                .param("size", expectedSize)
+                .param("hash", expectedHash)
+                .update();
+          });
+    } catch (UncheckedIOException exception) {
       jdbc.sql(
-              "UPDATE artifacts SET status='READY',size_bytes=:bytes,sha256=:hash WHERE id=:id AND"
-                  + " owner_id=:owner")
-          .param("bytes", bytes)
-          .param("hash", hash)
+              "UPDATE artifacts SET status='FAILED' WHERE id=:id AND owner_id=:owner"
+                  + " AND status<>'READY'")
           .param("id", id)
           .param("owner", owner)
           .update();
       signalDelivery(id);
-      events.emit(owner, "artifact", id, 1);
-      events.emit(owner, "task", task, 0);
-    } catch (IOException | NoSuchAlgorithmException | ArithmeticException exception) {
-      jdbc.sql("UPDATE artifacts SET status='FAILED' WHERE id=:id AND owner_id=:owner")
-          .param("id", id)
-          .param("owner", owner)
-          .update();
-      signalDelivery(id);
-      try {
-        Files.deleteIfExists(temporary);
-      } catch (IOException ignored) {
-        // The stable FAILED record allows cleanup to retry without exposing a ready file.
-      }
       throw ApiException.conflict(
-          "ARTIFACT_TRANSFER_FAILED",
-          "Исходный файл не сохранён полностью; повторная выдача пока недоступна.");
+          "ARTIFACT_REGISTRATION_FAILED",
+          "Результат не прошёл проверку. Исходные данные сохранены для повторной обработки.");
     }
+    signalDelivery(id);
+    events.emit(owner, "artifact", id, 1);
+    events.emit(owner, "task", task, 0);
+  }
+
+  private record Registration(UUID owner, UUID task, String status, Long size, String hash) {}
+
+  private void publishFile(UUID session, UUID id, long size, String hash) throws IOException {
+    if (Files.isSymbolicLink(directory)) {
+      throw new IOException("Invalid artifact root");
+    }
+    try (var stream = Files.newDirectoryStream(directory)) {
+      if (!(stream instanceof SecureDirectoryStream<Path> root)) {
+        throw new IOException("Atomic secure file publication is unavailable");
+      }
+      Path name = Path.of(id.toString());
+      try {
+        attributes(root, name);
+      } catch (NoSuchFileException absent) {
+        try (var sessions = root.newDirectoryStream(Path.of("sessions"), LinkOption.NOFOLLOW_LINKS);
+            var working =
+                sessions.newDirectoryStream(
+                    Path.of(session.toString()), LinkOption.NOFOLLOW_LINKS);
+            var files = working.newDirectoryStream(Path.of("artifacts"), LinkOption.NOFOLLOW_LINKS)) {
+          BasicFileAttributes verified = verifyFile(files, name, size, hash);
+          // SecureDirectoryStream.move has ATOMIC_MOVE semantics and never streams the content.
+          files.move(name, root, name);
+          BasicFileAttributes published = attributes(root, name);
+          if (!sameFile(verified, published)) {
+            throw new IOException("Artifact changed during publication");
+          }
+        }
+        return;
+      }
+      // Rename may have committed before the database did; an existing file is never overwritten.
+      verifyFile(root, name, size, hash);
+    }
+  }
+
+  private static BasicFileAttributes attributes(SecureDirectoryStream<Path> files, Path name)
+      throws IOException {
+    return files
+        .getFileAttributeView(name, BasicFileAttributeView.class, LinkOption.NOFOLLOW_LINKS)
+        .readAttributes();
+  }
+
+  private static boolean sameFile(BasicFileAttributes first, BasicFileAttributes second) {
+    return second.isRegularFile()
+        && Objects.equals(first.fileKey(), second.fileKey())
+        && first.size() == second.size()
+        && first.lastModifiedTime().equals(second.lastModifiedTime());
+  }
+
+  private static BasicFileAttributes verifyFile(
+      SecureDirectoryStream<Path> files, Path name, long size, String hash) throws IOException {
+    BasicFileAttributes before = attributes(files, name);
+    if (!before.isRegularFile() || before.size() != size) {
+      throw new IOException("Artifact size or type is invalid");
+    }
+    MessageDigest digest;
+    try {
+      digest = MessageDigest.getInstance("SHA-256");
+    } catch (NoSuchAlgorithmException exception) {
+      throw new IllegalStateException("SHA-256 is unavailable", exception);
+    }
+    long bytes = 0;
+    try (InputStream input =
+        Channels.newInputStream(
+            files.newByteChannel(name, Set.of(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)))) {
+      byte[] buffer = new byte[65536];
+      for (int count; (count = input.read(buffer)) != -1; ) {
+        bytes += count;
+        if (bytes > size) {
+          throw new IOException("Artifact exceeds declared size");
+        }
+        digest.update(buffer, 0, count);
+      }
+    }
+    if (bytes != size
+        || !hash.equalsIgnoreCase(HexFormat.of().formatHex(digest.digest()))
+        || !sameFile(before, attributes(files, name))) {
+      throw new IOException("Artifact integrity mismatch");
+    }
+    return before;
   }
 
   public Contracts.Artifact get(UUID owner, UUID id) {
@@ -294,7 +381,7 @@ ON CONFLICT(id) DO NOTHING
     return find(owner, id).filter(ArtifactService::ready);
   }
 
-  /** Waits for a verified delivery within the caller's remaining response budget. */
+  /** Waits for verified registration within the caller's remaining response budget. */
   public Optional<Contracts.Artifact> awaitReady(UUID owner, UUID id, long deadlineNanos) {
     if (System.nanoTime() >= deadlineNanos || !waitingCalls.tryAcquire()) {
       return findReady(owner, id);
@@ -307,7 +394,7 @@ ON CONFLICT(id) DO NOTHING
                     ? new Delivery(new CompletableFuture<>(), 1)
                     : new Delivery(current.signal(), current.waiters() + 1));
     try {
-      // Register before reading so a transfer finishing here cannot lose its notification.
+      // Register before reading so registration finishing here cannot lose its notification.
       var current = find(owner, id);
       long remaining = deadlineNanos - System.nanoTime();
       boolean terminal = current.isPresent() && !"UPLOADING".equals(current.get().status());
@@ -317,11 +404,11 @@ ON CONFLICT(id) DO NOTHING
       try {
         delivery.signal().get(remaining, TimeUnit.NANOSECONDS);
       } catch (TimeoutException exception) {
-        // Another API instance may have delivered it; the durable record is authoritative.
+        // Another API instance may have registered it; the durable record is authoritative.
       } catch (InterruptedException exception) {
         Thread.currentThread().interrupt();
       } catch (ExecutionException exception) {
-        throw new IllegalStateException("Artifact delivery notification failed", exception);
+        throw new IllegalStateException("Artifact registration notification failed", exception);
       }
       return findReady(owner, id);
     } finally {
@@ -403,7 +490,7 @@ ON CONFLICT(id) DO NOTHING
 
   public InputStream openOwnerArtifact(UUID owner, UUID id) throws IOException {
     getReady(owner, id);
-    return Files.newInputStream(directory.resolve(id.toString()));
+    return Files.newInputStream(directory.resolve(id.toString()), LinkOption.NOFOLLOW_LINKS);
   }
 
   public JsonNode audioContext(UUID owner, UUID artifact) {
@@ -434,7 +521,6 @@ ON CONFLICT(id) DO NOTHING
     for (UUID id : ids) {
       try {
         Files.deleteIfExists(directory.resolve(id.toString()));
-        Files.deleteIfExists(directory.resolve(id + ".part"));
       } catch (IOException exception) {
         return false;
       }

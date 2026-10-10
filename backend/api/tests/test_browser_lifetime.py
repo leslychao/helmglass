@@ -17,7 +17,6 @@ class BrowserLifetimeTest(unittest.TestCase):
     fixture_sql = dev.DevContractTest.fixture_sql
 
     def test_private_login_and_paused_task_keep_the_same_live_page(self):
-        fixture = os.environ["TEST_FIXTURE_URL"]
         settings = dict(line.split("=", 1) for line in Path(
             os.environ.get("HELM_TEST_ENV", "deploy/.env.dev")
         ).read_text(encoding="utf-8").splitlines() if line and not line.startswith("#") and "=" in line)
@@ -30,7 +29,7 @@ class BrowserLifetimeTest(unittest.TestCase):
         client = identity.client(); client.login_web(); client.login_mcp()
         error, presentation, _ = client.tool("tasks.create", {"operationKey": str(uuid.uuid4()),
             "task": {"title": "Browser lifetime contract", "goal": "Preserve private and paused page state",
-                     "startUrl": fixture, "prepare": True}})
+                     "startUrl": client.browser_fixture_url(), "prepare": True}})
         self.assertFalse(error); task_id = presentation["task"]["id"]
 
         def current():
@@ -93,7 +92,7 @@ class BrowserLifetimeTest(unittest.TestCase):
         try:
             completed("observe", {})
             marker = "retained-page-" + str(uuid.uuid4())
-            completed("fill", {**client.browser_target(task_id, 'Page marker'), 'text': marker})
+            completed("fill", {**client.browser_target(task_id, 'Comment'), 'text': marker})
             task = current(); browser = task["browser"]["id"]; original_process = process(browser)
             viewer = str(uuid.uuid4())
             command("BEGIN_LOGIN", viewerId=viewer)
@@ -148,7 +147,8 @@ class BrowserLifetimeTest(unittest.TestCase):
                 "SELECT count(*) FROM artifacts WHERE owner_id=:owner AND id='" + str(uuid.UUID(original["id"])) + "';"))
             self.fixture_sql(identity, "UPDATE browser_sessions SET artifact_cursor=0" + scope)
             command("STOP")
-            wait_task(lambda value: value["status"] == "STOPPED"); stopped = True
+            wait_task(lambda value: value["status"] == "STOPPED"
+                      and value["browser"]["cleanupState"] == "COMPLETE"); stopped = True
             status, data, _ = client.request(client.base + "/api/artifacts/" + original["id"] + "/download")
             self.assertEqual(200, status)
             self.assertEqual(expected, data)

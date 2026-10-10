@@ -16,7 +16,10 @@
           <th
             scope="col"
             [attr.data-column]="cell.column.key"
-            [attr.aria-sort]="cell.column.action ? null : view().ariaSort(cell.column.key)"
+            [attr.aria-sort]="
+              cell.column.action || !sortable() || cell.column.sortable === false
+                ? null : view().ariaSort(cell.column.key)
+            "
             [class.hg-action-cell]="cell.column.action"
             [class.hg-drag-source]="moving() === cell.column.key"
             [class.hg-drop-before]="drop()?.key === cell.column.key && !drop()?.after"
@@ -36,23 +39,27 @@
                 >
                   <hg-icon name="grip" />
                 </button>
-                <button
-                  type="button"
-                  class="hg-sort"
-                  (click)="view().sort(cell.column.key)"
-                  [hgTooltip]="'Сортировать: ' + cell.column.label"
-                >
-                  <span>{{ cell.column.label }}</span
-                  ><hg-icon
-                    [name]="
-                      view().ariaSort(cell.column.key) === 'ascending'
-                        ? 'arrow-up'
-                        : view().ariaSort(cell.column.key) === 'descending'
-                          ? 'arrow-down'
-                          : 'sort'
-                    "
-                  />
-                </button>
+                @if (sortable() && cell.column.sortable !== false) {
+                  <button
+                    type="button"
+                    class="hg-sort"
+                    (click)="view().sort(cell.column.key)"
+                    [hgTooltip]="'Сортировать: ' + cell.column.label"
+                  >
+                    <span>{{ cell.column.label }}</span
+                    ><hg-icon
+                      [name]="
+                        view().ariaSort(cell.column.key) === 'ascending'
+                          ? 'arrow-up'
+                          : view().ariaSort(cell.column.key) === 'descending'
+                            ? 'arrow-down'
+                            : 'sort'
+                      "
+                    />
+                  </button>
+                } @else {
+                  <span class="hg-sort">{{ cell.column.label }}</span>
+                }
                 @if (cell.column.help) {
                   <button
                     type="button"

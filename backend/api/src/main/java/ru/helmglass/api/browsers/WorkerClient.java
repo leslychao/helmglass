@@ -133,25 +133,6 @@ public class WorkerClient {
     }
   }
 
-  public InputStream artifact(String path) throws IOException {
-    Duration timeout = Duration.ofMinutes(6);
-    long deadline = System.nanoTime() + timeout.toNanos();
-    try {
-      var response =
-          http.send(
-              request("GET", path, null).timeout(timeout).build(),
-              HttpResponse.BodyHandlers.ofInputStream());
-      if (response.statusCode() != 200) {
-        response.body().close();
-        throw new IOException("Worker artifact unavailable");
-      }
-      return bounded(response.body(), deadline);
-    } catch (InterruptedException exception) {
-      Thread.currentThread().interrupt();
-      throw new IOException("Worker artifact interrupted", exception);
-    }
-  }
-
   private InputStream bounded(InputStream input, long deadline) {
     return new FilterInputStream(input) {
       private volatile boolean expired;

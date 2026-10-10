@@ -20,7 +20,7 @@ import { fillSavedCredential, type SavedCredential } from "./credential-autofill
 import { CredentialCapture, CaptureConflict } from "./credential-capture.js";
 import { BrowserMcp, BrowserRejection, McpExecutionUnconfirmed } from "./browser-mcp.js";
 import { snapshotUrl } from "./browser-privacy.js";
-import { artifactResponse, operationReceipt } from "./session-records.js";
+import { initializeRecords, operationReceipt } from "@helmglass/session-records";
 
 function required(name: string): string { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; }
 const sessionId = z.uuid().parse(required("SESSION_ID"));
@@ -33,7 +33,7 @@ const dispatcher = new ProxyAgent(proxy);
 const dataDirectory = process.env["DATA_DIR"] ?? "/data";
 await mkdir(path.join(dataDirectory, "artifacts"), { recursive: true });
 const db = new DatabaseSync(path.join(dataDirectory, "session.sqlite"));
-db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS state (id TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, status TEXT NOT NULL, result TEXT); CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, document TEXT NOT NULL);");
+initializeRecords(db);
 db.exec("UPDATE operations SET status='UNKNOWN' WHERE status='RUNNING';");
 const Policy = z.object({ controlEpoch: z.number().int().nonnegative(), owner: z.enum(["CHATGPT", "USER", "NONE"]), privateMode: z.boolean(), controllerId: z.string().max(200).optional() });
 type Policy = z.infer<typeof Policy>;
@@ -98,7 +98,7 @@ async function privateAutofill(page: Page, credential: SavedCredential): Promise
 }
 function summary(): object { return { id: sessionId, status, controlEpoch: policy.controlEpoch, controlOwner: policy.owner, controllerId: policy.controllerId, privateMode: policy.privateMode, ...(!policy.privateMode && currentPage ? { currentUrl: snapshotUrl(currentPage.url()), navigationError } : {}) }; }
 
-async function saveArtifact(stream: Readable, metadata: { name: string; mimeType: string; sourceUrl: string; sourceRef?: string; complete: boolean; pageId?: string; operationId?: string }, signal?: AbortSignal): Promise<object> {
+async function saveArtifact(stream: Readable, metadata: { name: string; mimeType: string; sourceUrl: string; sourceRef?: string; complete: boolean; pageId?: string; operationId?: string; audioContextDigest?: string }, signal?: AbortSignal): Promise<object> {
   const id = randomUUID(); const temporary = path.join(dataDirectory, "artifacts", `${id}.partial`); const final = path.join(dataDirectory, "artifacts", id);
   const hash = createHash("sha256"); let sizeBytes = 0;
   const counter = new Transform({ transform(chunk: Buffer, _encoding, callback) {
@@ -107,7 +107,7 @@ async function saveArtifact(stream: Readable, metadata: { name: string; mimeType
     hash.update(chunk); callback(null, chunk);
   } });
   try {
-    await pipeline(stream, counter, createWriteStream(temporary, { flags: "wx", mode: 0o600 }), { signal });
+    await pipeline(stream, counter, createWriteStream(temporary, { flags: "wx", mode: 0o640 }), { signal });
     if (sizeBytes === 0) throw new Error("Empty file");
     await rename(temporary, final);
     if (metadata.mimeType === "application/octet-stream" || metadata.mimeType === "audio/unknown") {
@@ -120,7 +120,16 @@ async function saveArtifact(stream: Readable, metadata: { name: string; mimeType
     }
     signal?.throwIfAborted();
     observationAllowed();
-    const artifact = { id, ...metadata, name: metadata.name.slice(0, 240), sizeBytes, sha256: hash.digest("hex"), createdAt: new Date().toISOString() };
+    const sha256 = hash.digest("hex");
+    if (metadata.complete && metadata.audioContextDigest) {
+      const existing = db.prepare("SELECT document FROM artifacts WHERE json_extract(document,'$.sha256')=? AND json_extract(document,'$.audioContextDigest')=? AND json_extract(document,'$.complete')=1 LIMIT 1")
+        .get(sha256, metadata.audioContextDigest);
+      if (existing) {
+        await rm(final);
+        return JSON.parse(z.string().parse(existing["document"]));
+      }
+    }
+    const artifact = { id, ...metadata, name: metadata.name.slice(0, 240), sizeBytes, sha256, createdAt: new Date().toISOString() };
     db.prepare("INSERT INTO artifacts(id,document) VALUES(?,?)").run(id, JSON.stringify(artifact));
     return artifact;
   } catch (error) { await rm(temporary, { force: true }); await rm(final, { force: true }); throw error; }
@@ -130,6 +139,12 @@ async function saveDownload(download: Download, pageId: string, signal: AbortSig
     const stream = await download.createReadStream();
     return await saveArtifact(stream, { name: download.suggestedFilename(), mimeType: "application/octet-stream", sourceUrl: download.url(), complete: true, pageId, operationId }, signal);
   } finally { await download.delete(); }
+}
+function findMedia(pageId: string, frame: Frame, sourceUrl: string): MediaSource | undefined {
+  for (const item of media.values()) {
+    if (item.pageId === pageId && item.frame === frame && item.sourceUrl === sourceUrl) return item;
+  }
+  return undefined;
 }
 function registerPage(page: Page): void {
   if (page.url() === profileExportUrl) return;
@@ -153,10 +168,11 @@ function registerPage(page: Page): void {
     const epoch = policy.controlEpoch;
     void response.request().allHeaders().then((headers) => {
       if (policy.privateMode || epoch !== policy.controlEpoch) return;
-      const existing = [...media.values()].find((item) => item.sourceUrl === response.url() && item.pageId === id);
+      const frame = response.frame();
+      const existing = findMedia(id, frame, response.url());
       if (!existing) while (media.size >= snapshotLimits.media) { const first = media.keys().next().value; if (first) media.delete(first); mediaTruncated = true; }
       const mediaId = existing?.id ?? randomUUID();
-      media.set(mediaId, { id: mediaId, pageId: id, frame: response.frame(), sourceUrl: response.url(), mimeType: mime || "application/octet-stream", headers, complete: response.status() === 200, observedAt: new Date().toISOString() });
+      media.set(mediaId, { id: mediaId, pageId: id, frame, sourceUrl: response.url(), mimeType: mime || "application/octet-stream", headers, complete: response.status() === 200, observedAt: new Date().toISOString() });
     }).catch(() => {});
   });
 }
@@ -236,7 +252,7 @@ async function initialize(input: { startUrl: string }): Promise<void> {
   } catch { status = "LOST"; await browser?.close(); throw new HttpError(502, "Browser launch failed"); }
 }
 
-const Command = z.object({ deadlineAt: z.string().datetime(), operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative(), observeAfter: z.boolean().default(true), sequence: z.object({ operationIds: z.array(z.uuid()).min(1).max(8) }).strict().optional() }).strict();
+const Command = z.object({ deadlineAt: z.string().datetime(), operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "playMedia", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative(), observeAfter: z.boolean().default(true), sequence: z.object({ operationIds: z.array(z.uuid()).min(1) }).strict().optional() }).strict();
 type Command = z.infer<typeof Command>;
 const readCommands = new Set(["observe", "screenshot", "listMedia", "captureAudio", "waitFor",
   "navigate", "goBack", "scroll", "newTab", "selectTab", "closeTab"]);
@@ -281,7 +297,7 @@ async function listMedia(): Promise<object> {
   observationAllowed();
   const page = selectedPage(); const pageId = pageIds.get(page);
   if (!pageId) throw new HttpError(409, "Page unavailable");
-  const sources: { url: string; mimeType: string; label: string }[] = [];
+  const sources: { url: string; mimeType: string; label: string; sourceId?: string }[] = [];
   let inspected = 0; let frames = 0; let truncated = false;
   for (const frame of page.frames()) {
     if (frames >= snapshotLimits.media || inspected >= snapshotLimits.nodes || sources.length >= snapshotLimits.media) { truncated = true; break; }
@@ -311,20 +327,99 @@ async function listMedia(): Promise<object> {
     observationAllowed();
     inspected += snapshot.inspected;
     truncated ||= snapshot.truncated;
-    sources.push(...snapshot.sources);
     for (const source of snapshot.sources) {
       if (!["http:", "https:", "blob:"].includes(new URL(source.url).protocol)) continue;
-      const existing = [...media.values()].find((item) => item.sourceUrl === source.url && item.pageId === pageId);
-      if (existing) { existing.frame = frame; continue; }
+      const existing = findMedia(pageId, frame, source.url);
+      if (existing) { sources.push({ ...source, sourceId: existing.id }); continue; }
       while (media.size >= snapshotLimits.media) { const first = media.keys().next().value; if (first) media.delete(first); mediaTruncated = true; }
       const id = randomUUID();
       media.set(id, { id, pageId, frame, sourceUrl: source.url, mimeType: source.mimeType, headers: {}, complete: false, observedAt: new Date().toISOString() });
+      sources.push({ ...source, sourceId: id });
     }
   }
   observationAllowed();
   return { media: [...media.values()].map(({ headers: _headers, frame: _frame, ...item }) => item), sources, truncated: truncated || mediaTruncated };
 }
-async function captureBlob(source: MediaSource, sourceRef: string, name: string, signal: AbortSignal): Promise<object> {
+async function playOriginalAudio(root: HTMLElement, url: string, timeout: number) {
+  const walker = root.ownerDocument.createTreeWalker(root.ownerDocument, NodeFilter.SHOW_ELEMENT);
+  let audio: HTMLMediaElement | undefined, inspected = 0;
+  while (walker.nextNode()) {
+    if (++inspected > 20_000) throw new Error("Media page exceeds inspection limit");
+    const element = walker.currentNode;
+    if (element instanceof HTMLMediaElement
+      && (element.currentSrc || element.src || element.querySelector('source')?.src) === url) {
+      if (audio) throw new Error("Media source identifies more than one player");
+      audio = element;
+    }
+  }
+  if (!audio || audio.loop || audio.playbackRate !== 1)
+    throw new Error("Original media player is unavailable");
+  const player = audio;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      player.removeEventListener("ended", ended); player.removeEventListener("error", failed);
+    };
+    const ended = () => { cleanup(); resolve(); };
+    const failed = () => { cleanup(); reject(new Error("Media playback failed")); };
+    const timer = setTimeout(failed, timeout);
+    player.addEventListener("ended", ended, { once: true });
+    player.addEventListener("error", failed, { once: true });
+    try { player.currentTime = 0; void player.play().catch(failed); }
+    catch { failed(); }
+  });
+  const duration = Number.isFinite(player.duration) ? player.duration : null;
+  const fullyPlayed = duration !== null && duration > 0 && player.ended
+    && player.playbackRate === 1 && player.played.length === 1
+    && player.played.start(0) <= .02 && player.played.end(0) >= duration - .02;
+  if (!fullyPlayed) throw new Error("Full playback was not established");
+  return { currentTime: player.currentTime, duration, ended: player.ended,
+    paused: player.paused, playbackRate: player.playbackRate, fullyPlayed };
+}
+
+async function playMedia(args: Record<string, unknown>, signal: AbortSignal, deadline: number): Promise<object> {
+  const { sourceId } = z.object({ sourceId: z.uuid() }).strict().parse(args);
+  const source = media.get(sourceId);
+  const page = selectedPage();
+  if (!source || source.pageId !== pageIds.get(page) || source.frame.isDetached())
+    throw new BeforeEffectRejection(409, "Media source is unavailable; use listMedia");
+  const selectors: string[] = [];
+  for (let frame = source.frame, parent = frame.parentFrame(); parent; parent = frame.parentFrame()) {
+    signal.throwIfAborted();
+    if (selectors.length >= snapshotLimits.media)
+      throw new BeforeEffectRejection(409, "Media frame exceeds inspection limit");
+    const element = await frame.frameElement();
+    try {
+      const index = await element.evaluate(element => {
+        const document = element.ownerDocument;
+        if (!document) return -1;
+        const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
+        let index = 0, inspected = 0;
+        while (walker.nextNode()) {
+          if (++inspected > 20_000) return -1;
+          const node = walker.currentNode;
+          if (node instanceof HTMLIFrameElement || node instanceof HTMLFrameElement) {
+            if (node === element) return index;
+            index++;
+          }
+        }
+        return -1;
+      });
+      if (index < 0) throw new BeforeEffectRejection(409, "Media frame is unavailable");
+      selectors.unshift(`css:light=iframe,frame >> nth=${index} >> internal:control=enter-frame`);
+    } finally { await element.dispose(); }
+    frame = parent;
+  }
+  selectors.push("css=html");
+  const timeout = Math.max(1, deadline - Date.now());
+  const functionSource = `(root) => (${playOriginalAudio.toString()})(root,${JSON.stringify(source.sourceUrl)},${timeout})`;
+  const playback = z.object({ currentTime: z.number(), duration: z.number().nullable(), ended: z.boolean(),
+    paused: z.boolean(), playbackRate: z.number(), fullyPlayed: z.boolean() }).parse(
+    await (await mcp()).evaluate(functionSource, selectors.join(" >> "), signal));
+  return { sourceId, playback };
+}
+
+async function captureBlob(source: MediaSource, sourceRef: string, name: string, audioContextDigest: string, signal: AbortSignal): Promise<object> {
   signal.throwIfAborted();
   const page = pages.get(source.pageId);
   if (!page || page.isClosed()) throw new HttpError(409, "Source page is no longer available");
@@ -332,7 +427,7 @@ async function captureBlob(source: MediaSource, sourceRef: string, name: string,
   if (frame.isDetached()) throw new HttpError(409, "Source frame is no longer available");
   const stream = new PassThrough({ highWaterMark: 65_536 }); const nonce = randomUUID();
   blobCapture = { nonce, frame, stream };
-  const metadata = { name, mimeType: "application/octet-stream", sourceUrl: source.sourceUrl, sourceRef, complete: true, pageId: source.pageId, operationId: activeOperation };
+  const metadata = { name, mimeType: "application/octet-stream", sourceUrl: source.sourceUrl, sourceRef, complete: true, pageId: source.pageId, operationId: activeOperation, audioContextDigest };
   const saved = saveArtifact(stream, metadata, signal);
   saved.catch(() => {});
   const abort = () => stream.destroy(new Error("Audio transfer cancelled"));
@@ -369,14 +464,22 @@ async function captureBlob(source: MediaSource, sourceRef: string, name: string,
   } catch (error) { stream.destroy(new Error("Audio source interrupted")); await saved.catch(() => {}); throw error; }
   finally { signal.removeEventListener("abort", abort); blobCapture = undefined; }
 }
-async function captureAudio(args: Record<string, unknown>, signal: AbortSignal): Promise<object> {
+async function captureAudio(args: Record<string, unknown>, instructionRevision: number, signal: AbortSignal): Promise<object> {
   observationAllowed();
   const input = z.object({ sourceId: z.uuid(), sourceRef: z.string().min(1).max(2000), name: z.string().max(240).optional() }).parse(args);
   const source = media.get(input.sourceId);
   if (!source) throw new HttpError(404, "Requested audio source has not been observed in this browser");
-  const existing = db.prepare("SELECT document FROM artifacts WHERE json_extract(document,'$.sourceRef')=? AND json_extract(document,'$.sourceUrl')=? LIMIT 1").get(input.sourceRef, source.sourceUrl);
-  if (existing) return { artifact: JSON.parse(z.string().parse(existing["document"])) };
-  if (source.sourceUrl.startsWith("blob:")) return { artifact: await captureBlob(source, input.sourceRef, input.name ?? "original-audio", signal) };
+  // API commands arrive from jsonb with stable key order. A missing context belongs only to
+  // direct worker clients; their explicit sourceRef still separates unrelated captures.
+  const audioContextDigest = createHash("sha256").update(JSON.stringify({ instructionRevision,
+    sourceContext: args["sourceContext"] ?? { sourceRef: input.sourceRef } })).digest("hex");
+  if (source.sourceUrl.startsWith("blob:")) {
+    // Blob URLs identify immutable bytes in this live page. HTTP URLs may change content.
+    const existing = db.prepare("SELECT document FROM artifacts WHERE json_extract(document,'$.sourceUrl')=? AND json_extract(document,'$.pageId')=? AND json_extract(document,'$.audioContextDigest')=? AND json_extract(document,'$.complete')=1 LIMIT 1")
+      .get(source.sourceUrl, source.pageId, audioContextDigest);
+    if (existing) return { artifact: JSON.parse(z.string().parse(existing["document"])), sourceRef: input.sourceRef };
+    return { artifact: await captureBlob(source, input.sourceRef, input.name ?? "original-audio", audioContextDigest, signal), sourceRef: input.sourceRef };
+  }
   const url = publicUrl(source.sourceUrl);
   const headers: Record<string, string> = {};
   for (const key of ["authorization", "cookie", "referer", "origin", "user-agent", "accept"]) if (source.headers[key]) headers[key] = source.headers[key];
@@ -387,8 +490,8 @@ async function captureAudio(args: Record<string, unknown>, signal: AbortSignal):
   if (!response.ok || !response.body) { await response.body?.cancel(); throw new HttpError(409, `Audio source unavailable (${response.status})`); }
   const mimeType = response.headers.get("content-type")?.split(";")[0] ?? source.mimeType;
   if (!mimeType.startsWith("audio/") && mimeType !== "application/octet-stream") { await response.body.cancel(); throw new HttpError(409, "Source is not an original audio file"); }
-  const artifact = await saveArtifact(Readable.fromWeb(response.body), { name: input.name ?? (path.posix.basename(new URL(url).pathname) || "audio"), mimeType, sourceUrl: url, sourceRef: input.sourceRef, complete: response.status === 200, pageId: source.pageId, operationId: activeOperation }, signal);
-  return { artifact };
+  const artifact = await saveArtifact(Readable.fromWeb(response.body), { name: input.name ?? (path.posix.basename(new URL(url).pathname) || "audio"), mimeType, sourceUrl: url, sourceRef: input.sourceRef, complete: response.status === 200, pageId: source.pageId, operationId: activeOperation, audioContextDigest }, signal);
+  return { artifact, sourceRef: input.sourceRef };
 }
 async function applyConnection(args: Record<string, unknown>, signal: AbortSignal): Promise<object> {
   const input = z.object({ connectionId: z.string().min(1).max(200), ownerId: z.string().min(1).max(200), origins: z.array(z.url()).min(1).max(50), url: z.url(), profileId: z.uuid() }).parse(args);
@@ -434,7 +537,8 @@ async function perform(command: Command, signal: AbortSignal): Promise<object> {
     case "applyConnection": return applyConnection(args, signal);
     case "observe": return observe(args, signal, command);
     case "listMedia": return listMedia();
-    case "captureAudio": return captureAudio(args, signal);
+    case "playMedia": return playMedia(args, signal, Date.parse(command.deadlineAt));
+    case "captureAudio": return captureAudio(args, command.instructionRevision, signal);
     case "screenshot": {
       z.object({}).strict().parse(args);
       const { filename, target } = await (await mcp()).screenshot(command.operationId, signal);
@@ -711,10 +815,6 @@ const server = http.createServer(async (request, response) => {
       const changed = db.prepare("UPDATE operations SET status=?,result=? WHERE id=? AND status='UNKNOWN'").run(input.outcome, JSON.stringify({ result: { reconciled: true, evidence: input.evidence } }), z.uuid().parse(resolve[1]));
       if (changed.changes !== 1) throw new HttpError(409, "Operation is not awaiting verification");
       reply(response, 200, receipt(resolve[1])); return;
-    }
-    if (url.pathname.startsWith("/artifacts") && request.method === "GET") {
-      if (url.searchParams.get("archive") !== "true") observationAllowed();
-      if (await artifactResponse(db, dataDirectory, url, response)) return;
     }
     throw new HttpError(404, "Route not found");
   } catch (error) {

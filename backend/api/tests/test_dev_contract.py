@@ -490,7 +490,7 @@ class DevContractTest(unittest.TestCase):
             self.assertEqual(409, self.user.api("/api/tasks", "POST", {**body, "goal": "different"}, key)[0])
             self.assertEqual(404, self.admin.api("/api/tasks/" + created["id"])[0])
             self.assertEqual(409, self.user.api("/api/tasks/" + created["id"] + "/commands", "POST",
-                                               {"type": "PREPARE", "expectedVersion": created["version"] - 1})[0])
+                                               {"type": "AMEND", "expectedVersion": created["version"] - 1})[0])
         finally:
             self.assertEqual(200, self.user.api("/api/tasks/" + created["id"], "DELETE")[0])
 
@@ -585,9 +585,9 @@ class DevContractTest(unittest.TestCase):
                 "startUrl": "https://example.com", "prepare": False}
         status, draft = client.api("/api/tasks", "POST", body)
         self.assertEqual(200, status)
-        status, refusal = client.api("/api/tasks/" + draft["id"] + "/commands", "POST",
-                                    {"type": "PREPARE", "expectedVersion": draft["version"]})
-        self.assertEqual(409, status)
+        error, refusal, _ = client.tool("tasks.bind", {
+            "taskId": draft["id"], "operationKey": str(uuid.uuid4())})
+        self.assertTrue(error, refusal)
         self.assertEqual("WAITING_LIMIT", refusal["code"])
         status, _ = command("BLOCK")
         self.assertEqual(200, status)

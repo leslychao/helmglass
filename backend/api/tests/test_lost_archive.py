@@ -1,4 +1,4 @@
-"""Confirmed execution loss releases its slot while failed artifact delivery retains the original volume."""
+"""Execution loss releases its slot while failed registration retains the session files."""
 
 import hashlib
 import json
@@ -97,7 +97,7 @@ class LostArchiveTest(unittest.TestCase):
             click = self.execute(task, "click", self.client.browser_target(task['id'], 'Download a completed result after this action returns'))
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                page = self.worker("/sessions/" + session + "/artifacts?archive=true")
+                page = self.worker("/sessions/" + session + "/artifacts")
                 self.assertEqual(200, page["status"])
                 if page["value"]["artifacts"]:
                     original = page["value"]["artifacts"][0]
@@ -116,36 +116,45 @@ class LostArchiveTest(unittest.TestCase):
                 "SELECT count(*) FROM artifacts WHERE owner_id=:owner AND id='" + artifact + "';"))
 
             # Corrupt one known byte in this tiny synthetic original. The immutable metadata
-            # retains its correct hash, so delivery must fail while execution releases its slot.
+            # retains its correct hash, so registration must fail while execution releases its slot.
             def write_first_byte(value):
                 script = ("import fs from 'node:fs';const file=fs.openSync('/data/artifacts/"
                           + artifact + "','r+');try{fs.writeSync(file,Buffer.from(["
                           + str(value) + "]),0,1,0);}finally{fs.closeSync(file);}")
-                running = json.loads(self.docker("inspect", "--format", "{{json .State.Running}}", container))
-                if running:
-                    self.docker("exec", "--user", "1000", "-i", container, "node",
-                                "--input-type=module", script=script)
-                else:
-                    # Repair only the synthetic byte, through the same original image with no network.
-                    self.docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
-                                "--user", "1000", "--entrypoint", "node", "-i",
-                                "--mount", "type=volume,source=" + container + "-data,target=/data",
-                                inspected["Image"], "--input-type=module", script=script)
+                script = script.replace('/data/artifacts/', '/artifacts/sessions/' + session + '/artifacts/')
+                self.docker("exec", "--user", "1000", "-i", "helmglass-browser-node-1", "node",
+                            "--input-type=module", script=script)
 
             def repair_delivery():
                 if failure == 'SOURCE_HASH':
                     write_first_byte(expected[0])
-                else:
+                elif failure == 'DESTINATION_UNAVAILABLE':
                     self.docker('exec', '--user', '10001', 'helmglass-api-1',
                                 'rmdir', '/data/artifacts/' + artifact)
+                else:
+                    fixture_source('REPAIR')
+
+            def fixture_source(action):
+                source = '/artifacts/sessions/' + session + '/artifacts/' + artifact
+                script = "import fs from 'node:fs';const p=" + json.dumps(source) + ";"
+                if failure == 'SOURCE_ACCESS':
+                    script += "fs.chmodSync(p," + ('0o640' if action == 'REPAIR' else '0o000') + ");"
+                elif action == 'REPAIR':
+                    script += "if(fs.existsSync(p))fs.unlinkSync(p);fs.renameSync(p+'.fixture',p);"
+                else:
+                    script += "fs.renameSync(p,p+'.fixture');"
+                    if failure == 'SOURCE_SYMLINK':
+                        script += "fs.symlinkSync(p+'.fixture',p);"
+                self.docker('exec', '--user', '1000', '-i', 'helmglass-browser-node-1',
+                            'node', '--input-type=module', script=script)
 
             if failure == 'SOURCE_HASH':
                 write_first_byte(expected[0] ^ 1)
-            else:
-                # Make only this disposable destination unavailable to the atomic publish.
-                # Other artifact receivers and owners remain usable.
+            elif failure == 'DESTINATION_UNAVAILABLE':
                 self.docker('exec', '--user', '10001', 'helmglass-api-1',
                             'mkdir', '/data/artifacts/' + artifact)
+            else:
+                fixture_source('BREAK')
             corrupted = True
             self.fixture_sql(self.identity, "UPDATE browser_sessions SET artifact_cursor=0" + scope)
             script = r"""import fs from 'node:fs';const pids=[];
@@ -180,12 +189,13 @@ process.kill(pids[0],'SIGKILL');"""
             self.assertEqual(0, self.admin.api(endpoint)[1]["user"]["browserCount"])
 
             failed = self.wait_task(task, lambda value: value["browser"]["cleanupState"] == "FAILED")
-            self.assertEqual("ARTIFACT_DELIVERY_FAILED", failed["browser"]["cleanupError"])
+            self.assertEqual("RESULT_REGISTRATION_FAILED", failed["browser"]["cleanupError"])
             self.assertEqual('SUCCEEDED', self.client.tool('operations.get', {'operationId': click['id']})[1]['status'])
             self.assertEqual("3", self.fixture_sql(self.identity,
                 "SELECT cleanup_attempts FROM browser_sessions WHERE owner_id=:owner AND id='" + session + "';"))
             self.assertFalse(json.loads(self.docker("inspect", "--format", "{{json .State.Running}}", container)))
-            self.assertEqual(container + "-data", json.loads(self.docker("volume", "inspect", container + "-data"))[0]["Name"])
+            self.assertEqual('directory', self.docker('exec', 'helmglass-browser-node-1', 'stat',
+                '--format', '%F', '/artifacts/sessions/' + session))
             self.assertEqual(403, self.client.api('/api/admin/browsers/' + session + '/retry-cleanup', 'POST', {})[0])
             time.sleep(4)
             self.assertEqual("FAILED", self.current(task)["browser"]["cleanupState"])
@@ -205,6 +215,8 @@ process.kill(pids[0],'SIGKILL');"""
             neighbor_task = shown["task"]
             self.execute(neighbor_task, "observe", {}, neighbor_client)
             self.assertEqual("LIVE", self.current(neighbor_task, neighbor_client)["browser"]["status"])
+            self.assertEqual(404, neighbor_client.request(neighbor_client.base + '/api/artifacts/' + artifact + '/download')[0],
+                'A known artifact ID must not grant another owner access')
             self.assertEqual("CLOSED", self.current(task)["browser"]["status"])
             node_id = self.worker("/health")["value"]["nodeId"]
             nodes = self.admin.api("/api/admin/nodes")[1]
@@ -238,6 +250,12 @@ process.kill(pids[0],'SIGKILL');"""
             self.assertEqual("LIVE", replacement["browser"]["status"])
             self.assertNotEqual(session, replacement["browser"]["id"])
             self.assertEqual(1, self.admin.api(endpoint)[1]["user"]["browserCount"])
+            status, received, _ = self.client.request(self.client.base + "/api/artifacts/" + artifact + "/download")
+            self.assertEqual((200, expected), (status, received), "A replacement browser must keep existing results")
+            replacement_id = str(uuid.UUID(replacement['browser']['id']))
+            script = "import fs from 'node:fs';console.log(fs.existsSync('/data/artifacts/" + artifact + "'));"
+            self.assertEqual('false', self.docker('exec', '-i', 'helm-browser-' + replacement_id,
+                'node', '--input-type=module', script=script), 'A browser must not mount permanent results')
         finally:
             if corrupted:
                 repair_delivery()

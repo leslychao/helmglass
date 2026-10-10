@@ -115,9 +115,9 @@
     <span class="spacer"></span>
     <hg-column-picker [view]="table" />
   </div>
-  @if (error()) {
+  @if (error() || browserError()) {
     <div class="error-banner" role="alert">
-      {{ error() }} <button class="text-button" (click)="load()">Повторить</button>
+      {{ error() || browserError() }} <button class="text-button" (click)="load()">Повторить</button>
     </div>
   }
   @if (data(); as page) {
@@ -142,6 +142,13 @@
         <ng-template hgCell="status" [hgCellOf]="page.items" let-task
           ><hg-status [value]="task.status"
         /></ng-template>
+        <ng-template hgCell="browser" [hgCellOf]="page.items" let-task>
+          <hg-task-browser-state
+            [browser]="task.browser"
+            [now]="task.browser?.status === 'LIVE' ? browserNow() : 0"
+            [synchronized]="browsersSynchronized() && !staleBrowsers().has(task.id)"
+          />
+        </ng-template>
         <ng-template hgCell="elapsedSeconds" [hgCellOf]="page.items" let-task>
           <hg-task-duration [timing]="task.timing" />
         </ng-template>

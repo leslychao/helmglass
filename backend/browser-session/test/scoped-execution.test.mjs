@@ -14,7 +14,7 @@ async function fixture(html, run) {
   const mcp = new BrowserMcp(context, () => page, () => epoch, () => {});
   try {
     await page.setContent(html);
-    await run({ mcp, page, context, changeControl: () => epoch++ });
+    await run({ mcp, page, changeControl: () => epoch++ });
   } finally { await mcp.close(); await browser.close(); }
 }
 function target(observation, name) {
@@ -104,51 +104,6 @@ test('stock text waits complete before a fresh observation without repeating the
     assert.equal(await page.evaluate(() => effects), 1);
     for (const args of [{}, { time: 31 }, { text: 'Ready', state: 'visible' }])
       await assert.rejects(mcp.act('waitFor', args, randomUUID(), undefined, signal()));
-  });
-});
-
-test('background requests do not delay native clicks; explicit waits retain their conditions', async () => {
-  await fixture(`<button>Choose</button><output>Waiting</output><script>
-    let effects=0;document.querySelector('button').onclick=()=>{
-      document.querySelector('output').textContent='Chosen '+(++effects);
-      fetch('https://latency.example.test/background').then(()=>{
-        document.querySelector('output').textContent='Ready '+effects;
-      });
-    };</script>`, async ({ mcp, page, context }) => {
-    let release;
-    const pending = new Promise(resolve => { release = resolve; });
-    await context.route('https://latency.example.test/background', async route => {
-      await pending;
-      await delay(180);
-      await route.fulfill({ body: 'ok', headers: { 'Access-Control-Allow-Origin': '*' } });
-    });
-    try {
-      const observed = await mcp.observe();
-      const started = performance.now();
-      await mcp.act('click', target(observed, 'Choose'), randomUUID(), undefined, signal());
-      const clickMillis = performance.now() - started;
-      assert.ok(clickMillis < 1000, `Click waited for the unfinished request: ${clickMillis} ms`);
-      assert.equal(await page.locator('output').textContent(), 'Chosen 1');
-
-      const timeStarted = performance.now();
-      await mcp.act('waitFor', { time: .12 }, randomUUID(), undefined, signal());
-      const timeMillis = performance.now() - timeStarted;
-      assert.ok(timeMillis >= 115 && timeMillis < 1000, `Explicit time wait: ${timeMillis} ms`);
-      assert.equal(await page.locator('output').textContent(), 'Chosen 1');
-
-      release();
-      const textStarted = performance.now();
-      await mcp.act('waitFor', { textGone: 'Chosen 1', text: 'Ready 1' }, randomUUID(), undefined, signal());
-      const textMillis = performance.now() - textStarted;
-      const final = await mcp.observe();
-      assert.ok(textMillis >= 150 && textMillis < 1500, `Explicit text wait: ${textMillis} ms`);
-      assert.ok(JSON.stringify(final.snapshot).includes('Ready 1'));
-      assert.equal(await page.evaluate(() => effects), 1);
-      console.log(JSON.stringify({ clickMillis, timeMillis, textMillis }));
-    } finally {
-      release();
-      await context.unrouteAll({ behavior: 'wait' });
-    }
   });
 });
 

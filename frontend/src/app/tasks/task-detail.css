@@ -12,6 +12,12 @@
   gap: 8px;
 }
 
+.task-menu hr {
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
 .current-step-heading {
   display: flex;
   align-items: center;

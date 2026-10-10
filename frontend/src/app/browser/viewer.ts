@@ -133,13 +133,13 @@ export function browserViewerId(): string {
     @if (browser()?.cleanupState === 'FAILED') {
       <p class="error-banner" role="alert">
         @if (browser()?.cleanupError === 'CLEANUP_FAILED') {
-          Браузер освобождён, файлы перенесены, но очистка диска не завершена. Администратор может повторить очистку.
+          Браузер освобождён, результаты сохранены, но временные данные не удалены. Администратор может повторить очистку.
         } @else {
-          Браузер освобождён, но перенос оставшихся файлов не завершён. Исходные файлы сохранены; администратор может повторить перенос.
+          Браузер освобождён, но проверка результатов не завершена. Исходные данные сохранены; администратор может повторить обработку.
         }
       </p>
     } @else if (browser()?.status === 'CLOSED' && browser()?.cleanupState === 'PENDING') {
-      <p class="browser-inline-notice" role="status">Браузер освобождён. Завершаем сохранение файлов.</p>
+      <p class="browser-inline-notice" role="status">Браузер освобождён. Проверяем результаты и удаляем временные данные.</p>
     }
     @if (sessionPanel()?.error() || browser()?.profileSaveError) {
       <p class="error-banner" role="alert">

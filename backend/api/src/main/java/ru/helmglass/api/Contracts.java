@@ -57,7 +57,7 @@ public final class Contracts {
       String accountLabel,
       String accountSubject) {
     public TaskCommand {
-      if (type == null || !Set.of("PREPARE", "AMEND", "RESUME", "STOP", "ANSWER",
+      if (type == null || !Set.of("AMEND", "RESUME", "STOP", "ANSWER",
           "CONFIRM", "REJECT", "CHOOSE_CONNECTION", "FINISH", "TAKE_CONTROL", "RETURN_CONTROL",
           "BEGIN_LOGIN", "FINISH_LOGIN", "REQUIRE_LOGIN", "CLOSE_BROWSER", "OPEN_BROWSER").contains(type)) {
         throw ApiException.invalid("type", "Неизвестная команда задачи.");

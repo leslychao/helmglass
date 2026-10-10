@@ -327,13 +327,14 @@ while(true){const s=JSON.parse(db.prepare('SELECT document FROM sessions WHERE i
         self.assertEqual(('LIVE', 'USER', accepted['controlEpoch']), (current['browser']['status'],
             current['browser']['controlOwner'], current['browser']['controlEpoch']))
 
-    def test_unavailable_archive_image_is_not_a_missing_receipt(self):
+    def test_unavailable_session_registry_is_not_a_missing_receipt(self):
         identity, client, model, task = self.ready()
         session = str(uuid.UUID(task['browser']['id']))
         scope = " WHERE owner_id=:owner AND id='" + session + "';"
         self.fixture_sql(identity,
             "UPDATE browser_sessions SET next_check_at=clock_timestamp()+interval '7 minutes'" + scope)
         script = """import {DatabaseSync} from 'node:sqlite';
+import fs from 'node:fs';
 const db=new DatabaseSync('/data/node.sqlite'),id=%s,owner=%s;
 const row=db.prepare('SELECT document FROM sessions WHERE id=?').get(id);
 const session=JSON.parse(row.document);
@@ -349,25 +350,24 @@ const get=async route=>{const r=await fetch('http://127.0.0.1:8090/sessions/'+id
 const receiptRoute='commands/'+%s;
 let receipt,manifest;
 try{
- db.prepare('UPDATE sessions SET document=? WHERE id=?').run(JSON.stringify({...original,
-  runtimeImage:'sha256:'+'0'.repeat(64)}),id);
- receipt=await get(receiptRoute);manifest=await get('artifacts?archive=true');
+ const registry='/artifacts/sessions/'+id+'/session.sqlite';
+ fs.renameSync(registry,registry+'.fixture');
+ receipt=await get(receiptRoute);manifest=await get('artifacts');
 }finally{
- const current=JSON.parse(db.prepare('SELECT document FROM sessions WHERE id=?').get(id).document);
- db.prepare('UPDATE sessions SET document=? WHERE id=?').run(
-  JSON.stringify({...current,runtimeImage:original.runtimeImage}),id);
+ const registry='/artifacts/sessions/'+id+'/session.sqlite';
+ fs.renameSync(registry+'.fixture',registry);
 }
 console.log(JSON.stringify({receipt,manifest,restoredReceipt:await get(receiptRoute),
- restoredManifest:await get('artifacts?archive=true')}));
+ restoredManifest:await get('artifacts')}));
 """ % (json.dumps(session), json.dumps(identity.id), json.dumps(str(uuid.uuid4())))
         try:
             checked = json.loads(self.docker('exec', '-i', 'helmglass-browser-node-1',
                 'node', '--input-type=module', script=script))
             self.assertEqual({'receipt': 502, 'manifest': 502,
                 'restoredReceipt': 404, 'restoredManifest': 200}, checked,
-                'An unavailable reader image cannot prove a receipt or artifact is absent')
-            self.assertEqual('helm-browser-' + session + '-data', self.docker('volume', 'inspect',
-                'helm-browser-' + session + '-data', '--format', '{{.Name}}'))
+                'An unavailable registry cannot prove a receipt or artifact is absent')
+            self.assertEqual('directory', self.docker('exec', 'helmglass-browser-node-1', 'stat',
+                '--format', '%F', '/artifacts/sessions/' + session))
         finally:
             self.fixture_sql(identity,
                 "UPDATE browser_sessions SET next_check_at=clock_timestamp()" + scope)

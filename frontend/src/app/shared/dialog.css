@@ -1,3 +1,43 @@
+.dialog.dialog-image {
+  display: flex;
+  flex-direction: column;
+  width: 1120px;
+  overflow: hidden;
+}
+.dialog-image header {
+  flex: none;
+}
+.dialog-image header h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dialog-image-viewport {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafd;
+}
+.dialog-image-viewport img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: calc(100dvh - 160px);
+  object-fit: contain;
+  margin: 0 auto;
+}
+.dialog-image-viewport img[hidden] {
+  display: none;
+}
+.dialog-image-viewport > p {
+  margin: 16px;
+}
 .dialog-subject {
   display: flex;
   align-items: center;

@@ -267,7 +267,7 @@ hg-data-table .hg-grid .hg-detail-cell {
   font-size: 11px;
   line-height: 1.45;
 }
-hg-data-table .hg-grid :is(.task-name, .summary-cell, .audit-text, .entity-cell) {
+hg-data-table .hg-grid :is(.task-name, .summary-cell, .audit-text, .entity-cell, .text-cell) {
   text-align: left;
 }
 hg-data-table .hg-grid .entity-cell .site-cell {

@@ -1,0 +1,8 @@
+**
+!session-records
+!session-records/**
+!browser-node
+!browser-node/**
+browser-node/node_modules
+browser-node/dist
+browser-node/*.log

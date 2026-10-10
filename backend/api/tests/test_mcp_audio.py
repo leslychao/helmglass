@@ -112,7 +112,8 @@ class AudioAnalysisTest(unittest.TestCase):
             started = time.monotonic()
             pending = self.tool('audio.analyze', {'artifactId': delayed_artifact, 'mode': 'transcript'})
             elapsed = time.monotonic() - started
-            self.assertLess(elapsed, 10)
+            self.assertGreaterEqual(elapsed, 49)
+            self.assertLess(elapsed, 55)
             self.assertEqual(delayed_id, pending['analysisId'])
             self.assertEqual('QUEUED', pending['status'])
             self.assertFalse(pending['sectionComplete'])
@@ -122,6 +123,49 @@ class AudioAnalysisTest(unittest.TestCase):
         finished = self.wait(delayed_id)
         self.assertEqual('SUCCEEDED', finished['status'], finished)
         self.assertEqual(1, finished['metrics']['asrCalls'])
+
+    def test_pending_summary_read_waits_for_full_completion(self):
+        path = Path('.work/audio-corpus/fleurs-10669014641440041936.wav')
+        artifact, _, _ = self.fixture(path, 'summary readiness metadata')
+        reference = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'full'})
+        self.assertEqual('SUCCEEDED', reference['status'], reference)
+        queued_artifact, _, digest = self.fixture(path, 'queued sound summary')
+        queued_id = str(uuid.uuid4())
+        self.sql(f"""INSERT INTO audio_analyses
+            (id,owner_id,artifact_id,source_sha256,processing_version,metadata,
+             requested_mode,status,next_attempt_at)
+            SELECT '{queued_id}',owner_id,'{queued_artifact}','{digest}',processing_version,
+              metadata,'full','QUEUED',now()+interval '1 day'
+            FROM audio_analyses WHERE id='{reference['analysisId']}';""")
+        self.sql(f"""INSERT INTO audio_analysis_items
+            (analysis_id,section,start_seconds,end_seconds,payload)
+            SELECT '{queued_id}',section,start_seconds,end_seconds,payload
+            FROM audio_analysis_items WHERE analysis_id='{reference['analysisId']}'
+              AND section='acoustics' ORDER BY id;
+            UPDATE audio_analyses SET acoustics_complete=true WHERE id='{queued_id}';""")
+        ready_started = time.monotonic()
+        acoustic_page = self.tool('audio.get', {
+            'analysisId': queued_id, 'section': 'acoustics', 'limit': 1})
+        self.assertEqual('QUEUED', acoustic_page['status'])
+        self.assertTrue(acoustic_page['sectionComplete'])
+        self.assertEqual(1, len(acoustic_page['items']))
+        self.assertLess(time.monotonic() - ready_started, 2)
+        started = time.monotonic()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            pending = executor.submit(self.tool, 'audio.get', {
+                'analysisId': queued_id, 'section': 'summary'})
+            try:
+                time.sleep(3)
+                self.assertFalse(pending.done(), 'An unfinished summary read should await its signal')
+            finally:
+                self.sql(f"UPDATE audio_analyses SET next_attempt_at=now() WHERE id='{queued_id}';")
+            summary = pending.result(timeout=60)
+        self.assertEqual('SUCCEEDED', summary['status'], summary)
+        self.assertTrue(summary['sectionComplete'])
+        self.assertTrue(summary['soundSummary']['acousticsComplete'])
+        self.assertTrue(summary['soundSummary']['emotionsComplete'])
+        self.assertLess(time.monotonic() - started, 15)
+        print('One summary read returned on full completion, without status polling', flush=True)
 
     def test_loudness_levels_and_timeline_through_mcp(self):
         # Analytic RMS/peak references for a sine, including both silence edges.
@@ -141,9 +185,38 @@ class AudioAnalysisTest(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
         job = self.tool('audio.analyze', {'artifactId': artifact, 'mode': 'full'})
+        self.assertIn('soundSummary', job)
+        self.assertEqual('SUCCEEDED', job['status'], job)
+        self.assertTrue(job['soundSummary']['acousticsComplete'])
+        self.assertTrue(job['soundSummary']['emotionsComplete'])
         state = self.wait(job['analysisId'])
         self.assertTrue(state['acousticsComplete'], state)
         self.assertEqual(18, state['durationSeconds'])
+        summary = self.tool('audio.get', {'analysisId': job['analysisId'], 'section': 'summary'})
+        self.assertTrue(summary['sectionComplete'])
+        self.assertFalse(summary['hasMore'])
+        sound = summary['soundSummary']
+        self.assertTrue(sound['acousticsComplete'])
+        self.assertTrue(sound['emotionsComplete'])
+        acoustics = sound['acoustics']
+        self.assertEqual(360, acoustics['loudnessSamples'])
+        self.assertEqual(1800, acoustics['pitchSamples'])
+        self.assertEqual(18, acoustics['coveredSeconds'])
+        self.assertEqual(6, acoustics['digitalSilenceSeconds'])
+        self.assertAlmostEqual(-6.0206, acoustics['peakDbfs'], delta=.02)
+        self.assertAlmostEqual(10 * math.log10((.1**2 + .5**2 + .025**2) * 2 / 18),
+                               acoustics['rmsDbfs'], delta=.02)
+        self.assertTrue(sound['emotions']['sectionComplete'])
+        if job['status'] == 'SUCCEEDED':
+            self.assertEqual(sound, job['soundSummary'])
+        interval = self.tool('audio.get', {'analysisId': job['analysisId'],
+            'section': 'acoustics', 'from': 6, 'to': 6.1})
+        self.assertFalse(interval['hasMore'])
+        self.assertTrue(all(item['start'] >= 6 and item['end'] <= 6.1
+                            for item in interval['items']))
+        self.assertGreater(len(interval['items']), 0)
+        print('Full sound summary includes all 18 seconds; targeted samples share the same result',
+              flush=True)
         cursor = None
         loudness = []
         while True:
@@ -215,7 +288,9 @@ class AudioAnalysisTest(unittest.TestCase):
                 self.assertEqual('SUCCEEDED', page['status'], page)
                 self.assertEqual(calls, page['metrics']['asrCalls'])
                 self.assertEqual(saved_context, page['instructionContext'])
-                unscoped = other.rpc('tools/call', {'name':'audio.get','arguments':{'analysisId':first['analysisId']}})
+                unscoped = other.rpc('tools/call', {'name':'audio.get', 'arguments': {
+                    'analysisId': first['analysisId'], 'callId': str(uuid.uuid4()),
+                    'stepTitle': 'Прочитать сохранённый анализ аудио'}})
                 self.assertFalse(unscoped.get('isError',False))
                 self.assertTrue(all(x['type']=='text' for x in unscoped['content']))
                 self.assertEqual(before['version'], self.client.api('/api/tasks/' + task_id)[1]['version'])
@@ -228,6 +303,25 @@ class AudioAnalysisTest(unittest.TestCase):
             status, raw, _ = self.client.request(self.client.base + '/api/artifacts/' + artifact['id'] + '/download')
             self.assertEqual(200,status)
             self.assertEqual(artifact['sha256'],hashlib.sha256(raw).hexdigest())
+            original_browser = self.client.api('/api/tasks/' + task_id)[1]['browser']['id']
+            for command, expected in [('CLOSE_BROWSER', 'CLOSED'), ('OPEN_BROWSER', 'LIVE')]:
+                current = self.client.api('/api/tasks/' + task_id)[1]
+                status, reply = self.client.api('/api/tasks/' + task_id + '/commands', 'POST',
+                    {'type': command, 'expectedVersion': current['version']})
+                self.assertEqual(200, status, reply)
+                deadline = time.monotonic() + 90
+                while time.monotonic() < deadline:
+                    current = self.client.api('/api/tasks/' + task_id)[1]
+                    if current['browser']['status'] == expected:
+                        break
+                    time.sleep(.2)
+                self.assertEqual(expected, current['browser']['status'])
+                status, saved, _ = self.client.request(
+                    self.client.base + '/api/artifacts/' + artifact['id'] + '/download')
+                self.assertEqual(200, status)
+                self.assertEqual(artifact['sha256'], hashlib.sha256(saved).hexdigest())
+                self.assertEqual('SUCCEEDED', self.tool('audio.get', {'analysisId': first['analysisId']})['status'])
+            self.assertNotEqual(original_browser, current['browser']['id'])
         finally:
             task = self.client.api('/api/tasks/' + task_id)[1]
             status, _ = self.client.api('/api/tasks/' + task_id + '/commands', 'POST',
@@ -267,6 +361,9 @@ class AudioAnalysisTest(unittest.TestCase):
         page = self.wait(analysis)
         self.assertEqual('SUCCEEDED', page['status'], page)
         self.assertEqual(0, page['metrics']['asrCalls'])
+        silence_summary = self.tool('audio.get', {'analysisId': analysis, 'section': 'summary'})
+        self.assertIsNone(silence_summary['soundSummary']['acoustics']['rmsDbfs'])
+        self.assertEqual(3, silence_summary['soundSummary']['acoustics']['digitalSilenceSeconds'])
         acoustics = self.tool('audio.get', {'analysisId': analysis, 'section': 'acoustics', 'limit': 20})
         self.assertTrue(acoustics['hasMore'])
         self.assertTrue(acoustics['sectionComplete'])
@@ -278,7 +375,9 @@ class AudioAnalysisTest(unittest.TestCase):
         stranger.login_web()
         stranger.login_mcp()
         try:
-            for name, args in [('audio.analyze', {'artifactId': artifact, 'mode': 'full'}), ('audio.get', {'analysisId': analysis})]:
+            for name, args in [('audio.analyze', {'artifactId': artifact, 'mode': 'full'}),
+                               ('audio.get', {'analysisId': analysis}),
+                               ('audio.get', {'analysisId': analysis, 'section': 'summary'})]:
                 failed, refusal, raw = stranger.tool(name, args)
                 self.assertTrue(failed)
                 self.assertEqual('NOT_FOUND', refusal['code'])
@@ -323,6 +422,10 @@ class AudioAnalysisTest(unittest.TestCase):
         self.assertFalse(result['emotionsComplete'])
         self.assertEqual('FAILED', result['stages']['emotions'])
         self.assertEqual('EMOTION_FAILED', result['stageErrors']['emotions'])
+        partial_summary = self.tool('audio.get', {'analysisId': partial_id, 'section': 'summary'})
+        self.assertFalse(partial_summary['sectionComplete'])
+        self.assertTrue(partial_summary['soundSummary']['acousticsComplete'])
+        self.assertFalse(partial_summary['soundSummary']['emotions']['sectionComplete'])
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

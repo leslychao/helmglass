@@ -6,20 +6,21 @@ import { FilterReset } from '../shared/filter-reset';
 import { KpiSection } from '../shared/kpi-section';
 import { Autocomplete, AutocompleteOption } from '../shared/autocomplete';
 import { DatePipe } from '@angular/common';
-import { Component, DestroyRef, effect, inject, signal, untracked } from '@angular/core';
+import { Component, DestroyRef, computed, effect, inject, signal, untracked } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { DateFilter } from '../shared/date-filter';
 import { RouterLink } from '@angular/router';
 import * as z from 'zod/mini';
 import { Api, ApiError, errorMessage } from '../core/api';
 import { LiveEvents } from '../core/live-events';
-import { Page, Task, kpiSchema, pageSchema, taskSchema } from '../core/models';
+import { Page, Task, kpiSchema, newestBrowser, pageSchema, taskSchema } from '../core/models';
 import { MultiFilter, Option } from '../shared/multi-filter';
 import { QueryState } from '../shared/query-state';
 import { Tooltip } from '../shared/tooltip';
 import { DurationPipe, Empty, MegabytesPipe, Pager, Status, states } from '../shared/ui';
 import { TaskStop } from './task-stop';
 import { TaskDuration } from './task-duration';
+import { TaskBrowserState } from './task-browser-state';
 
 @Component({
   selector: 'hg-task-list',
@@ -38,6 +39,7 @@ import { TaskDuration } from './task-duration';
     DurationPipe,
     MegabytesPipe,
     TaskDuration,
+    TaskBrowserState,
     Empty,
     Pager,
     Status,
@@ -59,6 +61,13 @@ export class TaskList {
   readonly error = signal('');
   readonly loading = signal(true);
   readonly stopping = signal<string | null>(null);
+  readonly browserNow = signal(Date.now());
+  readonly browserError = signal('');
+  readonly staleBrowsers = signal<ReadonlySet<string>>(new Set());
+  readonly browsersSynchronized = computed(
+    () => this.live.state() === 'ready' && !this.loading() && !this.error(),
+  );
+  private readonly browserRefreshes = new Map<string, { generation: number; again: boolean }>();
   readonly filterKeys = ['search', 'taskId', 'status', 'site', 'source', 'from', 'to'];
   readonly stateOptions: Option[] = [
     'DRAFT',
@@ -131,8 +140,10 @@ export class TaskList {
     { key: 'title', label: 'Задача', width: 300, required: true, className: 'task-name' },
     { key: 'site', label: 'Сайт', width: 210 },
     { key: 'status', label: 'Состояние', width: 190, required: true },
+    { key: 'browser', label: 'Браузер', width: 220, minWidth: 180, sortable: false,
+      help: 'Состояние браузера и срок автозакрытия при простое. Просмотр списка не продлевает этот срок.' },
     { key: 'elapsedSeconds', label: 'Длительность задачи', width: 190,
-      help: 'От подготовки до завершения задачи, включая ожидания и паузы. Черновик не учитывается.' },
+      help: 'От принятия к выполнению до завершения задачи, включая ожидания и паузы. Черновик не учитывается.' },
     { key: 'executionSeconds', label: 'Команды браузера', width: 180, hidden: true,
       help: 'Суммарное время выполнения команд браузера, без ожиданий между командами и работы ChatGPT.' },
     { key: 'manualSeconds', label: 'Человек', width: 150, hidden: true },
@@ -149,12 +160,85 @@ export class TaskList {
       untracked(() => void this.load());
     });
     this.live
-      .watch(['task'])
+      .watch(['task', 'browser'])
       .pipe(takeUntilDestroyed())
-      .subscribe(() => void this.load(false));
+      .subscribe((change) => {
+        if (change.resource === 'browser' && change.entityId) {
+          void this.refreshBrowser(change.entityId);
+        } else {
+          void this.load(false);
+        }
+      });
+    effect((onCleanup) => {
+      const visible = this.table.visible().some((column) => column.key === 'browser');
+      const tasks = this.data()?.items ?? [];
+      const stale = this.staleBrowsers();
+      const synchronized = this.browsersSynchronized();
+      const now = Date.now();
+      this.browserNow.set(now);
+      if (!visible || !synchronized) return;
+      const lastDeadline = tasks.reduce((latest, task) => {
+        const browser = task.browser;
+        return !stale.has(task.id) && browser?.status === 'LIVE' && browser.idleCloseAt
+          ? Math.max(latest, Date.parse(browser.idleCloseAt)) : latest;
+      }, 0);
+      if (lastDeadline <= now) return;
+      const timer = setInterval(() => {
+        const now = Date.now();
+        this.browserNow.set(now);
+        if (now >= lastDeadline) clearInterval(timer);
+      }, 1000);
+      onCleanup(() => clearInterval(timer));
+    });
     this.destroy.onDestroy(() => {
       this.generation++;
     });
+  }
+  private mergeTask(current: Task | undefined, incoming: Task): Task {
+    if (!current) return incoming;
+    const latest = incoming.version >= current.version ? incoming : current;
+    const browser = current.browser?.id === incoming.browser?.id
+      ? newestBrowser(current.browser, incoming.browser)
+      : latest.browser;
+    return { ...latest, browser };
+  }
+  private async refreshBrowser(browserId: string) {
+    const task = this.data()?.items.find((task) => task.browser?.id === browserId);
+    if (!task) return;
+    const pending = this.browserRefreshes.get(task.id);
+    if (pending?.generation === this.generation) {
+      pending.again = true;
+      return;
+    }
+    const refresh = { generation: this.generation, again: false };
+    this.browserRefreshes.set(task.id, refresh);
+    try {
+      do {
+        refresh.again = false;
+        try {
+          const incoming = await this.api.get('/api/tasks/' + task.id, taskSchema);
+          if (refresh.generation !== this.generation || this.destroy.destroyed) return;
+          this.data.update((page) => page ? {
+            ...page,
+            items: page.items.map((current) => current.id === task.id
+              ? this.mergeTask(current, incoming) : current),
+          } : page);
+          this.staleBrowsers.update((stale) => {
+            if (!stale.has(task.id)) return stale;
+            const next = new Set(stale);
+            next.delete(task.id);
+            return next;
+          });
+          if (!this.staleBrowsers().size) this.browserError.set('');
+        } catch (error: unknown) {
+          if (refresh.generation !== this.generation || this.destroy.destroyed) return;
+          this.staleBrowsers.update((stale) => new Set([...stale, task.id]));
+          this.browserError.set(errorMessage(error));
+        }
+      } while (refresh.again);
+    } finally {
+      if (this.browserRefreshes.get(task.id) === refresh) this.browserRefreshes.delete(task.id);
+    }
   }
   async stop(task: Task) {
     if (this.stopping() !== null) return;
@@ -205,7 +289,10 @@ export class TaskList {
           : Promise.resolve(this.summary()),
       ]);
       if (generation !== this.generation) return;
-      this.data.set(data);
+      const current = new Map(this.data()?.items.map((task) => [task.id, task]));
+      this.data.set({ ...data, items: data.items.map((task) => this.mergeTask(current.get(task.id), task)) });
+      this.staleBrowsers.set(new Set());
+      this.browserError.set('');
       this.summary.set(summary);
       this.error.set('');
     } catch (error: unknown) {

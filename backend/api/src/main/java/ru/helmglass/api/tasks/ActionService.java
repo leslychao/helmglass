@@ -1,6 +1,7 @@
 package ru.helmglass.api.tasks;
 
 import jakarta.annotation.PreDestroy;
+import java.nio.charset.StandardCharsets;
 import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
@@ -64,6 +65,7 @@ public class ActionService {
           "screenshot",
           "listMedia",
           "captureAudio",
+          "playMedia",
           "waitFor");
   private final JdbcClient jdbc;
   private final JsonSupport json;
@@ -128,10 +130,10 @@ public class ActionService {
         || !ACTIONS.contains(action.type())
         || action.arguments() == null
         || !action.arguments().isObject()
-        || json.write(action.arguments()).length() > 65536) {
+        || json.write(action.arguments()).getBytes(StandardCharsets.UTF_8).length > 65536) {
       throw ApiException.invalid("action", "Некорректная команда браузера.");
     }
-    if (sequence.size() > 8 || !sequence.isEmpty() && !sequence.contains(action.operationId())) {
+    if (!sequence.isEmpty() && !sequence.contains(action.operationId())) {
       throw ApiException.invalid("actions", "Некорректная последовательность операций.");
     }
     if (action.arguments().has("selector") || action.arguments().has("_meta")) {
@@ -177,7 +179,7 @@ public class ActionService {
       }
       return result(owner, action.operationId());
     }
-    validateObservationArguments(action.type(), action.arguments());
+    validateActionArguments(action.type(), action.arguments());
     Contracts.Task task = tasks.get(owner, taskId);
     if (task.instructionRevision() != action.instructionRevision()) {
       throw ApiException.conflict("STALE_INSTRUCTION", "Поручение изменилось.");
@@ -224,7 +226,8 @@ public class ActionService {
     instruction.put(
         "observeAfter",
         action.observeAfter() == null
-            ? !Set.of("listMedia", "captureAudio", "screenshot").contains(action.type())
+            ? !Set.of("listMedia", "captureAudio", "screenshot", "playMedia")
+                .contains(action.type())
             : action.observeAfter());
     if (confirmation != null) {
       instruction.put("confirmationPrompt", confirmation);
@@ -710,7 +713,19 @@ public class ActionService {
     }
   }
 
-  private static void validateObservationArguments(String type, JsonNode arguments) {
+  private static void validateActionArguments(String type, JsonNode arguments) {
+    if ("playMedia".equals(type)) {
+      String sourceId = arguments.path("sourceId").asString("");
+      try {
+        if (arguments.size() != 1
+            || !UUID.fromString(sourceId).toString().equalsIgnoreCase(sourceId)) {
+          throw new IllegalArgumentException("Invalid media target");
+        }
+      } catch (IllegalArgumentException exception) {
+        throw ApiException.invalid("sourceId", "Укажите только sourceId из listMedia.");
+      }
+      return;
+    }
     if (!Set.of("observe", "waitFor", "press").contains(type)) {
       return;
     }
@@ -915,7 +930,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
             .single();
     boolean supported = ACTIONS.contains(command.type()) || "applyConnection".equals(command.type());
     try {
-      validateObservationArguments(command.type(), command.arguments());
+      validateActionArguments(command.type(), command.arguments());
     } catch (ApiException exception) {
       supported = false;
     }
@@ -1168,7 +1183,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
             operation.owner(), operation.task(), operation.session(), operation.id(), result);
       } catch (RuntimeException exception) {
         log.warn(
-            "Confirmed operation {} awaits artifact delivery: {}",
+            "Confirmed operation {} awaits artifact registration: {}",
             operation.id(),
             exception.getClass().getSimpleName());
       }
@@ -1201,7 +1216,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
     }
   }
 
-  /** Recover final receipts before the node removes the original session volume. */
+  /** Recover final receipts before the node removes the session directory. */
   public boolean archiveReceipts(UUID session) {
     var ids =
         jdbc.sql(
@@ -1454,7 +1469,8 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       throw ApiException.conflict("STALE_INSTRUCTION", "Поручение изменилось.");
     }
     if ("DRAFT".equals(task.status())) {
-      throw ApiException.conflict("ACTION_UNAVAILABLE", "Сначала подготовьте задачу.");
+      throw ApiException.conflict(
+          "ACTION_UNAVAILABLE", "Результат можно сохранить после запуска задачи.");
     }
     if (result == null
         || !result.isObject()

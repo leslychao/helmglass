@@ -241,11 +241,40 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
         owner,
         id,
         "CREATED",
-        prepare ? "Задача подготовлена для ChatGPT" : "Черновик сохранён",
+        prepare ? "Задача принята к выполнению" : "Черновик сохранён",
         null);
     if (prepare) {
       events.emitAdministrators("admin-user", owner, 1);
     }
+    return get(owner, id);
+  }
+
+  @Transactional
+  public Contracts.Task startDraft(UUID owner, UUID id) {
+    identity.requireActive(owner);
+    lockOwner(owner);
+    lockTask(owner, id);
+    Contracts.Task task = get(owner, id);
+    if (!"DRAFT".equals(task.status())) {
+      return task;
+    }
+    validate(
+        new Contracts.TaskInput(
+            task.title(),
+            task.goal(),
+            task.startUrl(),
+            task.outputFormat(),
+            task.preferredConnectionIds(),
+            true),
+        true);
+    validateConnections(owner, task.preferredConnectionIds());
+    checkWaitingAdmission(owner);
+    long accepted = events.emit(owner, "task", id, task.version() + 1);
+    jdbc.sql("UPDATE tasks SET accepted_at=now(),accepted_sequence=:sequence WHERE id=:id")
+        .param("sequence", accepted)
+        .param("id", id)
+        .update();
+    change(owner, id, "WAITING_CHATGPT", null, "Задача принята к выполнению");
     return get(owner, id);
   }
 
@@ -267,27 +296,6 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
           "STALE_VERSION", "Задача изменилась. Проверьте актуальное поручение.");
     }
     switch (type) {
-      case "PREPARE" -> {
-        if (!"DRAFT".equals(task.status())) {
-          throw unavailable();
-        }
-        validate(
-            new Contracts.TaskInput(
-                task.title(),
-                task.goal(),
-                task.startUrl(),
-                task.outputFormat(),
-                task.preferredConnectionIds(),
-                true),
-            true);
-        checkWaitingAdmission(owner);
-        long accepted = events.emit(owner, "task", id, task.version() + 1);
-        jdbc.sql("UPDATE tasks SET accepted_at=now(),accepted_sequence=:sequence WHERE id=:id")
-            .param("sequence", accepted)
-            .param("id", id)
-            .update();
-        change(owner, id, "WAITING_CHATGPT", null, "Задача подготовлена для ChatGPT");
-      }
       case "AMEND" -> {
         if ("WEB".equals(actor.channel()) && !"DRAFT".equals(task.status())) {
           throw ApiException.conflict(
@@ -295,7 +303,17 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
         }
         amend(owner, task, command);
       }
-      case "RESUME" -> resume(owner, task, command);
+      case "RESUME" -> {
+        if ("DRAFT".equals(task.status())) {
+          if (!"MCP".equals(actor.channel())) {
+            throw ApiException.conflict(
+                "ORIGINAL_CHAT_REQUIRED", "Попросите выполнить черновик в чате.");
+          }
+          startDraft(owner, id);
+        } else {
+          resume(owner, task, command);
+        }
+      }
       case "STOP" -> requestStop(owner, id);
       case "CLOSE_BROWSER" -> {
         if (!"WEB".equals(actor.channel())) {
@@ -1048,6 +1066,19 @@ UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format
     if (Set.of("STOPPED", "STOPPING").contains(status)) {
       return;
     }
+    if ("DRAFT".equals(status)) {
+      boolean chatBound =
+          jdbc.sql(
+                  "SELECT EXISTS(SELECT 1 FROM mcp_task_chats"
+                      + " WHERE task_id=:id AND owner_id=:owner)")
+              .param("id", id)
+              .param("owner", owner)
+              .query(Boolean.class)
+              .single();
+      if (!chatBound) {
+        throw unavailable();
+      }
+    }
     cancelQueued(id);
     if (!hasUnknown(id)) {
       cancelRequest(id);
@@ -1376,7 +1407,7 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
     if (limit != null && waiting >= limit) {
       throw ApiException.conflict(
           "WAITING_LIMIT",
-          "Достигнут лимит подготовленных ожидающих задач. Черновик можно сохранить.");
+          "Достигнут лимит ожидающих задач. Черновик можно сохранить.");
     }
   }
 
@@ -1462,7 +1493,10 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
     String status = row.getString("status");
     List<String> commands = new ArrayList<>();
     if ("DRAFT".equals(status)) {
-      commands.addAll(List.of("AMEND", "PREPARE", "STOP"));
+      commands.addAll(List.of("AMEND", "RESUME"));
+      if (row.getBoolean("chat_bound")) {
+        commands.add("STOP");
+      }
     } else if ("PAUSED".equals(status)) {
       commands.addAll(List.of("RESUME", "STOP", "TAKE_CONTROL", "BEGIN_LOGIN"));
     } else if (TERMINAL.contains(status) && !"STOPPED".equals(status)) {

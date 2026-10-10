@@ -165,10 +165,10 @@
                     <ng-template hgCell="actions" [hgCellOf]="browsers.items" let-browser>
                       @if (browser.cleanupState === 'FAILED') {
                         <button class="button small" [disabled]="!!busy() || !available()"
-                          hgTooltip="Браузер остановлен. Повторить сохранение файлов и очистку"
+                          hgTooltip="Браузер остановлен. Повторить проверку результатов и очистку"
                           (click)="retryCleanup(browser, node.id)"><hg-icon name="refresh" />Повторить сохранение</button>
                       } @else if (browser.status === 'CLOSED') {
-                        <span>Браузер освобождён · сохраняем файлы</span>
+                        <span>Браузер освобождён · проверяем результаты</span>
                       } @else if (browser.taskId) {
                         <button
                           class="button small danger-soft stop-task"

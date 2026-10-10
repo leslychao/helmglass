@@ -2,7 +2,16 @@ import { TableViews } from '../shared/table-view';
 import { DataTable, TableCell } from '../shared/data-table';
 import { Icon } from '../shared/icon';
 import { SearchInput } from '../shared/search-input';
-import { Component, DestroyRef, computed, effect, inject, input, signal } from '@angular/core';
+import {
+  Component,
+  DestroyRef,
+  computed,
+  effect,
+  inject,
+  input,
+  linkedSignal,
+  signal,
+} from '@angular/core';
 import { RouterLink } from '@angular/router';
 import * as z from 'zod/mini';
 import { Api, errorMessage } from '../core/api';
@@ -150,8 +159,39 @@ import { Tooltip } from '../shared/tooltip';
                   file.mimeType.split(';')[0].trim() === 'text/plain'
                 ) {
                   <hg-text-artifact [id]="file.id" [name]="file.name" />
-                } @else if (file.status === 'READY' && file.complete && file.mimeType.startsWith('audio/')) {
+                } @else if (
+                  file.status === 'READY' && file.complete && file.mimeType.startsWith('audio/')
+                ) {
                   <hg-audio-analysis [id]="file.id" [name]="file.name" />
+                } @else if (
+                  file.status === 'READY' && file.complete && file.mimeType.startsWith('image/')
+                ) {
+                  <div class="file-row file-image">
+                    <button
+                      type="button"
+                      class="file-preview"
+                      [attr.aria-label]="'Открыть изображение ' + file.name"
+                      hgTooltip="Открыть изображение"
+                      (click)="openImage(file)"
+                    >
+                      @if (imageFailures().has(file.id)) {
+                        <span class="file-preview-error">Не удалось загрузить превью</span>
+                      } @else {
+                        <img
+                          [src]="file.downloadUrl"
+                          alt=""
+                          loading="lazy"
+                          decoding="async"
+                          (error)="imageFailed(file.id)"
+                        />
+                      }
+                      <span class="file-preview-action"><hg-icon name="expand" /></span>
+                    </button>
+                    <span class="file-image-details">
+                      <strong>{{ file.name }}</strong>
+                      <small>{{ file.mimeType }} · {{ file.sizeBytes | megabytes }}</small>
+                    </span>
+                  </div>
                 } @else {
                   <div class="file-row">
                     <span class="file-mark"><hg-icon name="file" /></span
@@ -260,6 +300,10 @@ export class ResultView {
   readonly size = computed(() => this.query.number('resultPageSize', 5));
   readonly filePage = computed(() => this.query.number('filePage', 1));
   readonly fileSize = computed(() => this.query.number('filePageSize', 10));
+  readonly imageFailures = linkedSignal<string, ReadonlySet<string>>({
+    source: computed(() => `${this.task().id}:${this.filePage()}:${this.fileSize()}`),
+    computation: () => new Set<string>(),
+  });
   readonly table = inject(TableViews).create(
     () => 'result:' + this.task().id,
     () => [
@@ -384,6 +428,13 @@ export class ResultView {
     } catch (error: unknown) {
       this.error.set(errorMessage(error));
     }
+  }
+  imageFailed(id: string) {
+    this.imageFailures.update((failed) => new Set([...failed, id]));
+  }
+  openImage(file: z.infer<typeof artifactSchema>) {
+    if (!file.downloadUrl) return;
+    this.dialog.info(file.name, '', { image: { src: file.downloadUrl, alt: file.name } });
   }
   openRow(row: z.infer<typeof resultRowSchema>) {
     this.dialog.info(

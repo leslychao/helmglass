@@ -47,6 +47,8 @@
     #state{flex:none;margin:0;padding:7px 10px;font-size:11px;color:#7a6640;background:#fff9ec;border-top:1px solid #efe5d0;white-space:pre-wrap;overflow-wrap:anywhere}
     #state.error{color:#a04b56;background:#fff4f4;border-color:#eedadd}
     .superseded #content,.superseded header{opacity:.45}[hidden]{display:none!important}
+    .superseded button:not(.step-disclosure),.superseded .sidebar-tools,.superseded .steps-toolbar,.superseded .steps-pagination{display:none!important}
+    .superseded #steps .step-disclosure[aria-expanded] strong::after{content:none}
     .icon-button{display:grid;place-items:center;margin:0;width:30px;height:30px;min-width:30px;min-height:30px;padding:6px}.icon-button svg{width:16px;height:16px}
     .viewport .icon-button{position:absolute;bottom:12px;z-index:2}
     #video-toggle{left:50%;transform:translateX(-50%)}#expand{right:12px}
@@ -106,7 +108,7 @@
       </div>
     </div>
     <div id="idle-warning" hidden><span id="idle-countdown" role="status"></span><button id="keep-open">Оставить ещё на 15 минут</button></div>
-    <p id="state" role="status" aria-live="polite">Проверяем актуальность задачи…</p>
+    <p id="state" role="status" aria-live="polite" hidden></p>
   </main>
   <!--SCRIPT-->
 </body>

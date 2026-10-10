@@ -253,7 +253,7 @@ paths:
               $ref: "#/components/schemas/TaskInput"
       responses:
         "200":
-          description: Created draft or prepared task
+          description: Created draft or task accepted for execution
           content:
             application/json:
               schema:
@@ -314,7 +314,7 @@ paths:
         - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "200":
-          description: "Confirmed deletion: {deleted:true}; prepared tasks cannot be deleted individually."
+          description: "Confirmed deletion: {deleted:true}; tasks accepted for execution cannot be deleted individually."
           content:
             application/json:
               schema:
@@ -2220,7 +2220,9 @@ components:
             - NOT_ACHIEVED
       description:
         expectedVersion is the observed Task version. AMEND is accepted from the cabinet only
-        for DRAFT. Human responses are accepted solely via native MCP elicitation tasks.respond;
+        for DRAFT. STOP rejects a DRAFT without an original chat binding with ACTION_UNAVAILABLE;
+        a bound draft can be stopped without a browser to release its chat.
+        Human responses are accepted solely via native MCP elicitation tasks.respond;
         ANSWER, CONFIRM, REJECT and CHOOSE_CONNECTION from WEB or model arguments are rejected.
         UNKNOWN_RESULT is reconciled by tasks.respond.verification after a successful observe
         of the same task after the uncertain action. Its outcome, evidence and observationOperationId
@@ -2357,6 +2359,7 @@ components:
           $ref: "#/components/schemas/Usage"
         allowedCommands:
           type: array
+          description: Server-provided actions; an unbound DRAFT does not include STOP.
           items:
             $ref: "#/components/schemas/TaskCommandType"
         stepCount:
@@ -2383,10 +2386,10 @@ components:
         elapsedSeconds:
           type: [number, "null"]
           minimum: 0
-          description: Null if the task has never been prepared, including a stopped draft.
+          description: Null if the task has never been accepted for execution, including a stopped draft.
         running:
           type: boolean
-          description: Whether the prepared task has no recorded completion yet.
+          description: Whether the accepted task has no recorded completion yet.
     Error:
       type: object
       required:
@@ -3167,6 +3170,8 @@ components:
     TaskCommandType:
       type: string
       description: >-
+        RESUME starts a saved DRAFT only from its bound MCP chat after validating its
+        goal, start URL and admission limits. The web cabinet saves drafts without starting them.
         CLOSE_BROWSER closes the task browser after dispatched work settles and preserves
         steps, results and an explicit pause. Closure is confirmed by the browser node;
         an unreachable node or UNKNOWN operation is not reported as a successful close.
@@ -3182,7 +3187,6 @@ components:
         RETURN_CONTROL does not require saving the login session and preserves explicit
         pause and unresolved requests. FINISH_LOGIN remains compatible with existing clients.
       enum:
-        - PREPARE
         - AMEND
         - RESUME
         - STOP

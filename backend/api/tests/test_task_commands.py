@@ -17,6 +17,120 @@ class TaskCommandsTest(unittest.TestCase):
     purge_identity = usage.UsageAdministrationTest.purge_identity
     wait_operation = usage.UsageAdministrationTest.wait_operation
 
+    def test_unbound_draft_cannot_be_stopped(self):
+        status, draft = self.client.api('/api/tasks', 'POST', {
+            'title': 'Unbound draft stop regression'})
+        self.assertEqual(200, status, draft)
+        self.assertEqual('DRAFT', draft['status'])
+        self.assertFalse(draft['chatBound'])
+        self.assertIsNone(draft['browser'])
+        path = '/api/tasks/' + draft['id']
+        status, page = self.client.api('/api/tasks')
+        self.assertEqual(200, status, page)
+        self.assertEqual([draft], page['items'])
+        with self.subTest(boundary='available commands'):
+            self.assertNotIn('STOP', draft['allowedCommands'])
+        with self.subTest(boundary='command execution'):
+            status, refusal = self.client.api(path + '/commands', 'POST', {
+                'type': 'STOP', 'expectedVersion': draft['version']})
+            self.assertEqual((409, 'ACTION_UNAVAILABLE'), (status, refusal.get('code')))
+            self.assertEqual((200, draft), self.client.api(path))
+
+    def test_new_chat_task_starts_without_preparation_option(self):
+        self.client.login_mcp()
+        error, presentation, _ = self.client.tool('tasks.create', {
+            'operationKey': str(uuid.uuid4()), 'task': {
+                'title': 'New chat task without preparation',
+                'goal': 'Observe the public fixture',
+                'startUrl': self.client.browser_fixture_url()}})
+        self.assertFalse(error, presentation)
+        task = presentation['task']
+        self.assertTrue(task['chatBound'])
+        self.assertNotEqual('DRAFT', task['status'])
+        self.assertTrue(task['timing']['running'])
+        self.assertIsNotNone(task['browser'])
+
+    def test_saved_draft_starts_from_chat_and_replays_same_task(self):
+        status, draft = self.client.api('/api/tasks', 'POST', {
+            'title': 'Saved draft execution', 'goal': 'Observe the public fixture',
+            'startUrl': self.client.browser_fixture_url(), 'outputFormat': 'TEXT'})
+        self.assertEqual(200, status, draft)
+        self.assertEqual('DRAFT', draft['status'])
+        self.assertIsNone(draft['browser'])
+        self.assertIsNone(draft['timing']['elapsedSeconds'])
+        path = '/api/tasks/' + draft['id']
+        status, refusal = self.client.api(path + '/commands', 'POST', {
+            'type': 'RESUME', 'expectedVersion': draft['version']})
+        self.assertEqual((409, 'ORIGINAL_CHAT_REQUIRED'), (status, refusal.get('code')))
+        self.assertEqual(400, self.client.api(path + '/commands', 'POST', {
+            'type': 'PREPARE', 'expectedVersion': draft['version']})[0])
+
+        self.client.login_mcp()
+        tools = self.client.rpc('tools/list', {})['tools']
+        command_tool = next(tool for tool in tools if tool['name'] == 'tasks.command')
+        commands = command_tool['inputSchema']['properties']['command']['properties']['type']['enum']
+        self.assertNotIn('PREPARE', commands)
+        self.assertIn('RESUME', commands)
+        error, viewed, _ = self.client.tool('tasks.get', {'taskId': draft['id']})
+        self.assertFalse(error, viewed)
+        current = self.client.api(path)[1]
+        self.assertEqual('DRAFT', current['status'])
+        self.assertFalse(current['chatBound'])
+        self.assertIsNone(current['browser'])
+
+        arguments = {'taskId': draft['id'], 'operationKey': str(uuid.uuid4())}
+        error, started, _ = self.client.tool('tasks.bind', arguments)
+        self.assertFalse(error, started)
+        self.assertEqual(draft['id'], started['id'])
+        self.assertEqual(draft['goal'], started['goal'])
+        self.assertTrue(started['chatBound'])
+        self.assertNotEqual('DRAFT', started['status'])
+        self.assertTrue(started['timing']['running'])
+        for _ in range(2):
+            error, replay, _ = self.client.tool('tasks.bind', arguments)
+            self.assertFalse(error, replay)
+            self.assertEqual(started, replay)
+
+        operation = str(uuid.uuid4())
+        error, receipt, _ = self.client.execute_browser({'taskId': draft['id'], 'action': {
+            'operationId': operation, 'type': 'observe', 'arguments': {},
+            'instructionRevision': started['instructionRevision']}})
+        self.assertFalse(error, receipt)
+        self.assertEqual('SUCCEEDED', self.wait_operation(operation, self.client)['status'])
+        counts = json.loads(self.fixture_sql(self.identity,
+            "SELECT json_build_object('tasks',(SELECT count(*) FROM tasks WHERE owner_id=:owner),"
+            "'browsers',(SELECT count(*) FROM browser_sessions WHERE owner_id=:owner),"
+            "'starts',(SELECT count(*) FROM task_history WHERE owner_id=:owner "
+            "AND title='Задача принята к выполнению'));"))
+        self.assertEqual({'tasks': 1, 'browsers': 1, 'starts': 1}, counts)
+
+    def test_incomplete_draft_bind_rolls_back_until_details_are_saved(self):
+        status, draft = self.client.api('/api/tasks', 'POST', {'title': 'Incomplete saved draft'})
+        self.assertEqual(200, status, draft)
+        self.client.login_mcp()
+        error, refusal, _ = self.client.tool('tasks.bind', {
+            'taskId': draft['id'], 'operationKey': str(uuid.uuid4())})
+        self.assertTrue(error, refusal)
+        self.assertEqual('VALIDATION', refusal.get('code'), refusal)
+        self.assertIn('goal', refusal['fieldErrors'])
+        path = '/api/tasks/' + draft['id']
+        current = self.client.api(path)[1]
+        self.assertEqual('DRAFT', current['status'])
+        self.assertFalse(current['chatBound'])
+        self.assertIsNone(current['browser'])
+        self.assertIsNone(current['timing']['elapsedSeconds'])
+        status, saved = self.client.api(path + '/commands', 'POST', {
+            'type': 'AMEND', 'expectedVersion': current['version'],
+            'goal': 'Observe the public fixture', 'startUrl': self.client.browser_fixture_url()})
+        self.assertEqual(200, status, saved)
+        self.assertEqual('DRAFT', saved['status'])
+        error, started, _ = self.client.tool('tasks.bind', {
+            'taskId': draft['id'], 'operationKey': str(uuid.uuid4())})
+        self.assertFalse(error, started)
+        self.assertEqual(draft['id'], started['id'])
+        self.assertTrue(started['chatBound'])
+        self.assertNotEqual('DRAFT', started['status'])
+
     def test_unconfirmed_response_preserves_task_list_and_detail_contracts(self):
         status, task = self.client.api("/api/tasks", "POST", {
             "title": "Recorded unconfirmed response", "goal": "Read a saved verification",
@@ -116,7 +230,7 @@ assert.equal(responseSchema.safeParse({...response, command: 'RETRY'}).success, 
                     task = self.client.api(path)[1]
                     error, prepared, _ = self.client.tool("tasks.command", {
                         "taskId": task_id, "operationKey": str(uuid.uuid4()),
-                        "command": {"type": "PREPARE", "expectedVersion": task["version"]}})
+                        "command": {"type": "RESUME", "expectedVersion": task["version"]}})
                     self.assertFalse(error, prepared)
                     operation = str(uuid.uuid4())
                     error, receipt, _ = self.client.execute_browser({"taskId": task_id,

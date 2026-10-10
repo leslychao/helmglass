@@ -1,11 +1,15 @@
 """Browser execution round trips, partial sequences and replay against deployed dev."""
 import json
+from array import array
+import io
+import math
 from pathlib import Path
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import time
 import unittest
 import uuid
+import wave
 
 import test_connection_contract as connections
 import test_dev_contract as dev
@@ -28,6 +32,9 @@ class BrowserExecutionTest(unittest.TestCase):
         cls.fixture_url = cls.settings['PUBLIC_URL'].rstrip('/') + '/' + name
         cls.addClassCleanup(cls.remove_fixture)
         html = (Path(__file__).parent / 'fixtures' / 'browser-execution.html').read_text(encoding='utf-8')
+        cls.audio_fixture_path = cls.fixture_path.removesuffix('.html') + '.wav'
+        cls.write_audio_fixture(.1)
+        html = html.replace('AUDIO_FIXTURE_URL', cls.audio_fixture_path.rsplit('/', 1)[1])
         subprocess.run(cls.docker + ['exec', '-i', '-u', '0', 'helmglass-frontend-1',
             'sh', '-c', 'cat > ' + cls.fixture_path], input=html, text=True,
             capture_output=True, check=True, timeout=20)
@@ -35,7 +42,19 @@ class BrowserExecutionTest(unittest.TestCase):
     @classmethod
     def remove_fixture(cls):
         subprocess.run(cls.docker + ['exec', '-u', '0', 'helmglass-frontend-1',
-            'rm', '-f', cls.fixture_path], check=True, capture_output=True, timeout=20)
+            'rm', '-f', cls.fixture_path, cls.audio_fixture_path],
+            check=True, capture_output=True, timeout=20)
+
+    @classmethod
+    def write_audio_fixture(cls, amplitude):
+        output = io.BytesIO()
+        with wave.open(output, 'wb') as audio:
+            audio.setparams((1, 2, 16000, 0, 'NONE', 'not compressed'))
+            audio.writeframes(array('h', (round(amplitude * 32767 * math.sin(
+                2 * math.pi * 220 * sample / 16000)) for sample in range(16000))).tobytes())
+        subprocess.run(cls.docker + ['exec', '-i', '-u', '0', 'helmglass-frontend-1',
+            'sh', '-c', 'cat > ' + cls.audio_fixture_path], input=output.getvalue(),
+            capture_output=True, check=True, timeout=20)
 
     def ready(self):
         self.identity, primary = self.owner()
@@ -149,6 +168,146 @@ console.log(JSON.stringify({rssKiB, leaked}));
             'action': {**explicit, 'observeAfter': False}})
         self.assertTrue(error, refusal)
         self.assertEqual('IDEMPOTENCY_CONFLICT', refusal['code'])
+
+    def test_whole_known_form_is_one_batch_with_one_final_observation(self):
+        self.ready()
+        observed = self.observation()
+        commands = [self.action('fill', {**self.target(observed, 'Batch field ' + str(index)),
+                    'text': 'value-' + str(index)}) for index in range(1, 11)]
+        result = self.execute(actions=commands)
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(['SUCCEEDED'] * 10, [item['status'] for item in result['operations']])
+        self.assertTrue(all('observation' not in item['result']
+                            for item in result['operations'][:-1]))
+        final = result['operations'][-1]['result']['observation']
+        self.assertEqual(1, final['metrics']['snapshots'] - observed['metrics']['snapshots'])
+        for index in range(1, 11):
+            self.assertIn('value-' + str(index), str(final))
+        self.assertEqual(result, self.execute(actions=commands))
+        oversized = self.action('fill', {**self.target(final, 'Batch field 1'),
+                                        'text': '\U0001f642' * 17_000})
+        error, refusal, _ = self.client.tool('browser.execute', {
+            'taskId': self.task['id'], 'action': oversized})
+        self.assertTrue(error, refusal)
+        self.assertEqual('VALIDATION', refusal['code'])
+        print('Ten form fields: one MCP call and one final observation', flush=True)
+
+    def test_screenshot_inside_a_batch_delivers_the_image_inline(self):
+        self.ready()
+        error, result, receipt = self.client.tool('browser.execute', {
+            'taskId': self.task['id'], 'actions': [self.action('screenshot')]})
+        self.assertFalse(error, result)
+        self.assertTrue(result['complete'], result)
+        self.assertEqual('READY', result['operations'][0]['result']['imageDelivery'])
+        self.assertEqual(1, sum(item['type'] == 'image' for item in receipt['content']))
+        print('A batch screenshot delivered its target and image in one MCP call', flush=True)
+
+    def test_audio_reuse_checks_bytes_instruction_context_and_processing_version(self):
+        self.ready()
+        inventory = self.execute(action=self.action('listMedia'))['result']
+        source_id = next(item['sourceId'] for item in inventory['sources']
+                         if item['label'] == 'Original audio')
+        source = next(item for item in inventory['media'] if item['id'] == source_id)
+        context = {'assignmentId': 'audio-reuse-fixture', 'instruction': 'Compare the whole audio.',
+                   'questions': ['How loud is this recording?']}
+
+        def capture(label, source_context):
+            return self.execute(action=self.action('captureAudio', {
+                'sourceId': source['id'], 'sourceRef': label,
+                'sourceContext': source_context}))['result']
+
+        first = capture('first display', context)
+        second = capture('second display', dict(reversed(list(context.items()))))
+        self.assertEqual(first['artifact']['id'], second['artifact']['id'])
+        self.assertEqual('second display', second['sourceRef'])
+        error, analysis, _ = self.client.tool('audio.analyze', {
+            'artifactId': first['artifact']['id'], 'mode': 'full'})
+        self.assertFalse(error, analysis)
+        self.assertEqual('SUCCEEDED', analysis['status'], analysis)
+        error, reused, _ = self.client.tool('audio.analyze', {
+            'artifactId': second['artifact']['id'], 'mode': 'full'})
+        self.assertFalse(error, reused)
+        self.assertEqual(analysis['analysisId'], reused['analysisId'])
+        self.assertEqual(analysis['processingVersion'], reused['processingVersion'])
+        changed_context = capture('different question', {**context,
+            'questions': ['What is its pitch?']})
+        self.assertNotEqual(first['artifact']['id'], changed_context['artifact']['id'])
+        self.write_audio_fixture(.3)
+        changed_bytes = capture('updated HTTP source', context)
+        self.assertNotEqual(first['artifact']['id'], changed_bytes['artifact']['id'])
+        self.assertNotEqual(first['artifact']['sha256'], changed_bytes['artifact']['sha256'])
+        print('Same bytes/context reuse the saved original and analysis; changed inputs do not', flush=True)
+
+    def test_iframe_audio_plays_fully_without_images_or_coordinate_clicks(self):
+        self.ready()
+        observed = self.observation()
+        self.assertFalse(any(isinstance(entry['node'], dict)
+            and entry['node']['role'] == 'button' and 'play' in entry['node'].get('name', '').lower()
+            for entry in observed['snapshot']))
+        inventory = self.execute(action=self.action('listMedia'))['result']
+        source_id = next(item['sourceId'] for item in inventory['sources']
+                         if item['label'] == 'Iframe audio')
+        action = self.action('playMedia', {'sourceId': source_id})
+        started = time.monotonic()
+        error, completed, receipt = self.client.tool('browser.execute', {
+            'taskId': self.task['id'], 'action': action})
+        self.assertFalse(error, completed)
+        self.assertEqual('SUCCEEDED', completed['status'], completed)
+        playback = completed['result']['playback']
+        self.assertTrue(playback['ended'])
+        self.assertTrue(playback['fullyPlayed'])
+        self.assertEqual(1, playback['duration'])
+        self.assertEqual(1, playback['currentTime'])
+        self.assertGreaterEqual(time.monotonic() - started, .9)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertTrue(all(item['type'] == 'text' for item in receipt['content']))
+        self.assertEqual(completed, self.execute(action=action))
+        final = self.observation()
+        self.assertIn('Listened fully:1', str(final))
+        self.assertIn('Original fully:0', str(final))
+        self.assertEqual(1, final['metrics']['snapshots'] - observed['metrics']['snapshots'])
+        refused = self.execute(action=self.action('playMedia', {'sourceId': str(uuid.uuid4())}))
+        self.assertEqual('FAILED', refused['status'], refused)
+        print('Iframe audio reached its real end in one text-only MCP call; replay had no second effect', flush=True)
+
+    def test_explicit_time_wait_returns_the_final_result_in_one_call(self):
+        self.ready()
+        started = time.monotonic()
+        result = self.execute(action=self.action('waitFor', {'time': 9}))
+        self.assertEqual('SUCCEEDED', result['status'], result)
+        self.assertIn('observation', result['result'])
+        self.assertGreaterEqual(time.monotonic() - started, 9)
+        self.assertLess(time.monotonic() - started, 18)
+        print('Nine-second wait returned its final observation in one MCP call', flush=True)
+
+    def test_operation_read_waits_for_the_pending_result(self):
+        self.ready()
+        action = self.action('waitFor', {'time': 10})
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            execution = executor.submit(self.execute, action=action)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                status = self.fixture_sql(self.identity,
+                    "SELECT status FROM operations WHERE owner_id=:owner AND id='"
+                    + action['operationId'] + "'").strip()
+                if status == 'DISPATCHED':
+                    break
+                time.sleep(.1)
+            self.assertEqual('DISPATCHED', status)
+            started = time.monotonic()
+            error, completed, _ = self.client.tool('operations.get', {
+                'operationId': action['operationId']})
+            self.assertEqual(completed, execution.result(timeout=15))
+        self.assertFalse(error, completed)
+        self.assertEqual('SUCCEEDED', completed['status'], completed)
+        self.assertIn('observation', completed['result'])
+        self.assertGreater(time.monotonic() - started, 1)
+        self.assertLess(time.monotonic() - started, 12)
+        ready_started = time.monotonic()
+        self.assertEqual(completed, self.client.tool('operations.get', {
+            'operationId': action['operationId']})[1])
+        self.assertLess(time.monotonic() - ready_started, 2)
+        print('One operation read waited for completion; a ready receipt returned immediately', flush=True)
 
     def test_native_references_survive_media_reads_in_the_accepted_sequence(self):
         self.ready()
@@ -348,19 +507,36 @@ console.log(JSON.stringify({rssKiB, leaked}));
         self.execute(action=self.action('navigate', {'url': self.fixture_url}))
         self.assertEqual('FAILED', self.execute(action=self.action('click', self.target(previous, 'Increment')))['status'])
 
-    def test_wait_budget_continues_exact_sequence(self):
+    def test_delayed_sequence_finishes_in_one_call_without_repeating_effects(self):
         self.ready()
         observed = self.observation()
         commands = [self.action('click', self.target(observed, 'Delay')),
                     self.action('waitFor', {'textGone': 'Delayed target'}),
                     self.action('click', self.target(observed, 'Increment'))]
         result = self.execute(actions=commands)
-        self.assertFalse(result['complete'])
-        self.assertIn(result['operations'][-1]['status'], ('ACCEPTED', 'DISPATCHED'))
-        self.assertEqual('SUCCEEDED', self.wait_operation(commands[1]['operationId'], self.client)['status'])
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(['SUCCEEDED'] * 3, [item['status'] for item in result['operations']])
+        self.assertIn('"counter":1', str(result['operations'][-1]['result']['observation']))
+        self.assertEqual(result, self.execute(actions=commands))
+
+    def test_transport_deadline_continues_the_exact_sequence(self):
+        self.ready()
+        observed = self.observation()
+        commands = [self.action('click', self.target(observed, 'Increment')),
+                    self.action('waitFor', {'time': 30}),
+                    self.action('waitFor', {'time': 25}),
+                    self.action('click', self.target(observed, 'Read state'))]
+        result = self.execute(actions=commands)
+        self.assertFalse(result['complete'], result)
+        self.assertEqual(commands[2]['operationId'], result['nextOperationId'])
+        self.assertEqual(['SUCCEEDED', 'SUCCEEDED', 'DISPATCHED'],
+                         [item['status'] for item in result['operations']])
+        self.assertEqual('SUCCEEDED', self.client.tool('operations.get', {
+            'operationId': commands[2]['operationId']})[1]['status'])
         continued = self.execute(actions=commands)
         self.assertTrue(continued['complete'], continued)
         self.assertIn('"counter":1', str(continued['operations'][-1]['result']['observation']))
+        self.assertEqual(continued, self.execute(actions=commands))
 
     def test_native_text_wait_and_scoped_observation_replay_without_second_effect(self):
         self.ready()

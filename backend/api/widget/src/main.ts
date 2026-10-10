@@ -3,6 +3,19 @@ import { z } from 'zod';
 
 import { stepsSchema, metadataSchema, presentationSchema, presentationReferenceSchema, ticketSchema, toolErrorSchema, widgetStateSchema, type Presentation } from './presentation';
 
+const retiredWidgetStateSchema = z.object({ privateContent: z.object({
+  retiredPresentation: presentationReferenceSchema,
+}) });
+
+declare global {
+  interface Window {
+    openai?: {
+      widgetState?: unknown;
+      setWidgetState?: (state: z.infer<typeof retiredWidgetStateSchema>) => void;
+    };
+  }
+}
+
 function element<T extends HTMLElement>(id: string, type: new () => T): T {
   const result = document.getElementById(id);
   if (!(result instanceof type)) throw new Error('Missing widget element: ' + id);
@@ -119,8 +132,8 @@ function renderNotice(): void {
   const waiting = waitingReasons[current?.task.waitReason ?? ''];
   if (connectionError) notice(connectionError, true);
   else if (current?.task.browser?.cleanupState === 'FAILED') notice(current.task.browser.cleanupError === 'CLEANUP_FAILED'
-    ? 'Браузер освобождён, файлы перенесены, но очистка диска не завершена. Требуется повтор администратора.'
-    : 'Браузер освобождён, но сохранение файлов не завершено. Исходные файлы сохранены; требуется повтор администратора.', true);
+    ? 'Браузер освобождён, результаты сохранены, но временные данные не удалены. Требуется повтор администратора.'
+    : 'Браузер освобождён, но проверка результатов не завершена. Исходные данные сохранены; требуется повтор администратора.', true);
   else if (waiting) notice(waiting);
   else if (current?.continuationStatus === 'MESSAGE_SENT') {
     notice('Запрос передан в исходный чат. Ожидаем следующую команду ChatGPT.');
@@ -195,18 +208,30 @@ keepOpen.addEventListener('click', async () => {
   }
 });
 
+function hasSavedRetirement(candidate: z.infer<typeof presentationReferenceSchema>): boolean {
+  const saved = retiredWidgetStateSchema.safeParse(window.openai?.widgetState);
+  return saved.success && saved.data.privateContent.retiredPresentation.generation === candidate.generation
+    && saved.data.privateContent.retiredPresentation.task.id === candidate.task.id;
+}
+
 function retirePresentation(): void {
   if (superseded || tornDown) return;
   if (!current) {
-    status.textContent = 'Неактуальный виджет';
-    notice(supersededMessage);
+    title.hidden = true;
+    status.hidden = true;
+    browserState.hidden = true;
+    historyStatus.hidden = true;
   }
+  notice('');
   superseded = true;
   validated = false;
   syncReady = false;
   historyGeneration++;
-  element('card', HTMLElement).classList.add('superseded');
+  expanded = false;
+  card.classList.remove('expanded');
+  card.classList.add('superseded');
   card.inert = true;
+  idleWarning.hidden = true;
   clearInterval(sessionTimer);
   clearTimeout(searchTimer);
   element('content', HTMLElement).inert = true;
@@ -222,6 +247,14 @@ function retirePresentation(): void {
       new URL(metadata.publicUrl).origin);
     viewerGeneration++;
   } else closeViewer();
+  if (reference) {
+    try {
+      if (!hasSavedRetirement(reference))
+        window.openai?.setWidgetState?.({ privateContent: { retiredPresentation: reference } });
+    } catch {
+      console.warn('Unable to persist inactive widget state.');
+    }
+  }
 }
 
 async function tool(name: string, extra: Record<string, unknown> = {}) {
@@ -627,6 +660,10 @@ app.ontoolresult = response => {
     connectionError = '';
     renderBrowser();
   }
+  if (hasSavedRetirement(next.data)) {
+    retirePresentation();
+    return;
+  }
   metadata = meta.data;
   brand.src = new URL('/helm-logo.png', metadata.publicUrl).href;
   if (streamUrl !== metadata.eventsUrl) {
@@ -775,9 +812,25 @@ videoToggle.addEventListener('click', () => {
   renderBrowser();
 });
 element('copy-session', HTMLButtonElement).addEventListener('click', () => {
-  if (current?.task.browser) void navigator.clipboard.writeText(current.task.browser.id)
-    .then(() => notice('Идентификатор браузера скопирован.'))
-    .catch(() => notice('Выделите идентификатор и скопируйте его вручную.', true));
+  if (!current?.task.browser || superseded || tornDown) return;
+  const selection = window.getSelection();
+  if (!selection) {
+    notice('Выделите идентификатор и скопируйте его вручную.', true);
+    return;
+  }
+  const range = document.createRange();
+  range.selectNodeContents(element('session-id', HTMLElement));
+  selection.removeAllRanges();
+  selection.addRange(range);
+  // ChatGPT blocks Clipboard API access; copying a selection requires the user's click.
+  let copied: boolean;
+  try {
+    copied = document.execCommand('copy');
+  } catch {
+    copied = false;
+  }
+  notice(copied ? 'Идентификатор браузера скопирован.'
+    : 'Идентификатор выделен. Нажмите Ctrl+C, чтобы скопировать.', !copied);
 });
 function changeHistoryPage(page: number): void {
   historyPage = page; historyDirty = true;

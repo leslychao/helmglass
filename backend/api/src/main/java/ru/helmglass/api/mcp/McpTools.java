@@ -43,29 +43,24 @@ import ru.helmglass.api.tasks.TaskQueries;
 import ru.helmglass.api.tasks.TaskService;
 import ru.helmglass.api.tasks.TaskStepService;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Service
 public class McpTools {
   private static final Logger log = LoggerFactory.getLogger(McpTools.class);
   private static final int IMAGE_LIMIT = 8 * 1024 * 1024;
   private static final int WIDGET_LIMIT = 1024 * 1024;
-  private static final long OPERATION_WAIT_NANOS = TimeUnit.SECONDS.toNanos(8);
+  private static final int SEQUENCE_RESULT_LIMIT = 2 * 1024 * 1024;
+  // Leave encoding and network headroom below the SDK's default one-minute request timeout.
+  private static final long OPERATION_WAIT_NANOS = TimeUnit.SECONDS.toNanos(50);
   static final String OPERATION_RESULT_INSTRUCTIONS =
-      "Используйте уже выданный результат SUCCEEDED сразу и продолжайте задание."
-          + " Не вызывайте operations.get для повторного подтверждения готового результата."
-          + " Используйте выданное result.observation вместо отдельного observe."
-          + " observationId и ref берите из одного наблюдения: ref из старого снимка нельзя"
-          + " соединять с новым observationId. При неполном observation дочитайте нужные refs"
-          + " через его cursor; новый observe({}) начинает снимок заново."
-          + " Известные независимые оценки и поля объединяйте в actions до 8 команд,"
-          + " с одним итоговым наблюдением. Условные поля читайте после пакета."
-          + " operations.get нужен только для ACCEPTED/DISPATCHED, восстановления результата"
-          + " после потери ответа или контекста, либо ещё не выданного изображения screenshot"
-          + " (imageDelivery=PENDING; в пакете actions изображение получают отдельно)."
-          + " В незавершённом пакете не перепроверяйте уже готовые результаты: смотрите статус"
-          + " nextOperationId и возвращённую ошибку. Если ожидание истекло до отправки этой"
-          + " операции, продолжайте исходный пакет"
-          + " с теми же аргументами и operationId, без operations.get для неотправленной команды.";
+      "Готовый SUCCEEDED используйте сразу; result.observation заменяет отдельный observe."
+          + " operations.get нужен только для ACCEPTED/DISPATCHED, потерянного ответа/контекста"
+          + " или imageDelivery=PENDING."
+          + " observationId и ref берите из одного снимка; при limited дочитайте его cursor."
+          + " При complete=false продолжайте от nextOperationId с учётом его статуса/ошибки."
+          + " Если эта команда ещё не отправлена, продолжите исходный пакет с прежними"
+          + " аргументами и operationId, без operations.get для неотправленной команды.";
   static final String WIDGET_PRESENTATION_INSTRUCTIONS =
       "Обновляемая карточка задачи Helm Glass с просмотром того же браузера."
           + " Текущие статус задачи, состояние браузера, прогресс и ожидание показывайте"
@@ -129,8 +124,7 @@ public class McpTools {
         "resourceDomains", List.of(publicUrl),
         "frameDomains", List.of(publicUrl));
     widgetMetadata = Map.of(
-        "ui", Map.of("prefersBorder", true, "csp", csp,
-            "permissions", Map.of("clipboardWrite", Map.of())),
+        "ui", Map.of("prefersBorder", true, "csp", csp),
         "openai/widgetCSP", Map.of("redirect_domains", List.of(publicUrl)),
         "openai/widgetDescription", WIDGET_PRESENTATION_INSTRUCTIONS);
     try (var stream = new ClassPathResource("mcp-widget/index.html").getInputStream()) {
@@ -142,7 +136,7 @@ public class McpTools {
       MessageDigest digest = MessageDigest.getInstance("SHA-256");
       digest.update(bytes);
       digest.update((byte) 0);
-      // Sandbox permissions are cached with the HTML under the resource URI.
+      // Sandbox configuration is cached with the HTML under the resource URI.
       byte[] hash = digest.digest(json.canonical(widgetMetadata).getBytes(StandardCharsets.UTF_8));
       widgetUri = "ui://helmglass/task-" + HexFormat.of().formatHex(hash) + ".html";
     } catch (IOException | NoSuchAlgorithmException exception) {
@@ -198,7 +192,11 @@ public class McpTools {
     result.add(
         tool(
             "tasks.get",
-            "Актуальное поручение, состояние, вопросы и результаты собственной задачи. lastResponse"
+            "Актуальное поручение, состояние, вопросы и результаты собственной задачи."
+                + " Используйте для отсутствующего или изменённого контекста; состояния из ответов"
+                + " tasks.command, tasks.respond и tasks.ask используйте сразу"
+                + " без подтверждающего get."
+                + " lastResponse"
                 + " содержит последний принятый ответ или результат проверки для текущей ревизии."
                 + " UNKNOWN_RESULT в нём означает проверку моделью, а не согласие человека."
                 + " WAITING_CHATGPT / UNKNOWN_RESULT требует самостоятельной проверки: выполните"
@@ -279,8 +277,9 @@ public class McpTools {
     result.add(
         tool(
             "tasks.bind",
-            "По явному поручению связать задачу кабинета с этим чатом и подготовить её браузер."
-                + " Затем показать tasks.view.",
+            "Когда пользователь просит выполнить сохранённую задачу, связать её с этим чатом"
+                + " и начать выполнение без отдельной подготовки. Проверяет полноту черновика."
+                + " Затем показать tasks.view. Для простого просмотра используется tasks.get.",
             object(Map.of("taskId", uuid(), "operationKey", key()), "taskId", "operationKey"),
             false,
             false));
@@ -415,7 +414,7 @@ public class McpTools {
     result.add(
         tool(
             "browser.execute",
-            "Выполнить action или последовательность actions (до 8). Один вызов — один шаг агента."
+            "Выполнить action или последовательность actions. Один вызов — один шаг агента."
                 + " click/fill/check/selectOption требуют в arguments одновременно"
                 + " observationId и ref из выданного наблюдения; одного ref недостаточно."
                 + " Для видимой кнопки без ARIA ref click принимает вместо них {screenshotId,x,y}"
@@ -425,8 +424,17 @@ public class McpTools {
                 + " snapshot содержит native ARIA nodes с path; observe.arguments: {} — страница,"
                 + " {observationId,ref} — область, {cursor} — продолжение; варианты несовместимы."
                 + " scope определяет область полноты. Адресный observe может завершать пакет."
-                + " Перед переходом или отправкой формы дочитайте актуальную область через cursor"
-                + " и заполните появившиеся обязательные поля. Число исходных ответов и успешный"
+                + " Известные независимые оценки и поля объединяйте в actions с"
+                + " итоговым наблюдением; не проверяйте каждую принятую оценку отдельно."
+                + " Условные поля читайте после пакета. Для аудио и оценок не запрашивайте"
+                + " изображения: listMedia.sources связывает sourceId с подписью HTML-плеера."
+                + " playMedia({sourceId}) через штатный Microsoft browser_evaluate вызывает"
+                + " audio.play() с начала и ждёт событие ended; возвращает текстовое fullyPlayed."
+                + " Используйте готовый результат сразу. Не нажимайте контейнер вместо Play."
+                + " Перед переходом или отправкой формы используйте актуальный возвращённый"
+                + " снимок; дочитайте cursor только при его неполноте и заполните"
+                + " обязательные поля."
+                + " Число исходных ответов и успешный"
                 + " переход не доказывают полноту формы."
                 + " Не добавляйте непрошенный необязательный текст."
                 + " Ссылки страницы открывайте click по выданному ref: браузер использует настоящий"
@@ -437,12 +445,15 @@ public class McpTools {
                 + " либо URL из ответа инструмента."
                 + " press.arguments: {key}; клавиша действует на текущий фокус. waitFor.arguments:"
                 + " text, textGone (1–1000 символов) и/или time (секунды, больше 0, не более 30)."
-                + " Ожидания выполняет штатный MCP на странице. Отсутствующие checked/selected"
+                + " Ожидания выполняет штатный MCP на странице. Ответ возвращается по событию"
+                + " готовности; 50 секунд — защитный предел одного HTTP-ответа."
+                + " Отсутствующие checked/selected"
                 + " означают false. selectOption принимает видимые названия options. Условные поля"
                 + " ищите в новом observation. Короткие команды возвращают готовый результат;"
                 + " " + OPERATION_RESULT_INSTRUCTIONS
-                + " listMedia, captureAudio и screenshot по умолчанию"
-                + " возвращают только свой результат. Шаг сохраняется автоматически. Группируйте заранее"
+                + " listMedia, captureAudio, playMedia и screenshot по умолчанию"
+                + " возвращают только свой результат. Шаг сохраняется автоматически. Группируйте"
+                + " заранее"
                 + " известные независимые заполнения в actions; не объединяйте действия, требующие"
                 + " промежуточного решения. Каждый элемент имеет свой стабильный operationId."
                 + " Последовательность останавливается на первом неподтверждённом успехе;"
@@ -463,7 +474,7 @@ public class McpTools {
                     "action",
                     actionSchema(),
                     "actions",
-                    array(actionSchema(), 8)),
+                    Map.of("type", "array", "items", actionSchema(), "minItems", 1)),
                 "taskId"),
             false,
             true));
@@ -488,6 +499,8 @@ public class McpTools {
         tool(
             "operations.get",
             "Получить сохранённый результат операции по её стабильному operationId. "
+                + "Возвращает результат по событию готовности или через 50 секунд при"
+                + " незавершённой работе; готовую квитанцию возвращает сразу. "
                 + OPERATION_RESULT_INSTRUCTIONS,
             object(Map.of("operationId", uuid()), "operationId"),
             true,
@@ -497,10 +510,17 @@ public class McpTools {
             "audio.analyze",
             "Запустить локальный анализ собственного сохранённого аудио. Для текста"
                 + " mode=transcript; для звучания mode=full. Повтор переиспользует анализ,"
-                + " повышение режима сохраняет расшифровку. Ожидает до 8 секунд и возвращает первую"
-                + " страницу transcript с items, sectionComplete, hasMore и nextCursor. Используйте"
+                + " повышение режима сохраняет расшифровку. Возвращает по готовности запрошенного"
+                + " режима, с защитным сроком 50 секунд, первую"
+                + " страницу transcript с items, sectionComplete, hasMore и nextCursor. В full"
+                + " soundSummary содержит акустическую сводку по всей обработанной записи и"
+                + " страницу эмоций со своими sectionComplete, hasMore и nextCursor. Используйте"
                 + " готовые items сразу; audio.get нужен только для незавершённого анализа,"
-                + " следующих страниц или других разделов. Доступен из любого своего чата без"
+                + " следующих страниц или необходимых подробностей. Не читайте первую страницу"
+                + " acoustics как характеристику всей записи. Сохраняйте artifactId и analysisId;"
+                + " для повторно показанной той же записи используйте их. captureAudio"
+                + " переиспользует совпадающие байты и контекст поручения."
+                + " Доступен из своего чата без"
                 + " передачи управления задачей.",
             object(
                 Map.of(
@@ -515,8 +535,13 @@ public class McpTools {
     result.add(
         tool(
             "audio.get",
-            "Прочитать состояние и текстовые результаты локального анализа. Разделы: transcript,"
-                + " intervals, acoustics, emotions. Прочитайте все страницы по nextCursor/hasMore;"
+            "Прочитать результаты по готовности стадии, с защитным сроком 50 секунд."
+                + " Разделы: transcript,"
+                + " summary, intervals, acoustics, emotions. summary возвращает soundSummary"
+                + " всей записи, как audio.analyze(full); не перечитывайте уже готовую сводку."
+                + " Подробные acoustics запрашивайте для нужного диапазона from/to в секундах;"
+                + " без диапазона страница содержит только начало отсчётов. Прочитайте необходимые"
+                + " страницы по nextCursor/hasMore;"
                 + " sectionComplete отдельно показывает полноту стадии. PARTIAL/FAILED не являются"
                 + " полным успехом. Аудиофайл модели не передаётся.",
             object(
@@ -528,11 +553,13 @@ public class McpTools {
                         "type",
                         "string",
                         "enum",
-                        List.of("transcript", "intervals", "acoustics", "emotions")),
+                        List.of("transcript", "summary", "intervals", "acoustics", "emotions")),
                     "cursor",
                     Map.of("type", "string", "pattern", "^[0-9]{1,19}$"),
                     "limit",
-                    Map.of("type", "integer", "minimum", 1, "maximum", 100)),
+                    Map.of("type", "integer", "minimum", 1, "maximum", 100),
+                    "from", Map.of("type", "number", "minimum", 0),
+                    "to", Map.of("type", "number", "minimum", 0)),
                 "analysisId"),
             true,
             false));
@@ -814,18 +841,19 @@ public class McpTools {
         return textResult(artifacts.list(owner, uuid(input, "taskId"), listQuery(arguments)));
       }
       if ("audio.get".equals(name)) {
-        if (!Set.of("analysisId", "section", "cursor", "limit").containsAll(arguments.keySet())) {
+        if (!Set.of("analysisId", "section", "cursor", "limit", "from", "to")
+            .containsAll(arguments.keySet())) {
           throw ApiException.invalid("arguments", "Недопустимые параметры audio.get.");
         }
         return textResult(
-            audioAnalyses.page(
+            audioAnalyses.readWhenReady(
                 owner,
                 uuid(input, "analysisId"),
                 input.path("section").asString("transcript"),
                 Long.parseLong(input.path("cursor").asString("0")),
                 input.path("limit").asInt(100),
-                null,
-                null));
+                input.has("from") ? input.path("from").asDouble() : null,
+                input.has("to") ? input.path("to").asDouble() : null));
       }
       if ("audio.analyze".equals(name)) {
         if (!arguments.keySet().equals(Set.of("artifactId", "mode"))) {
@@ -896,6 +924,7 @@ public class McpTools {
                 Contracts.Task.class,
                 () -> {
                   chats.bind(owner, taskId, chat);
+                  tasks.startDraft(owner, taskId);
                   return actions.prepareBrowser(owner, taskId);
                 }));
       }
@@ -951,6 +980,9 @@ public class McpTools {
                   arguments,
                   Contracts.Task.class,
                   () -> {
+                    boolean startsDraft =
+                        "RESUME".equals(command.type())
+                            && "DRAFT".equals(tasks.get(owner, taskId).status());
                     boolean reopensContinuation =
                         Set.of("RESUME", "AMEND").contains(command.type());
                     if (!reopensContinuation && !"STOP".equals(command.type())) {
@@ -960,7 +992,7 @@ public class McpTools {
                         "REQUIRE_LOGIN".equals(command.type())
                             ? browsers.requireLogin(owner, taskId, command.expectedVersion())
                             : tasks.command(actor, taskId, command);
-                    if ("PREPARE".equals(command.type())) {
+                    if (startsDraft) {
                       result = actions.prepareBrowser(owner, taskId);
                     }
                     if (reopensContinuation) {
@@ -1122,19 +1154,19 @@ public class McpTools {
     if (sequence == input.has("action")) {
       throw ApiException.invalid("action", "Передайте action или actions, но не оба поля.");
     }
-    long deadline = System.nanoTime() + OPERATION_WAIT_NANOS;
     if (!sequence) {
       if (!input.path("action").isObject()) {
         throw ApiException.invalid("action", "Действие должно быть объектом.");
       }
       Contracts.BrowserAction action =
           json.convert(input.path("action"), Contracts.BrowserAction.class);
+      long deadline = System.nanoTime() + OPERATION_WAIT_NANOS;
       return operationResponse(
           owner, executeAction(owner, task, chat, action, deadline, List.of(), callId), deadline);
     }
     JsonNode supplied = input.path("actions");
-    if (!supplied.isArray() || supplied.isEmpty() || supplied.size() > 8) {
-      throw ApiException.invalid("actions", "Последовательность содержит от 1 до 8 действий.");
+    if (!supplied.isArray() || supplied.isEmpty()) {
+      throw ApiException.invalid("actions", "Последовательность должна содержать действия.");
     }
     List<Contracts.BrowserAction> commands = new ArrayList<>();
     Set<UUID> identifiers = new HashSet<>();
@@ -1166,10 +1198,13 @@ public class McpTools {
                   : action.observeAfter()));
     }
     List<UUID> sequenceIds = commands.stream().map(Contracts.BrowserAction::operationId).toList();
+    long deadline = System.nanoTime() + OPERATION_WAIT_NANOS;
     List<Contracts.Operation> completed = new ArrayList<>();
+    int resultBytes = 0;
     for (int index = 0; index < commands.size(); index++) {
       Contracts.BrowserAction action = commands.get(index);
-      if (!completed.isEmpty() && System.nanoTime() >= deadline) {
+      if (!completed.isEmpty()
+          && (System.nanoTime() >= deadline || resultBytes >= SEQUENCE_RESULT_LIMIT)) {
         return sequenceResult(
             owner,
             task,
@@ -1179,7 +1214,8 @@ public class McpTools {
                 "complete",
                 false,
                 "nextOperationId",
-                action.operationId()));
+                action.operationId()),
+            deadline);
       }
       Contracts.Operation result;
       try {
@@ -1199,9 +1235,11 @@ public class McpTools {
                 "nextOperationId",
                 action.operationId(),
                 "error",
-                exception.response()));
+                exception.response()),
+            deadline);
       }
       completed.add(result);
+      resultBytes += json.write(result.result()).getBytes(StandardCharsets.UTF_8).length + 512;
       if (!"SUCCEEDED".equals(result.status())) {
         return sequenceResult(
             owner,
@@ -1212,19 +1250,50 @@ public class McpTools {
                 "complete",
                 false,
                 "nextOperationId",
-                action.operationId()));
+                action.operationId()),
+            deadline);
       }
     }
-    return sequenceResult(owner, task, Map.of("operations", completed, "complete", true));
+    return sequenceResult(owner, task, Map.of("operations", completed, "complete", true), deadline);
   }
 
   private McpSchema.CallToolResult sequenceResult(
-      UUID owner, UUID task, Map<String, Object> result) {
+      UUID owner, UUID task, Map<String, Object> result, long deadline) {
     actions.requireResultAccess(owner, task);
-    return McpSchema.CallToolResult.builder()
-        .addTextContent(json.write(modelData(json.tree(result))))
-        .addTextContent(OPERATION_RESULT_INSTRUCTIONS)
-        .build();
+    JsonNode content = json.tree(modelData(json.tree(result)));
+    List<McpSchema.ImageContent> images = new ArrayList<>();
+    long totalImageBytes = 0;
+    for (JsonNode operation : content.path("operations")) {
+      if (!"screenshot".equals(operation.path("type").asString())
+          || !"SUCCEEDED".equals(operation.path("status").asString())
+          || !(operation.path("result") instanceof ObjectNode screenshot)
+          || !screenshot.path("artifact").path("id").isString()) {
+        continue;
+      }
+      var available =
+          artifacts.awaitReady(
+              owner, UUID.fromString(screenshot.path("artifact").path("id").asString()), deadline);
+      screenshot.put("imageDelivery", "PENDING");
+      if (available.isPresent() && totalImageBytes + available.get().sizeBytes() <= IMAGE_LIMIT) {
+        Contracts.Artifact artifact = available.get();
+        images.add(
+            McpSchema.ImageContent.builder(
+                    Base64.getEncoder().encodeToString(imageBytes(owner, artifact)),
+                    artifact.mimeType())
+                .build());
+        totalImageBytes += artifact.sizeBytes();
+        screenshot.put("imageDelivery", "READY");
+      }
+    }
+    actions.requireResultAccess(owner, task);
+    var response =
+        McpSchema.CallToolResult.builder()
+            .addTextContent(json.write(content))
+            .addTextContent(OPERATION_RESULT_INSTRUCTIONS);
+    for (McpSchema.ImageContent image : images) {
+      response.addContent(image);
+    }
+    return response.build();
   }
 
   private Contracts.Operation executeAction(
@@ -1245,7 +1314,7 @@ public class McpTools {
 
   private McpSchema.CallToolResult operation(UUID owner, UUID id) {
     long deadline = System.nanoTime() + OPERATION_WAIT_NANOS;
-    Contracts.Operation operation = actions.result(owner, id);
+    Contracts.Operation operation = actions.awaitResult(owner, actions.result(owner, id), deadline);
     return operationResponse(owner, operation, deadline);
   }
 
@@ -1354,8 +1423,9 @@ public class McpTools {
                 + ". Каждый вызов инструмента — отдельный шаг агента, который сервер сохраняет"
                 + " автоматически. Для каждого нового вызова используйте новый callId;"
                 + " stepTitle описывает цель конкретного вызова без секретов и рассуждений;"
-                + " после потери ответа повторяйте тот же callId и аргументы. Навигация и"
-                + " получение исходных данных записываются отдельными вызовами. Готовые SUCCEEDED и текст"
+                + " после потери ответа повторяйте тот же callId и аргументы. Известные действия"
+                + " объединяйте в пакет; отдельный вызов для каждого поля или файла не нужен."
+                + " Готовые SUCCEEDED и текст"
                 + " audio.analyze используйте сразу, без повторного чтения."
                 + " Итог задачи публикуйте после проверки результата.")
         .meta(
@@ -1538,7 +1608,7 @@ public class McpTools {
     return object(
         Map.ofEntries(
             Map.entry(
-                "type", choice("PREPARE", "AMEND", "RESUME", "STOP", "FINISH", "REQUIRE_LOGIN")),
+                "type", choice("AMEND", "RESUME", "STOP", "FINISH", "REQUIRE_LOGIN")),
             Map.entry("expectedVersion", Map.of("type", "integer", "minimum", 1)),
             Map.entry("title", text(200)),
             Map.entry("goal", text(20000)),
@@ -1588,6 +1658,7 @@ public class McpTools {
                 "screenshot",
                 "listMedia",
                 "captureAudio",
+                "playMedia",
                 "waitFor"),
             "instructionRevision",
             Map.of("type", "integer", "minimum", 1),

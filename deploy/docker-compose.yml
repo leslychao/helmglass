@@ -155,7 +155,9 @@ services:
     networks: [docker]
   browser-node:
     image: helmglass-browser-node:current
-    build: ../backend/browser-node
+    build:
+      context: ../backend
+      dockerfile: browser-node/Dockerfile
     restart: unless-stopped
     depends_on: [docker-proxy, vault]
     environment:
@@ -171,7 +173,8 @@ services:
       BROWSER_EGRESS_NETWORK: helmglass-browser-egress
       BROWSER_CAPACITY: '4'
       PUBLIC_URL: ${PUBLIC_URL:?PUBLIC_URL is required}
-    volumes: [browser-node:/data, vault-ca:/vault-ca:ro]
+    group_add: ["10001"]
+    volumes: [browser-node:/data, artifacts:/artifacts, vault-ca:/vault-ca:ro]
     networks: [control, docker, browser-egress, secrets]
   vault:
     image: helmglass-vault:current
@@ -188,7 +191,9 @@ services:
       retries: 20
   browser-session-image:
     image: helmglass-browser-session:current
-    build: ../backend/browser-session
+    build:
+      context: ../backend
+      dockerfile: browser-session/Dockerfile
     profiles: [build]
     network_mode: none
   browser-egress-image:

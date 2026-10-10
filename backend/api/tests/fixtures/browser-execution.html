@@ -1,5 +1,12 @@
 <!doctype html><meta charset="utf-8"><title>Browser execution acceptance</title>
 <label>Recipient<input id="text" required></label>
+<fieldset><legend>Batch form</legend>
+<label>Batch field 1<input></label><label>Batch field 2<input></label>
+<label>Batch field 3<input></label><label>Batch field 4<input></label>
+<label>Batch field 5<input></label><label>Batch field 6<input></label>
+<label>Batch field 7<input></label><label>Batch field 8<input></label>
+<label>Batch field 9<input></label><label>Batch field 10<input></label>
+</fieldset>
 <label>Password<input type="password" value="private-password"></label>
 <label>OTP<input autocomplete="one-time-code" value="private-code"></label>
 <label>Code<input name="verificationCode" value="private-code-camel"></label>
@@ -47,6 +54,9 @@
 </section>
 <iframe title="Frame" srcdoc="<label>Frame value<input></label><button onclick='this.textContent=&quot;Frame clicked&quot;'>Frame action</button>"></iframe>
 <pre id="state" role="status"></pre>
+<audio aria-label="Original audio" controls preload="metadata" src="AUDIO_FIXTURE_URL" onended="document.getElementById('original-playback').textContent='Original fully:1'"></audio>
+<output id="original-playback">Original fully:0</output>
+<iframe title="Audio frame" srcdoc="<audio aria-label='Iframe audio' controls preload='metadata' src='AUDIO_FIXTURE_URL'></audio><output>Not listened</output><script>let count=0;document.querySelector('audio').onended=()=>document.querySelector('output').textContent='Listened fully:'+ ++count</script>"></iframe>
 <script>
 let counter=0;
 function render(){document.querySelector('#state').textContent=JSON.stringify({counter,text:document.querySelector('#text').value,message:document.querySelector('[contenteditable]').textContent});}
