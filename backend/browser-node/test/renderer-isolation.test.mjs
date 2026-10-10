@@ -1,3 +1,4 @@
+import { target, snapshotText } from '../../browser-session/test/references.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -24,18 +25,18 @@ test('same-origin renderer storage and artifacts stay isolated; internal archive
     return response.value.result;
   }
   async function identity(id, expected) {
-    await command(id, 'click', { selector: '#profile-read' });
+    await command(id, 'click', await target(request, '/sessions/' + id, 'Read identity'));
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const observation = await request(`/sessions/${id}/observe`);
       assert.equal(observation.code, 200);
-      if (observation.value.text.includes('"local":' + JSON.stringify(expected))) {
+      if (snapshotText(observation.value).includes('"local":' + JSON.stringify(expected))) {
         if (expected === null) {
-          assert.ok(observation.value.text.includes('"cookie":""'));
-          assert.ok(!observation.value.text.includes('"indexed":'));
+          assert.ok(snapshotText(observation.value).includes('"cookie":""'));
+          assert.ok(!snapshotText(observation.value).includes('"indexed":'));
         } else {
-          assert.ok(observation.value.text.includes('"indexed":"' + expected + '"'));
-          assert.ok(observation.value.text.includes('helm_acceptance=' + expected));
-          assert.ok(observation.value.text.includes('"complex":true'));
+          assert.ok(snapshotText(observation.value).includes('"indexed":"' + expected + '"'));
+          assert.ok(snapshotText(observation.value).includes('helm_acceptance=' + expected));
+          assert.ok(snapshotText(observation.value).includes('"complex":true'));
         }
         return;
       }
@@ -54,9 +55,9 @@ test('same-origin renderer storage and artifacts stay isolated; internal archive
       assert.equal(session.code, 200); assert.equal(session.value.status, 'LIVE');
       assert.equal((await request(`/sessions/${id}/control`, { controlEpoch: 1, owner: 'CHATGPT', privateMode: false })).code, 200);
     }
-    await command(a, 'click', { selector: '#profile-a' }); await identity(a, 'a');
+    await command(a, 'click', await target(request, '/sessions/' + a, 'Save A')); await identity(a, 'a');
     await identity(b, null);
-    await command(b, 'click', { selector: '#profile-b' }); await identity(b, 'b');
+    await command(b, 'click', await target(request, '/sessions/' + b, 'Save B')); await identity(b, 'b');
     await command(a, 'reload'); await identity(a, 'a');
     const artifact = (await command(a, 'screenshot')).artifact;
     assert.ok(artifact.id); assert.equal(artifact.complete, true);

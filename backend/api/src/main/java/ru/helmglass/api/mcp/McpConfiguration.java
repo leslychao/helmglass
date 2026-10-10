@@ -116,11 +116,28 @@ nextOperationId. Inspect that operation before continuing; never replay an unkno
 Repeat unchanged action payloads and IDs to continue a partially executed sequence safely.
 Intermediate actions omit observation by default; set observeAfter=true only when needed.
 listMedia, captureAudio and screenshot return their own result without an extra DOM snapshot
-unless observeAfter=true. Absent or empty element attributes are omitted from observations.
+unless observeAfter=true. Observations contain native Playwright ARIA JSON nodes with paths:
+snapshot entries contain path (child indices) and node (native attributes or text). Missing
+boolean states such as checked and selected mean false. Use option labels with selectOption.
+For click, fill, press, check, selectOption and waitFor provide observationId and the exact ref
+issued by the current observation. Never send selectors, JavaScript, filenames or raw MCP calls.
+References expire after 60 seconds and are revoked by navigation, control changes and actions.
+An accepted actions sequence reserves its already issued refs only for that exact sequence.
+New conditional fields require a new observation. A stale reference is a failure before dispatch;
+observe again and choose a new operationId only after establishing that no effect occurred.
+complete=false/limited=true means the observation is partial. Use observe with its cursor to
+read the same cached snapshot; its original timestamp and expiry do not change.
 Do not batch actions whose next inputs or authorization depend on reading intermediate results.
-For dynamic pages include waitFor with a known readiness selector in the sequence instead of
-sleeping or assuming that an immediate observation already contains delayed site updates.
+For dynamic pages use waitFor only for an already issued reference. Observe again to discover
+new controls; do not assume that an immediate observation includes delayed site updates.
 Credentials and private login belong only in the protected cabinet. Helm processes saved audio locally.
+listMedia is a browser media inventory, not a list of voice messages in the selected conversation.
+It may contain notification sounds, previews, and sources from other pages. Before captureAudio,
+establish which source belongs to the requested message using its visible player and observed
+media source. Read all required observation pages with cursor. If needed, play that exact message
+and inspect listMedia again. Never label an unrelated candidate as the message in sourceRef;
+sourceRef is your description, not verified evidence of its identity. NO_SPEECH_DETECTED on an
+unmatched source does not establish that the requested message has no speech or is unsupported.
 For plain text call audio.analyze with mode=transcript; for vocal analysis use mode=full.
 audio.analyze waits up to eight seconds and returns the first transcript page, including items,
 sectionComplete and hasMore. Use the returned text immediately if sectionComplete=true and
@@ -158,7 +175,11 @@ RETRY the same step after an established failure, preserving its identity. New t
 new turns and new widgets never imply new business steps. Register steps progressively; do
 not invent an overall count or percentage. Before FINISH, settle started steps and SKIP
 unperformed declared steps with a reason. Publish the overall result through results.publish;
-finish only when the task is complete.
+finish only when the task is complete. FINISH with outcome SUCCEEDED also starts closing its
+browser; use STOP to release a retained browser after other terminal outcomes. If the user asks
+to verify browser release, use tasks.get until browser.status is CLOSED; a terminal task status
+alone is not that confirmation. Do not send browser actions after FINISH or infer that a rejected
+action means the browser stayed open.
 """)
         .capabilities(
             McpSchema.ServerCapabilities.builder().tools(false).resources(false, false).build())

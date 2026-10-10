@@ -45,7 +45,7 @@ export function browserViewerId(): string {
       white-space: nowrap;
     }
   `,
-  template: ` <section #card
+  template: ` <section
     class="browser-card"
     [class.browser-expanded]="expanded()"
     [cdkTrapFocus]="expanded()"
@@ -428,12 +428,8 @@ export class BrowserViewer {
   readonly exhausted = signal(false);
   private readonly frameAspect = signal(1440 / 900);
   private readonly viewportWidth = signal(0);
-  private readonly availableHeight = signal(120);
   readonly viewportHeight = computed(() =>
-    Math.min(
-      this.availableHeight(),
-      this.viewportWidth() ? this.viewportWidth() / this.frameAspect() : 420,
-    ),
+    this.viewportWidth() ? this.viewportWidth() / this.frameAspect() : 388.8,
   );
   readonly viewAllowed = computed(() => {
     const browser = this.browser();
@@ -450,8 +446,6 @@ export class BrowserViewer {
   private readonly destroy = inject(DestroyRef);
   private readonly frame = viewChild<ElementRef<HTMLIFrameElement>>('frame');
   private readonly viewport = viewChild<ElementRef<HTMLElement>>('viewport');
-  private readonly card = viewChild<ElementRef<HTMLElement>>('card');
-  private readonly host = inject<ElementRef<HTMLElement>>(ElementRef);
   private generation = 0;
   private attempts = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -486,30 +480,13 @@ export class BrowserViewer {
     });
     effect((onCleanup) => {
       const viewport = this.viewport()?.nativeElement;
-      const card = this.card()?.nativeElement;
-      if (!viewport || !card || this.expanded()) return;
+      if (!viewport || this.expanded()) return;
       const measure = () => {
-        const viewportRect = viewport.getBoundingClientRect();
-        const cardRect = card.getBoundingClientRect();
-        this.viewportWidth.set(viewportRect.width);
-        // Include all controls and notices; document coordinates keep sizing stable while scrolling.
-        const top = cardRect.top + window.scrollY;
-        const chromeHeight = cardRect.height - viewportRect.height;
-        this.availableHeight.set(Math.max(120, window.innerHeight * 0.95 - top - chromeHeight));
+        this.viewportWidth.set(viewport.getBoundingClientRect().width);
       };
       const observer = new ResizeObserver(measure);
       observer.observe(viewport);
-      observer.observe(card);
-      // Live notices and wrapped headings can move the card without resizing the viewport.
-      for (let parent = this.host.nativeElement.parentElement; parent; parent = parent.parentElement) {
-        observer.observe(parent);
-        if (parent.tagName === 'MAIN') break;
-      }
-      window.addEventListener('resize', measure);
-      onCleanup(() => {
-        observer.disconnect();
-        window.removeEventListener('resize', measure);
-      });
+      onCleanup(() => observer.disconnect());
     });
     effect(() => {
       this.identity();

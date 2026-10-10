@@ -360,7 +360,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual(original, primary.api(path)[1]['cookieCheck'],
                 'Reading the page must not export the complete saved profile')
 
-        def click(transport, current, selector):
+        def click(transport, current, name):
             deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 current = primary.api('/api/tasks/' + current['id'])[1]
@@ -370,13 +370,13 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual('LIVE', current['browser']['status'])
             operation = str(uuid.uuid4())
             error, receipt, _ = transport.execute_in_scenario_step({'taskId': current['id'], 'action': {
-                'operationId': operation, 'type': 'click', 'arguments': {'selector': selector},
+                'operationId': operation, 'type': 'click', 'arguments': transport.browser_target(current['id'], name),
                 'instructionRevision': current['instructionRevision'],
                 'controlEpoch': current['browser']['controlEpoch']}})
             self.assertFalse(error, receipt)
             self.assertEqual('SUCCEEDED', self.wait_operation(operation, transport)['status'])
 
-        click(client, task, '#account-b')
+        click(client, task, 'Use account B')
         # Exceed the former checkpoint interval while the same browser remains open.
         deadline = time.monotonic() + 66
         while time.monotonic() < deadline:
@@ -397,12 +397,12 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             + str(uuid.UUID(browser['id'])) + "';"))
 
         restored_client, restored = self.create(primary, url=url, preferred=[connection])
-        click(restored_client, restored, '#read-state')
+        click(restored_client, restored, 'Read state')
         observed = self.wait_operation(self.observe(restored_client, restored), restored_client)
         self.assertEqual('SUCCEEDED', observed['status'])
         self.assertNotEqual(browser['id'], primary.api('/api/tasks/' + restored['id'])[1]['browser']['id'])
-        self.assertIn('"account":"b"', observed['result']['text'])
-        self.assertIn('"localAccount":"b"', observed['result']['text'])
+        self.assertIn('"account":"b"', str(observed['result']))
+        self.assertIn('"localAccount":"b"', str(observed['result']))
 
     def test_failed_final_save_closes_browser_keeps_previous_profile_and_warns(self):
         identity, primary = self.owner()

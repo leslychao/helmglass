@@ -31,7 +31,7 @@ class BrowserIdleTest(unittest.TestCase):
 
     def ready(self):
         identity, client = self.owner()
-        model, task = self.create(client)
+        model, task = self.create(client, client.browser_fixture_url())
         task = self.wait_task(client, task['id'], lambda value:
             value['browser'] and value['browser']['status'] == 'LIVE')
         return identity, client, model, task
@@ -172,7 +172,7 @@ class BrowserIdleTest(unittest.TestCase):
         operation = str(uuid.uuid4())
         error, receipt, _ = model.execute_in_scenario_step({'taskId': task['id'], 'action': {
             'operationId': operation, 'type': 'waitFor',
-            'arguments': {'selector': '[data-lifecycle-absent]'},
+            'arguments': {**model.browser_target(task['id'], 'Increment'), 'state': 'hidden'},
             'instructionRevision': task['instructionRevision']}})
         self.assertFalse(error, receipt)
         self.wait_task(client, task['id'], lambda value: value['status'] == 'RUNNING')

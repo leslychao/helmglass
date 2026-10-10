@@ -5,6 +5,7 @@ No containers, local server, authentication bypass, or infrastructure fixtures a
 """
 
 import base64
+import atexit
 import hashlib
 import json
 import os
@@ -339,6 +340,53 @@ class DevClient:
                 if task.get("browser"):
                     action["controlEpoch"] = task["browser"]["controlEpoch"]
         return self.tool("browser.execute", arguments)
+
+    def browser_observation(self, task_id, step_id=None, navigate=None):
+        deadline = time.monotonic() + 60
+        while True:
+            error, task, _ = self.tool("tasks.get", {"taskId": task_id})
+            if error:
+                raise AssertionError(task)
+            if task.get("browser") and task["browser"]["status"] == "LIVE":
+                break
+            if time.monotonic() > deadline:
+                raise AssertionError("Browser did not become live")
+            time.sleep(.2)
+        step_id = step_id or self.scenario_step(task_id)["id"]
+        operation = str(uuid.uuid4())
+        error, receipt, _ = self.tool("browser.execute", {"taskId": task_id, "action": {
+            "operationId": operation, "stepId": step_id, "type": "navigate" if navigate else "observe",
+            "arguments": {"url": navigate} if navigate else {},
+            "instructionRevision": task["instructionRevision"], "controlEpoch": task["browser"]["controlEpoch"]}})
+        while not error and receipt["status"] in ("ACCEPTED", "DISPATCHED") and time.monotonic() < deadline:
+            time.sleep(.2)
+            error, receipt, _ = self.tool("operations.get", {"operationId": operation})
+        if error or receipt["status"] != "SUCCEEDED":
+            raise AssertionError(receipt)
+        return receipt["result"]["observation"] if navigate else receipt["result"]
+
+    def browser_fixture_url(self):
+        if not hasattr(self, '_browser_fixture_url'):
+            filename = 'execution-' + uuid.uuid4().hex + '.html'
+            destination = '/usr/share/nginx/html/' + filename
+            docker = ['docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375']
+            html = (Path(__file__).parent / 'fixtures' / 'browser-execution.html').read_text(encoding='utf-8')
+            subprocess.run(docker + ['exec', '-i', '-u', '0', 'helmglass-frontend-1', 'sh', '-c',
+                'cat > ' + destination], input=html, encoding='utf-8', capture_output=True, check=True, timeout=20)
+            atexit.register(subprocess.run, docker + ['exec', '-u', '0', 'helmglass-frontend-1',
+                'rm', '-f', destination], capture_output=True, timeout=20)
+            self._browser_fixture_url = self.base + '/' + filename
+        return self._browser_fixture_url
+
+    def browser_target(self, task_id, name, step_id=None, uncertain=False):
+        """Select only a reference actually issued by the deployed browser contract."""
+        navigate = self.browser_fixture_url() if uncertain else None
+        observation = self.browser_observation(task_id, step_id, navigate)
+        nodes = [entry['node'] for entry in observation['snapshot'] if isinstance(entry['node'], dict)
+                 and entry['node'].get('name') == name and entry['node'].get('ref')]
+        if len(nodes) != 1:
+            raise AssertionError('Expected one native reference for ' + name)
+        return {'observationId': observation['observationId'], 'ref': nodes[0]['ref']}
 
     def complete_scenario_step(self, task_id, operation_id, outcome="SUCCEEDED"):
         step = self.scenario_step(task_id)
@@ -962,7 +1010,7 @@ class DevContractTest(unittest.TestCase):
             self.assertTrue(error)
             self.assertEqual("STALE_CONTROL", stale["code"])
             missing = {"operationId": str(uuid.uuid4()), "type": "click",
-                       "arguments": {"selector": "[data-helm-dev-regression-never-present]"},
+                       "arguments": self.user.browser_target(task_id, 'Slow effect', uncertain=True),
                        "instructionRevision": task["instructionRevision"], "controlEpoch": task["browser"]["controlEpoch"]}
             error, _, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": missing})
             self.assertFalse(error)
@@ -984,7 +1032,7 @@ class DevContractTest(unittest.TestCase):
             request = task["request"]
             status, task = self.user.api("/api/tasks/" + task_id + "/commands", "POST",
                 {"type": "REJECT", "expectedVersion": task["version"], "requestId": request["id"],
-                 "requestVersion": request["version"], "text": "The deliberately absent selector did not exist; no site action was possible."})
+                 "requestVersion": request["version"], "text": "The synthetic effect counter was inspected before reconciliation."})
             self.assertEqual(200, status)
             self.assertIsNone(task["request"])
             self.assertEqual("STOPPED", task["status"], "Verification does not implicitly resume a stopped task")

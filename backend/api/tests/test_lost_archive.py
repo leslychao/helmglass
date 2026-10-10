@@ -89,7 +89,7 @@ class LostArchiveTest(unittest.TestCase):
             scope = " WHERE owner_id=:owner AND id='" + session + "';"
             # Delay only this fixture's background import until the native file is complete.
             self.fixture_sql(self.identity, "UPDATE browser_sessions SET artifact_cursor=9007199254740991" + scope)
-            self.execute(task, "click", {"selector": "#download-later"})
+            self.execute(task, "click", self.client.browser_target(task['id'], 'Download a completed result after this action returns'))
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 page = self.worker("/sessions/" + session + "/artifacts?archive=true")

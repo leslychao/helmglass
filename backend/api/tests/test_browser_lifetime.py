@@ -93,7 +93,7 @@ class BrowserLifetimeTest(unittest.TestCase):
         try:
             completed("observe", {})
             marker = "retained-page-" + str(uuid.uuid4())
-            completed("fill", {"selector": "#marker", "text": marker})
+            completed("fill", {**client.browser_target(task_id, 'Page marker'), 'text': marker})
             task = current(); browser = task["browser"]["id"]; original_process = process(browser)
             viewer = str(uuid.uuid4())
             command("BEGIN_LOGIN", viewerId=viewer)
@@ -106,8 +106,10 @@ class BrowserLifetimeTest(unittest.TestCase):
             self.assertEqual(browser, task["browser"]["id"])
             self.assertTrue(task["browser"]["privateMode"])
             self.assertEqual(original_process, process(browser))
-            command("FINISH_LOGIN", viewerId=viewer, resume=False, saveConnection=False)
-            wait_task(lambda value: value["status"] == "PAUSED")
+            command("FINISH_LOGIN", viewerId=viewer)
+            wait_task(lambda value: value["status"] == "WAITING_CHATGPT"
+                      and not value["browser"]["privateMode"])
+            client.return_control_without_continuing(task_id)
             time.sleep(75)
             task = current()
             self.assertEqual("PAUSED", task["status"])
@@ -126,7 +128,7 @@ class BrowserLifetimeTest(unittest.TestCase):
             # download that has not reached backend storage before private input starts.
             scope = " WHERE owner_id=:owner AND id='" + str(uuid.UUID(browser)) + "';"
             self.fixture_sql(identity, "UPDATE browser_sessions SET artifact_cursor=9007199254740991" + scope)
-            completed("click", {"selector": "#download-later"})
+            completed("click", client.browser_target(task_id, 'Download a completed result after this action returns'))
             deadline = time.monotonic() + 20
             artifacts = []
             while time.monotonic() < deadline:

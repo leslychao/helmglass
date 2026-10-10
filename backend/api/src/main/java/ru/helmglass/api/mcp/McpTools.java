@@ -251,6 +251,7 @@ public class McpTools {
             "Изменить поручение или жизненный цикл задачи. STOP окончателен; RESUME завершённой задачи"
                 + " допускается только по явной просьбе пользователя в свободном исходном чате."
                 + " REQUIRE_LOGIN приостанавливает задачу для защищённого входа в её браузере."
+                + " FINISH с SUCCEEDED закрывает браузер; подтверждайте CLOSED через tasks.get."
                 + " Ответы и согласие пользователя принимаются только через tasks.respond.",
             object(
                 Map.of("taskId", uuid(), "operationKey", key(), "command", commandSchema()),
@@ -291,12 +292,19 @@ public class McpTools {
         tool(
             "browser.execute",
             "Выполнить action или последовательность actions (до 8) внутри бизнес-шага."
+                + " click/fill/press/check/selectOption/waitFor требуют в arguments одновременно"
+                + " observationId и ref из выданного наблюдения; одного ref недостаточно."
+                + " snapshot содержит native ARIA nodes с path;"
+                + " отсутствующие checked/selected означают false."
+                + " selectOption принимает видимые названия options."
+                + " Условные поля ищите в новом observation."
                 + " Короткие команды возвращают готовый результат; только для ACCEPTED/DISPATCHED"
                 + " или потерянного ответа нужен operations.get. После изменения страницы возвращается"
                 + " observation: используйте её вместо отдельного observe. listMedia, captureAudio"
                 + " и screenshot по умолчанию возвращают только свой результат."
                 + " Для нового шага передайте step вместо отдельных DECLARE/START; для существующего stepId."
-                + " actions используйте только для заранее известных действий без промежуточного решения."
+                + " Группируйте заранее известные независимые заполнения в actions;"
+                + " не объединяйте действия, требующие промежуточного решения."
                 + " Каждый элемент имеет свой стабильный operationId. Последовательность останавливается"
                 + " на первом неподтверждённом успехе; complete=false и nextOperationId требуют проверки."
                 + " confirmationPrompt указывайте"
@@ -305,7 +313,10 @@ public class McpTools {
                 + " operationId сохраняется при повторе; при потере ответа"
                 + " запрашивать operations.get. Не передавать пароли и коды: вход выполняется в"
                 + " кабинете. captureAudio требует sourceId из listMedia, sourceRef и"
-                + " sourceContext с идентификатором задания, точной инструкцией и вопросами.",
+                + " sourceContext с идентификатором задания, точной инструкцией и вопросами."
+                + " listMedia может содержать звуки уведомлений и медиа других страниц."
+                + " До captureAudio сопоставьте источник с нужным сообщением через его плеер;"
+                + " sourceRef сам по себе не подтверждает это соответствие.",
             object(Map.of("taskId", uuid(), "action", actionSchema(),
                 "actions", array(actionSchema(), 8)), "taskId"),
             false,
@@ -568,7 +579,8 @@ public class McpTools {
       }
       chats.requireOriginal(owner, taskId, chat);
       if (Set.of("browser.execute", "connections.select", "tasks.ask", "results.publish", "steps.command").contains(name)
-          || "tasks.command".equals(name) && !"RESUME".equals(input.path("command").path("type").asString())) {
+          || "tasks.command".equals(name)
+              && !Set.of("RESUME", "STOP").contains(input.path("command").path("type").asString())) {
         chats.requireCurrent(owner, taskId, chat);
       }
       return switch (name) {
@@ -610,7 +622,7 @@ public class McpTools {
                     () -> {
                       boolean reopensContinuation =
                           Set.of("RESUME", "AMEND").contains(command.type());
-                      if (!reopensContinuation) {
+                      if (!reopensContinuation && !"STOP".equals(command.type())) {
                         chats.acceptCommand(owner, taskId, chat);
                       }
                       Contracts.Task result = "REQUIRE_LOGIN".equals(command.type())
@@ -776,7 +788,8 @@ public class McpTools {
         throw ApiException.invalid("action", "Действие должно быть объектом.");
       }
       Contracts.BrowserAction action = json.convert(input.path("action"), Contracts.BrowserAction.class);
-      return operationResponse(owner, executeAction(owner, task, chat, action, deadline));
+      return operationResponse(
+          owner, executeAction(owner, task, chat, action, deadline, List.of()));
     }
     JsonNode supplied = input.path("actions");
     if (!supplied.isArray() || supplied.isEmpty() || supplied.size() > 8) {
@@ -798,6 +811,7 @@ public class McpTools {
           action.observeAfter() == null && commands.size() < supplied.size() - 1
               ? Boolean.FALSE : action.observeAfter()));
     }
+    List<UUID> sequenceIds = commands.stream().map(Contracts.BrowserAction::operationId).toList();
     List<Contracts.Operation> completed = new ArrayList<>();
     for (Contracts.BrowserAction action : commands) {
       if (!completed.isEmpty() && System.nanoTime() >= deadline) {
@@ -806,7 +820,7 @@ public class McpTools {
       }
       Contracts.Operation result;
       try {
-        result = executeAction(owner, task, chat, action, deadline);
+        result = executeAction(owner, task, chat, action, deadline, sequenceIds);
       } catch (ApiException exception) {
         if (completed.isEmpty()) {
           throw exception;
@@ -829,9 +843,9 @@ public class McpTools {
   }
 
   private Contracts.Operation executeAction(UUID owner, UUID task, String chat,
-      Contracts.BrowserAction action, long deadline) {
+      Contracts.BrowserAction action, long deadline, List<UUID> sequence) {
     chats.requireCurrent(owner, task, chat);
-    Contracts.Operation result = actions.submit(owner, task, action);
+    Contracts.Operation result = actions.submit(owner, task, action, sequence);
     if (Set.of("ACCEPTED", "DISPATCHED", "SUCCEEDED").contains(result.status())) {
       chats.accepted(owner, task, chat, action.instructionRevision(), action.operationId());
     }
@@ -1139,7 +1153,9 @@ public class McpTools {
             object(
                 Map.ofEntries(
                     Map.entry("url", text(8192)),
-                    Map.entry("selector", text(2000)),
+                    Map.entry("observationId", uuid()),
+                    Map.entry("ref", text(40)),
+                    Map.entry("cursor", text(100)),
                     Map.entry("text", text(20000)),
                     Map.entry("key", text(100)),
                     Map.entry("values", array(text(1000), 100)),

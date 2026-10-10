@@ -1,3 +1,4 @@
+import { snapshotText } from './references.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { test } from 'node:test';
@@ -21,11 +22,14 @@ test('original Blob bytes, lost-response receipt, deduplication and cancelled tr
   try {
     assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
     await request(base + '/control', { controlEpoch: epoch, owner: 'CHATGPT', privateMode: false });
-    assert.equal((await request(base + '/commands', command('waitFor', {
-      selector: 'body[data-ready="true"]',
-    }))).status, 'SUCCEEDED', 'Synthetic audio generation must finish before observing its metadata');
-    const observation = await request(base + '/observe');
-    const original = JSON.parse(observation.text.match(/\{"sizeBytes":.*?\}/)[0]);
+    let observation;
+    const metadataDeadline = Date.now() + 20000;
+    do {
+      observation = await request(base + '/observe');
+      if (snapshotText(observation).includes('"sizeBytes"')) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < metadataDeadline);
+    const original = JSON.parse(snapshotText(observation).match(/\{"sizeBytes":.*?\}/)[0]);
     const listed = await request(base + '/commands', command('listMedia', {}));
     const fast = listed.result.media.find(item => item.sourceUrl === original.fast);
     const slow = listed.result.media.find(item => item.sourceUrl === original.slow);

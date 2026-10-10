@@ -1,3 +1,4 @@
+import { target, snapshotText } from '../../browser-session/test/references.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -46,7 +47,7 @@ test('concurrent public/private takeovers are exclusive; ticket expiry and recon
     assert.equal((await request(base + '/control', { controlEpoch: epoch, owner: 'CHATGPT', privateMode: false })).code, 200);
     const marker = 'continuity-' + randomUUID();
     const filled = await request(base + '/commands', { operationId: randomUUID(), type: 'fill',
-      arguments: { selector: '#marker', text: marker }, instructionRevision: 0, controlEpoch: epoch });
+      arguments: { ...await target(request, base, 'Page marker'), text: marker }, instructionRevision: 0, controlEpoch: epoch });
     assert.equal(filled.value.status, 'SUCCEEDED');
     epoch += 1; assert.equal((await request(base + '/control', policy(first))).code, 200);
     const old = await connect(first);
@@ -67,7 +68,7 @@ test('concurrent public/private takeovers are exclusive; ticket expiry and recon
     const closed = once(viewer, 'close'); viewer.close(); await closed;
     const reconnected = await connect(first, 'VIEWER'); assert.equal(reconnected.readyState, WebSocket.OPEN);
     const after = await request(base + '/observe'); assert.equal(after.code, 200);
-    assert.ok(after.value.text.includes(marker), 'Viewer reconnect must preserve unsaved page state');
+    assert.ok(snapshotText(after.value).includes(marker), 'Viewer reconnect must preserve unsaved page state');
     assert.equal((await request(base)).value.status, 'LIVE');
   } finally { for (const viewer of viewers) viewer.terminate(); }
 });

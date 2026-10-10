@@ -612,8 +612,11 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
     if (take) {
       startUsage(reference, id, "MANUAL");
     }
-    if (reference.taskId() != null) {
-      Contracts.Task task = tasks.get(owner, reference.taskId());
+    Contracts.Task task =
+        reference.taskId() == null ? null : tasks.get(owner, reference.taskId());
+    // Browser control does not reopen a result; only an explicit task RESUME may do that.
+    if (task != null && !TaskService.TERMINAL.contains(task.status())
+        && !"STOPPING".equals(task.status())) {
       if (take) {
         tasks.change(
             owner,

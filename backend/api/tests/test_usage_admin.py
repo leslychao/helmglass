@@ -689,7 +689,7 @@ class UsageAdministrationTest(unittest.TestCase):
         status,original,_=self.client.request(self.client.base+artifact["downloadUrl"])
         self.assertEqual(200,status)
         self.assertEqual(artifact["sha256"],hashlib.sha256(original).hexdigest())
-        pending=execute("waitFor",{"selector":"[data-acceptance-never-visible]"})
+        pending=execute("waitFor",{**self.client.browser_target(task_id, 'Learn more'), 'state': 'hidden'})
         deadline=time.monotonic()+15
         while time.monotonic()<deadline:
             error,receipt,_=self.client.tool("operations.get",{"operationId":pending})
@@ -718,7 +718,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(elapsed,current()["usage"]["executionSeconds"],"Manual waiting is not execution time")
         self.assertGreater(current()["usage"]["browserSeconds"],paused["usage"]["browserSeconds"])
         self.command(task,"RESUME")
-        closing_action=execute("waitFor",{"selector":"[data-v16-never-visible]"})
+        closing_action=execute("waitFor",{**self.client.browser_target(task_id, 'Learn more'), 'state': 'hidden'})
         deadline=time.monotonic()+15
         while time.monotonic()<deadline:
             receipt=self.client.tool("operations.get",{"operationId":closing_action})[1]
@@ -750,7 +750,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertNotEqual(browser,reopened["browser"]["id"])
         self.assertEqual(closed["stepCount"],reopened["stepCount"])
         self.command(reopened,"RESUME")
-        unknown=execute("click",{"selector":"[data-acceptance-never-visible]"})
+        unknown=execute("click",self.client.browser_target(task_id, "Slow effect", uncertain=True))
         self.assertEqual("UNKNOWN",self.wait_operation(unknown,self.client)["status"])
         task=current()
         self.assertEqual("UNKNOWN_RESULT",task["request"]["type"])

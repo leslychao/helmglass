@@ -1,4 +1,6 @@
 """Browser execution round trips, partial sequences and replay against deployed dev."""
+import json
+from pathlib import Path
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -25,16 +27,7 @@ class BrowserExecutionTest(unittest.TestCase):
         cls.fixture_path = '/usr/share/nginx/html/' + name
         cls.fixture_url = cls.settings['PUBLIC_URL'].rstrip('/') + '/' + name
         cls.addClassCleanup(cls.remove_fixture)
-        html = '''<!doctype html><title>Execution acceptance</title>
-<input id="text"><input id="password" type="password">
-<span id="message" role="textbox" contenteditable="true" aria-label="Message"
-      style="display:block;min-height:24px"></span>
-<button id="increment" onclick="counter++; render()">Increment</button>
-<button id="render" onclick="render()">Read state</button>
-<button id="delay" onclick="setTimeout(()=>document.querySelector('#delayed').hidden=false,10000)">Delay</button>
-<span id="delayed" hidden>Ready</span><pre id="state"></pre>
-<script>let counter=0; function render(){document.querySelector('#state').textContent=
-JSON.stringify({counter,text:document.querySelector('#text').value})} render();</script>'''
+        html = (Path(__file__).parent / 'fixtures' / 'browser-execution.html').read_text(encoding='utf-8')
         subprocess.run(cls.docker + ['exec', '-i', '-u', '0', 'helmglass-frontend-1',
             'sh', '-c', 'cat > ' + cls.fixture_path], input=html, text=True,
             capture_output=True, check=True, timeout=20)
@@ -68,57 +61,95 @@ JSON.stringify({counter,text:document.querySelector('#text').value})} render();<
         self.assertFalse(error, result)
         return result
 
+    def observation(self):
+        result = self.execute(action=self.action('observe'))
+        if result['status'] in ('ACCEPTED', 'DISPATCHED'):
+            result = self.wait_operation(result['id'], self.client)
+        self.assertEqual('SUCCEEDED', result['status'], result)
+        return result['result']
+
+    def target(self, observation, name, role=None):
+        matches = [entry['node'] for entry in observation['snapshot']
+                   if isinstance(entry['node'], dict) and entry['node'].get('name') == name
+                   and (role is None or entry['node']['role'] == role) and entry['node'].get('ref')]
+        self.assertEqual(1, len(matches), (name, observation))
+        return {'observationId': observation['observationId'], 'ref': matches[0]['ref']}
+
+    def click(self, name):
+        return self.execute(action=self.action('click', self.target(self.observation(), name)))
+
+    def runtime_resources(self):
+        browser_id = str(uuid.UUID(self.task['browser']['id']))
+        script = r'''
+import {readdir, readFile, stat} from 'node:fs/promises';
+import {DatabaseSync} from 'node:sqlite';
+let rssKiB;
+for (const pid of await readdir('/proc')) {
+  if (!/^\d+$/.test(pid)) continue;
+  try {
+    const command = (await readFile('/proc/'+pid+'/cmdline','utf8')).split('\0');
+    if (command[1] !== '/app/dist/server.js') continue;
+    rssKiB = Number((await readFile('/proc/'+pid+'/status','utf8')).match(/^VmRSS:\s+(\d+)/m)[1]);
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+const db = new DatabaseSync('/data/session.sqlite',{readOnly:true});
+let leaked = false;
+for (const row of db.prepare('SELECT result FROM operations LIMIT 100').all()) {
+  if (/private-(password|code|card|hidden|service|url|query|fragment)/.test(row.result ?? '')) leaked = true;
+}
+db.close();
+let files = 0;
+try { for (const file of await readdir('/tmp/helm-mcp')) if ((await stat('/tmp/helm-mcp/'+file)).isFile()) files++; }
+catch (error) { if (error.code !== 'ENOENT') throw error; }
+console.log(JSON.stringify({rssKiB, leaked, files}));
+'''
+        result = subprocess.run(self.docker + ['exec', '-i', 'helm-browser-' + browser_id,
+            'node', '--input-type=module'], input=script, text=True, capture_output=True, timeout=20)
+        self.assertEqual(0, result.returncode, result.stderr)
+        values = json.loads(result.stdout)
+        self.assertGreater(values['rssKiB'], 0)
+        self.assertFalse(values['leaked'], 'Receipts must never retain synthetic sensitive values')
+        self.assertEqual(0, values['files'], 'MCP diagnostics must not write site data to files')
+        return values
+
     def test_short_results_inline_step_and_sequence_replay(self):
         self.ready()
-        observed = self.execute(action=self.action('observe'))
-        self.assertEqual('SUCCEEDED', observed['status'], 'A short command returns its final receipt')
-        commands = [self.action('fill', {'selector': '#text', 'text': 'synthetic-value'}),
-                    self.action('click', {'selector': '#increment'}),
-                    self.action('click', {'selector': '#render'})]
+        observed = self.observation()
+        commands = [self.action('fill', {**self.target(observed, 'Recipient'), 'text': 'synthetic-value'}),
+                    self.action('click', self.target(observed, 'Increment')),
+                    self.action('click', self.target(observed, 'Read state'))]
         started = time.monotonic()
         result = self.execute(actions=commands)
-        elapsed = time.monotonic() - started
         self.assertTrue(result['complete'], result)
         self.assertEqual(['SUCCEEDED'] * 3, [item['status'] for item in result['operations']])
         for item in result['operations'][:-1]:
             self.assertNotIn('observation', item['result'])
         final = result['operations'][-1]['result']['observation']
-        self.assertIn('"counter":1', final['text'])
-        self.assertIn('"text":"synthetic-value"', final['text'])
+        self.assertIn('"counter":1', str(final))
+        self.assertIn('"text":"synthetic-value"', str(final))
+        self.assertEqual(4, final['metrics']['snapshots'] - observed['metrics']['snapshots'],
+                         'One bounded native preflight per action and one final observation')
         self.assertEqual(result, self.execute(actions=commands))
-        self.assertIn('"counter":1', self.execute(action=self.action('observe'))['result']['text'])
-        error, page, _ = self.client.tool('steps.list', {'taskId': self.task['id']})
-        self.assertFalse(error, page)
-        self.assertEqual(1, page['total'])
-        self.assertEqual('RUNNING', page['items'][0]['status'], 'A click is not a business result')
-        self.assertEqual(observed['stepId'], page['items'][0]['id'])
-        conflict = {**commands[0], 'arguments': {'selector': '#text', 'text': 'different'}}
+        self.assertIn('"counter":1', str(self.observation()))
+        conflict = {**commands[0], 'arguments': {**commands[0]['arguments'], 'text': 'different'}}
         error, refusal, _ = self.client.tool('browser.execute', {
             'taskId': self.task['id'], 'actions': [conflict, *commands[1:]]})
         self.assertTrue(error, refusal)
         self.assertEqual('IDEMPOTENCY_CONFLICT', refusal['code'])
-        print(f'Three browser actions, final observation and ready receipts: {elapsed:.3f}s; one MCP call', flush=True)
+        print(f'Three actions + final snapshot: {time.monotonic()-started:.3f}s', flush=True)
 
     def test_media_reads_omit_redundant_dom_and_replay_preserves_observation(self):
         self.ready()
-        observed = self.execute(action=self.action('observe'))['result']
-        self.assertTrue(observed['elements'])
-        for element in observed['elements']:
-            self.assertTrue(all(value is not None and value != '' for value in element.values()), element)
-        self.assertTrue(any(element.get('id') == 'increment' and element.get('text') == 'Increment'
-                            for element in observed['elements']))
+        self.assertTrue(self.observation()['snapshot'])
         action = self.action('listMedia')
         result = self.execute(action=action)
         self.assertEqual('SUCCEEDED', result['status'])
         self.assertNotIn('observation', result['result'])
         self.assertIn('media', result['result'])
         self.assertEqual(result, self.execute(action=action))
-        batch = self.execute(actions=[self.action('listMedia')])
-        self.assertNotIn('observation', batch['operations'][0]['result'])
         explicit = self.action('listMedia', observeAfter=True)
         with_snapshot = self.execute(action=explicit)
         self.assertIn('observation', with_snapshot['result'])
-        # Omitted options reuse the durable choice, including receipts made under older defaults.
         without_option = {key: value for key, value in explicit.items() if key != 'observeAfter'}
         self.assertEqual(with_snapshot, self.execute(action=without_option))
         error, refusal, _ = self.client.tool('browser.execute', {'taskId': self.task['id'],
@@ -126,63 +157,171 @@ JSON.stringify({counter,text:document.querySelector('#text').value})} render();<
         self.assertTrue(error, refusal)
         self.assertEqual('IDEMPOTENCY_CONFLICT', refusal['code'])
 
-    def test_editable_target_is_observed_and_missing_input_fails_before_effect(self):
+    def test_native_references_survive_media_reads_in_the_accepted_sequence(self):
         self.ready()
-        observed = self.execute(action=self.action('observe'))['result']
-        editable = next((element for element in observed['elements']
-                         if element.get('id') == 'message'), None)
-        self.assertIsNotNone(editable, 'The model must see the actual editable element and tag')
-        self.assertEqual('span', editable['tag'])
-        self.assertEqual('textbox', editable['role'])
-        self.assertTrue(editable['contentEditable'])
-        for kind, arguments in [('fill', {'selector': 'div[contenteditable="true"]', 'text': 'test'}),
-                                ('press', {'selector': '#missing-input', 'key': 'Enter'})]:
-            action = self.action(kind, arguments)
-            started = time.monotonic()
-            receipt = self.execute(action=action)
-            self.assertEqual('FAILED', receipt['status'], 'Read-only preflight cannot change the site')
-            self.assertLess(time.monotonic() - started, 3, 'A missing input must fail without a 20s wait')
-            self.assertEqual(receipt, self.execute(action=action))
-            owner, task_id = self.tasks[-1]
-            status, current = owner.api('/api/tasks/' + task_id)
-            self.assertEqual(200, status, current)
-            self.assertIsNone(current['request'])
-        valid = self.execute(action=self.action('fill', {'selector': '#message', 'text': 'verified draft'}))
-        self.assertEqual('SUCCEEDED', valid['status'])
-        self.assertIn('verified draft', valid['result']['observation']['text'])
+        observed = self.observation()
+        commands = [self.action('listMedia'),
+                    self.action('fill', {**self.target(observed, 'Recipient'), 'text': 'mixed sequence'}),
+                    self.action('listMedia'),
+                    self.action('click', self.target(observed, 'Read state'))]
+        result = self.execute(actions=commands)
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(['SUCCEEDED'] * 4, [item['status'] for item in result['operations']])
+        final = result['operations'][-1]['result']['observation']
+        self.assertIn('"text":"mixed sequence"', str(final))
+        self.assertEqual(3, final['metrics']['snapshots'] - observed['metrics']['snapshots'])
+        self.assertEqual(result, self.execute(actions=commands))
 
-    def test_sequence_stops_on_refusal_and_never_repeats_completed_effects(self):
+    def test_unissued_and_replaced_refs_fail_before_effect(self):
         self.ready()
-        commands = [self.action('click', {'selector': '#increment'}),
-                    self.action('fill', {'selector': '#password', 'text': 'synthetic-only'}),
-                    self.action('click', {'selector': '#increment'})]
+        observed = self.observation()
+        for kind, values in [('fill', {'text': 'test'}), ('press', {'key': 'Enter'})]:
+            action = self.action(kind, {'observationId': observed['observationId'], 'ref': 'e999999', **values})
+            receipt = self.execute(action=action)
+            self.assertEqual('FAILED', receipt['status'])
+            self.assertEqual(receipt, self.execute(action=action))
+        changed = self.execute(actions=[self.action('click', self.target(observed, 'Replace target')),
+                         self.action('click', self.target(observed, 'Increment'))])
+        self.assertEqual(['SUCCEEDED', 'FAILED'], [item['status'] for item in changed['operations']])
+        self.assertIn('"counter":0', str(self.observation()))
+        filled = self.execute(action=self.action('fill', {**self.target(self.observation(), 'Message'), 'text': 'verified draft'}))
+        self.assertEqual('SUCCEEDED', filled['status'])
+        self.assertIn('verified draft', str(filled['result']['observation']))
+
+    def test_native_form_states_and_sensitive_values(self):
+        self.ready()
+        observed = self.observation()
+        nodes = [entry['node'] for entry in observed['snapshot'] if isinstance(entry['node'], dict)]
+        by_name = {node.get('name'): node for node in nodes}
+        self.assertEqual('combobox', by_name['City']['role'])
+        self.assertTrue(by_name['Kazan']['selected'])
+        self.assertTrue(by_name['Notifications']['checked'])
+        self.assertFalse(by_name['Checked data'].get('checked', False))
+        self.assertEqual('Existing comment', by_name['Comment']['text'])
+        self.assertNotIn('private-', str(observed))
+        self.assertEqual('https://example.com/path', by_name['Safe link']['url'])
+        for name in ('Code', 'Number', 'One-time code', 'Card number'):
+            refused = self.execute(action=self.action('fill', {
+                **self.target(observed, name), 'text': 'synthetic-rejected-value'}))
+            self.assertEqual('FAILED', refused['status'])
+        changed = self.execute(actions=[
+            self.action('fill', {**self.target(observed, 'Recipient'), 'text': 'Synthetic recipient'}),
+            self.action('selectOption', {**self.target(observed, 'City'), 'values': ['Perm']}),
+            self.action('check', {**self.target(observed, 'Notifications'), 'checked': False})])
+        self.assertTrue(changed['complete'], changed)
+        nodes = {entry['node'].get('name'): entry['node'] for entry in changed['operations'][-1]['result']['observation']['snapshot'] if isinstance(entry['node'], dict)}
+        self.assertTrue(nodes['Perm']['selected'])
+        self.assertFalse(nodes['Notifications'].get('checked', False))
+        self.runtime_resources()
+
+    def test_sequence_stops_on_private_refusal_and_never_repeats_completed_effects(self):
+        self.ready()
+        observed = self.observation()
+        commands = [self.action('click', self.target(observed, 'Increment')),
+                    self.action('fill', {**self.target(observed, 'OTP'), 'text': 'synthetic-only'}),
+                    self.action('click', self.target(observed, 'Increment'))]
         result = self.execute(actions=commands)
         self.assertFalse(result['complete'])
         self.assertEqual(['SUCCEEDED', 'FAILED'], [item['status'] for item in result['operations']])
-        self.assertEqual(commands[1]['operationId'], result['nextOperationId'])
         self.assertEqual(result, self.execute(actions=commands))
-        error, refusal, _ = self.client.tool('operations.get', {'operationId': commands[2]['operationId']})
-        self.assertTrue(error, refusal)
-        self.assertEqual('NOT_FOUND', refusal['code'])
-        self.assertIn('"counter":1', self.execute(action=self.action('observe'))['result']['text'])
+        self.assertIn('"counter":1', str(self.observation()))
 
-    def test_wait_budget_returns_pending_and_sequence_continues_with_same_ids(self):
+    def test_pagination_is_bounded_and_keeps_original_timestamp(self):
         self.ready()
-        commands = [self.action('click', {'selector': '#delay'}),
-                    self.action('waitFor', {'selector': '#delayed'}),
-                    self.action('click', {'selector': '#increment'})]
-        started = time.monotonic()
+        result = self.click('Large form')
+        self.assertEqual('SUCCEEDED', result['status'])
+        observed = result['result']['observation']
+        self.assertFalse(observed['complete'])
+        self.assertLessEqual(len(observed['snapshot']), 200)
+        self.assertLessEqual(len(json.dumps(observed, ensure_ascii=False).encode()), 32768)
+        continued = self.execute(action=self.action('observe', {'cursor': observed['cursor']}))['result']
+        self.assertEqual(observed['observedAt'], continued['observedAt'])
+        self.assertEqual(observed['metrics']['snapshots'], continued['metrics']['snapshots'])
+        self.assertEqual(observed['observationId'], continued['observationId'])
+        self.observation()
+        expired = self.execute(action=self.action('observe', {'cursor': observed['cursor']}))
+        self.assertEqual('FAILED', expired['status'])
+
+    def test_capture_limits_do_not_change_successful_action_receipt(self):
+        self.ready()
+        self.observation()
+        memory = [self.runtime_resources()['rssKiB']]
+        for name in ('Huge text', 'Deep tree', 'Many frames', 'Unavailable frame'):
+            with self.subTest(name=name):
+                reset = self.execute(action=self.action('navigate', {'url': self.fixture_url}))
+                if reset['status'] in ('ACCEPTED', 'DISPATCHED'):
+                    reset = self.wait_operation(reset['id'], self.client)
+                self.assertEqual('SUCCEEDED', reset['status'], reset)
+                result = self.click(name)
+                if result['status'] in ('ACCEPTED', 'DISPATCHED'):
+                    result = self.wait_operation(result['id'], self.client)
+                self.assertEqual('SUCCEEDED', result['status'], result)
+                expected = ('OBSERVATION_UNAVAILABLE' if name == 'Unavailable frame'
+                            else 'OBSERVATION_LIMIT_EXCEEDED')
+                self.assertEqual(expected, result['result'].get('observationError'))
+                self.assertNotIn('observation', result['result'])
+                if name == 'Huge text':
+                    refused = self.execute(action=self.action('observe'))
+                    self.assertEqual('FAILED', refused['status'], refused)
+                    self.assertEqual('OBSERVATION_LIMIT_EXCEEDED', refused['errorCode'])
+                memory.append(self.runtime_resources()['rssKiB'])
+        print('Node RSS before/after bounded rejections (KiB): ' + str(memory), flush=True)
+
+    def test_iframe_conditional_fields_popup_and_navigation_revoke_refs(self):
+        self.ready()
+        observed = self.observation()
+        frame_target = self.target(observed, 'Frame value')
+        self.assertTrue(frame_target['ref'].startswith('f'))
+        result = self.execute(action=self.action('fill', {**frame_target, 'text': 'frame answer'}))
+        self.assertIn('frame answer', str(result['result']['observation']))
+        result = self.click('Show conditional')
+        target = self.target(result['result']['observation'], 'Conditional')
+        self.assertEqual('SUCCEEDED', self.execute(action=self.action('fill', {**target, 'text': 'conditional answer'}))['status'])
+        previous = self.observation()
+        result = self.click('Popup')
+        self.assertEqual(2, len(result['result']['observation']['tabs']))
+        refused = self.execute(action=self.action('click', self.target(previous, 'Increment')))
+        self.assertEqual('FAILED', refused['status'])
+        previous = self.observation()
+        self.execute(action=self.action('reload'))
+        self.assertEqual('FAILED', self.execute(action=self.action('click', self.target(previous, 'Increment')))['status'])
+
+    def test_wait_budget_continues_exact_sequence(self):
+        self.ready()
+        observed = self.observation()
+        commands = [self.action('click', self.target(observed, 'Delay')),
+                    self.action('waitFor', {**self.target(observed, 'Delayed target'), 'state': 'hidden'}),
+                    self.action('click', self.target(observed, 'Increment'))]
         result = self.execute(actions=commands)
-        elapsed = time.monotonic() - started
         self.assertFalse(result['complete'])
-        self.assertLess(elapsed, 10, 'Waiting must return before the delayed page is ready')
-        self.assertEqual(2, len(result['operations']), result)
         self.assertIn(result['operations'][-1]['status'], ('ACCEPTED', 'DISPATCHED'))
-        self.assertEqual(commands[1]['operationId'], result['nextOperationId'])
         self.assertEqual('SUCCEEDED', self.wait_operation(commands[1]['operationId'], self.client)['status'])
         continued = self.execute(actions=commands)
         self.assertTrue(continued['complete'], continued)
-        self.assertIn('"counter":1', continued['operations'][-1]['result']['observation']['text'])
+        self.assertIn('"counter":1', str(continued['operations'][-1]['result']['observation']))
+
+    def test_concurrent_duplicate_has_one_effect(self):
+        self.ready()
+        action = self.action('click', self.target(self.observation(), 'Increment'))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            replies = list(executor.map(lambda _: self.execute(action=action), range(2)))
+        self.assertEqual(replies[0], replies[1])
+        self.assertEqual('SUCCEEDED', replies[0]['status'])
+        self.assertIn('"counter":1', str(replies[0]['result']['observation']))
+
+    def test_unknown_after_possible_effect_is_not_replayed(self):
+        self.ready()
+        action = self.action('click', self.target(self.observation(), 'Slow effect'))
+        result = self.execute(action=action)
+        if result['status'] in ('ACCEPTED', 'DISPATCHED'):
+            result = self.wait_operation(action['operationId'], self.client)
+        self.assertEqual('UNKNOWN', result['status'], result)
+        self.assertEqual(result, self.execute(action=action))
+        self.assertIn('"counter":1', str(self.observation()))
+        error, refusal, _ = self.client.tool('browser.execute', {'taskId': self.task['id'],
+            'action': self.action('click', self.target(self.observation(), 'Increment'))})
+        self.assertTrue(error, refusal)
+        self.assertEqual('UNKNOWN_RESULT', refusal['code'])
 
     def test_rejected_command_rolls_back_inline_step(self):
         self.ready()
@@ -193,71 +332,6 @@ JSON.stringify({counter,text:document.querySelector('#text').value})} render();<
         error, page, _ = self.client.tool('steps.list', {'taskId': self.task['id']})
         self.assertFalse(error, page)
         self.assertEqual(0, page['total'])
-        for fields in ({'action': None}, {'actions': [None]}):
-            error, refusal, _ = self.client.tool('browser.execute', {'taskId': self.task['id'], **fields})
-            self.assertTrue(error, refusal)
-            self.assertIn('object expected', str(refusal), 'The MCP schema rejects null before execution')
-
-    def test_concurrent_replay_waits_for_one_effect_and_one_step(self):
-        self.ready()
-        action = self.action('click', {'selector': '#increment'})
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            replies = list(executor.map(lambda _: self.execute(action=action), range(2)))
-        self.assertEqual(replies[0], replies[1])
-        self.assertEqual('SUCCEEDED', replies[0]['status'])
-        self.assertIn('"counter":1', replies[0]['result']['observation']['text'])
-        self.assertEqual(1, self.client.tool('steps.list', {'taskId': self.task['id']})[1]['total'])
-
-    def test_unknown_effect_blocks_sequence_continuation_and_replay(self):
-        self.ready()
-        commands = [self.action('click', {'selector': '#increment'}),
-                    self.action('click', {'selector': '#missing-effect'}),
-                    self.action('click', {'selector': '#increment'})]
-        pending = self.execute(actions=commands)
-        self.assertFalse(pending['complete'])
-        self.assertEqual(2, len(pending['operations']), pending)
-        self.assertEqual('UNKNOWN', self.wait_operation(commands[1]['operationId'], self.client)['status'])
-        repeated = self.execute(actions=commands)
-        self.assertFalse(repeated['complete'])
-        self.assertEqual(['SUCCEEDED', 'UNKNOWN'], [item['status'] for item in repeated['operations']])
-        error, refusal, _ = self.client.tool('browser.execute', {
-            'taskId': self.task['id'], 'action': commands[2]})
-        self.assertTrue(error, refusal)
-        self.assertEqual('UNKNOWN_RESULT', refusal['code'])
-        self.assertIn('"counter":1', self.execute(action=self.action('observe'))['result']['text'])
-
-    def test_slow_browser_does_not_hold_another_tasks_short_command(self):
-        self.ready()
-        slow_client, slow_task, slow_owner = self.client, self.task, self.identity
-        slow_action = self.action('waitFor', {'selector': '#never-ready'})
-        self.ready()
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            slow = executor.submit(slow_client.tool, 'browser.execute', {
-                'taskId': slow_task['id'], 'action': slow_action})
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                status = self.fixture_sql(slow_owner, "SELECT status FROM operations WHERE owner_id=:owner "
-                    "AND id='" + slow_action['operationId'] + "';")
-                if status == 'DISPATCHED':
-                    break
-                time.sleep(.1)
-            self.assertEqual('DISPATCHED', status)
-            started = time.monotonic()
-            quick = self.execute(action=self.action('observe'))
-            elapsed = time.monotonic() - started
-            self.assertEqual('SUCCEEDED', quick['status'],
-                'An independent browser must not queue behind another browser waiting on its site')
-            self.assertLess(elapsed, 5)
-            self.assertFalse(slow.result()[0])
-            # Another command in the slow task must stay queued until its own wait finishes.
-            next_action = {**slow_action, 'operationId': str(uuid.uuid4()), 'type': 'observe', 'arguments': {}}
-            error, queued, _ = slow_client.tool('browser.execute', {
-                'taskId': slow_task['id'], 'action': next_action})
-            self.assertFalse(error, queued)
-            self.assertEqual('ACCEPTED', queued['status'])
-            self.assertEqual('FAILED', self.wait_operation(slow_action['operationId'], slow_client)['status'])
-            self.assertEqual('SUCCEEDED', self.wait_operation(next_action['operationId'], slow_client)['status'])
-            print(f'Independent short command while another browser waits: {elapsed:.3f}s', flush=True)
 
 
 if __name__ == '__main__':

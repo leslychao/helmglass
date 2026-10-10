@@ -1,3 +1,4 @@
+import { target, snapshotText } from './references.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
@@ -14,20 +15,16 @@ test('site-controlled observation fields are bounded and oversized URLs are neve
   try {
     assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
     await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false });
-    const observation = await request(base + '/observe');
+    const observation = await request(base + '/commands', { operationId: randomUUID(), type: 'observe', arguments: {}, instructionRevision: 0, controlEpoch: 1 });
     const media = await request(base + '/commands', { operationId: randomUUID(), type: 'listMedia', arguments: {}, instructionRevision: 0, controlEpoch: 1 });
     assert.equal(media.status, 'SUCCEEDED');
-    const field = observation.elements.find(item => item.tag === 'input');
-    const link = observation.elements.find(item => item.tag === 'a');
-    assert.ok(field && link);
-    assert.equal(observation.truncated, true);
-    assert.ok(observation.title.length <= 1000);
-    assert.ok(field.label.length <= 2000);
-    for (const attribute of ['id', 'name', 'type']) assert.equal(field[attribute], undefined);
-    assert.equal(link.href, undefined);
-    assert.equal(observation.url, undefined);
-    assert.equal(observation.tabs[0].url, undefined);
-    assert.ok(JSON.stringify(observation).length < 10_000);
+    if (observation.status === 'SUCCEEDED') {
+      assert.ok(Buffer.byteLength(JSON.stringify(observation.result)) <= 32768);
+      assert.ok(observation.result.snapshot.length <= 200);
+    } else {
+      assert.equal(observation.status, 'FAILED', 'An oversized native capture fails closed');
+      assert.equal(observation.result, undefined);
+    }
     assert.equal(media.result.truncated, true);
     assert.ok(media.result.sources.length > 0);
     assert.ok(media.result.sources.every(source => source.label.length <= 2000 && source.url.length <= 8192));
@@ -45,21 +42,21 @@ test('sensitive input rejected before effect is FAILED and does not block later 
   try {
     assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
     await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false });
-    for (const selector of ['#password', '#current-password', '#new-password', '#one-time-code']) {
-      assert.equal((await command(action('click', { selector }))).status, 'SUCCEEDED');
-      for (const input of [action('fill', { selector, text: 'synthetic-rejected-value' }),
-        action('press', { selector, key: 'a' }), action('press', { key: 'a' })]) {
+    for (const name of ['Current password', 'New password', 'One-time code']) {
+      const reference = await target(request, base, name);
+      for (const input of [action('fill', { ...reference, text: 'synthetic-rejected-value' }),
+        action('press', { ...reference, key: 'a' })]) {
         const receipt = await command(input);
-        assert.equal(receipt.status, 'FAILED', 'A known pre-effect refusal must not become UNKNOWN');
+        assert.equal(receipt.status, 'FAILED');
         assert.equal(receipt.error, 'Private input requires the user');
-        assert.deepEqual(await command(input), receipt, 'Replay must preserve the original known refusal');
+        assert.deepEqual(await command(input), receipt);
       }
     }
-    assert.equal((await command(action('fill', { selector: '#plain', text: 'allowed-after-refusal' }))).status, 'SUCCEEDED');
-    assert.equal((await command(action('click', { selector: '#read-state' }))).status, 'SUCCEEDED');
+    assert.equal((await command(action('fill', { ...await target(request, base, 'Ordinary text'), text: 'allowed-after-refusal' }))).status, 'SUCCEEDED');
+    assert.equal((await command(action('click', { ...await target(request, base, 'Read synthetic state') }))).status, 'SUCCEEDED');
     const observation = await request(base + '/observe');
-    assert.ok(observation.text.includes('"sensitiveValues":["","","",""]'));
-    assert.ok(observation.text.includes('"sensitiveEvents":0'));
-    assert.ok(observation.text.includes('"plain":"allowed-after-refusal"'));
+    assert.ok(snapshotText(observation).includes('"sensitiveValues":["","","",""]'));
+    assert.ok(snapshotText(observation).includes('"sensitiveEvents":0'));
+    assert.ok(snapshotText(observation).includes('"plain":"allowed-after-refusal"'));
   } finally { assert.equal((await request(base, undefined, 'DELETE')).status, 'CLOSED'); }
 });

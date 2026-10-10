@@ -34,7 +34,7 @@ class ChatTaskTest(unittest.TestCase):
     def create_input(self, title="Single chat task"):
         return {"operationKey": str(uuid.uuid4()), "task": {"title": title,
             "goal": "Observe the public example without external writes",
-            "startUrl": "https://example.com", "prepare": True}}
+            "startUrl": self.client.browser_fixture_url(), "prepare": True}}
 
     def start(self):
         error, state, _ = self.client.tool("tasks.create", self.create_input())
@@ -103,7 +103,7 @@ class ChatTaskTest(unittest.TestCase):
     def test_bind_create_and_reopen_share_the_same_database_guard(self):
         first = self.start()["task"]
         completed = self.command(first, "FINISH", outcome="SUCCEEDED", text="Recorded result A")
-        cabinet = self.create("Existing cabinet task")
+        cabinet = self.create("Existing cabinet task", site=self.client.browser_fixture_url().removeprefix("https://"))
         commands = [
             ("tasks.command", {"taskId": first["id"], "operationKey": str(uuid.uuid4()),
                 "command": {"type": "RESUME", "expectedVersion": completed["version"]}}),
@@ -181,6 +181,107 @@ class ChatTaskTest(unittest.TestCase):
         self.assertEqual("Retained result A", resumed["result"]["summary"])
         self.assertEqual("WAITING_CHATGPT", resumed["status"])
         self.assertEqual(first["instructionRevision"] + 1, resumed["instructionRevision"])
+
+    def test_completed_browser_control_does_not_reopen_previous_chat_task(self):
+        first = self.start()["task"]
+        self.wait_task(first, lambda task: task.get("browser")
+                       and task["browser"]["status"] == "LIVE")
+        completed = self.command(first, "FINISH", outcome="NOT_ACHIEVED", text="Retained outcome")
+        arguments = self.create_input("Next task remains current")
+        arguments["task"]["prepare"] = False
+        error, second, _ = self.client.tool("tasks.create", arguments)
+        self.assertFalse(error, second)
+        current = second["task"]
+        viewer = str(uuid.uuid4())
+        path = "/api/browser-sessions/" + completed["browser"]["id"] + "/control"
+        history = self.client.api("/api/tasks/" + first["id"] + "/history")[1]
+        for kind, control, private, resume in (
+                ("TAKE", "USER", False, False), ("RETURN", "CHATGPT", False, False),
+                ("BEGIN_LOGIN", "USER", True, False),
+                ("FINISH_LOGIN", "CHATGPT", False, True)):
+            with self.subTest(command=kind):
+                status, receipt = self.client.api(path, "POST", {
+                    "type": kind, "viewerId": viewer, "resume": resume})
+                self.assertEqual(200, status, receipt)
+                task = self.wait_task(first, lambda value:
+                    value["browser"]["controlOwner"] == control)
+                self.assertEqual(private, task["browser"]["privateMode"])
+                for field in ("status", "outcome", "version", "instructionRevision", "result", "timing"):
+                    self.assertEqual(completed[field], task[field], field)
+                self.assertEqual(history, self.client.api("/api/tasks/" + first["id"] + "/history")[1])
+                error, card, _ = self.client.tool("widget.state", {
+                    "taskId": current["id"], "generation": second["generation"]})
+                self.assertFalse(error, card)
+        error, refusal, _ = self.client.tool("tasks.command", {
+            "taskId": first["id"], "operationKey": str(uuid.uuid4()),
+            "command": {"type": "RESUME", "expectedVersion": completed["version"]}})
+        self.assertTrue(error, refusal)
+        self.assertEqual(("CHAT_TASK_IN_PROGRESS", current["id"]),
+                         (refusal["code"], refusal.get("currentTaskId")))
+        self.mcp_command(current, "STOP")
+        error, third, _ = self.client.tool("tasks.create", {
+            **arguments, "operationKey": str(uuid.uuid4())})
+        self.assertFalse(error, third)
+        self.mcp_command(third["task"], "STOP")
+        resumed, _ = self.mcp_command(first, "RESUME")
+        self.assertEqual(("WAITING_CHATGPT", completed["instructionRevision"] + 1),
+                         (resumed["status"], resumed["instructionRevision"]))
+
+    def test_stop_previous_task_preserves_current_chat_and_replays(self):
+        first = self.start()["task"]
+        self.wait_task(first, lambda task: task.get("browser")
+                       and task["browser"]["status"] == "LIVE")
+        self.command(first, "FINISH", outcome="NOT_ACHIEVED", text="Retained result")
+        arguments = self.create_input("Current draft")
+        arguments["task"]["prepare"] = False
+        error, second, _ = self.client.tool("tasks.create", arguments)
+        self.assertFalse(error, second)
+        wrong_chat = self.transport("other-" + str(uuid.uuid4()))
+        stop = {"taskId": first["id"], "operationKey": str(uuid.uuid4()),
+                "command": {"type": "STOP", "expectedVersion": self.current(first)["version"]}}
+        error, refusal, _ = wrong_chat.tool("tasks.command", stop)
+        self.assertTrue(error)
+        self.assertEqual("ORIGINAL_CHAT_REQUIRED", refusal["code"])
+        error, refusal, _ = self.client.tool("tasks.command", {
+            **stop, "operationKey": str(uuid.uuid4()),
+            "command": {**stop["command"], "expectedVersion": stop["command"]["expectedVersion"] - 1}})
+        self.assertTrue(error)
+        self.assertEqual("STALE_VERSION", refusal["code"])
+        error, receipt, _ = self.client.tool("tasks.command", stop)
+        self.assertFalse(error, receipt)
+        self.wait_task(first, lambda task: task["status"] == "STOPPED")
+        error, replay, _ = self.client.tool("tasks.command", stop)
+        self.assertFalse(error, replay)
+        self.assertEqual(receipt, replay)
+        error, card, _ = self.client.tool("widget.state", {
+            "taskId": second["task"]["id"], "generation": second["generation"]})
+        self.assertFalse(error, card)
+        self.assertEqual(second["task"]["id"], card["task"]["id"])
+        self.assertEqual("Retained result", self.current(first)["result"]["summary"])
+
+    def test_stop_recovers_noncurrent_task_reopened_by_old_browser_control(self):
+        first = self.start()["task"]
+        self.wait_task(first, lambda task: task.get("browser")
+                       and task["browser"]["status"] == "LIVE")
+        self.command(first, "FINISH", outcome="NOT_ACHIEVED", text="Retained result")
+        arguments = self.create_input("Stopped current draft")
+        arguments["task"]["prepare"] = False
+        error, second, _ = self.client.tool("tasks.create", arguments)
+        self.assertFalse(error, second)
+        self.mcp_command(second["task"], "STOP")
+        # Reproduce the persisted incident only inside this disposable account.
+        self.fixture_sql(self.identity, "UPDATE tasks SET status='WAITING_CHATGPT',completed_at=NULL,"
+            "version=version+1 WHERE owner_id=:owner AND id='" + first["id"] + "';")
+        error, refusal, _ = self.client.tool("tasks.create", {
+            **arguments, "operationKey": str(uuid.uuid4())})
+        self.assertTrue(error)
+        self.assertEqual(("CHAT_TASK_IN_PROGRESS", first["id"]),
+                         (refusal["code"], refusal["currentTaskId"]))
+        self.mcp_command(first, "STOP")
+        self.wait_task(first, lambda task: task["status"] == "STOPPED")
+        error, created, _ = self.client.tool("tasks.create", {
+            **arguments, "operationKey": str(uuid.uuid4())})
+        self.assertFalse(error, created)
 
     def test_chat_answers_do_not_send_another_turn_and_widget_rotation_preserves_intent(self):
         state = self.start()
@@ -537,7 +638,7 @@ class ChatTaskTest(unittest.TestCase):
             self.assertFalse(error, receipt)
             return command, receipt
 
-        for kind, arguments in (("observe", {}), ("newTab", {"url": "https://example.com"})):
+        for kind, arguments in (("observe", {}), ("newTab", {"url": self.client.browser_fixture_url()})):
             command, receipt = action(kind, arguments)
             self.assertNotEqual("AWAITING_CONFIRMATION", receipt["status"])
             self.assertEqual("SUCCEEDED", self.wait_operation(command["operationId"], self.client)["status"])
@@ -545,7 +646,7 @@ class ChatTaskTest(unittest.TestCase):
         paused = self.client.return_control_without_continuing(task["id"])
         self.assertEqual(("PAUSED", live), (paused["status"], paused["browser"]["id"]))
         self.mcp_command(task, "RESUME")
-        command, receipt = action("newTab", {"url": "https://example.com"}, "Open one additional tab?")
+        command, receipt = action("newTab", {"url": self.client.browser_fixture_url()}, "Open one additional tab?")
         self.assertEqual("AWAITING_CONFIRMATION", receipt["status"])
         error, refusal, _ = self.client.execute_in_scenario_step({"taskId": task["id"],
             "action": {**command, "confirmationPrompt": "Changed decision"}})
@@ -559,14 +660,14 @@ class ChatTaskTest(unittest.TestCase):
         self.assertEqual(accepted["lastResponse"], self.client.tool("tasks.respond", approval)[1]["lastResponse"])
         observation, _ = action("observe", {})
         self.assertEqual(3, len(self.wait_operation(observation["operationId"], self.client)["result"]["tabs"]))
-        denied, _ = action("newTab", {"url": "https://example.com"}, "Open a rejected tab?")
+        denied, _ = action("newTab", {"url": self.client.browser_fixture_url()}, "Open a rejected tab?")
         request = self.current(task)["request"]
         rejected, _ = self.mcp_command(task, "REJECT", requestId=request["id"], requestVersion=request["version"])
         self.assertEqual(("REJECT", denied["operationId"], request["prompt"]),
             (rejected["lastResponse"]["command"], rejected["lastResponse"]["operationId"],
              rejected["lastResponse"]["prompt"]))
         self.assertEqual("CANCELLED", self.client.tool("operations.get", {"operationId": denied["operationId"]})[1]["status"])
-        declined, _ = action("newTab", {"url": "https://example.com"}, "Decline this specific action?")
+        declined, _ = action("newTab", {"url": self.client.browser_fixture_url()}, "Decline this specific action?")
         error, rejected, _ = self.client.respond(self.current(task), action="decline")
         self.assertFalse(error, rejected)
         self.assertEqual("REJECT", rejected["lastResponse"]["command"])
@@ -581,7 +682,7 @@ class ChatTaskTest(unittest.TestCase):
         task = self.start()["task"]
         operation = str(uuid.uuid4())
         error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
-            "operationId": operation, "type": "waitFor", "arguments": {"selector": "#never-present"},
+            "operationId": operation, "type": "waitFor", "arguments": {**self.client.browser_target(task['id'], 'Increment'), 'state': 'hidden'},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)
         deadline = time.monotonic() + 40

@@ -198,6 +198,43 @@ show(presentation('PENDING', liveBrowser())); await settled();
 assert.deepEqual(preflightCalls, ['widget.state'], 'Late output cannot reactivate a retired frame');
 
 await mount();
+const frozenPresentation = presentation('IDLE', liveBrowser()), lateSteps = deferred();
+let retire = false;
+const frozenCalls = [];
+call = request => {
+  frozenCalls.push(request.name);
+  if (request.name === 'widget.state') return Promise.resolve(retire ? stale : response(frozenPresentation));
+  if (request.name === 'widget.steps') return retire ? lateSteps.promise : Promise.resolve(history());
+  if (request.name === 'widget.browser') return Promise.resolve(ticket);
+  throw new Error(request.name);
+};
+show(frozenPresentation); await settled();
+viewerState('connected');
+const frozenVisual = () => Object.fromEntries(['title', 'header-status', 'state', 'browser-state', 'viewer',
+  'event-count', 'steps-count', 'history-state', 'session-duration'].map(id => {
+    const element = elements.get(id);
+    return [id, { text: element.textContent, hidden: element.hidden, src: element.src }];
+  }));
+const beforeRetirement = frozenVisual(), retiredSource = sources.at(-1);
+retire = true;
+retiredSource.change('step'); await settled();
+assert.deepEqual(frozenVisual(), beforeRetirement, 'Retiring preserves the displayed status, steps and browser frame');
+assert.equal(viewerMessages.at(-1).type, 'helm-viewer-freeze', 'The viewer disconnects without clearing its last frame');
+assert.ok(retiredSource.closed);
+assert.equal(timers.size, 0);
+assert.equal(intervals.size, 0);
+const retiredCallCount = frozenCalls.length;
+lateSteps.resolve(history());
+retiredSource.change('task'); retiredSource.onopen(); retiredSource.onerror();
+windowListeners.get('offline')(); windowListeners.get('online')();
+documentListeners.get('visibilitychange')();
+show(presentation('PENDING', liveBrowser()));
+await settled();
+assert.equal(frozenCalls.length, retiredCallCount, 'Retired cards never request status, steps or viewer tickets again');
+assert.deepEqual(frozenVisual(), beforeRetirement, 'Late replies and host events cannot repaint a retired card');
+assert.equal(messages.length, 0);
+
+await mount();
 let state = presentation('IDLE', liveBrowser());
 const calls = [];
 let pendingTicket;
@@ -381,10 +418,11 @@ assert.equal(elements.get('viewer').hidden, true);
 const lastSource = sources.at(-1);
 call = request => Promise.resolve(request.name === 'widget.state' ? stale : history());
 lastSource.onerror();
+const beforeStaleRecovery = frozenVisual();
 await nextTimer();
 assert.ok(lastSource.closed); assert.equal(timers.size, 0);
 assert.equal(elements.get('cabinet').disabled, true);
-assert.match(elements.get('state').textContent, /Неактивная карточка/);
+assert.deepEqual(frozenVisual(), beforeStaleRecovery, 'A stale recovery response preserves the last displayed state');
 
 for (const outcome of ['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'FAILED', 'STOPPED', 'WAITING_CHATGPT']) {
   await mount();
@@ -560,6 +598,14 @@ for (const outcome of ['PARTIAL', 'NOT_ACHIEVED', 'FAILED', 'SUCCEEDED', 'STOPPE
   sources.at(-1).change('browser'); await settled();
   assert.equal(elements.get('viewer').hidden, true, 'Late frames cannot reactivate a finished widget');
   assert.equal(viewerRequests, 1);
+  if (outcome === 'STOPPED') {
+    taskState = { ...taskState, task: { ...taskState.task,
+      browser: { ...taskState.task.browser, status: 'CLOSED' }, version: 3 } };
+    sources.at(-1).change('browser'); await settled();
+    assert.doesNotMatch(elements.get('browser-state').textContent, /Возобновить/,
+      'STOPPED is final and cannot offer to resume the task');
+    assert.match(elements.get('browser-state').textContent, /Шаги и результаты/);
+  }
   if (outcome !== 'STOPPED') {
     taskState = { ...taskState, task: { ...taskState.task, status: 'WAITING_CHATGPT', version: 3 } };
     sources.at(-1).change('task'); await settled(); viewerState('connected');

@@ -77,3 +77,9 @@
 .detail-heading .actions .button { font-size: 12px; min-height: 36px; padding: 8px 12px; }
 .task-result { margin: 16px 0; padding: 16px; }
 .task-result > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+
+@media (max-width: 560px) {
+  .detail-heading .task-detail-meta {
+    flex-basis: auto;
+  }
+}

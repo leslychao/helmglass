@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>Browser execution acceptance</title>
+<label>Recipient<input id="text" required></label>
+<label>Password<input type="password" value="private-password"></label>
+<label>OTP<input autocomplete="one-time-code" value="private-code"></label>
+<label>Code<input name="verificationCode" value="private-code-camel"></label>
+<label>Card<input autocomplete="cc-number" value="private-card"></label>
+<label>Number<input name="ccNumber" value="private-card-camel"></label>
+<label>One-time code<input id="field-a" value="private-code-label"></label>
+<label>Card number<input id="field-b" value="private-card-label"></label>
+<input type="hidden" value="private-hidden">
+<span hidden id="service">private-service</span><input aria-labelledby="service">
+<a href="https://user:private-url@example.com/path?token=private-query#private-fragment">Safe link</a>
+<label>City<select id="city"><option value="p59">Perm</option><option value="k16" selected>Kazan</option>
+<optgroup label="Unavailable" disabled><option value="blocked">Blocked</option></optgroup></select></label>
+<label><input id="notifications" type="checkbox" checked>Notifications</label>
+<label><input id="confirmed" type="checkbox">Checked data</label>
+<label>Comment<textarea id="comment">Existing comment</textarea></label>
+<span role="textbox" contenteditable="true" aria-label="Message" style="display:block;min-height:24px"></span>
+<button id="increment" onclick="counter++; render()">Increment</button>
+<button onclick="render()">Read state</button>
+<button onclick="document.querySelector('#increment').replaceWith(document.querySelector('#increment').cloneNode(true))">Replace target</button>
+<button onclick="document.querySelector('#conditional').hidden=false">Show conditional</button>
+<label id="conditional" hidden>Conditional<input></label>
+<button onclick="setTimeout(()=>document.querySelector('#delayed').remove(),10000)">Delay</button>
+<button id="delayed" disabled>Delayed target</button>
+<button onclick="counter++; render(); const end=Date.now()+25000; while(Date.now()<end){}">Slow effect</button>
+<button onclick="const select=document.querySelector('#many-options'); for(let i=0;i<210;i++)select.add(new Option('Option '+i, 'v'+i));">Large form</button>
+<select id="many-options" aria-label="Many options" multiple></select>
+<button onclick="document.querySelector('#comment').value='x'.repeat(3000000)">Huge text</button>
+<button onclick="let node=document.body;for(let i=0;i<100;i++){node=node.appendChild(document.createElement('div'));}node.textContent='Deep marker'">Deep tree</button>
+<button onclick="for(let i=0;i<21;i++){document.body.appendChild(document.createElement('iframe')).srcdoc='<p>Frame '+i+'</p>'}">Many frames</button>
+<button onclick="const frame=document.createElement('iframe'); frame.srcdoc='<script>document.addEventListener(&quot;DOMContentLoaded&quot;,()=>document.body.remove())<\/script>'; document.body.appendChild(frame)">Unavailable frame</button>
+<button onclick="window.open(location.href+'?popup=1')">Popup</button>
+<iframe title="Frame" srcdoc="<label>Frame value<input></label><button onclick='this.textContent=&quot;Frame clicked&quot;'>Frame action</button>"></iframe>
+<pre id="state" role="status"></pre>
+<script>
+let counter=0;
+function render(){document.querySelector('#state').textContent=JSON.stringify({counter,text:document.querySelector('#text').value});}
+render();
+</script>

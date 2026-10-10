@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<title>Учебная заявка</title>
+<style>
+body { font: 18px system-ui; max-width: 760px; margin: 32px auto; padding: 16px; }
+label, fieldset { display: block; margin: 16px 0; }
+input:not([type=checkbox]), select, textarea { display: block; min-width: 300px; padding: 8px; }
+button { padding: 12px; margin: 8px 0; } pre { white-space: pre-wrap; }
+</style>
+<h1>Учебная заявка</h1>
+<p>Тестовая форма. Сохранение только показывает результат на этой странице; реальной заявки нет.</p>
+<section id="instructions"></section>
+<form id="form">
+  <label for="f1">Имя получателя</label><input id="f1" name="recipient" required maxlength="80">
+  <label for="f2">Город</label>
+  <select id="f2" name="city" required>
+    <option value="srt">Саратов</option><option value="p59">Пермь</option><option value="k16">Казань</option>
+  </select>
+  <label for="f3">Количество</label><input id="f3" name="quantity" type="number" value="1" min="1" max="10" required>
+  <label for="f4">Доставка</label>
+  <select id="f4" name="delivery"><option value="collect">Самовывоз</option><option value="to-door">Курьер</option></select>
+  <fieldset id="address-group" hidden disabled>
+    <label for="f5">Адрес для курьера</label><input id="f5" name="address" required maxlength="120">
+  </fieldset>
+  <label for="f6">Комментарий</label><textarea id="f6" name="comment" maxlength="200"></textarea>
+  <label><input id="f7" name="notifications" type="checkbox" checked>Получать уведомления</label>
+  <label><input id="f8" name="confirmed" type="checkbox" required>Данные проверены</label>
+  <button type="submit">Сохранить учебную заявку</button>
+</form>
+<h2>Результат</h2><pre id="result" role="status">Заявка ещё не сохранена</pre>
+<script>
+const instructions = document.querySelector('#instructions');
+if (new URLSearchParams(location.search).get('case') === 'audio') {
+  instructions.innerHTML = '<h2>Аудиоинструкция</h2><p>Заполните форму по записи. Неуказанные настройки оставьте без изменений. Сохраните ровно один раз.</p><audio controls preload="metadata" aria-label="Аудиоинструкция"><source src="instruction.wav" type="audio/wav"></audio>';
+} else {
+  instructions.innerHTML = '<h2>Инструкция</h2><p>Получатель — Иван Учебный. Город — Пермь. Количество — 2. Доставка — Курьер. Адрес — Учебная, 5. Комментарий — Позвонить перед доставкой. Отключите уведомления, отметьте «Данные проверены» и сохраните заявку ровно один раз.</p>';
+}
+const delivery = document.querySelector('#f4');
+delivery.addEventListener('change', () => {
+  const group = document.querySelector('#address-group');
+  group.hidden = group.disabled = delivery.value !== 'to-door';
+});
+let submissions = 0;
+document.querySelector('#form').addEventListener('submit', event => {
+  event.preventDefault();
+  const result = Object.fromEntries(new FormData(event.target));
+  result.quantity = Number(result.quantity);
+  result.notifications = document.querySelector('#f7').checked;
+  result.confirmed = document.querySelector('#f8').checked;
+  result.submissions = ++submissions;
+  document.querySelector('#result').textContent = 'Учебная заявка сохранена\n' + JSON.stringify(result, null, 2);
+});
+</script>
+</html>

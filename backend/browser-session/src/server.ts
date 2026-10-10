@@ -8,7 +8,7 @@ import path from "node:path";
 import { PassThrough, Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DatabaseSync } from "node:sqlite";
-import { chromium, type Browser, type BrowserContext, type Page, type Download, type Locator } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page, type Download } from "playwright";
 import { fetch, ProxyAgent } from "undici";
 import { WebSocketServer, createWebSocketStream, type WebSocket } from "ws";
 import { z } from "zod";
@@ -18,6 +18,7 @@ import { profileExportUrl } from "./profile-target.js";
 import { importProfile } from "./profile-import.js";
 import { fillSavedCredential, type SavedCredential } from "./credential-autofill.js";
 import { CredentialCapture, CaptureConflict } from "./credential-capture.js";
+import { BrowserMcp, BrowserRejection } from "./browser-mcp.js";
 
 function required(name: string): string { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; }
 const sessionId = z.uuid().parse(required("SESSION_ID"));
@@ -52,13 +53,16 @@ let initialization: Promise<void> | undefined;
 const profileImports = new Map<string, BrowserContext>();
 let activeOperation: string | undefined;
 let activeAbort: AbortController | undefined;
+let activeWork: Promise<object> | undefined;
+let browserMcp: BrowserMcp | undefined;
+let changingControl = false;
 let navigationError: string | undefined;
 const viewers = new Set<WebSocket>();
 const pages = new Map<string, Page>();
 const pageIds = new WeakMap<Page, string>();
 const media = new Map<string, { id: string; pageId: string; sourceUrl: string; mimeType: string; headers: Record<string, string>; complete: boolean; observedAt: string }>();
 let mediaTruncated = false;
-const snapshotLimits = { text: 60_000, nodes: 20_000, elements: 200, tabs: 20, title: 1000, label: 2000, identifier: 256, attribute: 100, url: 8192, mimeType: 200, media: 100 };
+const snapshotLimits = { nodes: 20_000, label: 2000, url: 8192, mimeType: 200, media: 100 };
 const pendingDownloads = new Map<string, { completion: Promise<unknown>; abort: AbortController; download: Download }>();
 let blobCapture: { nonce: string; page: Page; stream: PassThrough } | undefined;
 
@@ -81,6 +85,7 @@ function selectedPage(): Page { if (status !== "LIVE" || !currentPage || current
 function publicUrl(value: string): string { const url = new URL(value); if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new HttpError(400, "Only HTTP(S) URLs are allowed"); return url.href; }
 function observationAllowed(): void {
   if (policy.privateMode) throw new HttpError(423, "Private input in progress");
+  if (changingControl) throw new HttpError(409, "Control transfer in progress");
   if (exportingProfile) throw new HttpError(409, "Profile save in progress");
 }
 function snapshotUrl(value: string): string | undefined {
@@ -237,57 +242,35 @@ async function initialize(input: { startUrl: string }): Promise<void> {
   } catch { status = "LOST"; await browser?.close(); throw new HttpError(502, "Browser launch failed"); }
 }
 
-const Command = z.object({ operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "reload", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative(), observeAfter: z.boolean().default(true) }).strict();
+const Command = z.object({ operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "reload", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative(), observeAfter: z.boolean().default(true), sequence: z.object({ operationIds: z.array(z.uuid()).min(1).max(8) }).strict().optional() }).strict();
 type Command = z.infer<typeof Command>;
 const readCommands = new Set(["observe", "screenshot", "listMedia", "captureAudio", "waitFor"]);
-async function observe(): Promise<object> {
-  observationAllowed(); const page = selectedPage();
-  const snapshot = await page.evaluate((limits) => {
-    let text = ""; let inspected = 0; let truncated = false;
-    const clipped = (value: string | null, maximum: number) => {
-      if (value === null) return null;
-      if (value.length > maximum) { truncated = true; return value.slice(0, maximum); }
-      return value;
-    };
-    const exact = (value: string | null, maximum: number) => {
-      if (value === null) return null;
-      if (value.length > maximum) { truncated = true; return undefined; }
-      return value;
-    };
-    const elements: object[] = [];
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) {
-      inspected += 1;
-      if (inspected > limits.nodes || text.length >= limits.text) { truncated = true; break; }
-      const node = walker.currentNode;
-      if (node.nodeType === Node.TEXT_NODE && !node.parentElement?.closest("script,style,noscript,textarea,input,[hidden],[aria-hidden=true]")) {
-        text += clipped(node.textContent ?? "", limits.text - text.length) ?? "";
-        if (text.length < limits.text) text += " ";
-      }
-      const editable = node instanceof HTMLElement && node.hasAttribute("contenteditable") && node.isContentEditable;
-      if (node instanceof Element && (editable || node.matches("a,button,input,textarea,select,[role=button],[role=textbox]"))) {
-        if (elements.length >= limits.elements) { truncated = true; continue; }
-        elements.push({ index: elements.length, tag: node.tagName.toLowerCase(), role: exact(node.getAttribute("role"), limits.attribute) || undefined, id: exact(node.id, limits.identifier) || undefined,
-          text: node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? undefined : clipped(node.textContent ?? "", 300) || undefined,
-          label: clipped(node.getAttribute("aria-label") ?? node.getAttribute("placeholder"), limits.label) || undefined, type: exact(node.getAttribute("type"), limits.attribute) || undefined, name: exact(node.getAttribute("name"), limits.identifier) || undefined,
-          ...(editable ? { contentEditable: true } : {}),
-          ...(node instanceof HTMLAnchorElement && ["http:", "https:"].includes(node.protocol)
-            ? { href: exact(node.origin + node.pathname, limits.url) } : {}) });
-      }
-    }
-    const title = clipped(document.title, limits.title);
-    return { title, text, truncated, elements };
-  }, snapshotLimits);
-  const url = snapshotUrl(page.url());
+async function mcp(): Promise<BrowserMcp> {
+  if (!context) throw new HttpError(409, "Browser unavailable");
+  if (browserMcp?.isClosing) await closeMcp();
+  browserMcp ??= new BrowserMcp(context, selectedPage, () => policy.controlEpoch, observationAllowed);
+  return browserMcp;
+}
+async function closeMcp(): Promise<void> {
+  await browserMcp?.close();
+  browserMcp = undefined;
+}
+async function observe(args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<object> {
+  observationAllowed();
+  const page = selectedPage();
+  const snapshot = await (await mcp()).observe(args, signal);
   const tabs: { id: string; url?: string; active: boolean }[] = [];
-  let truncated = snapshot.truncated || url === undefined;
+  let tabBytes = 0;
   for (const [id, item] of pages) {
-    if (tabs.length >= snapshotLimits.tabs) { truncated = true; break; }
-    const tabUrl = snapshotUrl(item.url()); if (tabUrl === undefined) truncated = true;
-    tabs.push({ id, url: tabUrl, active: item === page });
+    if (item.context() !== context || tabs.length === 20) continue;
+    const url = snapshotUrl(item.url());
+    const available = url && Buffer.byteLength(url) <= 1000 && tabBytes + Buffer.byteLength(url) < 2000;
+    if (available) tabBytes += Buffer.byteLength(url);
+    tabs.push({ id, ...(available ? { url } : {}), active: item === page });
   }
   observationAllowed();
-  return { url, ...snapshot, truncated, tabs };
+  const url = snapshotUrl(page.url());
+  return { ...(url && Buffer.byteLength(url) <= 1000 ? { url } : {}), ...snapshot, tabs };
 }
 async function listMedia(): Promise<object> {
   observationAllowed();
@@ -416,66 +399,47 @@ async function applyConnection(args: Record<string, unknown>, signal: AbortSigna
       }
     } finally { await cdp.detach(); }
   }
+  await closeMcp();
   context = replacement; currentPage = replacementPage; media.clear(); mediaTruncated = false;
   await replacementPage.goto(target.href, { waitUntil: "domcontentloaded", signal });
   await replacementPage.bringToFront();
   return { connectionId: input.connectionId, url: replacementPage.url(), switched: true };
-}
-async function requirePublicInput(page: Page, target: Locator | undefined, signal: AbortSignal): Promise<void> {
-  try {
-    if (target && await target.count() !== 1) {
-      throw new BeforeEffectRejection(409, "Input selector must match exactly one element. Observe the page before retrying.");
-    }
-    const sensitive = target
-      ? await target.evaluate((element) => element instanceof HTMLInputElement && (element.type === "password" || /password|one-time-code/i.test(element.autocomplete)), undefined, { signal })
-      : await page.evaluate(() => document.activeElement instanceof HTMLInputElement && (document.activeElement.type === "password" || /password|one-time-code/i.test(document.activeElement.autocomplete)));
-    if (sensitive) throw new BeforeEffectRejection(403, "Private input requires the user");
-  } catch (error) {
-    if (error instanceof BeforeEffectRejection) throw error;
-    // This gate only reads the target; neither fill nor press has been invoked yet.
-    throw new BeforeEffectRejection(409, "Input target could not be inspected. Observe the page before retrying.");
-  }
 }
 async function perform(command: Command, signal: AbortSignal): Promise<object> {
   signal.throwIfAborted();
   const page = selectedPage(); const args = command.arguments;
   switch (command.type) {
     case "applyConnection": return applyConnection(args, signal);
-    case "observe": return observe();
+    case "observe": return observe(args, signal);
     case "listMedia": return listMedia();
     case "captureAudio": return captureAudio(args, signal);
     case "screenshot": {
       observationAllowed(); const bytes = await page.screenshot({ type: "png", fullPage: false }); observationAllowed();
       const artifact = await saveArtifact(Readable.from(bytes), { name: "screenshot.png", mimeType: "image/png", sourceUrl: page.url(), complete: true, operationId: activeOperation }, signal); return { artifact };
     }
-    case "navigate": await page.goto(publicUrl(z.string().max(8192).parse(args["url"])), { waitUntil: "domcontentloaded", signal }); break;
-    case "click": await page.locator(z.string().max(2000).parse(args["selector"])).click({ signal }); break;
-    case "fill": {
-      const input = z.object({ selector: z.string().max(2000), text: z.string().max(50_000) }).parse(args);
-      const locator = page.locator(input.selector);
-      await requirePublicInput(page, locator, signal);
-      await locator.fill(input.text, { signal }); break;
+    default: {
+      const input = { ...args };
+      if (command.type === "navigate" || command.type === "newTab") {
+        if (input["url"] !== undefined) input["url"] = publicUrl(z.string().max(8192).parse(input["url"]));
+      }
+      if (command.type === "newTab" && pages.size >= 20) throw new BrowserRejection("Browser tab limit reached");
+      if (command.type === "closeTab" && pages.size <= 1) throw new BrowserRejection("Cannot close the only task page");
+      if (command.type === "selectTab") {
+        const tab = pages.get(z.uuid().parse(input["tabId"]));
+        if (!tab || tab.context() !== context) throw new BrowserRejection("Tab not found");
+        delete input["tabId"];
+        input["index"] = context.pages().indexOf(tab);
+        await (await mcp()).act(command.type, input, command.operationId, command.sequence, signal);
+        currentPage = tab;
+      } else {
+        await (await mcp()).act(command.type, input, command.operationId, command.sequence, signal);
+      }
     }
-    case "press": {
-      const input = z.object({ selector: z.string().max(2000).optional(), key: z.string().max(100) }).parse(args);
-      const locator = input.selector ? page.locator(input.selector) : undefined;
-      await requirePublicInput(page, locator, signal);
-      if (locator) await locator.press(input.key, { signal }); else { signal.throwIfAborted(); await page.keyboard.press(input.key); } break;
-    }
-    case "selectOption": { const input = z.object({ selector: z.string().max(2000), values: z.array(z.string().max(1000)).max(100) }).parse(args); await page.locator(input.selector).selectOption(input.values, { signal }); break; }
-    case "check": { const input = z.object({ selector: z.string().max(2000), checked: z.boolean() }).parse(args); await page.locator(input.selector).setChecked(input.checked, { signal }); break; }
-    case "scroll": { const input = z.object({ x: z.number().min(-10_000).max(10_000).default(0), y: z.number().min(-10_000).max(10_000) }).parse(args); await page.mouse.wheel(input.x, input.y); break; }
-    case "goBack": await page.goBack({ waitUntil: "domcontentloaded", signal }); break;
-    case "reload": await page.reload({ waitUntil: "domcontentloaded", signal }); break;
-    case "newTab": { if (pages.size >= 20) throw new HttpError(409, "Browser tab limit reached"); const tab = await page.context().newPage(); if (args["url"]) await tab.goto(publicUrl(z.string().parse(args["url"])), { waitUntil: "domcontentloaded", signal }); break; }
-    case "selectTab": { const tab = pages.get(z.uuid().parse(args["tabId"])); if (!tab) throw new HttpError(404, "Tab not found"); currentPage = tab; await tab.bringToFront(); break; }
-    case "closeTab": if (pages.size <= 1) throw new HttpError(409, "Cannot close the only task page"); await page.close(); break;
-    case "waitFor": { const input = z.object({ selector: z.string().max(2000), state: z.enum(["visible", "hidden", "attached", "detached"]).default("visible") }).parse(args); await page.locator(input.selector).waitFor({ state: input.state, timeout: 20_000, signal }); break; }
   }
   await Promise.all([...pendingDownloads.values()].map((download) => download.completion));
   const rows = db.prepare("SELECT document FROM artifacts WHERE json_extract(document,'$.operationId')=? ORDER BY rowid LIMIT 100").all(command.operationId);
   const artifacts = rows.map((row) => JSON.parse(z.string().parse(row["document"])));
-  return { url: selectedPage().url(), ...(artifacts.length ? { artifacts } : {}) };
+  return { url: snapshotUrl(selectedPage().url()), ...(artifacts.length ? { artifacts } : {}) };
 }
 function receipt(id: string): object | undefined {
   const row = db.prepare("SELECT status,result FROM operations WHERE id=?").get(id);
@@ -501,13 +465,14 @@ async function execute(command: Command): Promise<object> {
     let result = await perform(command, abort.signal);
     if (command.observeAfter && command.type !== "observe") {
       try { result = { ...result, observation: await observe() }; }
-      catch { result = { ...result, observationError: "OBSERVATION_UNAVAILABLE" }; }
+      catch (error) { result = { ...result, observationError: error instanceof BrowserRejection && error.code ? error.code : "OBSERVATION_UNAVAILABLE" }; }
     }
     if (command.controlEpoch !== policy.controlEpoch) throw new HttpError(409, "Control changed while the action was in progress; verify its result");
     db.prepare("UPDATE operations SET status='SUCCEEDED',result=? WHERE id=?").run(JSON.stringify({ result }), command.operationId);
   } catch (error) {
-    const outcome = readCommands.has(command.type) || error instanceof z.ZodError || error instanceof BeforeEffectRejection ? "FAILED" : "UNKNOWN";
-    db.prepare("UPDATE operations SET status=?,result=? WHERE id=?").run(outcome, JSON.stringify({ error: error instanceof HttpError ? error.message : outcome === "UNKNOWN" ? "The action may have reached the site; verify its result before continuing" : "Browser read failed" }), command.operationId);
+    const outcome = readCommands.has(command.type) || error instanceof z.ZodError || error instanceof BeforeEffectRejection || error instanceof BrowserRejection ? "FAILED" : "UNKNOWN";
+    db.prepare("UPDATE operations SET status=?,result=? WHERE id=?").run(outcome, JSON.stringify({ error: error instanceof HttpError || error instanceof BrowserRejection ? error.message : outcome === "UNKNOWN" ? "The action may have reached the site; verify its result before continuing" : "Browser read failed", ...(error instanceof BrowserRejection && error.code ? { code: error.code } : {}) }), command.operationId);
+    if (outcome === "UNKNOWN") await closeMcp();
   } finally { activeOperation = undefined; activeAbort = undefined; }
   return receipt(command.operationId) ?? { operationId: command.operationId, status: "UNKNOWN" };
 }
@@ -555,6 +520,7 @@ const server = http.createServer(async (request, response) => {
       if (!replacement || !browser) throw new HttpError(409, "Imported profile unavailable");
       const previous = browser.contexts().filter((item) => item !== replacement);
       const page = await replacement.newPage();
+      await closeMcp();
       context = replacement; currentPage = page; profileImports.delete(input.id); credentialCapture.clear();
       db.prepare("INSERT INTO state(id,value) VALUES('profile-import',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(input.id);
       for (const old of previous) await old.close();
@@ -566,13 +532,22 @@ const server = http.createServer(async (request, response) => {
     }
     if (url.pathname === "/control" && request.method === "POST") {
       const input = Policy.parse(await body(request));
+      if (changingControl) throw new HttpError(409, "Control transfer in progress");
       if (input.controlEpoch < policy.controlEpoch || (input.controlEpoch === policy.controlEpoch && JSON.stringify(input) !== JSON.stringify(policy))) throw new HttpError(409, "Stale control epoch");
       if (JSON.stringify(input) === JSON.stringify(policy)) { reply(response, 200, summary()); return; }
       // Never expose a renderer while a private password injection is still pending.
       if (activeAutofills || exportingProfile) throw new HttpError(409, "Private browser work is finishing");
       if (input.owner === "USER" && !input.controllerId) throw new HttpError(400, "Controller identity required");
       if (activeOperation && input.owner !== "NONE") throw new HttpError(409, "Wait for the dispatched action to finish");
-      activeAbort?.abort();
+      changingControl = true;
+      try {
+        activeAbort?.abort();
+        await activeWork;
+        await closeMcp();
+      } catch (error) {
+        changingControl = false;
+        throw error;
+      }
       if (input.privateMode) {
         for (const transfer of pendingDownloads.values()) {
           transfer.abort.abort();
@@ -589,12 +564,17 @@ const server = http.createServer(async (request, response) => {
           if (["http:", "https:"].includes(current.protocol)) loginOrigins.add(current.origin);
         }
       }
-      policy = input; media.clear(); mediaTruncated = false;
+      policy = input; changingControl = false; media.clear(); mediaTruncated = false;
       db.prepare("INSERT INTO state(id,value) VALUES('policy',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(JSON.stringify(policy));
       if (currentPage && !currentPage.isClosed()) await credentialCapture.updatePage(currentPage);
       reply(response, 200, summary()); return;
     }
-    if (url.pathname === "/observe" && request.method === "GET") { reply(response, 200, await observe()); return; }
+    if (url.pathname === "/observe" && request.method === "GET") {
+      if (activeWork) throw new HttpError(409, "Browser work in progress");
+      activeWork = observe(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor") } : {});
+      try { reply(response, 200, await activeWork); } finally { activeWork = undefined; }
+      return;
+    }
     if (url.pathname === "/profile/export" && request.method === "POST") {
       if (!context || status !== "LIVE") throw new HttpError(409, "Browser unavailable");
       if (activeOperation || exportingProfile) throw new HttpError(409, "Action in progress");
@@ -624,6 +604,7 @@ const server = http.createServer(async (request, response) => {
       if (!policy.privateMode || policy.owner !== "NONE" || activeOperation || exportingProfile || activeAutofills) throw new HttpError(409, "Protected idle browser required");
       const input = z.object({ startUrl: z.url() }).strict().parse(await body(request));
       const previous = browser?.contexts() ?? [];
+      await closeMcp();
       context = await createContext();
       const page = await context.newPage(); currentPage = page;
       for (const prior of previous) await prior.close();
@@ -655,7 +636,17 @@ const server = http.createServer(async (request, response) => {
       if (currentPage) await credentialCapture.updatePage(currentPage);
       reply(response, 200, { cleared: true }); return;
     }
-    if (url.pathname === "/commands" && request.method === "POST") { reply(response, 200, await execute(Command.parse(await body(request, 8_650_752)))); return; }
+    if (url.pathname === "/commands" && request.method === "POST") {
+      const command = Command.parse(await body(request, 8_650_752));
+      if (activeWork) {
+        const previous = receipt(command.operationId);
+        if (previous) { reply(response, 200, await execute(command)); return; }
+        throw new HttpError(409, "Browser work in progress");
+      }
+      activeWork = execute(command);
+      try { reply(response, 200, await activeWork); } finally { activeWork = undefined; }
+      return;
+    }
     const command = /^\/commands\/([^/]+)$/.exec(url.pathname);
     if (command?.[1] && request.method === "GET") { const result = receipt(z.uuid().parse(command[1])); if (!result) throw new HttpError(404, "Operation not found"); reply(response, 200, result); return; }
     const resolve = /^\/commands\/([^/]+)\/resolve$/.exec(url.pathname);

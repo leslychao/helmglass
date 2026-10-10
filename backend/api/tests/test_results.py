@@ -63,6 +63,13 @@ process.stdout.write(result.outputFiles[0].text);
             input=script, text=True, capture_output=True, timeout=30)
         self.assertEqual(0, checked.returncode, checked.stderr[-3000:])
 
+    def test_published_viewer_freezes_without_reconnecting(self):
+        script = Path("backend/api/widget/test/viewer-freeze.mjs").read_text()
+        checked = subprocess.run(["docker", "--host", "tcp://" + self.settings["DEV_HOST"] + ":2375",
+            "exec", "-i", "helmglass-browser-node-1", "node", "--input-type=module"],
+            input=script, text=True, capture_output=True, timeout=30)
+        self.assertEqual(0, checked.returncode, checked.stderr[-3000:])
+
     def test_published_widget_contains_executable_module_javascript(self):
         resources = [resource for resource in self.user.rpc("resources/list", {})["resources"]
                      if resource["uri"].startswith("ui://helmglass/task-")]

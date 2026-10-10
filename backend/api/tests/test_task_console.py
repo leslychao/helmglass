@@ -79,7 +79,7 @@ class TaskConsoleTest(unittest.TestCase):
 
         try:
             self.assertEqual("SUCCEEDED", execute("observe", {})["status"])
-            self.assertEqual("UNKNOWN", execute("click", {"selector": "#absent-" + marker})["status"])
+            self.assertEqual("UNKNOWN", execute("click", self.admin.browser_target(task_id, 'Slow effect', uncertain=True))["status"])
             unknown = current()
             self.assertEqual("UNKNOWN_RESULT", unknown["request"]["type"])
             print("UNKNOWN UI " + self.admin.base + path.replace("/api", "", 1), flush=True)

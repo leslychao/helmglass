@@ -354,7 +354,7 @@ async function assets(url: URL, response: ServerResponse): Promise<void> {
     const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Helm Glass browser</title><style>html,body,#screen{width:100%;height:100%;margin:0;background:#111827;overflow:hidden}canvas{outline:none}</style></head><body><div id="screen"></div><script type="module">
       import RFB from './core/rfb.js';
       const parentOrigin = ${JSON.stringify(parent.origin)};
-      let rfb, pending, activeEpoch, navigating = false, generation = 0;
+      let rfb, pending, activeEpoch, navigating = false, frozen = false, generation = 0;
       const report = (state, epoch) => {
         const canvas = document.querySelector('#screen canvas');
         window.parent.postMessage({type:'helm-viewer',state,viewerEpoch:epoch,width:canvas?.width,height:canvas?.height}, parentOrigin);
@@ -385,7 +385,32 @@ async function assets(url: URL, response: ServerResponse): Promise<void> {
         });
       }
       window.addEventListener('message', async event => {
-        if (event.source !== window.parent || event.origin !== parentOrigin || typeof event.data?.url !== 'string') return;
+        if (event.source !== window.parent || event.origin !== parentOrigin || frozen) return;
+        if (event.data?.type === 'helm-viewer-freeze') {
+          if (event.data.viewerEpoch !== activeEpoch || rfb && !rfb.viewOnly) return;
+          frozen = true;
+          generation++;
+          pending = undefined;
+          try {
+            const canvas = document.querySelector('#screen canvas');
+            if (canvas) {
+              const snapshot = document.createElement('canvas'), bounds = canvas.getBoundingClientRect();
+              snapshot.width = canvas.width; snapshot.height = canvas.height;
+              const context = snapshot.getContext('2d');
+              if (context) {
+                context.drawImage(canvas, 0, 0);
+                snapshot.style.cssText = 'position:fixed;left:' + bounds.left + 'px;top:' + bounds.top
+                  + 'px;width:' + bounds.width + 'px;height:' + bounds.height + 'px';
+                document.body.append(snapshot);
+              }
+            }
+          } finally {
+            rfb?.disconnect();
+            rfb = undefined;
+          }
+          return;
+        }
+        if (typeof event.data?.url !== 'string') return;
         if (event.data.type === 'helm-viewer-navigate') {
           if (!rfb || rfb.viewOnly || navigating || event.data.viewerEpoch !== activeEpoch) return;
           const connection = rfb, epoch = activeEpoch;
@@ -592,7 +617,11 @@ const server = http.createServer(async (request, response) => {
       const archive = url.searchParams.get("archive") === "true" ? "&archive=true" : "";
       reply(response, 200, await sessionJson(session, `/artifacts?after=${after}${archive}`)); return;
     }
-    if (segments[2] === "observe" && request.method === "GET") { reply(response, 200, await sessionJson(session, "/observe")); return; }
+    if (segments[2] === "observe" && request.method === "GET") {
+      const cursor = url.searchParams.get("cursor");
+      const endpoint = cursor ? "/observe?cursor=" + encodeURIComponent(z.uuid().parse(cursor)) : "/observe";
+      reply(response, 200, await sessionJson(session, endpoint)); return;
+    }
     if (segments[2] === "commands") {
       const endpoint = segments[3] ? `/commands/${z.uuid().parse(segments[3])}${segments[4] === "resolve" ? "/resolve" : ""}` : "/commands";
       let input = request.method === "POST" ? await body(request) : undefined;

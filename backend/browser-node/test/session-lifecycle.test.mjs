@@ -1,3 +1,4 @@
+import { snapshotText } from '../../browser-session/test/references.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
@@ -77,7 +78,7 @@ test('LIVE follows initial navigation and the first observation reads the reques
     assert.equal(observation.code, 200);
     assert.equal(observation.value.status, 'SUCCEEDED');
     assert.equal(observation.value.result.url, url);
-    assert.match(observation.value.result.text, /httpbin\.org\/delay\/5/);
+    assert.match(snapshotText(observation.value.result), /httpbin\.org\/delay\/5/);
     assert.equal((await creation).value.status, 'LIVE');
   } finally {
     await creation?.catch(() => {});

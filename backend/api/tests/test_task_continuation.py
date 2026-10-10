@@ -49,7 +49,7 @@ class TaskContinuationTest(unittest.TestCase):
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Cancelled continuation acceptance", "goal": "Stop after manual control",
-                "startUrl": "https://example.com", "prepare": True}})
+                "startUrl": self.client.browser_fixture_url(), "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         widget = {"taskId": task["id"], "generation": presentation["generation"]}
@@ -82,20 +82,20 @@ class TaskContinuationTest(unittest.TestCase):
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Continuation revisions", "goal": "Observe only",
-                "startUrl": "https://example.com", "prepare": True}})
+                "startUrl": self.client.browser_fixture_url(), "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         widget = {"taskId": task["id"], "generation": presentation["generation"]}
         self.client.observe_task_browser(task["id"])
         self.client.return_control_without_continuing(task["id"])
         amended = self.command(task, "AMEND", title=task["title"], goal="Paused revision",
-                               startUrl="https://example.com")
+                               startUrl=self.client.browser_fixture_url())
         self.assertEqual("PAUSED", amended["status"])
         self.assertEqual("IDLE", self.client.tool("widget.state", widget)[1]["continuationStatus"])
         self.command(task, "RESUME")
         old = self.client.tool("widget.state", widget)[1]
         amended = self.command(task, "AMEND", title=task["title"], goal="Active revised continuation",
-                               startUrl="https://example.com")
+                               startUrl=self.client.browser_fixture_url())
         self.assertEqual("ACCEPTED", self.client.tool("widget.state", widget)[1]["continuationStatus"])
         self.client.return_control_without_continuing(task["id"])
         self.command(task, "RESUME")
@@ -152,7 +152,7 @@ class TaskContinuationTest(unittest.TestCase):
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Instruction and continuation acceptance", "goal": "Preserve collected work",
-                "startUrl": "https://example.com/retained-page", "outputFormat": "TABLE",
+                "startUrl": self.client.browser_fixture_url(), "outputFormat": "TABLE",
                 "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
@@ -175,10 +175,10 @@ class TaskContinuationTest(unittest.TestCase):
 
         def amend(goal):
             return self.command(task, "AMEND", title=task["title"], goal=goal,
-                                startUrl="https://example.com/?amended-start=1", outputFormat="TABLE",
+                                startUrl=self.client.base, outputFormat="TABLE",
                                 preferredConnectionIds=[])
 
-        navigation = execute("navigate", {"url": "https://example.com/retained-page"})
+        navigation = execute("navigate", {"url": self.client.browser_fixture_url()})
         self.assertEqual("SUCCEEDED", self.wait_operation(navigation, self.client)["status"])
         screenshot = execute("screenshot", {})
         self.assertEqual("SUCCEEDED", self.wait_operation(screenshot, self.client)["status"])
@@ -207,9 +207,9 @@ class TaskContinuationTest(unittest.TestCase):
         self.command(task, "RESUME")
         observed = self.wait_operation(execute("observe", {}), self.client)
         self.assertEqual("SUCCEEDED", observed["status"], observed.get("errorCode"))
-        self.assertIn("/retained-page", observed["result"]["url"])
+        self.assertEqual(self.client.browser_fixture_url(), observed["result"]["url"])
 
-        pending = execute("waitFor", {"selector": "[data-instruction-acceptance-never-present]"})
+        pending = execute("waitFor", {**self.client.browser_target(task['id'], 'Increment'), 'state': 'hidden'})
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             receipt = self.client.tool("operations.get", {"operationId": pending})[1]
@@ -222,9 +222,14 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertEqual("RUNNING", revised["status"])
         self.assertEqual("CANCELLED", self.wait_operation(queued, self.client)["status"])
         next_operation = execute("observe", {})
-        self.assertEqual("ACCEPTED", self.client.tool("operations.get", {"operationId": next_operation})[1]["status"])
+        self.assertIn(self.client.tool("operations.get", {"operationId": next_operation})[1]["status"],
+                      ("ACCEPTED", "DISPATCHED", "SUCCEEDED"))
         self.assertEqual("FAILED", self.wait_operation(pending, self.client)["status"])
         self.assertEqual("SUCCEEDED", self.wait_operation(next_operation, self.client)["status"])
+        self.assertEqual("t", self.fixture_sql(self.identity,
+            "SELECT next.dispatched_at >= previous.completed_at FROM operations next, operations previous "
+            "WHERE next.owner_id=:owner AND previous.owner_id=:owner AND next.id='"
+            + str(uuid.UUID(next_operation)) + "' AND previous.id='" + str(uuid.UUID(pending)) + "';"))
         self.assertEqual(browser, current()["browser"]["id"])
 
         self.command(task, "STOP")
@@ -258,7 +263,7 @@ class TaskContinuationTest(unittest.TestCase):
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Retained partial result browser", "goal": "Observe only",
-                "startUrl": "https://example.com", "prepare": True}})
+                "startUrl": self.client.browser_fixture_url(), "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         path = "/api/tasks/" + task["id"]
@@ -309,7 +314,7 @@ class TaskContinuationTest(unittest.TestCase):
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Uncertain amendment acceptance", "goal": "Preserve an explicit stop",
-                "startUrl": "https://example.com", "prepare": True}})
+                "startUrl": self.client.browser_fixture_url(), "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         path = "/api/tasks/" + task["id"]
@@ -317,14 +322,14 @@ class TaskContinuationTest(unittest.TestCase):
         error, receipt, _ = self.client.execute_in_scenario_step({
             "taskId": task["id"], "action": {
                 "operationId": operation, "type": "click",
-                "arguments": {"selector": "[data-amend-unknown-never-present]"},
+                "arguments": self.client.browser_target(task['id'], 'Slow effect', uncertain=True),
                 "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)
         self.assertEqual("UNKNOWN", self.wait_operation(operation, self.client)["status"])
         self.command(task, "CLOSE_BROWSER")
         paused = self.command(task, "AMEND", title=task["title"],
                               goal="Revised while paused with an unknown effect",
-                              startUrl="https://example.com")
+                              startUrl=self.client.browser_fixture_url())
         self.assertEqual("PAUSED", paused["status"])
         self.assertEqual("UNKNOWN_RESULT", paused["request"]["type"])
         self.assertEqual(operation, paused["request"]["operationId"])
@@ -338,7 +343,7 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertEqual(("STOPPED", "CLOSED"), (stopped["status"], stopped["browser"]["status"]))
         revised = self.command(task, "AMEND", title=task["title"],
                                goal="Revised after stop with an unknown effect",
-                               startUrl="https://example.com")
+                               startUrl=self.client.browser_fixture_url())
         self.assertEqual("STOPPED", revised["status"])
         self.assertEqual(operation, revised["request"]["operationId"])
         verified = self.command(task, "REJECT", requestId=revised["request"]["id"],

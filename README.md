@@ -44,6 +44,11 @@
 sh deploy/deploy-dev.sh deploy/.env.dev
 ```
 
+Для Docker Compose `2.29.7-desktop.1`, где наблюдался `concurrent map writes`,
+успешно проверен тот же запуск с `COMPOSE_PARALLEL_LIMIT=1` перед `sh`.
+Это [штатный предел параллелизма Compose](https://docs.docker.com/compose/how-tos/environment-variables/envvars/#compose_parallel_limit),
+а не изменение конфигурации приложения.
+
 Скрипт выбирает env-файл явно, проверяет Compose, собирает образы, запрещает новые
 назначения и ждёт подтверждённого освобождения браузеров. Неизвестное состояние узла
 останавливает обновление. Деплой не закрывает рабочие браузеры принудительно;

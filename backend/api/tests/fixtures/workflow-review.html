@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<title>Проверка спортивной заметки</title>
+<style>
+body { font: 18px system-ui; max-width: 760px; margin: 32px auto; padding: 16px; }
+label { display: block; margin: 16px 0; } input, select { padding: 8px; } button { padding: 12px; }
+pre { white-space: pre-wrap; }
+</style>
+<h1>Проверка спортивной заметки</h1>
+<p>Учебная форма, данные никуда не отправляются. Прослушайте запись и заполните три факта из неё:
+название страны, число пробегов и число потерянных калиток. Нажмите «Проверить», сравните сводку
+с услышанным и только затем сохраните один раз. Слова и числа нельзя угадывать по имени файла.</p>
+<audio controls preload="metadata" aria-label="Спортивная заметка"><source src="recording.wav" type="audio/wav"></audio>
+<form id="facts">
+  <label for="r1">Страна</label><select id="r1" name="country" required>
+    <option value="">Выберите страну</option><option value="a17">Индия</option><option value="b23">Австралия</option><option value="c31">Англия</option>
+  </select>
+  <label for="r2">Пробеги</label><input id="r2" name="runs" type="number" min="0" max="999" required>
+  <label for="r3">Потерянные калитки</label><input id="r3" name="wickets" type="number" min="0" max="10" required>
+  <button type="submit">Проверить</button>
+</form>
+<section id="review" hidden><h2>Проверьте сводку</h2><pre id="summary"></pre><button id="save" type="button">Сохранить проверенную заметку</button></section>
+<pre id="result" role="status">Заметка ещё не сохранена</pre>
+<script>
+let submissions = 0;
+let reviewed;
+document.querySelector('#facts').addEventListener('input', () => {
+  reviewed = undefined;
+  document.querySelector('#review').hidden = true;
+});
+document.querySelector('#facts').addEventListener('submit', event => {
+  event.preventDefault();
+  reviewed = Object.fromEntries(new FormData(event.target));
+  document.querySelector('#summary').textContent = JSON.stringify({
+    country: document.querySelector('#r1').selectedOptions[0].textContent,
+    runs: Number(reviewed.runs), wickets: Number(reviewed.wickets)
+  }, null, 2);
+  document.querySelector('#review').hidden = false;
+});
+document.querySelector('#save').addEventListener('click', () => {
+  if (!reviewed) return;
+  document.querySelector('#result').textContent = 'Заметка сохранена\n' + JSON.stringify({
+    ...reviewed, runs: Number(reviewed.runs), wickets: Number(reviewed.wickets), submissions: ++submissions
+  }, null, 2);
+});
+</script>
+</html>

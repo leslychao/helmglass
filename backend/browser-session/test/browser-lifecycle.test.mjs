@@ -1,3 +1,4 @@
+import { target, snapshotText } from './references.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { test } from 'node:test';
@@ -18,8 +19,8 @@ test('safe external POST lost response never replays; private mode cancels an un
   try {
     assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
     await request(base + '/control', { controlEpoch: epoch, owner: 'CHATGPT', privateMode: false });
-    const marker = 'helm-safe-post-' + randomUUID(); await command('fill', { selector: '#message', text: marker });
-    const submitted = action('click', { selector: '#submit' });
+    const marker = 'helm-safe-post-' + randomUUID(); await command('fill', { ...await target(request, base, 'Safe echo message'), text: marker });
+    const submitted = action('click', { ...await target(request, base, 'Submit to public echo service') });
     await assert.rejects(request(base + '/commands', submitted, 'POST', AbortSignal.timeout(250)));
     let receipt = await request(base + '/commands/' + submitted.operationId);
     const deadline = Date.now() + 30_000;
@@ -28,10 +29,10 @@ test('safe external POST lost response never replays; private mode cancels an un
       receipt = await request(base + '/commands/' + submitted.operationId);
     }
     assert.equal(receipt.status, 'SUCCEEDED');
-    assert.ok((await request(base + '/observe')).text.includes(marker), 'Real public POST endpoint must echo the unique test message');
+    assert.ok(snapshotText(await request(base + '/observe')).includes(marker), 'Real public POST endpoint must echo the unique test message');
     assert.deepEqual(await request(base + '/commands', submitted), receipt);
     await command('navigate', { url: fixture });
-    assert.ok((await request(base + '/observe')).text.includes('Submissions: 1'));
+    assert.ok(snapshotText(await request(base + '/observe')).includes('Submissions: 1'));
 
     const source = 'https://httpbin.org/drip?duration=12&numbytes=256&code=200&delay=0';
     const baseline = action('navigate', { url: source + '&case=complete' });

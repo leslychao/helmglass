@@ -95,7 +95,7 @@ const browserWaiting: Record<string, string> = {
 };
 
 function notice(message: string, error = false): void {
-  if (superseded) { message = supersededMessage; error = false; }
+  if (superseded || tornDown) return;
   statePanel.hidden = !message;
   statePanel.textContent = message;
   statePanel.className = error ? 'error' : '';
@@ -127,7 +127,9 @@ function renderBrowser(): void {
     browserState.hidden = false;
     browserState.textContent = browser?.status === 'CLOSED'
       ? (browser.closeReason === 'IDLE_TIMEOUT' ? 'Браузер закрыт после 15 минут бездействия. ' : 'Браузер закрыт. ')
-        + 'Возобновить браузер и задачу можно в Helm Glass; шаги и результаты сохранены.'
+        + (current?.task.status === 'STOPPED'
+          ? 'Задача остановлена окончательно. Шаги и результаты доступны в Helm Glass.'
+          : 'Возобновить браузер и задачу можно в Helm Glass; шаги и результаты сохранены.')
       : 'Задача завершена. Шаги и результаты доступны в Helm Glass.';
     return;
   }
@@ -174,16 +176,22 @@ keepOpen.addEventListener('click', async () => {
   } catch {
     notice('Продление браузера не подтверждено. Проверьте связь и повторите действие.', true);
   } finally {
-    keepOpen.disabled = false;
+    if (!superseded && !tornDown) keepOpen.disabled = false;
   }
 });
 
 function retirePresentation(): void {
+  if (superseded || tornDown) return;
+  if (!current) {
+    status.textContent = 'Неактуальный виджет';
+    notice(supersededMessage);
+  }
   superseded = true;
   validated = false;
   syncReady = false;
   historyGeneration++;
   element('card', HTMLElement).classList.add('superseded');
+  card.inert = true;
   clearInterval(sessionTimer);
   clearTimeout(searchTimer);
   element('content', HTMLElement).inert = true;
@@ -192,9 +200,13 @@ function retirePresentation(): void {
   events = undefined;
   clearTimeout(retryTimer);
   dirty = false;
-  closeViewer();
-  status.textContent = 'Неактуальный виджет';
-  notice(supersededMessage);
+  clearTimeout(browserRetry);
+  browserRetry = undefined;
+  if (browserConnected && browserId && metadata) {
+    viewer.contentWindow?.postMessage({ type: 'helm-viewer-freeze', viewerEpoch: String(viewerGeneration) },
+      new URL(metadata.publicUrl).origin);
+    viewerGeneration++;
+  } else closeViewer();
 }
 
 async function tool(name: string, extra: Record<string, unknown> = {}) {
@@ -394,6 +406,7 @@ function closeViewer(): void {
 }
 
 function retryViewer(): void {
+  if (superseded || tornDown) return;
   browserConnected = false;
   browserError = 'Связь с браузером прервана. Восстанавливаем просмотр…';
   renderBrowser();
@@ -670,6 +683,7 @@ function updatePanels(): void {
 }
 
 function renderClock(): void {
+  if (superseded || tornDown) return;
   renderIdle();
   if (!sessionPanel.hidden) renderSession();
 }
@@ -720,6 +734,7 @@ stepsSearch.addEventListener('input', () => {
   searchTimer = setTimeout(() => changeHistoryPage(1), 250);
 });
 function updateHostLayout(): void {
+  if (superseded || tornDown) return;
   const context = app.getHostContext();
   const dimensions = context?.containerDimensions;
   const availableHeight = dimensions && ('height' in dimensions ? dimensions.height : dimensions.maxHeight);
@@ -730,6 +745,7 @@ function updateHostLayout(): void {
 }
 
 function expandBrowser(value: boolean): void {
+  if (superseded || tornDown) return;
   expanded = value;
   card.classList.toggle('expanded', expanded);
   const label = expanded ? 'Свернуть браузер' : 'Развернуть браузер';

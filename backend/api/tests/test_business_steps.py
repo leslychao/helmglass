@@ -128,7 +128,7 @@ class BusinessStepsTest(unittest.TestCase):
         self.create()
         first = self.step("START", self.declare())
         remaining = self.declare(2)
-        _, failed = self.browser_action(first, "waitFor", {"selector": "#business-step-missing", "state": "visible"})
+        _, failed = self.browser_action(first, "waitFor", {**self.client.browser_target(self.task['id'], 'Learn more', first['id']), 'state': 'hidden'})
         self.assertEqual("FAILED", failed["status"])
         self.assertEqual("RUNNING", self.actual_step(first)["status"])
         _, observed = self.browser_action(first)
@@ -170,7 +170,7 @@ class BusinessStepsTest(unittest.TestCase):
         self.assertEqual("WAITING", self.actual_step(step)["status"])
         self.command(self.task, "RESUME")
         self.assertEqual("RUNNING", self.actual_step(step)["status"])
-        _, unknown = self.browser_action(step, "click", {"selector": "#uncertain-business-effect"})
+        _, unknown = self.browser_action(step, "click", self.client.browser_target(self.task['id'], 'Slow effect', step['id'], uncertain=True))
         self.assertEqual("UNKNOWN", unknown["status"])
         self.assertEqual("UNKNOWN", self.actual_step(step)["status"])
         self.command(self.task, "REJECT", text="Проверено: действие не выполнено")
@@ -218,7 +218,7 @@ class BusinessStepsTest(unittest.TestCase):
             self.assertTrue(error)
         finally:
             self.purge_identity(foreign)
-        _, operation = self.browser_action(step, "click", {"selector": "#unknown-before-stop"})
+        _, operation = self.browser_action(step, "click", self.client.browser_target(self.task['id'], 'Slow effect', step['id'], uncertain=True))
         self.assertEqual("UNKNOWN", operation["status"])
         self.command(self.task, "STOP")
         deadline = time.monotonic() + 45

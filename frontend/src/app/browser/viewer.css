@@ -12,7 +12,7 @@
 .browser-controls .browser-close { color: #a9534b; }
 .browser-controls .browser-close:hover:not(:disabled) { background: #fff7f5; border-color: #d8b5ae; }
 .browser-inline-notice { display: flex; align-items: center; gap: 8px; padding: 8px 13px; font-size: 11px; color: #936b30; background: #fff9ef; border-bottom: 1px solid #f2e8d7; }
-.browser-stage { display: flex; position: relative; min-height: 0; background: #f7f9fc; }
+.browser-stage { display: flex; position: relative; min-height: 0; max-height: clamp(388.8px, 60.75dvh, 810px); background: #f7f9fc; }
 .browser-viewport { min-width: 0; flex: 1; }
 .viewer-placeholder { overflow: auto; justify-content: safe center; }
 .browser-drawer { width: 320px; flex: 0 0 320px; min-width: 0; min-height: 0; display: flex; flex-direction: column; border-left: 1px solid #e1e8f1; background: #fff; overflow: hidden; }
@@ -25,7 +25,7 @@
 .browser-footer .text-button:hover { background: #f3f6fb; }
 .browser-footer .text-button.active { color: #326cc0; background: #edf4ff; }
 .browser-expanded { box-shadow: 0 0 0 100vmax #26334d55; }
-.browser-expanded .browser-stage { min-height: 0; flex: 1; }
+.browser-expanded .browser-stage { min-height: 0; max-height: none; flex: 1; }
 @media(max-width:1280px) {
   .browser-toolbar { flex-wrap: wrap; gap: 8px; }
   .browser-address { flex: 1 1 230px; }

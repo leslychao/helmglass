@@ -102,6 +102,12 @@ public class ActionService {
 
   @Transactional
   public Contracts.Operation submit(UUID owner, UUID taskId, Contracts.BrowserAction action) {
+    return submit(owner, taskId, action, List.of());
+  }
+
+  @Transactional
+  public Contracts.Operation submit(UUID owner, UUID taskId, Contracts.BrowserAction action,
+      List<UUID> sequence) {
     identity.requireActive(owner);
     tasks.lockOwner(owner);
     tasks.lockTask(owner, taskId);
@@ -112,6 +118,12 @@ public class ActionService {
         || !action.arguments().isObject()
         || json.write(action.arguments()).length() > 65536) {
       throw ApiException.invalid("action", "Некорректная команда браузера.");
+    }
+    if (sequence.size() > 8 || !sequence.isEmpty() && !sequence.contains(action.operationId())) {
+      throw ApiException.invalid("actions", "Некорректная последовательность операций.");
+    }
+    if (action.arguments().has("selector") || action.arguments().has("_meta")) {
+      throw ApiException.invalid("arguments", "Используйте observationId и ref из наблюдения.");
     }
     String confirmation = action.confirmationPrompt() == null ? null
         : TaskService.required(action.confirmationPrompt(), "confirmationPrompt", 4000);
@@ -132,7 +144,9 @@ public class ActionService {
                       + " instruction_snapshot->'step'=CAST(:definition AS jsonb),false))"
                       + " AND (:observe IS NULL OR"
                       + " coalesce((instruction_snapshot->>'observeAfter')::boolean,true)=:observe)"
-                      + " AND type=:type AND arguments=CAST(:arguments AS jsonb) AND"
+                      + " AND coalesce(instruction_snapshot->'sequence','[]'::jsonb)="
+                      + " CAST(:sequence AS jsonb) AND type=:type"
+                      + " AND arguments=CAST(:arguments AS jsonb) AND"
                       + " instruction_revision=:revision AND requested_control_epoch IS NOT"
                       + " DISTINCT FROM CAST(:epoch AS bigint) AND instruction_snapshot->>'confirmationPrompt'"
                       + " IS NOT DISTINCT FROM CAST(:confirmation AS text) FROM operations WHERE id=:id")
@@ -140,6 +154,7 @@ public class ActionService {
               .param("step", action.stepId())
               .param("definition", action.step() == null ? null : json.write(action.step()))
               .param("observe", action.observeAfter(), Types.BOOLEAN)
+              .param("sequence", json.write(sequence))
               .param("type", action.type())
               .param("arguments", json.write(action.arguments()))
               .param("revision", action.instructionRevision())
@@ -192,6 +207,7 @@ public class ActionService {
     instruction.put("revision", task.instructionRevision());
     instruction.put("title", task.title());
     instruction.put("goal", task.goal());
+    instruction.put("sequence", sequence);
     instruction.put("observeAfter", action.observeAfter() == null
         ? !Set.of("listMedia", "captureAudio", "screenshot").contains(action.type())
         : action.observeAfter());
@@ -564,6 +580,9 @@ public class ActionService {
     request.put("instructionRevision", dispatch.revision());
     request.put("controlEpoch", dispatch.epoch());
     request.put("observeAfter", dispatch.observeAfter());
+    if (!dispatch.sequence().isMissingNode() && !dispatch.sequence().isEmpty()) {
+      request.put("sequence", Map.of("operationIds", dispatch.sequence()));
+    }
     try {
       JsonNode response =
           worker.call("POST", "/sessions/" + dispatch.session() + "/commands", request);
@@ -649,19 +668,21 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                     + " id=:id")
             .param("id", candidate.id())
             .query(
-                (row, index) ->
-                    new Dispatch(
-                        candidate.id(),
-                        candidate.owner(),
-                        candidate.task(),
-                        sessionId,
-                        row.getString("type"),
-                        json.read(row.getString("arguments")),
-                        row.getLong("instruction_revision"),
-                        epoch,
-                        row.getBoolean("mutating"),
-                        json.read(row.getString("instruction_snapshot"))
-                            .path("observeAfter").asBoolean(true)))
+                (row, index) -> {
+                  JsonNode instruction = json.read(row.getString("instruction_snapshot"));
+                  return new Dispatch(
+                      candidate.id(),
+                      candidate.owner(),
+                      candidate.task(),
+                      sessionId,
+                      row.getString("type"),
+                      json.read(row.getString("arguments")),
+                      row.getLong("instruction_revision"),
+                      epoch,
+                      row.getBoolean("mutating"),
+                      instruction.path("observeAfter").asBoolean(true),
+                      instruction.path("sequence"));
+                })
             .single();
     if (command.revision() != task.instructionRevision()
         || tasks.hasUnknown(task.id()) && command.mutating()) {
@@ -751,19 +772,21 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                 "SELECT * FROM operations WHERE status IN ('DISPATCHED','UNKNOWN') AND"
                     + " dispatched_at<now()-interval '45 seconds' ORDER BY dispatched_at LIMIT 20")
             .query(
-                (row, index) ->
-                    new Dispatch(
-                        row.getObject("id", UUID.class),
-                        row.getObject("owner_id", UUID.class),
-                        row.getObject("task_id", UUID.class),
-                        row.getObject("session_id", UUID.class),
-                        row.getString("type"),
-                        json.read(row.getString("arguments")),
-                        row.getLong("instruction_revision"),
-                        row.getLong("control_epoch"),
-                        row.getBoolean("mutating"),
-                        json.read(row.getString("instruction_snapshot"))
-                            .path("observeAfter").asBoolean(true)))
+                (row, index) -> {
+                  JsonNode instruction = json.read(row.getString("instruction_snapshot"));
+                  return new Dispatch(
+                      row.getObject("id", UUID.class),
+                      row.getObject("owner_id", UUID.class),
+                      row.getObject("task_id", UUID.class),
+                      row.getObject("session_id", UUID.class),
+                      row.getString("type"),
+                      json.read(row.getString("arguments")),
+                      row.getLong("instruction_revision"),
+                      row.getLong("control_epoch"),
+                      row.getBoolean("mutating"),
+                      instruction.path("observeAfter").asBoolean(true),
+                      instruction.path("sequence"));
+                })
             .list();
     for (Dispatch operation : operations) {
       try {
@@ -794,16 +817,26 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       artifacts.importResults(
           operation.owner(), operation.task(), operation.session(), operation.id(), result);
     }
+    String errorCode = null;
+    String errorMessage = null;
+    if ("FAILED".equals(status)) {
+      if ("OBSERVATION_LIMIT_EXCEEDED".equals(response.path("code").asString())) {
+        errorCode = "OBSERVATION_LIMIT_EXCEEDED";
+        errorMessage = "Страница превышает безопасные ограничения наблюдения.";
+      } else {
+        errorCode = "BROWSER_ACTION_FAILED";
+        errorMessage = "Браузер сообщил об отказе действия.";
+      }
+    } else if ("UNKNOWN".equals(status)) {
+      errorCode = "UNKNOWN_RESULT";
+      errorMessage = "Результат действия неизвестен.";
+    }
     complete(
         operation,
         Set.of("SUCCEEDED", "FAILED").contains(status) ? status : "UNKNOWN",
         result,
-        "FAILED".equals(status)
-            ? "BROWSER_ACTION_FAILED"
-            : "UNKNOWN".equals(status) ? "UNKNOWN_RESULT" : null,
-        "FAILED".equals(status)
-            ? "Браузер сообщил об отказе действия."
-            : "UNKNOWN".equals(status) ? "Результат действия неизвестен." : null);
+        errorCode,
+        errorMessage);
   }
 
   private void complete(
@@ -1109,5 +1142,6 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       long revision,
       long epoch,
       boolean mutating,
-      boolean observeAfter) {}
+      boolean observeAfter,
+      JsonNode sequence) {}
 }

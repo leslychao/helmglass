@@ -1,3 +1,4 @@
+import { target, snapshotText } from './references.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
@@ -18,7 +19,7 @@ test('bounded saved profiles retain structured IDB and reject oversize without r
   async function waitForText(text) {
     for (let attempt = 0; attempt < 20; attempt++) {
       const response = await request(base + '/observe');
-      if (response.value.text.includes(text)) return response.value.text;
+      if (snapshotText(response.value).includes(text)) return snapshotText(response.value);
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     assert.fail('Fixture storage operation did not complete');
@@ -26,7 +27,7 @@ test('bounded saved profiles retain structured IDB and reject oversize without r
   const save = profile => request(base + '/profile/export', { connectionId: profile, ownerId: owner, origins: [new URL(fixture).origin] });
   async function apply(profile, expected) {
     await command('applyConnection', { connectionId: profile, ownerId: owner, origins: [new URL(fixture).origin], url: fixture });
-    await command('click', { selector: '#profile-read' });
+    await command('click', { ...await target(request, base, 'Read identity') });
     const text = await waitForText('"complex":true');
     assert.ok(text.includes('"local":"' + expected + '"'));
     assert.ok(text.includes('"indexed":"' + expected + '"'));
@@ -36,12 +37,12 @@ test('bounded saved profiles retain structured IDB and reject oversize without r
     assert.equal((await request('/sessions', { sessionId: id, ownerId: owner, startUrl: fixture })).value.status, 'LIVE');
     await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false });
     for (const [value, profile] of [['a', profileA], ['b', profileB]]) {
-      await command('click', { selector: '#profile-' + value }); await waitForText('"complex":true');
+      await command('click', { ...await target(request, base, 'Save ' + value.toUpperCase()) }); await waitForText('"complex":true');
       assert.equal((await save(profile)).status, 200);
     }
     await apply(profileA, 'a'); await apply(profileB, 'b'); await apply(profileA, 'a');
     for (const type of ['oversize', 'unsupported']) {
-      await command('click', { selector: '#profile-' + type }); await waitForText('Stored ' + type);
+      await command('click', { ...await target(request, base, type === 'oversize' ? 'Write oversized IDB value' : 'Write unsupported IDB value') }); await waitForText('Stored ' + type);
       assert.equal((await save(profileA)).status, type === 'oversize' ? 413 : 422,
         'Size limits and unsupported values must remain distinct without replacing the saved profile');
       await apply(profileA, 'a');

@@ -1,3 +1,4 @@
+import { target, snapshotText } from './references.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -46,9 +47,9 @@ test('private credentials fill only the saved HTTPS origin and never enter obser
     assert.equal((await request(base + '/observe', undefined, 'GET')).status, 423);
     assert.equal((await credentials('STATUS', { viewerId: randomUUID() })).status, 403);
     assert.equal((await control(2, false)).status, 200);
-    assert.equal((await command('click', { selector: '#verify' }, 2)).value.status, 'SUCCEEDED');
+    assert.equal((await command('click', { ...await target(request, base, 'Check synthetic credentials') }, 2)).value.status, 'SUCCEEDED');
     const observed = await request(base + '/observe', undefined, 'GET');
-    assert.ok(observed.value.text.includes('Expected synthetic credentials'));
+    assert.ok(snapshotText(observed.value).includes('Expected synthetic credentials'));
     assert.equal(JSON.stringify(observed.value).includes(write.password), false);
     let epoch = 2;
     for (const [mode, expected] of [['readonly-other', 'No matching credentials'], ['password-only', 'No matching credentials'], ['readonly-same', 'Expected synthetic credentials']]) {
@@ -57,9 +58,9 @@ test('private credentials fill only the saved HTTPS origin and never enter obser
       assert.equal((await command('navigate', { url: url.href }, epoch)).value.status, 'SUCCEEDED');
       assert.equal((await control(++epoch, true)).status, 200);
       assert.equal((await control(++epoch, false)).status, 200);
-      assert.equal((await command('click', { selector: '#verify' }, epoch)).value.status, 'SUCCEEDED');
+      assert.equal((await command('click', { ...await target(request, base, 'Check synthetic credentials') }, epoch)).value.status, 'SUCCEEDED');
       const result = await request(base + '/observe', undefined, 'GET');
-      assert.ok(result.value.text.includes(expected));
+      assert.ok(snapshotText(result.value).includes(expected));
       assert.equal(JSON.stringify(result.value).includes('synthetic-url-secret'), false);
       assert.equal(JSON.stringify(result.value).includes('synthetic-fragment-secret'), false);
       assert.equal(JSON.stringify(result.value).includes(write.password), false);
@@ -70,8 +71,8 @@ test('private credentials fill only the saved HTTPS origin and never enter obser
       connectionId: connection, restoreProfile: false })).value.status, 'LIVE');
     assert.equal((await control(1, true)).status, 200);
     assert.equal((await control(2, false)).status, 200);
-    assert.equal((await command('click', { selector: '#verify' }, 2)).value.status, 'SUCCEEDED');
-    assert.ok((await request(base + '/observe', undefined, 'GET')).value.text.includes('Expected synthetic credentials'),
+    assert.equal((await command('click', { ...await target(request, base, 'Check synthetic credentials') }, 2)).value.status, 'SUCCEEDED');
+    assert.ok(snapshotText((await request(base + '/observe', undefined, 'GET')).value).includes('Expected synthetic credentials'),
       'An expired connection must arm saved credentials without restoring its old profile');
     assert.equal((await control(3, true)).status, 200);
     assert.equal((await credentials('DELETE', { operationId: randomUUID(), expectedRevision: 1 })).value.available, false);

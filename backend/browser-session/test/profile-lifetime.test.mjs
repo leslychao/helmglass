@@ -1,3 +1,4 @@
+import { target, snapshotText } from './references.mjs';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -46,40 +47,40 @@ test('explicit save owns profile updates and failed export cannot block close', 
   }
   try {
     await create();
-    await command('click', { selector: '#account-a' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Use account A') });
     const save = () => request('/sessions/' + session + '/profile/export', {
       connectionId: profile, ownerId: owner, origins: [new URL(fixture).origin] });
     const first = await save();
     assert.equal(first.status, 200); assert.equal(first.value.revision, 1);
     assert.equal((await save()).value.revision, first.value.revision,
       'Unchanged storage must not create another profile revision');
-    await command('click', { selector: '#account-b' });
-    await command('click', { selector: '#short-login' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Use account B') });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Sign in for eight seconds') });
     assert.equal((await save()).status, 200);
     assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
     await create(true);
-    await command('click', { selector: '#read-state' });
-    assert.ok((await command('observe')).text.includes('"account":"b"'),
+    await command('click', { ...await target(request, '/sessions/' + session, 'Read state') });
+    assert.ok(snapshotText(await command('observe')).includes('"account":"b"'),
       'Explicit save must retain the changed account');
-    await command('click', { selector: '#logout' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Sign out') });
     assert.equal((await save()).status, 200);
     assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
     await create(true);
-    await command('click', { selector: '#read-state' });
-    assert.ok((await command('observe')).text.includes('"session":"login-required"'),
+    await command('click', { ...await target(request, '/sessions/' + session, 'Read state') });
+    assert.ok(snapshotText(await command('observe')).includes('"session":"login-required"'),
       'Explicitly saving logout must replace the previously saved login');
-    await command('click', { selector: '#ordinary-storage' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Add a 2 MiB site cache') });
     assert.equal((await save()).status, 200, 'A 2 MiB ASCII site cache is retained');
-    await command('click', { selector: '#large-storage' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Add serialized site data above 8 MiB') });
     assert.equal((await save()).status, 200, 'A serialized 12 MiB cache is saved without approximate overhead');
     assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
     await create(true);
-    await command('click', { selector: '#read-state' });
-    assert.ok((await command('observe')).text.includes('"cacheLength":2097152'));
-    await command('click', { selector: '#account-a' });
-    await command('click', { selector: '#oversize-record' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Read state') });
+    assert.ok(snapshotText(await command('observe')).includes('"cacheLength":2097152'));
+    await command('click', { ...await target(request, '/sessions/' + session, 'Use account A') });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Add a record above 16 MiB') });
     for (let attempt = 0; attempt < 30; attempt++) {
-      if ((await command('observe')).text.includes('Stored oversize')) break;
+      if (snapshotText(await command('observe')).includes('Stored oversize')) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     const rejected = await save();
@@ -90,8 +91,8 @@ test('explicit save owns profile updates and failed export cannot block close', 
     assert.equal(closed.value.status, 'CLOSED', 'A failed save must not prevent closing');
     assert.equal(closed.value.profileSaveError, 'PROFILE_RECORD_TOO_LARGE');
     await create(true);
-    await command('click', { selector: '#read-state' });
-    assert.ok((await command('observe')).text.includes('"account":"b"'),
+    await command('click', { ...await target(request, '/sessions/' + session, 'Read state') });
+    assert.ok(snapshotText(await command('observe')).includes('"account":"b"'),
       'Closing must preserve the last successful save, not replace it with later unsaved state');
   } finally {
     for (const id of sessions) await request('/sessions/' + id, undefined, 'DELETE');
@@ -120,10 +121,10 @@ test('saved profile does not renew expired site login or restore forms; redirect
     return result.value.result;
   }
   async function state(expected) {
-    await command('click', { selector: '#read-state' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Read state') });
     const observed = await command('observe');
     for (const [key, value] of Object.entries(expected)) {
-      assert.ok(observed.text.includes(JSON.stringify(key) + ':' + JSON.stringify(value)),
+      assert.ok(snapshotText(observed).includes(JSON.stringify(key) + ':' + JSON.stringify(value)),
         'The restored page must expose the expected ' + key);
     }
   }
@@ -133,10 +134,10 @@ test('saved profile does not renew expired site login or restore forms; redirect
   }
   try {
     await create();
-    await command('click', { selector: '#account-a' });
-    await command('click', { selector: '#short-login' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Use account A') });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Sign in for eight seconds') });
     const expiresAfter = Date.now() + 9000;
-    await command('fill', { selector: '#draft', text: 'unsaved private form value' });
+    await command('fill', { ...await target(request, '/sessions/' + session, 'Unsaved form'), text: 'unsaved private form value' });
     await state({ account: 'a', localAccount: 'a', session: 'authenticated', draft: 'unsaved private form value' });
     await save(profileA);
     assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
@@ -144,7 +145,7 @@ test('saved profile does not renew expired site login or restore forms; redirect
     await create(profileA);
     await state({ account: 'a', localAccount: 'a', session: 'login-required', draft: '' });
 
-    await command('click', { selector: '#account-b' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Use account B') });
     await save(profileB);
     for (const [profile, account] of [[profileA, 'a'], [profileB, 'b'], [profileA, 'a']]) {
       await command('applyConnection', { connectionId: profile, ownerId: owner, origins: [origin], url: fixture });
@@ -184,11 +185,11 @@ test('saved host-only cookies and local storage stay isolated from a similar hos
     return expected === 'SUCCEEDED' ? result.value.result : result.value;
   }
   async function state(account) {
-    await command('click', { selector: '#read-state' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Read state') });
     const observed = await command('observe');
     for (const key of ['account', 'localAccount', 'pathAccount']) {
-      assert.ok(observed.text.includes(JSON.stringify(key) + ':' + JSON.stringify(account)),
-        'Similar hostnames must retain separate ' + key + '; synthetic state: ' + observed.text.slice(-800));
+      assert.ok(snapshotText(observed).includes(JSON.stringify(key) + ':' + JSON.stringify(account)),
+        'Similar hostnames must retain separate ' + key + '; synthetic state: ' + snapshotText(observed).slice(-800));
     }
   }
   async function save(profile, allowedOrigin) {
@@ -198,12 +199,12 @@ test('saved host-only cookies and local storage stay isolated from a similar hos
   try {
     await create(first);
     assert.equal((await command('observe')).title, 'Profile lifetime acceptance');
-    await command('click', { selector: '#account-a' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Use account A') });
     await state('a'); await save(profileA, origin);
     assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
     await create(similar, profileA);
     await state(null);
-    await command('click', { selector: '#account-b' });
+    await command('click', { ...await target(request, '/sessions/' + session, 'Use account B') });
     await state('b'); await save(profileB, otherOrigin);
     const accountBTab = (await command('observe')).tabs.find(tab => tab.active).id;
     await command('applyConnection', { connectionId: profileA, ownerId: owner, origins: [origin], url: first });
@@ -221,9 +222,9 @@ test('saved host-only cookies and local storage stay isolated from a similar hos
     assert.equal(denied.error, 'Account switch destination was not confirmed');
     const retained = await command('observe');
     assert.equal(retained.url, first);
-    assert.ok(retained.text.includes('"account":"a"'));
-    assert.ok(retained.text.includes('"localAccount":"a"'));
-    assert.ok(retained.text.includes('"pathAccount":"a"'));
+    assert.ok(snapshotText(retained).includes('"account":"a"'));
+    assert.ok(snapshotText(retained).includes('"localAccount":"a"'));
+    assert.ok(snapshotText(retained).includes('"pathAccount":"a"'));
     assert.equal((await request('/sessions/' + session, undefined, 'DELETE')).value.status, 'CLOSED');
 
     // Reproduce a formerly exported parent cookie, only in our random owner's profile.

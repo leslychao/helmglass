@@ -1,3 +1,4 @@
+import { target, snapshotText } from './references.mjs';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
@@ -150,10 +151,10 @@ test('completed downloads release staging files while archived artifacts and the
     try {
       assert.equal((await request('/sessions', {sessionId: id, ownerId: randomUUID(), startUrl: url})).status, 'LIVE');
       await request(base + '/control', {controlEpoch: 1, owner: 'CHATGPT', privateMode: false});
-      assert.equal((await action('waitFor', {selector: '#download'})).status, 'SUCCEEDED', 'Download fixture is available');
+      assert.equal((await action('waitFor', await target(request, base, 'Download'))).status, 'SUCCEEDED', 'Download fixture is available');
       const before = await sample(container);
       for (let index = 0; index < 5; index++) {
-        assert.equal((await action('click', {selector: '#download'})).status, 'SUCCEEDED');
+        assert.equal((await action('click', await target(request, base, 'Download'))).status, 'SUCCEEDED');
       }
       const afterDownloads = await sample(container);
       const artifacts = (await request(base + '/artifacts')).artifacts;
@@ -194,7 +195,7 @@ test('completed downloads release staging files while archived artifacts and the
       assert.equal(afterDownloads.downloadBytes, before.downloadBytes, 'Staging bytes must return to baseline');
       // An external click can have an uncertain outcome when artifact storage rejects
       // its download. Do this last: subsequent mutations correctly require reconciliation.
-      const empty = await action('click', {selector: '#empty'});
+      const empty = await action('click', await target(request, base, 'Empty'));
       assert.equal(empty.status, 'UNKNOWN');
       assert.equal((await request(base + '/artifacts')).artifacts.length, 5,
         'Rejected empty download must not publish an artifact');
@@ -211,8 +212,8 @@ test('a download triggered during private input is cancelled without retaining a
     const id = randomUUID(), base = '/sessions/' + id;
     const html = `<!doctype html><a id="download" download="private.txt" href="data:text/plain,synthetic">Download</a>
       <button id="arm" onclick="setTimeout(() => {
-        document.getElementById('download').click(); document.body.dataset.downloadAttempted = 'true';
-      }, 1500)">Arm private download</button>`;
+        document.getElementById('download').click(); document.body.dataset.downloadAttempted = 'true'; document.querySelector('#attempt').textContent='Download attempted';
+      }, 1500)">Arm private download</button><p id="attempt">Waiting for download</p>`;
     const url = 'https://httpbin.org/base64/' + Buffer.from(html).toString('base64');
     const action = (type, args, epoch) => request(base + '/commands', {
       operationId: randomUUID(), type, arguments: args, instructionRevision: 0, controlEpoch: epoch,
@@ -221,12 +222,12 @@ test('a download triggered during private input is cancelled without retaining a
       assert.equal((await request('/sessions', {sessionId: id, ownerId: randomUUID(), startUrl: url})).status, 'LIVE');
       await request(base + '/control', {controlEpoch: 1, owner: 'CHATGPT', privateMode: false});
       const before = await sample('helm-browser-' + id);
-      assert.equal((await action('click', {selector: '#arm'}, 1)).status, 'SUCCEEDED');
+      assert.equal((await action('click', await target(request, base, 'Arm private download'), 1)).status, 'SUCCEEDED');
       await request(base + '/control', {controlEpoch: 2, owner: 'USER', privateMode: true, controllerId: randomUUID()});
       await delay(2500);
       const after = await sample('helm-browser-' + id);
       await request(base + '/control', {controlEpoch: 3, owner: 'CHATGPT', privateMode: false});
-      assert.equal((await action('waitFor', {selector: 'body[data-download-attempted="true"]'}, 3)).status, 'SUCCEEDED');
+      assert.ok(snapshotText(await request(base + '/observe')).includes('Download attempted'));
       assert.equal((await request(base + '/artifacts')).artifacts.length, 0);
       assert.equal(after.downloads, before.downloads);
       assert.equal(after.downloadBytes, before.downloadBytes);

@@ -77,7 +77,7 @@ class ApplicationPersistenceTest(unittest.TestCase):
         self.assertFalse(error,state)
         task=state["task"]
         task_id=task["id"]
-        self.browser_action(task, 'click', {'selector': '#account-a'})
+        self.browser_action(task, 'click', self.client.browser_target(task['id'], 'Use account A'))
         operation=str(uuid.uuid4())
         error,receipt,_=self.client.execute_in_scenario_step({"taskId":task_id,"action":{
             "operationId":operation,"type":"screenshot","arguments":{},"instructionRevision":task["instructionRevision"],
@@ -195,7 +195,7 @@ class ApplicationPersistenceTest(unittest.TestCase):
         self.assertFalse(error, state)
         restored = state['task']
         self.assertNotEqual(task['browser']['id'], restored['browser']['id'])
-        self.browser_action(restored, 'click', {'selector': '#read-state'})
+        self.browser_action(restored, 'click', self.client.browser_target(restored['id'], 'Read state'))
         observed = self.browser_action(restored, 'observe')
         self.assertIn('"account":"a"', observed['text'])
         self.assertIn('"localAccount":"a"', observed['text'])
@@ -207,7 +207,7 @@ class ApplicationPersistenceTest(unittest.TestCase):
         self.assertTrue(credential['available'])
         self.assertEqual(1, credential['revision'])
         restored = self.login_control(restored, 'FINISH_LOGIN', viewer)
-        self.browser_action(restored, 'click', {'selector': '#verify'})
+        self.browser_action(restored, 'click', self.client.browser_target(restored['id'], 'Check synthetic credentials'))
         self.assertIn('Expected synthetic credentials', self.browser_action(restored, 'observe')['text'])
         self.command(restored, 'STOP')
         print("PASS persisted application data, encrypted cookies/localStorage and automatic protected credential fill in a new Chromium",flush=True)
