@@ -174,7 +174,10 @@ async function controlSession(id: string, policy: Policy, requestedDeadline?: st
   }
   const pending = current.pendingOperation;
   if (unchanged && pending?.kind !== "CONTROL") return summary(current);
-  if (pending?.kind === "COMMAND" || savingProfiles.has(id)) throw new HttpError(409, "Browser work in progress");
+  // Revocation lets the runtime cancel and settle a command before the final save.
+  if (pending?.kind === "COMMAND" && policy.owner !== "NONE" || savingProfiles.has(id)) {
+    throw new HttpError(409, "Browser work in progress");
+  }
   if (pending?.kind === "CONTROL" && (pending.id !== `control:${policy.controlEpoch}`
       || pending.policy && JSON.stringify(pending.policy) !== JSON.stringify(policy))) {
     throw new HttpError(409, "Control transfer in progress");
