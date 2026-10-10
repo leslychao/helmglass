@@ -107,6 +107,11 @@ test('timeout releases an unresolved permission prompt and suppresses its late p
   resolve('Поздний текст'); await settle(); f.sent(); await settle();
   assert.equal(f.keys.length, 0);
   assert.equal(f.connection.sent, undefined);
+  f.clipboard.readText = async () => 'Текст ожидает согласования';
+  f.key('KeyV'); await settle();
+  t.mock.timers.tick(5000); await settle();
+  f.sent(); await settle();
+  assert.equal(f.keys.length, 0, 'Late Provide after timeout cannot send Ctrl+V');
 });
 test('disconnect cancels pending copy and stale messages cannot paste', async t => {
   const f = fixture(t);
@@ -126,19 +131,34 @@ test('VIEWER and shortcuts outside the canvas cannot exchange clipboard', async 
   f.connection.viewOnly = false;
   assert.equal(f.key('KeyV', { target: { tagName: 'TEXTAREA' } }).prevented, undefined);
 });
-test('published noVNC rejects unsupported Unicode transport and oversize before sending', () => {
+test('published noVNC waits for capabilities, rejects unsupported transport and oversize', () => {
+  let sends = 0;
+  const wireOrder = [];
+  const messages = {
+    extendedClipboardNotify() { sends++; wireOrder.push('notify'); },
+    extendedClipboardCaps() { wireOrder.push('caps'); },
+  };
+  const bindings = {
+    RFB: { messages }, CLIPBOARD_TEXT_LIMIT: 262144, TextEncoder, CustomEvent,
+    extendedClipboardFormatText: 1, extendedClipboardActionCaps: 1 << 24,
+    extendedClipboardActionRequest: 1 << 25, extendedClipboardActionPeek: 1 << 26,
+    extendedClipboardActionNotify: 1 << 27, extendedClipboardActionProvide: 1 << 28,
+    toSigned32bit: value => value | 0, Log: { Debug() {} },
+  };
   const a = rfbSource.indexOf('    clipboardPasteFrom(text) {');
   const b = rfbSource.indexOf('    getImageData() {', a);
-  const fn = vm.runInNewContext('(' + rfbSource.slice(a, b).replace('clipboardPasteFrom(text)', 'function paste(text)') + ')', {
-    RFB: { messages: { extendedClipboardNotify() { sends++; } } }, CLIPBOARD_TEXT_LIMIT: 262144,
-    TextEncoder, CustomEvent, extendedClipboardFormatText: 1, extendedClipboardActionNotify: 1 << 27,
-  });
-  let sends = 0;
+  const fn = vm.runInNewContext('(' + rfbSource.slice(a, b)
+    .replace('clipboardPasteFrom(text)', 'function paste(text)') + ')', bindings);
   const events = [];
   const connection = { _rfbConnectionState: 'connected', _viewOnly: false,
     _clipboardServerCapabilitiesFormats: {}, _clipboardServerCapabilitiesActions: {},
     dispatchEvent: event => events.push(event.type) };
   fn.call(connection, 'Привет 🌍');
+  assert.deepEqual(events, [], 'Unknown capabilities are pending rather than unsupported');
+  assert.equal(connection._clipboardText, 'Привет 🌍');
+  assert.equal(sends, 0);
+  connection._clipboardServerCapabilitiesActions[1 << 24] = true;
+  fn.call(connection, connection._clipboardText);
   assert.deepEqual(events, ['clipboarderror']);
   connection._clipboardServerCapabilitiesFormats[1] = true;
   connection._clipboardServerCapabilitiesActions[1 << 27] = true;
@@ -147,4 +167,16 @@ test('published noVNC rejects unsupported Unicode transport and oversize before 
   fn.call(connection, 'я'.repeat(131072) + 'a');
   assert.equal(sends, 1);
   assert.equal(events.length, 2);
+  const header = rfbSource.indexOf('    _handleServerCutText() {');
+  const end = rfbSource.indexOf('\n    _handle', header + 30);
+  const receive = vm.runInNewContext('({' + rfbSource.slice(header, end) + '})', bindings)._handleServerCutText;
+  const words = [-8, (31 << 24) | 1, 0];
+  const pending = { ...connection, _clipboardServerCapabilitiesFormats: {},
+    _clipboardServerCapabilitiesActions: {}, clipboardPasteFrom: fn,
+    _sock: { rQwait: () => false, rQskipBytes() {}, rQshift32: () => words.shift() } };
+  wireOrder.length = 0;
+  fn.call(pending, 'Очередь до Caps');
+  assert.deepEqual(wireOrder, []);
+  assert.equal(receive.call(pending), true);
+  assert.deepEqual(wireOrder, ['caps', 'notify'], 'Actual Caps handler releases the queued paste in order');
 });

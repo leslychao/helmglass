@@ -1,17 +1,18 @@
 FROM node:24.17.0-bookworm-slim AS vnc
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl cmake g++ make pkg-config libpam0g-dev libjpeg62-turbo-dev \
+    ca-certificates curl patch cmake g++ make pkg-config libpam0g-dev libjpeg62-turbo-dev \
     zlib1g-dev libpixman-1-dev libx11-dev libxext-dev libxtst-dev libxdamage-dev libxfixes-dev libxrandr-dev \
     && rm -rf /var/lib/apt/lists/*
+COPY patches/tigervnc-clipboard.patch /tmp/tigervnc-clipboard.patch
 RUN curl --fail --location https://github.com/TigerVNC/tigervnc/archive/refs/tags/v1.15.0.tar.gz -o /tmp/vnc.tar.gz \
     && mkdir /tmp/vnc && tar -xzf /tmp/vnc.tar.gz --strip-components=1 -C /tmp/vnc \
+    && patch --fuzz=0 -d /tmp/vnc -p1 < /tmp/tigervnc-clipboard.patch \
     && cmake -S /tmp/vnc -B /tmp/vnc/build -DCMAKE_BUILD_TYPE=Release -DBUILD_VIEWER=OFF -DENABLE_NLS=OFF \
     && cmake --build /tmp/vnc/build --target x0vncserver -j2
 
 FROM node:24.17.0-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-COPY patches ./patches
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src

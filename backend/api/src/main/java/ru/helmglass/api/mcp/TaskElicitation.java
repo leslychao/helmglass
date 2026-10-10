@@ -12,31 +12,47 @@ import org.springframework.stereotype.Service;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Contracts;
 import ru.helmglass.api.auth.Actor;
+import ru.helmglass.api.connections.ConnectionSite;
 import ru.helmglass.api.tasks.ActionService;
 import ru.helmglass.api.tasks.TaskService;
 
-/** Converts a host response to one persisted task request; model arguments never contain answers. */
+/** Receives native user answers or delegates observed operation verification to its owner. */
 @Service
 public class TaskElicitation {
   private final TaskService tasks;
   private final ActionService actions;
   private final JdbcClient jdbc;
+  private final ConnectionSite connectionSites;
 
-  public TaskElicitation(TaskService tasks, ActionService actions, JdbcClient jdbc) {
+  public TaskElicitation(
+      TaskService tasks, ActionService actions, JdbcClient jdbc, ConnectionSite connectionSites) {
     this.tasks = tasks;
     this.actions = actions;
     this.jdbc = jdbc;
+    this.connectionSites = connectionSites;
   }
 
   public Contracts.Task respond(McpSyncServerExchange exchange, Actor actor, String chat,
-      UUID taskId, UUID requestId, long requestVersion, String operationKey) {
+      UUID taskId, UUID requestId, long requestVersion, String operationKey,
+      Contracts.OperationVerification verification) {
+    if (verification != null) {
+      return actions.verifyResult(
+          actor, chat, taskId, requestId, requestVersion, operationKey, verification);
+    }
+    Contracts.Task task = tasks.get(actor.id(), taskId);
+    if (task.request() != null && "UNKNOWN_RESULT".equals(task.request().type())) {
+      throw ApiException.conflict("VERIFICATION_REQUIRED",
+          "Выполните observe, затем tasks.respond с verification: outcome SUCCEEDED, FAILED"
+              + " или UNCONFIRMED, evidence и observationOperationId. UNCONFIRMED разрешает"
+              + " безопасное продолжение без повтора действия. Ответ пользователя не нужен.");
+    }
     var capability = exchange.getClientCapabilities().elicitation();
     if (capability == null || capability.form() == null && capability.url() != null) {
       throw ApiException.conflict("ELICITATION_UNAVAILABLE",
           "Этот GPT-клиент не поддерживает нативный ответ пользователя. Запрос остаётся ожидающим.");
     }
     TaskService.ElicitationClaim claim =
-        tasks.claimResponse(actor, taskId, chat, requestId, requestVersion, operationKey);
+        tasks.claimResponse(actor, taskId, chat, requestId, requestVersion, operationKey, null);
     if (claim == null) {
       return tasks.get(actor.id(), taskId);
     }
@@ -86,16 +102,6 @@ public class TaskElicitation {
           }
           yield actions.respond(actor, chat, claim, proceed ? "CONFIRM" : "REJECT", null, null);
         }
-        case "UNKNOWN_RESULT" -> {
-          requireFields(content, Set.of("outcome", "evidence"));
-          String outcome = text(content, "outcome", 10);
-          if (!Set.of("SUCCEEDED", "FAILED").contains(outcome)) {
-            throw ApiException.invalid("outcome", "Укажите проверенный результат операции.");
-          }
-          yield actions.respond(actor, chat, claim,
-              "SUCCEEDED".equals(outcome) ? "CONFIRM" : "REJECT",
-              text(content, "evidence", 4000), null);
-        }
         default -> throw ApiException.conflict("STALE_REQUEST", "Запрос больше не актуален.");
       };
     } finally {
@@ -115,13 +121,11 @@ public class TaskElicitation {
         request.options().forEach(option -> options.add(Map.of(
             "const", option.path("id").asString(), "title", option.path("label").asString())));
         if (options.isEmpty()) {
-          options.addAll(jdbc.sql("""
-              SELECT c.id,c.name FROM connections c JOIN tasks t ON t.site=c.site
-              WHERE t.id=:task AND t.owner_id=:owner AND c.owner_id=:owner
-                AND c.deleted_at IS NULL AND c.status='READY' ORDER BY c.name,c.id LIMIT 50
-              """).param("task", claim.taskId()).param("owner", owner)
-              .query((row, index) -> Map.<String, Object>of("const", row.getString("id"),
-                  "title", row.getString("name"))).list());
+          String site = jdbc.sql("SELECT site FROM tasks WHERE id=:task AND owner_id=:owner")
+              .param("task", claim.taskId()).param("owner", owner).query(String.class).single();
+          for (Map<String, String> option : connectionSites.choices(owner, site, List.of())) {
+            options.add(Map.of("const", option.get("id"), "title", option.get("label")));
+          }
         }
         if (options.isEmpty()) {
           throw ApiException.conflict("NO_AVAILABLE_CONNECTION", "Подходящих подключений больше нет.");
@@ -141,11 +145,6 @@ public class TaskElicitation {
         message += "\n\nКонкретное действие и его параметры:\n" + operation;
         properties = Map.of("proceed", Map.of("type", "boolean", "title", "Разрешить это действие"));
       }
-      case "UNKNOWN_RESULT" -> properties = Map.of(
-          "outcome", Map.of("type", "string", "title", "Проверенный результат",
-              "enum", List.of("SUCCEEDED", "FAILED")),
-          "evidence", Map.of("type", "string", "title", "Что подтвердило результат",
-              "minLength", 1, "maxLength", 4000));
       default -> throw ApiException.conflict("HOST_RESPONSE_UNAVAILABLE", "Нативный ответ недоступен.");
     }
     return McpSchema.ElicitFormRequest.builder(message, Map.of("type", "object",

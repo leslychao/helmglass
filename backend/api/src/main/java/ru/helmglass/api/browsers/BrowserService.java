@@ -253,9 +253,7 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
     if (expectedVersion == null || expectedVersion != task.version()) {
       throw ApiException.conflict("STALE_VERSION", "Задача изменилась.");
     }
-    if (!task.allowedCommands().contains("OPEN_BROWSER")
-        || tasks.hasDispatched(id)
-        || tasks.hasUnknown(id)) {
+    if (!task.allowedCommands().contains("OPEN_BROWSER") || tasks.hasDispatched(id)) {
       throw ApiException.conflict("ACTION_UNAVAILABLE", "Новый браузер сейчас открыть нельзя.");
     }
     UUID connection = task.browser().connectionId();
@@ -435,21 +433,31 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
     }
     String token = UUID.randomUUID().toString() + UUID.randomUUID();
     Instant expiry = Instant.now().plusSeconds(60);
-    worker.call(
-        "POST",
-        "/sessions/" + id + "/ticket",
-        Map.of(
-            "ticket",
-            token,
-            "role",
-            input.role(),
-            "viewerId",
-            input.viewerId(),
-            "expiresAt",
-            expiry.toString(),
-            "access",
-            Map.of("channel", actor.channel(), "grantId", actor.sessionId())),
-        Duration.ofSeconds(2));
+    try {
+      worker.call(
+          "POST",
+          "/sessions/" + id + "/ticket",
+          Map.of(
+              "ticket",
+              token,
+              "role",
+              input.role(),
+              "viewerId",
+              input.viewerId(),
+              "expiresAt",
+              expiry.toString(),
+              "access",
+              Map.of("channel", actor.channel(), "grantId", actor.sessionId())),
+          Duration.ofSeconds(2));
+    } catch (WorkerClient.WorkerException exception) {
+      if ("VIEWER_LIMIT_REACHED".equals(exception.code())) {
+        throw ApiException.conflict(
+            "VIEWER_LIMIT_REACHED",
+            "Оба места просмотра заняты. Закройте трансляцию в другой вкладке."
+                + " Ожидаем свободного места.");
+      }
+      throw exception;
+    }
     String path = "browser/sessions/" + id + "/view?ticket=" + token;
     String url =
         "/browser/novnc/helm.html?autoconnect=1&resize=scale&path="
@@ -493,7 +501,7 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
       }
     }
     if (reference.taskId() != null
-        && (tasks.hasDispatched(reference.taskId()) || tasks.hasUnknown(reference.taskId()))) {
+        && tasks.hasDispatched(reference.taskId())) {
       throw ApiException.conflict(
           "ACTION_UNRESOLVED", "Сначала дождитесь или проверьте результат текущего действия.");
     }
@@ -992,7 +1000,7 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
                 if ("MANUAL_CONTROL".equals(task.request().type())
                     || ("LOGIN".equals(task.request().type()) && completedLogin)) {
                   tasks.cancelRequest(task.id());
-                } else {
+                } else if (!incompleteLogin) {
                   pendingReason = task.request().type();
                 }
               }
@@ -1000,7 +1008,7 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
               if (paused || !resume) {
                 state = "PAUSED";
               } else if (pendingReason != null) {
-                state = "WAITING_USER";
+                state = TaskService.waitingStatus(pendingReason);
               }
               tasks.change(owner, task.id(), state, pendingReason, "Управление возвращено");
               tasks.requestContinuation(task.id());
@@ -1339,10 +1347,10 @@ RETURNING id,version
       throw ApiException.conflict("STALE_VERSION", "Задача изменилась.");
     }
     if (tasks.hasDispatched(taskId)
-        || tasks.hasUnknown(taskId)
         || Set.of("DRAFT", "STOPPING", "STOPPED", "SUCCEEDED", "PARTIAL", "NOT_ACHIEVED", "FAILED")
             .contains(task.status())
-        || (task.request() != null && !"LOGIN".equals(task.request().type()))) {
+        || (task.request() != null
+            && !Set.of("LOGIN", "UNKNOWN_RESULT").contains(task.request().type()))) {
       throw ApiException.conflict("ACTION_UNRESOLVED", "Сначала завершите текущее действие.");
     }
     UUID connection =
@@ -1382,6 +1390,9 @@ RETURNING id,version
     if (task.request() == null) {
       tasks.request(
           owner, taskId, "LOGIN", "Войдите на сайт в защищённом браузере задачи.", null, null);
+    } else if ("UNKNOWN_RESULT".equals(task.request().type())) {
+      tasks.change(owner, taskId, "WAITING_USER", "LOGIN",
+          "Для проверки результата требуется вход на сайт; неизвестная операция сохранена.");
     }
     return tasks.get(owner, taskId);
   }

@@ -161,8 +161,13 @@ public class McpTools {
         tool(
             "tasks.get",
             "Актуальное поручение, состояние, вопросы и результаты собственной задачи. lastResponse"
-                + " содержит последний принятый ответ пользователя для текущей ревизии: учитывайте"
-                + " его при продолжении после нативного ответа пользователя в чате.",
+                + " содержит последний принятый ответ или результат проверки для текущей ревизии."
+                + " UNKNOWN_RESULT в нём означает проверку моделью, а не согласие человека."
+                + " WAITING_CHATGPT / UNKNOWN_RESULT требует самостоятельной проверки: выполните"
+                + " browser.execute observe, даже при CLOSED. Передайте через tasks.respond"
+                + " verification SUCCEEDED, FAILED либо UNCONFIRMED с основанием безопасного"
+                + " продолжения без повтора прежнего действия. Согласие человека не требуется."
+                + " По просьбе продолжить разрешён повторный RESUME для той же проверки.",
             object(task, "taskId"),
             true,
             false));
@@ -186,7 +191,10 @@ public class McpTools {
         tool(
             "tasks.create",
             "Создать новую самостоятельную задачу только по явному поручению пользователя и связать"
-                + " с исходным чатом. Уточнения продолжают прежний taskId. Возвращает единственную"
+                + " с исходным чатом. Вызывайте сразу по поручению, до вступительного текста,"
+                + " проверки подключений, страниц, шагов и аудио. После получения карточки"
+                + " продолжайте выполнение. Уточнения продолжают прежний taskId. Возвращает"
+                + " единственную"
                 + " карточку этого ответа: дополнительный tasks.view не нужен. Первую браузерную"
                 + " команду отправляйте с описанием step: отдельные DECLARE и START не нужны.",
             object(
@@ -217,9 +225,16 @@ public class McpTools {
     result.add(
         tool(
             "tasks.view",
-            "Показать карточку текущей задачи по новому обращению пользователя, если она нужна."
-                + " Только один раз за ответ; tasks.create уже показывает карточку. При"
-                + " автоматическом продолжении не вызывать: прежний виджет обновляется событиями."
+            "Обязательно показать новую карточку той же задачи при каждом пользовательском"
+                + " уточнении или поручении выполнить либо продолжить задачу."
+                + " Вызывайте сразу после минимального поиска и tasks.get либо первой tasks.bind,"
+                + " до вступительного текста, AMEND и основной работы. Прежние карточки становятся"
+                + " неактивными; taskId, браузер, история и результаты сохраняются."
+                + " Только один раз за ответ; tasks.create уже показывает карточку."
+                + " При автоматическом продолжении не вызывать: прежний виджет обновляется"
+                + " событиями."
+                + " Новое сообщение пользователя с уточнением не является автоматическим"
+                + " продолжением."
                 + " Не привязывает и не запускает задачу.",
             object(Map.of("taskId", uuid(), "operationKey", key()), "taskId", "operationKey"),
             false,
@@ -292,9 +307,12 @@ public class McpTools {
     result.add(
         tool(
             "tasks.command",
-            "Изменить поручение или жизненный цикл задачи. STOP окончателен; RESUME завершённой"
-                + " задачи допускается только по явной просьбе пользователя в свободном исходном"
-                + " чате. REQUIRE_LOGIN приостанавливает задачу и показывает «Войти на сайт» в"
+            "Изменить поручение или жизненный цикл задачи. Перед AMEND по новому уточнению"
+                + " пользователя обязательно покажите tasks.view с тем же taskId один раз в этом"
+                + " ответе: AMEND сам новую карточку не показывает. STOP окончателен;"
+                + " RESUME завершённой задачи допускается только по явной просьбе пользователя"
+                + " в свободном исходном чате. REQUIRE_LOGIN приостанавливает задачу"
+                + " и показывает «Войти на сайт» в"
                 + " текущем виджете. Кнопка открывает подключение в Helm Glass; отсутствующее"
                 + " подключение создаётся автоматически. Для LOGIN не вызывайте tasks.respond:"
                 + " нативная форма не нужна. После «Завершить вход» виджет запрашивает продолжение"
@@ -302,7 +320,11 @@ public class McpTools {
                 + " подтверждайте CLOSED через tasks.get. При FINISH command.text заменяет"
                 + " result.summary: передайте полный итог с полученными данными, а не сообщение"
                 + " «результат сохранён». Ответы на вопросы и согласие пользователя принимаются"
-                + " только через tasks.respond.",
+                + " только через tasks.respond. После принятого RESUME выполните browser.execute"
+                + " observe: первое чтение создаст отсутствующий браузер. При UNKNOWN_RESULT"
+                + " повторный RESUME разрешает ту же проверку; проверку выполняет модель,"
+                + " новое согласие пользователя не требуется. Не создавайте новую задачу"
+                + " для обхода ожидания.",
             object(
                 Map.of("taskId", uuid(), "operationKey", key(), "command", commandSchema()),
                 "taskId",
@@ -335,12 +357,19 @@ public class McpTools {
     result.add(
         tool(
             "tasks.respond",
-            "Показать QUESTION, ACCOUNT_CHOICE, CONFIRMATION или UNKNOWN_RESULT в нативной форме"
+            "Показать QUESTION, ACCOUNT_CHOICE или CONFIRMATION в нативной форме"
                 + " GPT. LOGIN и MANUAL_CONTROL выполняются в Helm Glass через кнопку текущего"
                 + " виджета; не вызывайте этот инструмент для входа. Сервер получает ответ напрямую"
                 + " от host; не передавайте ответ, согласие или выбор аккаунта аргументами. После"
                 + " отмены или таймаута повторный показ допустим только по новому обращению"
-                + " пользователя.",
+                + " пользователя. UNKNOWN_RESULT проверяйте самостоятельно: выполните observe,"
+                + " установите результат по состоянию сайта и передайте verification с outcome,"
+                + " evidence и observationOperationId успешного наблюдения после действия."
+                + " Нативная форма для проверки результата не нужна. Если исход не установлен,"
+                + " но продолжение безопасно без повтора и без предположения об успехе, передайте"
+                + " UNCONFIRMED и обоснование в evidence. Промежуточный клик по плееру"
+                + " не должен блокировать остальные действия. Иначе сохраните UNKNOWN;"
+                + " не угадывайте и не повторяйте отправку с возможным внешним эффектом.",
             object(
                 Map.of(
                     "taskId",
@@ -350,7 +379,16 @@ public class McpTools {
                     "requestVersion",
                     Map.of("type", "integer", "minimum", 1),
                     "operationKey",
-                    key()),
+                    key(),
+                    "verification",
+                    object(
+                        Map.of(
+                            "outcome", choice("SUCCEEDED", "FAILED", "UNCONFIRMED"),
+                            "evidence", text(4000),
+                            "observationOperationId", uuid()),
+                        "outcome",
+                        "evidence",
+                        "observationOperationId")),
                 "taskId",
                 "requestId",
                 "requestVersion",
@@ -361,14 +399,14 @@ public class McpTools {
         tool(
             "browser.execute",
             "Выполнить action или последовательность actions (до 8) внутри бизнес-шага."
-                + " click/fill/press/check/selectOption/waitFor требуют в arguments одновременно"
+                + " click/fill/check/selectOption требуют в arguments одновременно"
                 + " observationId и ref из выданного наблюдения; одного ref недостаточно. snapshot"
                 + " содержит native ARIA nodes с path; observe.arguments: {} — страница,"
                 + " {observationId,ref} — область, {cursor} — продолжение; варианты несовместимы."
                 + " scope определяет область полноты. Адресный observe может завершать пакет."
-                + " waitFor: state visible/hidden/attached/detached либо text (буквальный текст"
-                + " 1–1000 символов) внутри безопасного snapshot указанного ref. Действие→waitFor в"
-                + " одном пакете заменяет фиксированную паузу. отсутствующие checked/selected"
+                + " press.arguments: {key}; клавиша действует на текущий фокус. waitFor.arguments:"
+                + " text, textGone (1–1000 символов) и/или time (секунды, больше 0, не более 30)."
+                + " Ожидания выполняет штатный MCP на странице. Отсутствующие checked/selected"
                 + " означают false. selectOption принимает видимые названия options. Условные поля"
                 + " ищите в новом observation. Короткие команды возвращают готовый результат;"
                 + " только для ACCEPTED/DISPATCHED или потерянного ответа нужен operations.get."
@@ -643,7 +681,12 @@ public class McpTools {
       if ("tasks.respond".equals(name)
           && !arguments
               .keySet()
-              .equals(Set.of("taskId", "requestId", "requestVersion", "operationKey"))) {
+              .equals(Set.of("taskId", "requestId", "requestVersion", "operationKey"))
+          && !arguments
+              .keySet()
+              .equals(
+                  Set.of(
+                      "taskId", "requestId", "requestVersion", "operationKey", "verification"))) {
         throw ApiException.invalid(
             "arguments", "Ответ пользователя нельзя передать аргументами модели.");
       }
@@ -790,7 +833,8 @@ public class McpTools {
                     taskId,
                     uuid(input, "requestId"),
                     input.path("requestVersion").asLong(),
-                    string(input, "operationKey")));
+                    string(input, "operationKey"),
+                    input.has("verification") ? verification(input.path("verification")) : null));
         case "connections.select" ->
             textResult(
                 idempotency.execute(
@@ -997,7 +1041,7 @@ public class McpTools {
       Contracts.BrowserAction action =
           json.convert(input.path("action"), Contracts.BrowserAction.class);
       return operationResponse(
-          owner, executeAction(owner, task, chat, action, deadline, List.of(), false));
+          owner, executeAction(owner, task, chat, action, deadline, List.of()));
     }
     JsonNode supplied = input.path("actions");
     if (!supplied.isArray() || supplied.isEmpty() || supplied.size() > 8) {
@@ -1052,9 +1096,7 @@ public class McpTools {
       }
       Contracts.Operation result;
       try {
-        boolean explicitWait =
-            index + 1 < commands.size() && "waitFor".equals(commands.get(index + 1).type());
-        result = executeAction(owner, task, chat, action, deadline, sequenceIds, explicitWait);
+        result = executeAction(owner, task, chat, action, deadline, sequenceIds);
       } catch (ApiException exception) {
         if (completed.isEmpty()) {
           throw exception;
@@ -1101,10 +1143,9 @@ public class McpTools {
       String chat,
       Contracts.BrowserAction action,
       long deadline,
-      List<UUID> sequence,
-      boolean explicitWait) {
+      List<UUID> sequence) {
     chats.requireCurrent(owner, task, chat);
-    Contracts.Operation result = actions.submit(owner, task, action, sequence, explicitWait);
+    Contracts.Operation result = actions.submit(owner, task, action, sequence);
     if (Set.of("ACCEPTED", "DISPATCHED", "SUCCEEDED").contains(result.status())) {
       chats.accepted(owner, task, chat, action.instructionRevision(), action.operationId());
     }
@@ -1296,6 +1337,33 @@ public class McpTools {
             }));
   }
 
+  private static Contracts.OperationVerification verification(JsonNode input) {
+    if (!input.isObject()
+        || input.size() != 3
+        || !input.has("outcome")
+        || !input.has("evidence")
+        || !input.has("observationOperationId")) {
+      throw ApiException.invalid(
+          "verification", "Требуются результат, свидетельство и наблюдение.");
+    }
+    for (String field : List.of("outcome", "evidence", "observationOperationId")) {
+      if (!input.path(field).isString()) {
+        throw ApiException.invalid(field, "Значение должно быть строкой.");
+      }
+    }
+    UUID observation;
+    try {
+      observation = uuid(input, "observationOperationId");
+      if (!observation.toString().equalsIgnoreCase(string(input, "observationOperationId"))) {
+        throw new IllegalArgumentException("Noncanonical UUID");
+      }
+    } catch (IllegalArgumentException exception) {
+      throw ApiException.invalid("observationOperationId", "Укажите ID успешного наблюдения.");
+    }
+    return new Contracts.OperationVerification(
+        string(input, "outcome"), string(input, "evidence"), observation);
+  }
+
   private static String string(JsonNode input, String name) {
     return input.path(name).asString();
   }
@@ -1476,7 +1544,6 @@ public class McpTools {
                 "check",
                 "scroll",
                 "goBack",
-                "reload",
                 "newTab",
                 "selectTab",
                 "closeTab",
@@ -1497,6 +1564,8 @@ public class McpTools {
                     Map.entry("ref", text(40)),
                     Map.entry("cursor", text(100)),
                     Map.entry("text", text(20000)),
+                    Map.entry("textGone", text(1000)),
+                    Map.entry("time", Map.of("type", "number", "exclusiveMinimum", 0, "maximum", 30)),
                     Map.entry("key", text(100)),
                     Map.entry("values", array(text(1000), 100)),
                     Map.entry("checked", bool()),
@@ -1518,8 +1587,7 @@ public class McpTools {
                             "assignmentId",
                             "instruction",
                             "questions")),
-                    Map.entry("name", text(240)),
-                    Map.entry("state", choice("visible", "hidden", "attached", "detached"))))),
+                    Map.entry("name", text(240))))),
         "operationId",
         "type",
         "instructionRevision",

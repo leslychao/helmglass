@@ -16,7 +16,8 @@ public final class ConnectionSite {
   private static final int CHOICE_LIMIT = 50;
   private static final String CANDIDATE =
       "(rtrim(lower(site),'.')=:connectionSite"
-          + " OR (:connectionSubdomains AND ends_with(rtrim(lower(site),'.'),:connectionSuffix)))";
+          + " OR (:connectionSubdomains"
+          + " AND right(rtrim(lower(site),'.'),length(:connectionSuffix))=:connectionSuffix))";
   private final JdbcClient jdbc;
 
   public ConnectionSite(JdbcClient jdbc) {

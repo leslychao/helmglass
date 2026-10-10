@@ -100,7 +100,12 @@
   @if (task.request?.type === 'UNKNOWN_RESULT') {
     <div class="notice warning">
       <strong>Исход внешнего действия неизвестен</strong>
-      <p>Проверьте текущее состояние сайта. Задача не повторяет действие автоматически.</p>
+      <p>ChatGPT проверяет состояние сайта и продолжает, если это безопасно. Ваше подтверждение не требуется.
+        Прежнее действие не повторяется автоматически.</p>
+      @if (task.browser?.status === 'CLOSED' || task.browser?.status === 'LOST') {
+        <p>Для проверки требуется возобновить браузер. Неизвестный результат сохранится;
+          ChatGPT сможет восстановить браузер и продолжить проверку самостоятельно.</p>
+      }
     </div>
   }
   @if (task.status === 'DRAFT') {
@@ -113,21 +118,23 @@
     </section>
   } @else {
     @if (task.request; as request) {
-      <section class="notice" role="status">
-        @if (request.type === 'LOGIN') {
-          <strong>Нужен вход на сайт</strong>
-          <p>Восстановите вход в подключении. Браузер и состояние задачи сохранятся.</p>
-          <button class="button small"
-            [disabled]="busy() || (!task.browser?.connectionId && !can('BEGIN_LOGIN'))"
-            (click)="openLogin()">Открыть подключение</button>
-        } @else {
-          <strong>Ожидается ответ в GPT</strong>
-          <p>
-            Вернитесь в исходный чат задачи: уточнения, выбор подключения и подтверждения
-            выполняются там.
-          </p>
-        }
-      </section>
+      @if (request.type !== 'UNKNOWN_RESULT') {
+        <section class="notice" role="status">
+          @if (request.type === 'LOGIN') {
+            <strong>Нужен вход на сайт</strong>
+            <p>Восстановите вход в подключении. Браузер и состояние задачи сохранятся.</p>
+            <button class="button small"
+              [disabled]="busy() || (!task.browser?.connectionId && !can('BEGIN_LOGIN'))"
+              (click)="openLogin()">Открыть подключение</button>
+          } @else {
+            <strong>Ожидается ответ в GPT</strong>
+            <p>
+              Вернитесь в исходный чат задачи: уточнения, выбор подключения и подтверждения
+              выполняются там.
+            </p>
+          }
+        </section>
+      }
     }
     <hg-browser
       [browser]="task.browser"

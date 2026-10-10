@@ -24,7 +24,7 @@ import tools.jackson.databind.JsonNode;
 public class WorkerClient {
   private static final int MAXIMUM_REPLY_BYTES = 2 * 1024 * 1024;
   private static final long[] RETRY_DELAYS_MILLIS = {1000, 3000, 10000};
-  private static final Set<String> PROFILE_ERRORS =
+  private static final Set<String> KNOWN_ERRORS =
       Set.of(
           "PROFILE_TOO_LARGE",
           "PROFILE_RECORD_TOO_LARGE",
@@ -34,7 +34,8 @@ public class WorkerClient {
           "PROFILE_SNAPSHOT_CHANGED",
           "PROFILE_REVISION_CHANGED",
           "PROFILE_UNSUPPORTED_VALUE",
-          "PROFILE_SAVE_FAILED");
+          "PROFILE_SAVE_FAILED",
+          "VIEWER_LIMIT_REACHED");
   private final HttpClient http =
       HttpClient.newBuilder()
           .connectTimeout(Duration.ofSeconds(5))
@@ -111,7 +112,7 @@ public class WorkerClient {
             try {
               String code =
                   json.read(new String(bytes, StandardCharsets.UTF_8)).path("code").asString("");
-              if (PROFILE_ERRORS.contains(code)) {
+              if (KNOWN_ERRORS.contains(code)) {
                 throw new WorkerException(code, response.statusCode());
               }
             } catch (JacksonException exception) {

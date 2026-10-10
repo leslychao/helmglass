@@ -718,7 +718,7 @@ class UsageAdministrationTest(unittest.TestCase):
         status,original,_=self.client.request(self.client.base+artifact["downloadUrl"])
         self.assertEqual(200,status)
         self.assertEqual(artifact["sha256"],hashlib.sha256(original).hexdigest())
-        pending=execute("waitFor",{**self.client.browser_target(task_id, 'Learn more'), 'state': 'hidden'})
+        pending=execute("waitFor",{'textGone': 'Learn more'})
         deadline=time.monotonic()+15
         while time.monotonic()<deadline:
             error,receipt,_=self.client.tool("operations.get",{"operationId":pending})
@@ -747,7 +747,7 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(elapsed,current()["usage"]["executionSeconds"],"Manual waiting is not execution time")
         self.assertGreater(current()["usage"]["browserSeconds"],paused["usage"]["browserSeconds"])
         self.command(task,"RESUME")
-        closing_action=execute("waitFor",{**self.client.browser_target(task_id, 'Learn more'), 'state': 'hidden'})
+        closing_action=execute("waitFor",{'textGone': 'Learn more'})
         deadline=time.monotonic()+15
         while time.monotonic()<deadline:
             receipt=self.client.tool("operations.get",{"operationId":closing_action})[1]
@@ -793,10 +793,11 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(original,download)
         self.assertEqual(404,self.admin.api("/api/tasks/"+task_id+"/result/rows")[0])
         self.assertEqual(404,self.admin.request(self.admin.base+artifact["downloadUrl"])[0])
-        status,refusal=self.client.api("/api/tasks/"+task_id+"/commands","POST",{
+        status,resumed=self.client.api("/api/tasks/"+task_id+"/commands","POST",{
             "type":"RESUME","expectedVersion":task["version"]})
-        self.assertEqual((409,"UNKNOWN_RESULT"),(status,refusal["code"]))
-        self.command(task,"CLOSE_BROWSER")
+        self.assertEqual(200,status,resumed)
+        self.assertEqual(task['request'],resumed['request'])
+        self.command(resumed,"CLOSE_BROWSER")
         deadline=time.monotonic()+45
         while time.monotonic()<deadline:
             closed=current()
@@ -806,8 +807,8 @@ class UsageAdministrationTest(unittest.TestCase):
         self.assertEqual(("PAUSED","CLOSED"),(closed["status"],closed["browser"]["status"]))
         self.assertEqual("UNKNOWN_RESULT",closed["request"]["type"])
         self.assertEqual("UNKNOWN",self.client.tool("operations.get",{"operationId":unknown})[1]["status"])
-        self.assertNotIn("OPEN_BROWSER",closed["allowedCommands"])
-        self.assertEqual(409,self.client.api("/api/tasks/"+task_id+"/commands","POST",{
+        self.assertIn("OPEN_BROWSER",closed["allowedCommands"])
+        self.assertEqual(200,self.client.api("/api/tasks/"+task_id+"/commands","POST",{
             "type":"OPEN_BROWSER","expectedVersion":closed["version"]})[0])
         self.assertEqual("Preserved before uncertain action",closed["result"]["summary"])
 

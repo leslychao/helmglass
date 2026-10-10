@@ -119,6 +119,11 @@ Helm предоставляет только пользовательские и
 принимаются только от человека через native MCP elicitation в исходном GPT-чате;
 секретный вход и ручное управление — в кабинете. Создание и редактирование черновиков
 в кабинете сохраняются. Модель не может передать согласие через CONFIRM.
+Проверку результата уже разрешённого действия при UNKNOWN GPT выполняет самостоятельно
+через `tasks.respond.verification` после успешного наблюдения сайта; форма пользователя
+для этого не нужна. UNKNOWN запрашивает продолжение агента и позволяет восстановить браузер.
+Если исход не установлен, но продолжение безопасно без повтора прежнего действия, GPT
+записывает UNCONFIRMED и продолжает; неопределённость сохраняется в истории.
 Один исходный чат содержит одну незавершённую задачу. `tasks.create` создаёт и связывает
 новую задачу, `tasks.bind` явно связывает задачу кабинета, `tasks.view` обновляет только
 карточку. STOP окончателен; завершённую задачу можно явно продолжить, если чат свободен.
@@ -185,17 +190,24 @@ ChatGPT может продолжать использовать прежние 
 
 ## Проверки приложения на dev
 
+Обычные браузерные команды выполняет штатный Microsoft Playwright MCP без патчей;
+версии закреплены в `backend/browser-session/package-lock.json`. Контракт команд и
+фильтрация перед выдачей модели описаны в §9 [спецификации](docs/Helm-Glass-functional-spec.md).
+
 После штатного деплоя интеграционные проверки обращаются к публичному адресу из
 `HELM_TEST_ENV` (по умолчанию `deploy/.env.dev`) через обычный OIDC и PKCE:
 
 ```sh
 python backend/api/tests/test_oauth_discovery.py
 python backend/api/tests/test_dev_contract.py
+python backend/api/tests/test_browser_execution.py
 python backend/api/tests/test_connection_contract.py
 python backend/api/tests/test_results.py
 python backend/api/tests/test_business_steps.py
 python backend/api/tests/test_mcp_audio.py
 python backend/api/tests/test_viewer_revocation.py
+node --test backend/browser-node/test/clipboard.test.mjs
+python backend/api/tests/test_browser_clipboard.py
 ```
 
 Аудиовыборка и эталоны закреплены в `backend/api/tests/audio-corpus.json`.
@@ -219,6 +231,8 @@ python backend/api/tests/evaluate_audio.py
 Для проверки виджета в `test_results.py` нужны Node.js 24, зависимости
 `backend/api/widget`, установленные через `npm ci`, и доступ к Docker API dev.
 Гонки callback проверяются с управляемым host в Node.js на dev; это не проверка ChatGPT.
+Проверка буфера использует опубликованный dev-код, установленный Chrome и зависимости
+Playwright из `backend/browser-session`; создаёт и удаляет одно временное подключение.
 Проверки создают данные приёмки;
 административные сценарии используют отдельные временные учётные записи.
 Эти проверки не заменяют работу в кабинете, настоящий ChatGPT и согласованный маршрут

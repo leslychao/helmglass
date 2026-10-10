@@ -281,6 +281,25 @@ class DevClient:
         pending = task["request"]
         arguments = {"taskId": task["id"], "requestId": pending["id"],
             "requestVersion": pending["version"], "operationKey": operation_key or str(uuid.uuid4())}
+        if pending["type"] == "UNKNOWN_RESULT" and action == "accept" and content is not None:
+            observation = content.get("observationOperationId")
+            if observation is None:
+                observation = str(uuid.uuid4())
+                error, receipt, _ = self.execute_in_scenario_step({"taskId": task["id"], "action": {
+                    "operationId": observation, "type": "observe", "arguments": {},
+                    "instructionRevision": task["instructionRevision"], "observeAfter": False}})
+                if error:
+                    return error, receipt, None
+                deadline = time.monotonic() + 60
+                while receipt["status"] in ("ACCEPTED", "DISPATCHED") and time.monotonic() < deadline:
+                    time.sleep(.2)
+                    error, receipt, _ = self.tool("operations.get", {"operationId": observation})
+                    if error:
+                        return error, receipt, None
+                if receipt["status"] != "SUCCEEDED":
+                    raise AssertionError(receipt)
+            arguments["verification"] = {**content, "observationOperationId": observation}
+            return self.tool("tasks.respond", arguments)
         previous = self.elicitation_handler
         self.elicitation_handler = lambda form: {"action": action, **({"content": content} if content is not None else {})}
         try:
@@ -1020,20 +1039,24 @@ class DevContractTest(unittest.TestCase):
             self.assertFalse(error)
             self.assertEqual("UNKNOWN", receipt["status"])
             error, blocked, _ = self.user.execute_in_scenario_step({"taskId": task_id,
-                "action": {**missing, "operationId": str(uuid.uuid4()), "type": "navigate",
-                           "arguments": {"url": "https://example.com"}}})
+                "action": {**missing, "operationId": str(uuid.uuid4()), "type": "click"}})
             self.assertTrue(error)
             self.assertEqual("UNKNOWN_RESULT", blocked["code"])
+            observed_id = str(uuid.uuid4())
+            error, observed, _ = self.user.execute_in_scenario_step({"taskId": task_id, "action": {
+                "operationId": observed_id, "type": "observe", "arguments": {},
+                "instructionRevision": task["instructionRevision"]}})
+            self.assertFalse(error, observed)
+            self.assertEqual("SUCCEEDED", self.wait_operation(observed_id, self.user)["status"])
             status, _ = self.user.api("/api/tasks/" + task_id + "/commands", "POST",
                 {"type": "STOP", "expectedVersion": task["version"]})
             self.assertEqual(200, status)
             task = self.wait_task(task_id, lambda value: value["status"] == "STOPPED")
             self.assertIsNotNone(task["request"], "Stopping preserves the UNKNOWN verification request")
-            request = task["request"]
-            status, task = self.user.api("/api/tasks/" + task_id + "/commands", "POST",
-                {"type": "REJECT", "expectedVersion": task["version"], "requestId": request["id"],
-                 "requestVersion": request["version"], "text": "The synthetic effect counter was inspected before reconciliation."})
-            self.assertEqual(200, status)
+            error, task, _ = self.user.respond(task, {
+                "outcome": "SUCCEEDED", "evidence": "The synthetic effect counter was inspected before stopping.",
+                "observationOperationId": observed_id})
+            self.assertFalse(error, task)
             self.assertIsNone(task["request"])
             self.assertEqual("STOPPED", task["status"], "Verification does not implicitly resume a stopped task")
         finally:

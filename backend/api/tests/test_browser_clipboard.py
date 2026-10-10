@@ -56,7 +56,7 @@ class BrowserClipboardTest(unittest.TestCase):
                 deadline = time.monotonic() + 45
                 while time.monotonic() < deadline:
                     _, current = client.api('/api/connections/' + connection_id)
-                    if current.get('browser', {}).get('status') == 'CLOSED':
+                    if (current.get('browser') or {}).get('status') == 'CLOSED':
                         break
                     time.sleep(.5)
                 client.api('/api/connections/' + connection_id, 'DELETE')

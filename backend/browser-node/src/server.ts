@@ -63,7 +63,8 @@ const AccessBinding = z.object({ channel: z.enum(["WEB", "MCP"]), grantId: z.str
 const Ticket = z.object({ ticket: z.string().min(32).max(512), role: z.enum(["VIEWER", "CONTROLLER"]), viewerId: z.string().min(1).max(200), expiresAt: z.string().datetime(), access: AccessBinding });
 type Ticket = z.infer<typeof Ticket>;
 const tickets = new Map<string, Ticket & { sessionId: string }>();
-const viewers = new Map<string, Set<{ close: (reason: ViewerCloseReason) => void; viewerId: string; role: string; access: z.infer<typeof AccessBinding> }>>();
+type Viewer = { close: (reason: ViewerCloseReason) => void; viewerId: string; role: string; access: z.infer<typeof AccessBinding> };
+const viewers = new Map<string, Set<Viewer>>();
 const starting = new Map<string, Promise<Session>>();
 const closing = new Map<string, Promise<Session>>();
 const controls = new Map<string, { policy: Policy; completion: Promise<unknown> }>();
@@ -71,7 +72,11 @@ const savingProfiles = new Set<string>();
 const changingCredentials = new Set<string>();
 
 class HttpError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  readonly code: string | undefined;
+  constructor(readonly status: number, message: string, options?: ErrorOptions & { code?: string }) {
+    super(message, options);
+    this.code = options?.code;
+  }
 }
 function reply(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
@@ -371,6 +376,12 @@ async function startSession(input: z.infer<typeof CreateSession>): Promise<Sessi
   if (!pending) { pending = createSession(input); starting.set(input.sessionId, pending); }
   try { return await pending; } finally { if (starting.get(input.sessionId) === pending) starting.delete(input.sessionId); }
 }
+function requireViewerSlot(id: string, viewerId: string): Set<Viewer> {
+  const group = viewers.get(id) ?? new Set<Viewer>();
+  for (const viewer of group) if (viewer.viewerId === viewerId) return group;
+  if (group.size >= 2) throw new HttpError(409, "Viewer limit reached", { code: "VIEWER_LIMIT_REACHED" });
+  return group;
+}
 function disconnectViewers(id: string, reason: ViewerCloseReason): void {
   for (const viewer of viewers.get(id) ?? []) viewer.close(reason);
   viewers.delete(id);
@@ -463,6 +474,11 @@ async function withArchive(session: Session, work: (reader: Session) => Promise<
     }
     await work(target);
     return true;
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) {
+      throw new HttpError(502, "Archive reader resources unavailable", { cause: error });
+    }
+    throw error;
   } finally { archiveBusy = false; }
 }
 
@@ -751,6 +767,7 @@ const server = http.createServer(async (request, response) => {
       if (Date.parse(ticket.expiresAt) <= Date.now() || Date.parse(ticket.expiresAt) > Date.now() + 120_000) throw new HttpError(400, "Invalid ticket lifetime");
       if (session.policy.privateMode && ticket.viewerId !== session.policy.controllerId) throw new HttpError(423, "Private input in progress");
       if (ticket.role === "CONTROLLER" && (session.policy.owner !== "USER" || ticket.viewerId !== session.policy.controllerId)) throw new HttpError(403, "Control not granted");
+      requireViewerSlot(session.id, ticket.viewerId);
       for (const [key, item] of tickets) if (Date.parse(item.expiresAt) <= Date.now()) tickets.delete(key);
       if (tickets.size >= config.capacity * 8) throw new HttpError(429, "Too many outstanding viewer tickets");
       tickets.set(ticket.ticket, { ...ticket, sessionId: session.id }); reply(response, 200, { registered: true }); return;
@@ -827,7 +844,7 @@ const server = http.createServer(async (request, response) => {
     throw new HttpError(404, "Route not found");
   } catch (error) {
     if (response.headersSent) { response.destroy(); return; }
-    reply(response, error instanceof HttpError || error instanceof StorageError ? error.status : error instanceof CredentialConflict ? 409 : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 502, { error: error instanceof HttpError || error instanceof StorageError ? error.message : "Operation unavailable", ...(error instanceof StorageError ? { code: error.code } : {}) });
+    reply(response, error instanceof HttpError || error instanceof StorageError ? error.status : error instanceof CredentialConflict ? 409 : error instanceof z.ZodError || error instanceof SyntaxError ? 400 : 502, { error: error instanceof HttpError || error instanceof StorageError ? error.message : "Operation unavailable", ...((error instanceof StorageError || error instanceof HttpError) && error.code ? { code: error.code } : {}) });
   }
 });
 const websocketServer = new WebSocketServer({ noServer: true, maxPayload: 1_048_576, perMessageDeflate: false });
@@ -843,9 +860,9 @@ server.on("upgrade", (request, socket, head) => {
     if (!ticket || ticket.sessionId !== session.id || Date.parse(ticket.expiresAt) <= Date.now()) throw new HttpError(401, "Invalid viewer ticket");
     if (session.policy.privateMode && ticket.viewerId !== session.policy.controllerId) throw new HttpError(423, "Private input");
     if (ticket.role === "CONTROLLER" && (session.policy.owner !== "USER" || ticket.viewerId !== session.policy.controllerId)) throw new HttpError(403, "Control not granted");
-    const group = viewers.get(session.id) ?? new Set();
+    const group = requireViewerSlot(session.id, ticket.viewerId);
     for (const viewer of group) if (viewer.viewerId === ticket.viewerId) viewer.close("viewer_replaced");
-    if (group.size >= 2 || !session.address || session.status !== "LIVE") throw new HttpError(409, "View unavailable");
+    if (!session.address || session.status !== "LIVE") throw new HttpError(409, "View unavailable");
     websocketServer.handleUpgrade(request, socket, head, (client) => {
       const upstream = new WebSocket(`ws://${session.address}:8080/view?role=${ticket.role}&epoch=${session.policy.controlEpoch}&viewerId=${encodeURIComponent(ticket.viewerId)}`, { headers: { "X-Worker-Token": session.token }, handshakeTimeout: 10_000, perMessageDeflate: false, maxPayload: 16_777_216 });
       const connectionId = randomUUID();

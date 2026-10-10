@@ -236,10 +236,12 @@ async function tool(name: string, extra: Record<string, unknown> = {}) {
     }
     if (failure.success && failure.data.code === 'STALE_WIDGET'
         && reference?.task.id === binding.taskId && reference.generation === binding.generation) retirePresentation();
-    throw new Error(failure.success ? failure.data.message : 'Сервер отклонил запрос.');
+    throw failure.success ? new ToolError(failure.data.message) : new Error('Сервер отклонил запрос.');
   }
   return result;
 }
+
+class ToolError extends Error {}
 
 function render(next: Presentation): void {
   if (superseded || tornDown || !validated || reference?.generation !== next.generation
@@ -421,14 +423,15 @@ function closeViewer(): void {
   browserId = undefined;
 }
 
-function retryViewer(): void {
+function retryViewer(reason?: string): void {
   if (superseded || tornDown) return;
   browserConnected = false;
-  browserError = 'Связь с браузером прервана. Восстанавливаем просмотр…';
+  browserError = reason ?? 'Связь с браузером прервана. Восстанавливаем просмотр…';
   renderBrowser();
   if (!videoEnabled || browserRetry || tornDown || superseded || !online) return;
   if (++browserAttempts > retryLimit) {
-    browserError = 'Просмотр временно недоступен. При возвращении в чат или восстановлении сети подключимся снова.';
+    browserError = (reason ? reason + ' ' : 'Просмотр временно недоступен. ')
+      + 'При возвращении в чат или восстановлении сети подключимся снова.';
     renderBrowser();
     return;
   }
@@ -471,8 +474,9 @@ async function openViewer(renew = false): Promise<void> {
       browserRetry = undefined;
       if (attempt === viewerGeneration && !browserConnected) retryViewer();
     }, 10000);
-  } catch {
-    if (current?.generation === generation && attempt === viewerGeneration && !superseded && !tornDown) retryViewer();
+  } catch (error: unknown) {
+    if (current?.generation === generation && attempt === viewerGeneration && !superseded && !tornDown)
+      retryViewer(error instanceof ToolError ? error.message : undefined);
   } finally {
     openingBrowser = false;
     if (attempt !== viewerGeneration && !browserId && !browserRetry) void openViewer();

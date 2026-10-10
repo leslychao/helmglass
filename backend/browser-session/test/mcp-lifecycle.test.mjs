@@ -25,14 +25,17 @@ async function inspect(id) {
 test('a timed out read releases MCP and the next observation reuses the same live page',
   { timeout: 45_000 }, async () => {
     const id = randomUUID(), base = '/sessions/' + id;
+    let createdSession = false;
     try {
-      assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).value.status, 'LIVE');
+      const created = await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture });
+      createdSession = created.code >= 200 && created.code < 300;
+      assert.equal(created.value.status, 'LIVE', JSON.stringify(created.value));
       assert.equal((await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false })).code, 200);
       const process = await inspect(id);
       const before = (await request(base + '/observe')).value;
-      const node = before.snapshot.find(entry => entry.node.name === 'Increment').node;
       const waiting = { operationId: randomUUID(), type: 'waitFor', instructionRevision: 0, controlEpoch: 1,
-        arguments: { observationId: before.observationId, ref: node.ref, state: 'hidden' } };
+        deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+        arguments: { textGone: 'Increment' } };
       const receipt = await request(base + '/commands', waiting);
       assert.equal(receipt.value.status, 'FAILED');
       const after = await request(base + '/observe');
@@ -41,14 +44,21 @@ test('a timed out read releases MCP and the next observation reuses the same liv
       assert.equal(after.value.tabs.find(tab => tab.active).id, before.tabs.find(tab => tab.active).id);
       assert.deepEqual(await inspect(id), process);
       assert.deepEqual(await request(base + '/commands', waiting), receipt);
-    } finally { assert.equal((await request(base, undefined, 'DELETE')).value.status, 'CLOSED'); }
+    } finally {
+      if (createdSession) {
+        assert.equal((await request(base, undefined, 'DELETE')).value.status, 'CLOSED');
+        assert.equal((await request(base + '/cleanup', undefined, 'DELETE')).code, 200);
+      }
+    }
   });
 
 test('MCP cancellation, private handoff, tab identity and lost response preserve one effect',
   { timeout: 100_000 }, async () => {
     const id = randomUUID(), base = '/sessions/' + id;
+    let createdSession = false;
     let epoch = 1;
     const action = (type, args = {}) => ({ operationId: randomUUID(), type,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
       arguments: args, instructionRevision: 0, controlEpoch: epoch });
     async function command(type, args) {
       const result = await request(base + '/commands', action(type, args));
@@ -62,7 +72,8 @@ test('MCP cancellation, private handoff, tab identity and lost response preserve
     }
     try {
       const created = await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture });
-      assert.equal(created.value.status, 'LIVE');
+      createdSession = created.code >= 200 && created.code < 300;
+      assert.equal(created.value.status, 'LIVE', JSON.stringify(created.value));
       const process = await inspect(id);
       await control('CHATGPT');
       const filled = await command('fill', { ...await target(request, base, 'Recipient'), text: 'same-page-marker' });
@@ -72,7 +83,7 @@ test('MCP cancellation, private handoff, tab identity and lost response preserve
       assert.ok(snapshotText(selected.observation).includes('same-page-marker'));
       const before = selected.observation;
 
-      const waiting = action('waitFor', { ...await target(request, base, 'Delayed target'), state: 'hidden' });
+      const waiting = action('waitFor', { time: 3 });
       const pending = request(base + '/commands', waiting);
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
@@ -80,16 +91,20 @@ test('MCP cancellation, private handoff, tab identity and lost response preserve
         await delay(20);
       }
       assert.equal((await request(base + '/commands/' + waiting.operationId)).value.status, 'RUNNING');
-      await delay(500); // Let the bounded preflight reach the pending native wait.
+      await delay(500);
       epoch++;
       const started = performance.now();
-      await control('NONE', true);
+      const busy = await request(base + '/control', { controlEpoch: epoch, owner: 'NONE', privateMode: true });
+      assert.equal(busy.code, 409, 'Manager keeps control fenced while the command is running');
+      const cancelling = await request(base + '/commands/' + waiting.operationId + '/cancel', {});
+      assert.equal(cancelling.value.status, 'RUNNING', 'Cancellation is not acknowledgement of native completion');
       const settled = await pending;
       assert.equal(settled.value.status, 'FAILED');
       assert.equal((await request(base + '/commands/' + waiting.operationId)).value.status, 'FAILED');
+      await control('NONE', true);
       const elapsed = performance.now() - started;
-      assert.ok(elapsed < 15_000, 'Abort must reach the native pending wait, not just its caller');
-      console.log('Confirmed cancellation and disposal: ' + elapsed.toFixed(0) + ' ms');
+      assert.ok(elapsed >= 1000 && elapsed < 10_000, 'Handoff waits for the native handler to finish');
+      console.log('Confirmed native completion before handoff: ' + elapsed.toFixed(0) + ' ms');
       epoch++;
       const contenders = [randomUUID(), randomUUID()];
       const raced = await Promise.all(contenders.map(controllerId => request(base + '/control', {
@@ -120,14 +135,17 @@ test('MCP cancellation, private handoff, tab identity and lost response preserve
       assert.deepEqual(await request(base + '/commands', increment), receipt);
       assert.ok(snapshotText((await request(base + '/observe')).value).includes('"counter":1'));
     } finally {
-      const closed = await Promise.all([request(base, undefined, 'DELETE'), request(base, undefined, 'DELETE')]);
-      for (const result of closed) assert.equal(result.value.status, 'CLOSED');
-      for (const route of ['/containers/helm-browser-' + id + '/json',
-        '/containers/helm-browser-' + id + '-egress/json', '/networks/helm-browser-' + id,
-        '/volumes/helm-browser-' + id + '-data']) {
-        const response = await fetch(docker + route);
-        assert.equal(response.status, 404, 'CLOSED must acknowledge resource disposal');
-        await response.body?.cancel();
+      if (createdSession) {
+        const closed = await Promise.all([request(base, undefined, 'DELETE'), request(base, undefined, 'DELETE')]);
+        for (const result of closed) assert.equal(result.value.status, 'CLOSED');
+        assert.equal((await request(base + '/cleanup', undefined, 'DELETE')).code, 200);
+        for (const route of ['/containers/helm-browser-' + id + '/json',
+          '/containers/helm-browser-' + id + '-egress/json', '/networks/helm-browser-' + id,
+          '/volumes/helm-browser-' + id + '-data']) {
+          const response = await fetch(docker + route);
+          assert.equal(response.status, 404, 'CLOSED must acknowledge resource disposal');
+          await response.body?.cancel();
+        }
       }
     }
   });

@@ -4,4 +4,10 @@
 <script>
   if (new URL(location.href).searchParams.has('oversize'))
     document.querySelector('textarea').value = 'я'.repeat(131072) + 'a';
+  if (new URL(location.href).searchParams.has('wireoversize')) {
+    const text = new Uint8Array(1024 * 1024);
+    for (let offset = 0; offset < text.length; offset += 65536)
+      crypto.getRandomValues(text.subarray(offset, offset + 65536));
+    document.querySelector('textarea').value = new TextDecoder().decode(text.map(value => 33 + value % 94));
+  }
 </script>

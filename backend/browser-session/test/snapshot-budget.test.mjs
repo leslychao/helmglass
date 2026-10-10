@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import { BrowserMcp } from '../dist/browser-mcp.js';
 
 // Run inside the browser-session image on dev, with no network or saved profile.
-test('native snapshot counts distinct DOM nodes and keeps pagination and target identity', async () => {
+test('Helm paginates native output and keeps issued target identity', async () => {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -25,7 +25,7 @@ test('native snapshot counts distinct DOM nodes and keeps pagination and target 
     let target;
     do {
       assert.equal(observation.observationId, id);
-      assert.equal(observation.metrics.snapshots, 1, 'Cursor reuses the bounded native snapshot');
+      assert.equal(observation.metrics.snapshots, 1, 'Cursor reuses the filtered native snapshot');
       assert.ok(Buffer.byteLength(JSON.stringify(observation)) <= 32768);
       for (const entry of observation.snapshot) {
         if (entry.node.role === 'button') controls++;
@@ -52,7 +52,7 @@ test('oversized native snapshots fail explicitly without exposing partial data a
   const page = await context.newPage();
   const mcp = new BrowserMcp(context, () => page, () => 1, () => {});
   try {
-    for (const html of ['<span></span>'.repeat(20001), '<p>' + 'x'.repeat(262145) + '</p>']) {
+    for (const html of ['<p>' + 'x'.repeat(262145) + '</p>', '<p>' + 'я'.repeat(1_100_000) + '</p>']) {
       await page.setContent(html);
       await assert.rejects(mcp.observe(), error => error.code === 'OBSERVATION_LIMIT_EXCEEDED');
     }

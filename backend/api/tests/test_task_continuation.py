@@ -273,7 +273,7 @@ class TaskContinuationTest(unittest.TestCase):
         self.assertEqual("SUCCEEDED", observed["status"], observed.get("errorCode"))
         self.assertEqual(self.client.browser_fixture_url(), observed["result"]["url"])
 
-        pending = execute("waitFor", {**self.client.browser_target(task['id'], 'Increment'), 'state': 'hidden'})
+        pending = execute("waitFor", {'textGone': 'Increment'})
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             receipt = self.client.tool("operations.get", {"operationId": pending})[1]
@@ -281,7 +281,7 @@ class TaskContinuationTest(unittest.TestCase):
                 break
             time.sleep(.1)
         self.assertEqual("DISPATCHED", receipt["status"])
-        queued = execute("reload", {})
+        queued = execute("observe", {})
         revised = amend("Changed after a read was dispatched")
         self.assertEqual("RUNNING", revised["status"])
         self.assertEqual("CANCELLED", self.wait_operation(queued, self.client)["status"])
@@ -390,6 +390,12 @@ class TaskContinuationTest(unittest.TestCase):
                 "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)
         self.assertEqual("UNKNOWN", self.wait_operation(operation, self.client)["status"])
+        observation = str(uuid.uuid4())
+        error, observed, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
+            "operationId": observation, "type": "observe", "arguments": {},
+            "instructionRevision": task["instructionRevision"]}})
+        self.assertFalse(error, observed)
+        self.assertEqual("SUCCEEDED", self.wait_operation(observation, self.client)["status"])
         self.command(task, "CLOSE_BROWSER")
         paused = self.command(task, "AMEND", title=task["title"],
                               goal="Revised while paused with an unknown effect",
@@ -410,12 +416,15 @@ class TaskContinuationTest(unittest.TestCase):
                                startUrl=self.client.browser_fixture_url())
         self.assertEqual("STOPPED", revised["status"])
         self.assertEqual(operation, revised["request"]["operationId"])
-        verified = self.command(task, "REJECT", requestId=revised["request"]["id"],
-                                requestVersion=revised["request"]["version"],
-                                text="The target element does not exist and no external effect was observed")
-        self.assertEqual(("STOPPED", "CLOSED"), (verified["status"], verified["browser"]["status"]))
-        self.assertIsNone(verified["request"])
-        self.assertEqual("FAILED", self.client.tool("operations.get", {"operationId": operation})[1]["status"])
+        error, refusal, _ = self.client.respond(revised, {
+            "outcome": "SUCCEEDED", "evidence": "Counter was observed before the instruction changed.",
+            "observationOperationId": observation})
+        self.assertTrue(error, refusal)
+        self.assertEqual("VALIDATION", refusal["code"])
+        current = self.client.api(path)[1]
+        self.assertEqual(("STOPPED", "CLOSED"), (current["status"], current["browser"]["status"]))
+        self.assertEqual(revised["request"], current["request"])
+        self.assertEqual("UNKNOWN", self.client.tool("operations.get", {"operationId": operation})[1]["status"])
 
 
 if __name__ == "__main__":

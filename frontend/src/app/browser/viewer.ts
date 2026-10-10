@@ -634,11 +634,12 @@ export class BrowserViewer {
         if ('error' in event.data && typeof event.data.error === 'string' && event.data.error.length <= 300)
           this.clipboardError.set(event.data.error);
         if ('manual' in event.data && event.data.manual === true) {
+          const copy = 'direction' in event.data && event.data.direction === 'copy';
           this.clipboardOpen.set(true);
           requestAnimationFrame(() => {
-            const input = this.clipboardRemoteText() === null ? this.clipboardInput() : this.clipboardOutput();
+            const input = copy ? this.clipboardOutput() : this.clipboardInput();
             input?.nativeElement.focus();
-            if (this.clipboardRemoteText() !== null) input?.nativeElement.select();
+            if (copy) input?.nativeElement.select();
           });
         }
         return;

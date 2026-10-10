@@ -18,12 +18,19 @@
 <span role="textbox" contenteditable="true" aria-label="Message" style="display:block;min-height:24px"></span>
 <button id="increment" onclick="counter++; render()">Increment</button>
 <button onclick="render()">Read state</button>
+<button onclick="document.querySelector('#text').focus()">Focus recipient</button>
+<button onclick="document.querySelector('input[autocomplete=one-time-code]').focus()">Focus private code</button>
+<button onclick="alert('Synthetic dialog'); counter++; render()">Dialog before effect</button>
 <button onclick="document.querySelector('#increment').replaceWith(document.querySelector('#increment').cloneNode(true))">Replace target</button>
 <button onclick="document.querySelector('#conditional').hidden=false">Show conditional</button>
 <label id="conditional" hidden>Conditional<input></label>
 <button onclick="setTimeout(()=>document.querySelector('#delayed').remove(),10000)">Delay</button>
 <button id="delayed" disabled>Delayed target</button>
-<button onclick="counter++; render(); const end=Date.now()+25000; while(Date.now()<end){}">Slow effect</button>
+<div style="position:relative;width:max-content">
+  <button onclick="counter++;render()">Covered target</button>
+  <div aria-hidden="true" style="position:absolute;inset:0"></div>
+</div>
+<button id="slow-effect" onclick="counter++; render(); const end=Date.now()+25000; while(Date.now()<end){}">Slow effect</button>
 <button onclick="const select=document.querySelector('#many-options'); for(let i=0;i<210;i++)select.add(new Option('Option '+i, 'v'+i));">Large form</button>
 <select id="many-options" aria-label="Many options" multiple></select>
 <button onclick="document.querySelector('#comment').value='x'.repeat(3000000)">Huge text</button>
@@ -42,6 +49,6 @@
 <pre id="state" role="status"></pre>
 <script>
 let counter=0;
-function render(){document.querySelector('#state').textContent=JSON.stringify({counter,text:document.querySelector('#text').value});}
+function render(){document.querySelector('#state').textContent=JSON.stringify({counter,text:document.querySelector('#text').value,message:document.querySelector('[contenteditable]').textContent});}
 render();
 </script>

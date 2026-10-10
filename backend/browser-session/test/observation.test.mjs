@@ -15,8 +15,9 @@ test('site-controlled observation fields are bounded and oversized URLs are neve
   try {
     assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
     await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false });
-    const observation = await request(base + '/commands', { operationId: randomUUID(), type: 'observe', arguments: {}, instructionRevision: 0, controlEpoch: 1 });
-    const media = await request(base + '/commands', { operationId: randomUUID(), type: 'listMedia', arguments: {}, instructionRevision: 0, controlEpoch: 1 });
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    const observation = await request(base + '/commands', { operationId: randomUUID(), type: 'observe', arguments: {}, instructionRevision: 0, controlEpoch: 1, deadlineAt });
+    const media = await request(base + '/commands', { operationId: randomUUID(), type: 'listMedia', arguments: {}, instructionRevision: 0, controlEpoch: 1, deadlineAt });
     assert.equal(media.status, 'SUCCEEDED');
     if (observation.status === 'SUCCEEDED') {
       assert.ok(Buffer.byteLength(JSON.stringify(observation.result)) <= 32768);
@@ -37,21 +38,27 @@ test('site-controlled observation fields are bounded and oversized URLs are neve
 // select this test by name. The synthetic values are not real account credentials.
 test('sensitive input rejected before effect is FAILED and does not block later input', { timeout: 40_000 }, async () => {
   const id = randomUUID(), base = '/sessions/' + id;
-  const action = (type, args) => ({ operationId: randomUUID(), type, arguments: args, instructionRevision: 0, controlEpoch: 1 });
+  const action = (type, args) => ({ operationId: randomUUID(), type, arguments: args, instructionRevision: 0, controlEpoch: 1,
+    deadlineAt: new Date(Date.now() + 60_000).toISOString() });
   const command = input => request(base + '/commands', input);
   try {
     assert.equal((await request('/sessions', { sessionId: id, ownerId: randomUUID(), startUrl: fixture })).status, 'LIVE');
     await request(base + '/control', { controlEpoch: 1, owner: 'CHATGPT', privateMode: false });
     for (const name of ['Current password', 'New password', 'One-time code']) {
       const reference = await target(request, base, name);
-      for (const input of [action('fill', { ...reference, text: 'synthetic-rejected-value' }),
-        action('press', { ...reference, key: 'a' })]) {
+      for (const input of [action('fill', { ...reference, text: 'synthetic-rejected-value' })]) {
         const receipt = await command(input);
         assert.equal(receipt.status, 'FAILED');
         assert.equal(receipt.error, 'Private input requires the user');
         assert.deepEqual(await command(input), receipt);
       }
     }
+    assert.equal((await command(action('click', await target(request, base, 'Focus private code')))).status, 'SUCCEEDED');
+    const key = action('press', { key: 'a' });
+    const refused = await command(key);
+    assert.equal(refused.status, 'FAILED');
+    assert.equal(refused.error, 'Private input requires the user');
+    assert.deepEqual(await command(key), refused);
     assert.equal((await command(action('fill', { ...await target(request, base, 'Ordinary text'), text: 'allowed-after-refusal' }))).status, 'SUCCEEDED');
     assert.equal((await command(action('click', { ...await target(request, base, 'Read synthetic state') }))).status, 'SUCCEEDED');
     const observation = await request(base + '/observe');

@@ -36,7 +36,7 @@ export function startViewer(parentOrigin) {
     connection.sendKey(keysym, code);
     connection.sendKey(0xffe3, 'ControlLeft', false);
   }
-  async function runClipboard(work) {
+  async function runClipboard(work, direction = 'paste') {
     const connection = rfb, epoch = activeEpoch;
     if (!connection || !current(connection, epoch)) return;
     if (operation) {
@@ -54,7 +54,7 @@ export function startViewer(parentOrigin) {
     });
     try { await Promise.race([work(connection, epoch, controller.signal), aborted]); }
     catch (error) {
-      if (operation === controller && current(connection, epoch)) report('clipboard', epoch, { manual: true,
+      if (operation === controller && current(connection, epoch)) report('clipboard', epoch, { manual: true, direction,
         error: controller.signal.aborted ? 'Обмен буфером не завершён за пять секунд. Повторите действие.'
           : error instanceof Error ? error.message : 'Не удалось передать текст.' });
     } finally {
@@ -200,7 +200,7 @@ export function startViewer(parentOrigin) {
         try { await navigator.clipboard.writeText(received.detail.text); }
         catch { throw new Error('Скопируйте полученный текст из панели «Буфер обмена»: браузер ограничил доступ к буферу компьютера.'); }
       }
-    });
+    }, event.code === 'KeyC' ? 'copy' : 'paste');
   }, true);
   document.addEventListener('keyup', event => {
     if (!intercepted.delete(event.code)) return;

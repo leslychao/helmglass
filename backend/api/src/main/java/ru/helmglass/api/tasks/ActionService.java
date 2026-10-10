@@ -29,6 +29,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import ru.helmglass.api.ApiException;
 import ru.helmglass.api.Contracts;
 import ru.helmglass.api.Database;
+import ru.helmglass.api.Idempotency;
 import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.artifacts.ArtifactService;
 import ru.helmglass.api.auth.Actor;
@@ -44,7 +45,8 @@ public class ActionService {
   private static final Logger log = LoggerFactory.getLogger(ActionService.class);
   private static final int MAXIMUM_DISPATCHES = 8;
   private static final Set<String> READ_ONLY =
-      Set.of("observe", "screenshot", "listMedia", "captureAudio", "waitFor");
+      Set.of("observe", "screenshot", "listMedia", "captureAudio", "waitFor", "navigate",
+          "goBack", "scroll", "newTab", "selectTab", "closeTab");
   private static final Set<String> ACTIONS =
       Set.of(
           "navigate",
@@ -55,7 +57,6 @@ public class ActionService {
           "check",
           "scroll",
           "goBack",
-          "reload",
           "newTab",
           "selectTab",
           "closeTab",
@@ -73,6 +74,7 @@ public class ActionService {
   private final WorkerClient worker;
   private final ArtifactService artifacts;
   private final Identity identity;
+  private final Idempotency idempotency;
   private final EventService events;
   private final TransactionTemplate transactions;
   private final Map<UUID, Completion> completions = new ConcurrentHashMap<>();
@@ -94,6 +96,7 @@ public class ActionService {
       WorkerClient worker,
       ArtifactService artifacts,
       Identity identity,
+      Idempotency idempotency,
       EventService events,
       org.springframework.transaction.PlatformTransactionManager manager) {
     this.jdbc = jdbc;
@@ -105,13 +108,14 @@ public class ActionService {
     this.worker = worker;
     this.artifacts = artifacts;
     this.identity = identity;
+    this.idempotency = idempotency;
     this.events = events;
     transactions = new TransactionTemplate(manager);
   }
 
   @Transactional
   public Contracts.Operation submit(UUID owner, UUID taskId, Contracts.BrowserAction action) {
-    return submit(owner, taskId, action, List.of(), false);
+    return submit(owner, taskId, action, List.of());
   }
 
   @Transactional
@@ -119,8 +123,7 @@ public class ActionService {
       UUID owner,
       UUID taskId,
       Contracts.BrowserAction action,
-      List<UUID> sequence,
-      boolean explicitWait) {
+      List<UUID> sequence) {
     identity.requireActive(owner);
     tasks.lockOwner(owner);
     tasks.lockTask(owner, taskId);
@@ -138,7 +141,6 @@ public class ActionService {
     if (action.arguments().has("selector") || action.arguments().has("_meta")) {
       throw ApiException.invalid("arguments", "Используйте observationId и ref из наблюдения.");
     }
-    validateObservationArguments(action.type(), action.arguments());
     String confirmation =
         action.confirmationPrompt() == null
             ? null
@@ -161,8 +163,7 @@ public class ActionService {
                       + " (:observe IS NULL OR"
                       + " coalesce((instruction_snapshot->>'observeAfter')::boolean,true)=:observe)"
                       + " AND coalesce(instruction_snapshot->'sequence','[]'::jsonb)="
-                      + " CAST(:sequence AS jsonb) AND type=:type AND"
-                      + " coalesce((instruction_snapshot->>'explicitWait')::boolean,false)=:explicitWait"
+                      + " CAST(:sequence AS jsonb) AND type=:type"
                       + " AND arguments=CAST(:arguments AS jsonb) AND"
                       + " instruction_revision=:revision AND requested_control_epoch IS NOT"
                       + " DISTINCT FROM CAST(:epoch AS bigint) AND"
@@ -173,7 +174,6 @@ public class ActionService {
               .param("definition", action.step() == null ? null : json.write(action.step()))
               .param("observe", action.observeAfter(), Types.BOOLEAN)
               .param("sequence", json.write(sequence))
-              .param("explicitWait", explicitWait)
               .param("type", action.type())
               .param("arguments", json.write(action.arguments()))
               .param("revision", action.instructionRevision())
@@ -188,6 +188,7 @@ public class ActionService {
       }
       return result(owner, action.operationId());
     }
+    validateObservationArguments(action.type(), action.arguments());
     Contracts.Task task = tasks.get(owner, taskId);
     if (task.instructionRevision() != action.instructionRevision()) {
       throw ApiException.conflict("STALE_INSTRUCTION", "Поручение изменилось.");
@@ -203,7 +204,9 @@ public class ActionService {
       throw ApiException.conflict("TASK_NOT_RUNNING", "Задача не разрешает новые действия.");
     }
     if (tasks.hasUnknown(taskId) && !READ_ONLY.contains(action.type())) {
-      throw ApiException.conflict("UNKNOWN_RESULT", "Проверьте результат предыдущего действия.");
+      throw ApiException.conflict("UNKNOWN_RESULT",
+          "Выполните observe и tasks.respond с verification. Если продолжение безопасно"
+              + " без повтора прежнего действия, используйте UNCONFIRMED с обоснованием.");
     }
     if (task.request() != null && !"UNKNOWN_RESULT".equals(task.request().type())) {
       throw ApiException.conflict(
@@ -233,7 +236,6 @@ public class ActionService {
     instruction.put("title", task.title());
     instruction.put("goal", task.goal());
     instruction.put("sequence", sequence);
-    instruction.put("explicitWait", explicitWait);
     instruction.put(
         "observeAfter",
         action.observeAfter() == null
@@ -295,6 +297,111 @@ public class ActionService {
     }
   }
 
+  public Contracts.Task verifyResult(
+      Actor actor,
+      String chat,
+      UUID taskId,
+      UUID requestId,
+      long requestVersion,
+      String operationKey,
+      Contracts.OperationVerification verification) {
+    Map<String, Object> request = Map.of(
+        "taskId", taskId, "requestId", requestId, "requestVersion", requestVersion,
+        "operationKey", operationKey, "verification", verification);
+    TaskService.ElicitationClaim claim = transactions.execute(transaction -> {
+      TaskService.ElicitationClaim attempt = tasks.claimResponse(
+          actor, taskId, chat, requestId, requestVersion, operationKey, verification);
+      if (attempt != null) {
+        validateVerification(actor, chat, attempt, verification);
+      }
+      return attempt;
+    });
+    if (claim == null) {
+      return idempotency.execute(actor.id(), operationKey, "tasks.respond", request,
+          Contracts.Task.class, () -> {
+            throw ApiException.conflict("STALE_REQUEST", "Результат уже подтверждён другим ответом.");
+          });
+    }
+    try {
+      Dispatch operation = savedDispatch(claim.request().operationId());
+      if (!Set.of("CLOSED", "LOST")
+          .contains(browsers.get(actor.id(), operation.session()).status())) {
+        JsonNode receipt = worker.call(
+            "POST",
+            "/sessions/" + operation.session() + "/commands/" + operation.id() + "/resolve",
+            Map.of("outcome", verification.outcome(), "evidence", verification.evidence()));
+        if (receipt == null
+            || !operation.id().toString().equals(receipt.path("operationId").asString())
+            || !verification.outcome().equals(receipt.path("status").asString())
+            || !receipt.path("result").path("reconciled").asBoolean(false)
+            || !verification.evidence()
+                .equals(receipt.path("result").path("evidence").asString())) {
+          throw ApiException.conflict("UNKNOWN_RESULT", "Узел не подтвердил результат проверки.");
+        }
+      }
+      // Only the final apply is transactional; STOP can proceed during the worker call above.
+      return idempotency.execute(actor.id(), operationKey, "tasks.respond", request,
+          Contracts.Task.class, () -> {
+            tasks.respond(actor, chat, claim,
+                switch (verification.outcome()) {
+                  case "SUCCEEDED" -> "CONFIRM";
+                  case "FAILED" -> "REJECT";
+                  case "UNCONFIRMED" -> "PROCEED";
+                  default -> throw ApiException.invalid("outcome", "Неизвестный исход проверки.");
+                },
+                verification.evidence(), null);
+            complete(operation, verification.outcome(),
+                json.tree(Map.of("verification", verification.evidence(),
+                    "observationOperationId", verification.observationOperationId())),
+                "UNCONFIRMED".equals(verification.outcome()) ? "RESULT_UNCONFIRMED" : null,
+                "UNCONFIRMED".equals(verification.outcome())
+                    ? "Результат не установлен; разрешено продолжение без повтора действия."
+                    : "Результат проверен по состоянию сайта.");
+            tasks.requestContinuation(taskId);
+            return tasks.get(actor.id(), taskId);
+          });
+    } finally {
+      tasks.releaseResponse(actor.id(), claim);
+    }
+  }
+
+  private void validateVerification(
+      Actor actor,
+      String chat,
+      TaskService.ElicitationClaim claim,
+      Contracts.OperationVerification verification) {
+    Contracts.Task task = tasks.validateResponse(actor, chat, claim);
+    if (verification.outcome() == null
+        || !Set.of("SUCCEEDED", "FAILED", "UNCONFIRMED").contains(verification.outcome())) {
+      throw ApiException.invalid("outcome", "Укажите проверенный результат операции.");
+    }
+    TaskService.required(verification.evidence(), "evidence", 4000);
+    boolean observed =
+        jdbc.sql(
+                """
+                SELECT EXISTS(SELECT 1 FROM operations observation JOIN operations original
+                  ON original.id=:original AND original.task_id=observation.task_id
+                WHERE observation.id=:observation AND observation.owner_id=:owner
+                  AND observation.task_id=:task AND observation.type='observe'
+                  AND observation.status='SUCCEEDED' AND observation.result IS NOT NULL
+                  AND observation.instruction_revision=:revision
+                  AND original.status='UNKNOWN'
+                  AND observation.dispatched_at>original.dispatched_at
+                  AND observation.completed_at>=original.completed_at)
+                """)
+            .param("original", claim.request().operationId())
+            .param("observation", verification.observationOperationId())
+            .param("owner", actor.id())
+            .param("task", task.id())
+            .param("revision", task.instructionRevision())
+            .query(Boolean.class)
+            .single();
+    if (!observed) {
+      throw ApiException.invalid(
+          "observationOperationId", "Нужно успешное наблюдение этой задачи после действия.");
+    }
+  }
+
   public Contracts.Task respond(
       Actor actor,
       String chat,
@@ -302,37 +409,12 @@ public class ActionService {
       String command,
       String text,
       UUID connection) {
-    tasks.validateResponse(actor, chat, claim);
     if ("UNKNOWN_RESULT".equals(claim.request().type())) {
-      String evidence = TaskService.required(text, "text", 4000);
-      if (!Set.of("CONFIRM", "REJECT").contains(command)) {
-        throw ApiException.invalid("type", "Укажите подтверждённый результат проверки.");
-      }
-      Dispatch operation = savedDispatch(claim.request().operationId());
-      if (!Set.of("CLOSED", "LOST")
-          .contains(browsers.get(actor.id(), operation.session()).status())) {
-        worker.call(
-            "POST",
-            "/sessions/" + operation.session() + "/commands/" + operation.id() + "/resolve",
-            Map.of(
-                "outcome",
-                "CONFIRM".equals(command) ? "SUCCEEDED" : "FAILED",
-                "evidence",
-                evidence));
-      }
+      throw ApiException.conflict("VERIFICATION_REQUIRED", "Нужно подтверждение наблюдением сайта.");
     }
     return transactions.execute(
         transaction -> {
           Contracts.Task task = tasks.respond(actor, chat, claim, command, text, connection);
-          if ("UNKNOWN_RESULT".equals(claim.request().type())) {
-            complete(
-                savedDispatch(claim.request().operationId()),
-                "CONFIRM".equals(command) ? "SUCCEEDED" : "FAILED",
-                json.tree(Map.of("verification", text)),
-                null,
-                "Результат подтверждён пользователем.");
-            return tasks.get(actor.id(), task.id());
-          }
           if ("CHOOSE_CONNECTION".equals(command)) {
             return selectConnection(
                 actor.id(), task.id(), task.instructionRevision(), connection, null);
@@ -648,7 +730,7 @@ public class ActionService {
   }
 
   private static void validateObservationArguments(String type, JsonNode arguments) {
-    if (!Set.of("observe", "waitFor").contains(type)) {
+    if (!Set.of("observe", "waitFor", "press").contains(type)) {
       return;
     }
     boolean target = arguments.has("observationId") && arguments.has("ref");
@@ -663,21 +745,29 @@ public class ActionService {
       if (!valid) {
         throw ApiException.invalid("arguments", "Укажите страницу, observationId/ref или cursor.");
       }
+    } else if ("press".equals(type)) {
+      if (arguments.size() != 1
+          || !arguments.path("key").isString()
+          || arguments.path("key").asString().isEmpty()
+          || arguments.path("key").asString().length() > 100) {
+        throw ApiException.invalid("arguments", "press принимает только key для текущего фокуса.");
+      }
     } else {
-      boolean text = arguments.has("text");
-      boolean state = arguments.has("state");
-      if (!target
-          || text && state
-          || arguments.size() != (text || state ? 3 : 2)
-          || text
-              && (!arguments.path("text").isString()
-                  || arguments.path("text").asString().isEmpty()
-                  || arguments.path("text").asString().length() > 1000)
-          || state
-              && !Set.of("visible", "hidden", "attached", "detached")
-                  .contains(arguments.path("state").asString(""))) {
-        throw ApiException.invalid(
-            "arguments", "waitFor требует observationId/ref и state либо text.");
+      if (arguments.isEmpty()) {
+        throw ApiException.invalid("arguments", "waitFor требует text, textGone и/или time.");
+      }
+      for (var entry : arguments.properties()) {
+        JsonNode value = entry.getValue();
+        boolean valid = switch (entry.getKey()) {
+          case "text", "textGone" -> value.isString()
+              && !value.asString().isEmpty() && value.asString().length() <= 1000;
+          case "time" -> value.isNumber() && value.asDouble() > 0 && value.asDouble() <= 30;
+          default -> false;
+        };
+        if (!valid) {
+          throw ApiException.invalid(
+              "arguments", "waitFor принимает text, textGone и time больше 0, не более 30 секунд.");
+        }
       }
     }
     if (target
@@ -702,7 +792,6 @@ public class ActionService {
     request.put("instructionRevision", dispatch.revision());
     request.put("controlEpoch", dispatch.epoch());
     request.put("observeAfter", dispatch.observeAfter());
-    request.put("explicitWait", dispatch.explicitWait());
     Instant deadline =
         jdbc.sql("SELECT deadline_at FROM operations WHERE id=:id")
             .param("id", dispatch.id())
@@ -840,10 +929,23 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                       epoch,
                       row.getBoolean("mutating"),
                       instruction.path("observeAfter").asBoolean(true),
-                      instruction.path("sequence"),
-                      instruction.path("explicitWait").asBoolean(false));
+                      instruction.path("sequence"));
                 })
             .single();
+    boolean supported = ACTIONS.contains(command.type());
+    try {
+      validateObservationArguments(command.type(), command.arguments());
+    } catch (ApiException exception) {
+      supported = false;
+    }
+    if (!supported) {
+      jdbc.sql("UPDATE operations SET status='CANCELLED',completed_at=now(),"
+              + "error_code='UNSUPPORTED_BROWSER_COMMAND' WHERE id=:id")
+          .param("id", command.id())
+          .update();
+      tasks.requestContinuation(task.id());
+      return null;
+    }
     if (command.revision() != task.instructionRevision()
         || tasks.hasUnknown(task.id()) && command.mutating()) {
       jdbc.sql("UPDATE operations SET status='CANCELLED',completed_at=now() WHERE id=:id")
@@ -940,6 +1042,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
 
   @Scheduled(fixedDelay = 5000)
   public void recoverReceipts() {
+    tasks.recoverVerifications();
     var operations =
         jdbc.sql(
                 "SELECT o.* FROM operations o JOIN browser_sessions b ON b.id=o.session_id"
@@ -960,8 +1063,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                       row.getLong("control_epoch"),
                       row.getBoolean("mutating"),
                       instruction.path("observeAfter").asBoolean(true),
-                      instruction.path("sequence"),
-                      instruction.path("explicitWait").asBoolean(false));
+                      instruction.path("sequence"));
                 })
             .list();
     for (Dispatch operation : operations) {
@@ -1030,6 +1132,17 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       return;
     }
     JsonNode result = response.get("result");
+    // The stored agent decision must be applied with its request and idempotency record.
+    // Generic receipt recovery must not cancel that request before a lost reply is retried.
+    if (result != null && result.path("reconciled").asBoolean(false)
+        && jdbc.sql("""
+            SELECT EXISTS(SELECT 1 FROM task_requests WHERE operation_id=:operation
+              AND owner_id=:owner AND status='PENDING' AND verification IS NOT NULL)
+            """)
+            .param("operation", operation.id()).param("owner", operation.owner())
+            .query(Boolean.class).single()) {
+      return;
+    }
     String errorCode = null;
     String errorMessage = null;
     if ("FAILED".equals(status)) {
@@ -1040,6 +1153,9 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
         errorCode = "BROWSER_ACTION_FAILED";
         errorMessage = "Браузер сообщил об отказе действия.";
       }
+    } else if ("UNCONFIRMED".equals(status)) {
+      errorCode = "RESULT_UNCONFIRMED";
+      errorMessage = "Результат не установлен; продолжение разрешено без повтора действия.";
     } else if ("UNKNOWN".equals(status)) {
       errorCode = operation.mutating() ? "UNKNOWN_RESULT" : "READ_UNCONFIRMED";
       errorMessage =
@@ -1050,7 +1166,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
     }
     complete(
         operation,
-        Set.of("SUCCEEDED", "FAILED").contains(status) ? status : "UNKNOWN",
+        Set.of("SUCCEEDED", "FAILED", "UNCONFIRMED").contains(status) ? status : "UNKNOWN",
         result,
         errorCode,
         errorMessage);
@@ -1200,8 +1316,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                   row.getLong("control_epoch"),
                   row.getBoolean("mutating"),
                   instruction.path("observeAfter").asBoolean(true),
-                  instruction.path("sequence"),
-                  instruction.path("explicitWait").asBoolean(false));
+                  instruction.path("sequence"));
             })
         .single();
   }
@@ -1319,7 +1434,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                     null,
                     "SUCCEEDED".equals(status)
                         ? "Команда выполнена"
-                        : "Действие завершилось отказом");
+                        : message);
               }
             }
           }
@@ -1517,6 +1632,5 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       long epoch,
       boolean mutating,
       boolean observeAfter,
-      JsonNode sequence,
-      boolean explicitWait) {}
+      JsonNode sequence) {}
 }

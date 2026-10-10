@@ -641,4 +641,28 @@ assert.equal(elements.get('idle-warning').hidden, true, 'An acknowledged extensi
 assert.equal(messages.length, 0, 'Keeping the browser open must not launch ChatGPT');
 await app.onteardown();
 assert.equal(intervals.size, 0, 'Widget clocks are disposed on teardown');
-console.log('PASS widget idle warning and extension, execution, recovery, isolation and continuation races');
+await mount();
+const capacityPresentation = presentation('IDLE', liveBrowser());
+const capacityMessage = 'Оба места просмотра заняты. Закройте трансляцию в другой вкладке. Ожидаем свободного места.';
+let capacityFull = true;
+call = request => {
+  if (request.name === 'widget.state') return Promise.resolve(response(capacityPresentation));
+  if (request.name === 'widget.steps') return Promise.resolve(history());
+  if (request.name === 'widget.browser') return Promise.resolve(capacityFull
+    ? { isError: true, content: [], structuredContent: { code: 'VIEWER_LIMIT_REACHED', message: capacityMessage } }
+    : ticket);
+  throw new Error(request.name);
+};
+show(capacityPresentation); await settled();
+assert.equal(elements.get('browser-state').textContent, capacityMessage,
+  'Ticket rejection must preserve the server reason instead of claiming a network break');
+assert.equal(elements.get('viewer').src, undefined, 'Rejected tickets never initiate an iframe handshake');
+await nextTimer();
+assert.equal(elements.get('browser-state').textContent, capacityMessage);
+capacityFull = false;
+await nextTimer(); viewerState('connected');
+assert.equal(elements.get('viewer').hidden, false, 'A freed viewer slot recovers through the existing retry');
+assert.equal(elements.get('browser-state').hidden, true);
+assert.equal(messages.length, 0, 'Viewer recovery does not launch ChatGPT or perform a browser action');
+await app.onteardown();
+console.log('PASS widget idle warning and extension, execution, recovery, isolation, viewer admission and continuation races');

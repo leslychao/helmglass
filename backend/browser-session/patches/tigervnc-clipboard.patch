@@ -1,0 +1,178 @@
+--- a/unix/tx/TXWindow.h
++++ b/unix/tx/TXWindow.h
+@@ -147,6 +147,9 @@
+ 
+   // selectionNotify() is called when the selection owner has replied to a
+   // request for information about a selection from the selection owner.
++  // Maximum selection property length, in 32-bit units.
++  virtual long selectionReadLength() { return 16384; }
++
+   virtual void selectionNotify(XSelectionEvent* /*ev*/, Atom /*type*/,
+                                int /*format*/, int /*nitems*/,
+                                void* /*data*/) {}
+--- a/unix/tx/TXWindow.cxx
++++ b/unix/tx/TXWindow.cxx
+@@ -439,7 +439,7 @@
+       int format;
+       unsigned long nitems, after;
+       unsigned char *data;
+-      XGetWindowProperty(dpy, win(), ev->xselection.property, 0, 16384, True,
++      XGetWindowProperty(dpy, win(), ev->xselection.property, 0, selectionReadLength(), True,
+                          AnyPropertyType, &type, &format,
+                          &nitems, &after, &data);
+       if (type != None) {
+--- a/unix/x0vncserver/XSelection.h
++++ b/unix/x0vncserver/XSelection.h
+@@ -29,7 +29,7 @@
+   virtual void handleXSelectionData(const char* data) = 0;
+ };
+ 
+-class XSelection : TXWindow
++class XSelection : TXWindow, TXEventHandler
+ {
+ public:
+   XSelection(Display* dpy_, XSelectionHandler* handler_);
+@@ -45,6 +45,16 @@
+   Atom timestampProperty;
+   Atom announcedSelection;
+   std::string clientData; // Always in UTF-8
++  // CRLF may double the accepted UTF-8 length. Extra bytes witness overflow
++  // even after newline conversion; noVNC rejects the entire oversized reply.
++  static constexpr size_t maxSelectionBytes = 2 * 256 * 1024 + 8;
++  bool receivingIncremental = false;
++  bool discardingIncremental = false;
++  Atom incrementalTarget = None;
++  std::string incrementalData;
++
++  long selectionReadLength() override { return maxSelectionBytes / 4; }
++  void handleEvent(TXWindow* window, XEvent* event) override;
+ 
+   Time getXServerTime();
+   void announceSelection(Atom selection);
+--- a/unix/x0vncserver/XSelection.cxx
++++ b/unix/x0vncserver/XSelection.cxx
+@@ -16,6 +16,8 @@
+  * USA.
+  */
+ 
++#include <algorithm>
++#include <cstring>
+ #include <X11/Xatom.h>
+ #include <rfb/Configuration.h>
+ #include <rfb/LogWriter.h>
+@@ -38,6 +40,7 @@
+   transferProperty = XInternAtom(dpy, "TigerVNC_TransferProperty", False);
+   timestampProperty = XInternAtom(dpy, "TigerVNC_TimestampProperty", False);
+   toplevel("TigerVNC Clipboard (x0vncserver)");
++  setEventHandler(this);
+   addEventMask(PropertyChangeMask); // Required for PropertyNotify events
+ }
+ 
+@@ -64,6 +67,8 @@
+ // Takes ownership of selections, backed by given data.
+ void XSelection::handleClientClipboardData(const char* data)
+ {
++  if (strlen(data) > 256 * 1024)
++    return;
+   vlog.debug("Received client clipboard data, taking selection ownership");
+ 
+   Time time = getXServerTime();
+@@ -111,6 +116,10 @@
+     return;
+   if (selection == XA_PRIMARY && !sendPrimary)
+     return;
++
++  receivingIncremental = false;
++  discardingIncremental = false;
++  incrementalData.clear();
+ 
+   if (selection == announcedSelection)
+     announceSelection(None);
+@@ -175,14 +184,28 @@
+                         ev->time);
+   } else if (ev->target == xaUTF8_STRING || ev->target == XA_STRING) {
+     if (type == xaINCR) {
+-      // Incremental transfer is not supported
+-      vlog.debug("Selected data is too big!");
++      receivingIncremental = true;
++      discardingIncremental = false;
++      incrementalTarget = ev->target;
++      incrementalData.clear();
++      XDeleteProperty(dpy, win(), transferProperty);
++      XFlush(dpy);
+       return;
+     }
+ 
+     if (format != 8)
+       return;
+ 
++    if (type == xaUTF8_STRING && nitems >= (int)maxSelectionBytes) {
++      // A bounded prefix can end inside a UTF-8 character. It remains larger
++      // than the text limit after dropping that character and normalizing LF.
++      const unsigned char* bytes = (const unsigned char*)data;
++      while (nitems > 0 && (bytes[nitems - 1] & 0xc0) == 0x80)
++        nitems--;
++      if (nitems > 0 && (bytes[nitems - 1] & 0x80))
++        nitems--;
++    }
++    XDeleteProperty(dpy, win(), ev->property);
+     if (type == xaUTF8_STRING) {
+       std::string result = rfb::convertLF((char*)data, nitems);
+       handler->handleXSelectionData(result.c_str());
+@@ -192,4 +215,54 @@
+       handler->handleXSelectionData(result.c_str());
+     }
+   }
+-}
+\ No newline at end of file
++}
++// INCR chunks are acknowledged by deleting the transfer property. Retain only
++// the bounded prefix needed to accept text or report overflow; drain the rest.
++void XSelection::handleEvent(TXWindow* /* window */, XEvent* event)
++{
++  if (!receivingIncremental || event->type != PropertyNotify ||
++      event->xproperty.atom != transferProperty ||
++      event->xproperty.state != PropertyNewValue)
++    return;
++
++  Atom type = None;
++  int format = 0;
++  unsigned long count = 0, after = 0;
++  unsigned char* data = nullptr;
++  size_t remaining = maxSelectionBytes - incrementalData.size();
++  long units = discardingIncremental ? 16384 : (remaining + 3) / 4;
++  int status = XGetWindowProperty(dpy, win(), transferProperty, 0, units, True,
++                                  AnyPropertyType, &type, &format, &count, &after, &data);
++  if (status != Success) {
++    receivingIncremental = false;
++    incrementalData.clear();
++    if (data)
++      XFree(data);
++    return;
++  }
++  XDeleteProperty(dpy, win(), transferProperty);
++
++  if (format != 8 || type != incrementalTarget) {
++    receivingIncremental = false;
++    incrementalData.clear();
++  } else if (!discardingIncremental) {
++    size_t accepted = std::min((size_t)count, remaining);
++    if (accepted)
++      incrementalData.append((const char*)data, accepted);
++    if (count == 0 || after || count > remaining ||
++        incrementalData.size() == maxSelectionBytes) {
++      XSelectionEvent reply = {};
++      reply.target = incrementalTarget;
++      reply.property = transferProperty;
++      selectionNotify(&reply, type, 8, (int)incrementalData.size(),
++                       (void*)incrementalData.data());
++      incrementalData.clear();
++      discardingIncremental = count != 0;
++    }
++  }
++  if (count == 0)
++    receivingIncremental = false;
++  if (data)
++    XFree(data);
++  XFlush(dpy);
++}

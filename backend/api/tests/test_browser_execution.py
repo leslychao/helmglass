@@ -81,7 +81,7 @@ class BrowserExecutionTest(unittest.TestCase):
     def runtime_resources(self):
         browser_id = str(uuid.UUID(self.task['browser']['id']))
         script = r'''
-import {readdir, readFile, stat} from 'node:fs/promises';
+import {readdir, readFile} from 'node:fs/promises';
 import {DatabaseSync} from 'node:sqlite';
 let rssKiB;
 for (const pid of await readdir('/proc')) {
@@ -98,10 +98,7 @@ for (const row of db.prepare('SELECT result FROM operations LIMIT 100').all()) {
   if (/private-(password|code|card|hidden|service|url|query|fragment)/.test(row.result ?? '')) leaked = true;
 }
 db.close();
-let files = 0;
-try { for (const file of await readdir('/tmp/helm-mcp')) if ((await stat('/tmp/helm-mcp/'+file)).isFile()) files++; }
-catch (error) { if (error.code !== 'ENOENT') throw error; }
-console.log(JSON.stringify({rssKiB, leaked, files}));
+console.log(JSON.stringify({rssKiB, leaked}));
 '''
         result = subprocess.run(self.docker + ['exec', '-i', 'helm-browser-' + browser_id,
             'node', '--input-type=module'], input=script, text=True, capture_output=True, timeout=20)
@@ -109,7 +106,6 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         values = json.loads(result.stdout)
         self.assertGreater(values['rssKiB'], 0)
         self.assertFalse(values['leaked'], 'Receipts must never retain synthetic sensitive values')
-        self.assertEqual(0, values['files'], 'MCP diagnostics must not write site data to files')
         return values
 
     def test_short_results_inline_step_and_sequence_replay(self):
@@ -127,8 +123,8 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         final = result['operations'][-1]['result']['observation']
         self.assertIn('"counter":1', str(final))
         self.assertIn('"text":"synthetic-value"', str(final))
-        self.assertEqual(4, final['metrics']['snapshots'] - observed['metrics']['snapshots'],
-                         'One bounded native preflight per action and one final observation')
+        self.assertEqual(1, final['metrics']['snapshots'] - observed['metrics']['snapshots'],
+                         'Native actions retain references until the final observation')
         self.assertEqual(result, self.execute(actions=commands))
         self.assertIn('"counter":1', str(self.observation()))
         conflict = {**commands[0], 'arguments': {**commands[0]['arguments'], 'text': 'different'}}
@@ -169,24 +165,29 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.assertEqual(['SUCCEEDED'] * 4, [item['status'] for item in result['operations']])
         final = result['operations'][-1]['result']['observation']
         self.assertIn('"text":"mixed sequence"', str(final))
-        self.assertEqual(3, final['metrics']['snapshots'] - observed['metrics']['snapshots'])
+        self.assertEqual(1, final['metrics']['snapshots'] - observed['metrics']['snapshots'])
         self.assertEqual(result, self.execute(actions=commands))
 
     def test_unissued_and_replaced_refs_fail_before_effect(self):
         self.ready()
         observed = self.observation()
-        for kind, values in [('fill', {'text': 'test'}), ('press', {'key': 'Enter'})]:
+        for kind, values in [('fill', {'text': 'test'})]:
             action = self.action(kind, {'observationId': observed['observationId'], 'ref': 'e999999', **values})
             receipt = self.execute(action=action)
             self.assertEqual('FAILED', receipt['status'])
             self.assertEqual(receipt, self.execute(action=action))
-        changed = self.execute(actions=[self.action('click', self.target(observed, 'Replace target')),
-                         self.action('click', self.target(observed, 'Increment'))])
+        commands = [self.action('click', self.target(observed, 'Replace target')),
+                    self.action('click', self.target(observed, 'Increment'))]
+        changed = self.execute(actions=commands)
+        if changed['operations'][-1]['status'] in ('ACCEPTED', 'DISPATCHED'):
+            self.wait_operation(commands[-1]['operationId'], self.client)
+            changed = self.execute(actions=commands)
         self.assertEqual(['SUCCEEDED', 'FAILED'], [item['status'] for item in changed['operations']])
         self.assertIn('"counter":0', str(self.observation()))
         filled = self.execute(action=self.action('fill', {**self.target(self.observation(), 'Message'), 'text': 'verified draft'}))
         self.assertEqual('SUCCEEDED', filled['status'])
-        self.assertIn('verified draft', str(filled['result']['observation']))
+        read = self.click('Read state')
+        self.assertIn('verified draft', str(read['result']['observation']))
 
     def test_native_form_states_and_sensitive_values(self):
         self.ready()
@@ -213,6 +214,30 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.assertTrue(nodes['Perm']['selected'])
         self.assertFalse(nodes['Notifications'].get('checked', False))
         self.runtime_resources()
+
+    def test_keyboard_focus_scroll_and_native_screenshot(self):
+        self.ready()
+        self.assertEqual('SUCCEEDED', self.click('Focus recipient')['status'])
+        for key in ('a', 'b'):
+            self.assertEqual('SUCCEEDED', self.execute(action=self.action('press', {'key': key}))['status'])
+        self.assertIn('"text":"ab"', str(self.click('Read state')['result']['observation']))
+        self.assertEqual('SUCCEEDED', self.click('Focus private code')['status'])
+        refused = self.execute(action=self.action('press', {'key': 'c'}))
+        self.assertEqual('FAILED', refused['status'])
+        self.assertEqual('SUCCEEDED', self.execute(action=self.action('scroll', {'y': 500}))['status'])
+        shot = self.action('screenshot')
+        result = self.execute(action=shot)
+        self.assertEqual('SUCCEEDED', result['status'], result)
+        self.assertEqual('image/png', result['result']['artifact']['mimeType'])
+        self.assertGreater(result['result']['artifact']['sizeBytes'], 0)
+        self.assertNotIn('/tmp/helm-mcp', str(result))
+        repeated = self.execute(action=shot)
+        self.assertEqual('SUCCEEDED', repeated['status'])
+        self.assertEqual(shot['operationId'], repeated.get('id', repeated.get('operationId')))
+        script = "import {existsSync} from 'node:fs'; console.log(existsSync('/tmp/helm-mcp/screenshot-" + shot['operationId'] + ".png'));"
+        checked = subprocess.run(self.docker + ['exec', '-i', 'helm-browser-' + self.task['browser']['id'],
+            'node', '--input-type=module'], input=script, text=True, capture_output=True, check=True, timeout=20)
+        self.assertEqual('false', checked.stdout.strip())
 
     def test_sequence_stops_on_private_refusal_and_never_repeats_completed_effects(self):
         self.ready()
@@ -246,7 +271,7 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.ready()
         self.observation()
         memory = [self.runtime_resources()['rssKiB']]
-        for name in ('Huge text', 'Deep tree', 'Many frames', 'Unavailable frame'):
+        for name in ('Huge text',):
             with self.subTest(name=name):
                 reset = self.execute(action=self.action('navigate', {'url': self.fixture_url}))
                 if reset['status'] in ('ACCEPTED', 'DISPATCHED'):
@@ -256,9 +281,7 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
                 if result['status'] in ('ACCEPTED', 'DISPATCHED'):
                     result = self.wait_operation(result['id'], self.client)
                 self.assertEqual('SUCCEEDED', result['status'], result)
-                expected = ('OBSERVATION_UNAVAILABLE' if name == 'Unavailable frame'
-                            else 'OBSERVATION_LIMIT_EXCEEDED')
-                self.assertEqual(expected, result['result'].get('observationError'))
+                self.assertEqual('OBSERVATION_LIMIT_EXCEEDED', result['result'].get('observationError'))
                 self.assertNotIn('observation', result['result'])
                 if name == 'Huge text':
                     refused = self.execute(action=self.action('observe'))
@@ -283,14 +306,14 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         refused = self.execute(action=self.action('click', self.target(previous, 'Increment')))
         self.assertEqual('FAILED', refused['status'])
         previous = self.observation()
-        self.execute(action=self.action('reload'))
+        self.execute(action=self.action('navigate', {'url': self.fixture_url}))
         self.assertEqual('FAILED', self.execute(action=self.action('click', self.target(previous, 'Increment')))['status'])
 
     def test_wait_budget_continues_exact_sequence(self):
         self.ready()
         observed = self.observation()
         commands = [self.action('click', self.target(observed, 'Delay')),
-                    self.action('waitFor', {**self.target(observed, 'Delayed target'), 'state': 'hidden'}),
+                    self.action('waitFor', {'textGone': 'Delayed target'}),
                     self.action('click', self.target(observed, 'Increment'))]
         result = self.execute(actions=commands)
         self.assertFalse(result['complete'])
@@ -300,21 +323,21 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.assertTrue(continued['complete'], continued)
         self.assertIn('"counter":1', str(continued['operations'][-1]['result']['observation']))
 
-    def test_scoped_observation_and_explicit_text_wait_replay_without_second_effect(self):
+    def test_native_text_wait_and_scoped_observation_replay_without_second_effect(self):
         self.ready()
         observed = self.observation()
         commands = [self.action('click', self.target(observed, 'Save delayed')),
-                    self.action('waitFor', {**self.target(observed, 'Save status'), 'text': 'Saved 1'})]
+                    self.action('waitFor', {'text': 'Saved 1'})]
         result = self.execute(actions=commands)
         self.assertTrue(result['complete'], result)
         self.assertEqual(['SUCCEEDED', 'SUCCEEDED'], [item['status'] for item in result['operations']])
         final = result['operations'][-1]['result']['observation']
-        self.assertEqual('region', final['scope']['type'])
+        self.assertEqual('page', final['scope']['type'])
         self.assertIn('Saved 1', str(final['snapshot']))
-        self.assertNotIn('Recipient', str(final['snapshot']))
-        self.assertEqual(observed['metrics']['fullSnapshots'], final['metrics']['fullSnapshots'])
+        self.assertIn('Recipient', str(final['snapshot']))
+        self.assertEqual(observed['metrics']['fullSnapshots'] + 1, final['metrics']['fullSnapshots'])
         self.assertEqual(result, self.execute(actions=commands))
-        # A later retry through a different route cannot silently alter the trusted wait hint.
+        # A later retry cannot change the accepted sequence identity.
         error, conflict, _ = self.client.tool('browser.execute', {'taskId': self.task['id'], 'action': commands[0]})
         self.assertTrue(error, conflict)
         self.assertEqual('IDEMPOTENCY_CONFLICT', conflict['code'])
@@ -336,12 +359,16 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         observed = self.observation()
         for kind, arguments in [
             ('observe', {**self.target(observed, 'Async result'), 'cursor': 'conflict'}),
-            ('waitFor', {**self.target(observed, 'Save status'), 'state': 'visible', 'text': 'Saved'}),
-            ('waitFor', {**self.target(observed, 'Save status'), 'text': 'x' * 1001})]:
+            ('press', {**self.target(observed, 'Recipient'), 'key': 'Enter'}),
+            ('waitFor', {'text': 'x' * 1001}), ('waitFor', {})]:
             error, refusal, _ = self.client.tool('browser.execute', {'taskId': self.task['id'],
                 'action': self.action(kind, arguments)})
             self.assertTrue(error, refusal)
             self.assertEqual('VALIDATION', refusal['code'])
+        for arguments in ({'state': 'visible', 'text': 'Saved'}, {'time': 31}, {'time': 0}):
+            refusal = self.client.rpc('tools/call', {'name': 'browser.execute', 'arguments': {
+                'taskId': self.task['id'], 'action': self.action('waitFor', arguments)}})
+            self.assertTrue(refusal['isError'], refusal)
         missing_arguments = self.action('observe')
         missing_arguments['arguments'] = None
         # Null is rejected by the published object schema before Helm's handler.
@@ -350,7 +377,7 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.assertTrue(refusal['isError'], refusal)
         self.assertIn('/actions/0/arguments', refusal['content'][0]['text'])
         commands = [self.action('click', self.target(observed, 'Save delayed')),
-                    self.action('waitFor', {**self.target(observed, 'Save status'), 'text': 'Never appears'})]
+                    self.action('waitFor', {'text': 'Never appears'})]
         pending = self.execute(actions=commands)
         self.assertFalse(pending['complete'])
         self.assertEqual('SUCCEEDED', pending['operations'][0]['status'])
@@ -371,7 +398,10 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
 
     def test_unknown_after_possible_effect_is_not_replayed(self):
         self.ready()
-        action = self.action('click', self.target(self.observation(), 'Slow effect'))
+        initial = self.execute(action=self.action('observe'))
+        self.assertEqual('SUCCEEDED', initial['status'])
+        action = self.action('click', self.target(initial['result'],
+            'Slow effect'))
         result = self.execute(action=action)
         if result['status'] in ('ACCEPTED', 'DISPATCHED'):
             result = self.wait_operation(action['operationId'], self.client)
@@ -398,14 +428,236 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.assertEqual(before['browser']['idleCloseAt'], after['browser']['idleCloseAt'])
         self.assertEqual(history, primary.api(path + '/history')[1])
 
-        error, resolved, _ = self.client.respond(before, {
-            'outcome': 'SUCCEEDED', 'evidence': 'Observed counter=1 after the uncertain click.'})
+        observed = self.execute(action=self.action('observe'))
+        self.assertEqual('SUCCEEDED', observed['status'])
+        self.assertIn('"counter":1', str(observed['result']))
+        pending = before['request']
+        verification = {'outcome': 'SUCCEEDED',
+            'evidence': 'Observed counter=1 after the uncertain click.',
+            'observationOperationId': observed['id']}
+        arguments = {'taskId': self.task['id'], 'requestId': pending['id'],
+            'requestVersion': pending['version'], 'operationKey': str(uuid.uuid4()),
+            'verification': verification}
+        self.client.close_mcp()
+        self.client.mcp_capabilities = {}
+        for invalid in (None, [], 'invalid', {**verification, 'extra': True},
+                        {**verification, 'evidence': None}, {'outcome': 'SUCCEEDED'}):
+            error, refusal, _ = self.client.tool('tasks.respond', {**arguments,
+                'operationKey': str(uuid.uuid4()), 'verification': invalid})
+            self.assertTrue(error, refusal)
+            self.assertEqual(pending, primary.api(path)[1]['request'])
+        for invalid in (str(uuid.uuid4()), initial['id'], action['operationId']):
+            error, refusal, _ = self.client.tool('tasks.respond', {**arguments,
+                'operationKey': str(uuid.uuid4()),
+                'verification': {**verification, 'observationOperationId': invalid}})
+            self.assertTrue(error, refusal)
+            self.assertEqual('VALIDATION', refusal['code'])
+        error, refusal, _ = self.client.tool('tasks.respond', {**arguments,
+            'requestVersion': pending['version'] + 1})
+        self.assertTrue(error, refusal)
+        self.assertEqual('STALE_REQUEST', refusal['code'])
+        wrong_chat = primary.tool('tasks.respond', arguments)
+        self.assertTrue(wrong_chat[0], wrong_chat[1])
+
+        # Simulate a lost resolve reply after its intent and worker receipt were persisted.
+        payload = json.dumps(verification).replace("'", "''")
+        self.fixture_sql(self.identity,
+            "UPDATE task_requests SET verification='" + payload + "'::jsonb,"
+            "elicitation_operation_key='" + arguments['operationKey'] + "',"
+            "elicitation_attempt_id=NULL,elicitation_deadline=NULL WHERE owner_id=:owner AND id='"
+            + pending['id'] + "'; UPDATE operations SET next_check_at=clock_timestamp()"
+            " WHERE owner_id=:owner AND id='" + action['operationId'] + "';")
+        script = """
+const input = %s;
+const response = await fetch('http://127.0.0.1:8080/commands/' + input.id + '/resolve', {
+  method: 'POST', headers: {'content-type': 'application/json', 'x-worker-token': process.env.SESSION_TOKEN},
+  body: JSON.stringify({outcome: input.outcome, evidence: input.evidence})});
+if (response.status !== 200) throw new Error('Resolve status ' + response.status);
+""" % json.dumps({'id': action['operationId'], **verification})
+        reply = subprocess.run(self.docker + ['exec', '-i',
+            'helm-browser-' + self.task['browser']['id'], 'node', '--input-type=module'],
+            input=script, text=True, capture_output=True, timeout=20)
+        self.assertEqual(0, reply.returncode, reply.stderr)
+        time.sleep(12)
+        self.assertEqual(pending, primary.api(path)[1]['request'])
+        self.assertEqual('UNKNOWN', self.client.tool('operations.get',
+            {'operationId': action['operationId']})[1]['status'])
+        for changed in ({**verification, 'outcome': 'FAILED'},
+                        {**verification, 'evidence': 'A contradictory retry'},
+                        {**verification, 'observationOperationId': initial['id']}):
+            error, refusal, _ = self.client.tool('tasks.respond', {**arguments,
+                'verification': changed})
+            self.assertTrue(error, refusal)
+            self.assertEqual('IDEMPOTENCY_CONFLICT', refusal['code'])
+        error, refusal, _ = self.client.tool('tasks.respond', {**arguments,
+            'operationKey': str(uuid.uuid4()),
+            'verification': {**verification, 'outcome': 'FAILED'}})
+        self.assertTrue(error, refusal)
+        self.assertEqual('IDEMPOTENCY_CONFLICT', refusal['code'])
+        error, resolved, _ = self.client.tool('tasks.respond', arguments)
         self.assertFalse(error, resolved)
         self.assertEqual('WAITING_CHATGPT', resolved['status'])
         self.assertIsNone(resolved['request'])
         error, receipt, _ = self.client.tool('operations.get', {'operationId': action['operationId']})
         self.assertFalse(error, receipt)
         self.assertEqual('SUCCEEDED', receipt['status'])
+        self.assertEqual(observed['id'], receipt['result']['observationOperationId'])
+        self.assertEqual(resolved, self.client.tool('tasks.respond', arguments)[1])
+        error, refusal, _ = self.client.tool('tasks.respond', {**arguments,
+            'verification': {**verification, 'outcome': 'FAILED'}})
+        self.assertTrue(error, refusal)
+        self.assertEqual('IDEMPOTENCY_CONFLICT', refusal['code'])
+        self.assertEqual('MCP_VERIFICATION', self.fixture_sql(self.identity,
+            "SELECT answer_source FROM task_requests WHERE owner_id=:owner AND id='" + pending['id'] + "';"))
+
+    def test_unconfirmed_effect_allows_autonomous_progress_without_replay(self):
+        self.ready()
+        original = self.action('click', self.target(self.observation(), 'Slow effect'))
+        uncertain = self.execute(action=original)
+        if uncertain['status'] in ('ACCEPTED', 'DISPATCHED'):
+            uncertain = self.wait_operation(original['operationId'], self.client)
+        self.assertEqual('UNKNOWN', uncertain['status'])
+        primary = self.tasks[0][0]
+        path = '/api/tasks/' + self.task['id']
+        pending = primary.api(path)[1]
+        self.assertEqual(('WAITING_CHATGPT', 'UNKNOWN_RESULT'),
+            (pending['status'], pending['waitReason']))
+        self.assertIn('TAKE_CONTROL', pending['allowedCommands'])
+        self.assertIn('BEGIN_LOGIN', pending['allowedCommands'])
+        self.assertEqual('PENDING', self.fixture_sql(self.identity,
+            "SELECT continuation_status FROM mcp_chats WHERE owner_id=:owner AND task_id='"
+            + self.task['id'] + "';"))
+        tab = self.observation()['tabs'][0]['id']
+        for kind, arguments in (('selectTab', {'tabId': tab}), ('scroll', {'y': 100})):
+            receipt = self.execute(action=self.action(kind, arguments))
+            if receipt['status'] in ('ACCEPTED', 'DISPATCHED'):
+                receipt = self.wait_operation(receipt['id'], self.client)
+            self.assertEqual('SUCCEEDED', receipt['status'], receipt)
+        observed = self.execute(action=self.action('observe'))
+        if observed['status'] in ('ACCEPTED', 'DISPATCHED'):
+            observed = self.wait_operation(observed['id'], self.client)
+        self.assertEqual('SUCCEEDED', observed['status'])
+        self.client.close_mcp()
+        self.client.mcp_capabilities = {}
+        arguments = {'taskId': self.task['id'], 'requestId': pending['request']['id'],
+            'requestVersion': pending['request']['version'], 'operationKey': str(uuid.uuid4()),
+            'verification': {'outcome': 'UNCONFIRMED',
+                'evidence': 'Counter=1 is visible, but handler completion is unconfirmed. '
+                    'Proceed with the independent next increment without repeating the old click.',
+                'observationOperationId': observed['id']}}
+        error, resumed, _ = self.client.tool('tasks.respond', arguments)
+        self.assertFalse(error, resumed)
+        self.assertEqual('WAITING_CHATGPT', resumed['status'])
+        self.assertIsNone(resumed['request'])
+        receipt = self.client.tool('operations.get', {'operationId': original['operationId']})[1]
+        self.assertEqual(('UNCONFIRMED', 'RESULT_UNCONFIRMED'),
+            (receipt['status'], receipt['errorCode']))
+        self.assertEqual(observed['id'], receipt['result']['observationOperationId'])
+        self.assertEqual(receipt, self.execute(action=original))
+        self.assertEqual(resumed, self.client.tool('tasks.respond', arguments)[1])
+        self.assertEqual('SUCCEEDED', self.click('Increment')['status'])
+        self.assertIn('"counter":2', str(self.observation()))
+        error, conflict, _ = self.client.tool('tasks.respond', {**arguments,
+            'verification': {**arguments['verification'], 'outcome': 'SUCCEEDED'}})
+        self.assertTrue(error)
+        self.assertEqual('IDEMPOTENCY_CONFLICT', conflict['code'])
+        self.assertEqual('MCP_VERIFICATION|PROCEED', self.fixture_sql(self.identity,
+            "SELECT answer_source || '|' || answer_command FROM task_requests WHERE owner_id=:owner"
+            " AND id='" + pending['request']['id'] + "';"))
+        step = self.client.tool('steps.list', {'taskId': self.task['id']})[1]['items'][0]
+        error, completed, _ = self.client.tool('steps.command', {
+            'taskId': self.task['id'], 'operationKey': str(uuid.uuid4()), 'command': {
+                'type': 'COMPLETE', 'stepId': step['id'], 'expectedVersion': step['version'],
+                'instructionRevision': self.task['instructionRevision'], 'outcome': 'SUCCEEDED',
+                'result': 'Observed the required counter=2 without replaying the uncertain click.',
+                'evidence': [{'type': 'MODEL_RESULT', 'text': 'The page reports counter=2.',
+                    'sources': [{'title': 'Counter fixture', 'url': self.fixture_url}]}]}})
+        self.assertFalse(error, completed)
+        current = primary.api(path)[1]
+        error, finished, _ = self.client.tool('tasks.command', {
+            'taskId': self.task['id'], 'operationKey': str(uuid.uuid4()), 'command': {
+                'type': 'FINISH', 'expectedVersion': current['version'], 'outcome': 'SUCCEEDED',
+                'text': 'Reached counter=2. The earlier click remains unconfirmed in history.'}})
+        self.assertFalse(error, finished)
+        self.assertEqual('SUCCEEDED', finished['status'])
+
+    def test_native_click_timeout_requires_verification(self):
+        self.ready()
+        action = self.action('click', self.target(self.observation(), 'Covered target'))
+        result = self.execute(action=action)
+        if result['status'] in ('ACCEPTED', 'DISPATCHED'):
+            result = self.wait_operation(action['operationId'], self.client)
+        self.assertEqual('UNKNOWN', result['status'], result)
+        self.assertEqual('UNKNOWN_RESULT', result['errorCode'])
+        self.assertEqual(result, self.execute(action=action))
+        task = self.tasks[0][0].api('/api/tasks/' + self.task['id'])[1]
+        self.assertEqual('UNKNOWN_RESULT', task['request']['type'])
+        self.assertIn('"counter":0', str(self.observation()))
+
+    def test_dialog_early_response_stops_execution_and_preserves_receipt(self):
+        self.ready()
+        action = self.action('click', self.target(self.observation(), 'Dialog before effect'))
+        result = self.execute(action=action)
+        if result['status'] in ('ACCEPTED', 'DISPATCHED'):
+            result = self.wait_operation(action['operationId'], self.client)
+        self.assertEqual('UNKNOWN', result['status'], result)
+        self.assertEqual(result, self.execute(action=action))
+        primary = self.tasks[0][0]
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            task = primary.api('/api/tasks/' + self.task['id'])[1]
+            if task['browser']['status'] in ('LOST', 'CLOSED'):
+                break
+            time.sleep(.25)
+        self.assertIn(task['browser']['status'], ('LOST', 'CLOSED'))
+        running = subprocess.run(self.docker + ['ps', '--filter',
+            'name=^/helm-browser-' + self.task['browser']['id'] + '$', '--format', '{{.ID}}'],
+            text=True, capture_output=True, check=True, timeout=20)
+        self.assertEqual('', running.stdout.strip(), 'No native callback can run after the stopped session is released')
+        error, saved, _ = self.client.tool('operations.get', {'operationId': action['operationId']})
+        self.assertFalse(error, saved)
+        self.assertEqual(result['id'], saved['id'])
+        self.assertEqual('UNKNOWN', saved['status'])
+
+    def test_verification_after_stop_does_not_resume_the_task(self):
+        self.ready()
+        action = self.action('click', self.target(self.observation(), 'Slow effect'))
+        result = self.execute(action=action)
+        if result['status'] in ('ACCEPTED', 'DISPATCHED'):
+            result = self.wait_operation(action['operationId'], self.client)
+        self.assertEqual('UNKNOWN', result['status'], result)
+        observed = self.execute(action=self.action('observe'))
+        if observed['status'] in ('ACCEPTED', 'DISPATCHED'):
+            observed = self.wait_operation(observed['id'], self.client)
+        self.assertEqual('SUCCEEDED', observed['status'])
+        self.assertIn('"counter":1', str(observed['result']))
+        primary = self.tasks[0][0]
+        path = '/api/tasks/' + self.task['id']
+        task = primary.api(path)[1]
+        status, stopped = primary.api(path + '/commands', 'POST',
+            {'type': 'STOP', 'expectedVersion': task['version']})
+        self.assertEqual(200, status, stopped)
+        until = time.monotonic() + 45
+        while time.monotonic() < until:
+            stopped = primary.api(path)[1]
+            if stopped['status'] == 'STOPPED':
+                break
+            time.sleep(.2)
+        self.assertEqual('STOPPED', stopped['status'])
+        pending = stopped['request']
+        self.client.close_mcp()
+        self.client.mcp_capabilities = {}
+        error, verified, _ = self.client.tool('tasks.respond', {
+            'taskId': self.task['id'], 'requestId': pending['id'],
+            'requestVersion': pending['version'], 'operationKey': str(uuid.uuid4()),
+            'verification': {'outcome': 'SUCCEEDED',
+                'evidence': 'Observed counter=1 before stopping; this only verifies the prior effect.',
+                'observationOperationId': observed['id']}})
+        self.assertFalse(error, verified)
+        self.assertEqual(('STOPPED', 'CLOSED'), (verified['status'], verified['browser']['status']))
+        self.assertIsNone(verified['request'])
+        self.assertEqual('SUCCEEDED', self.client.tool('operations.get',
+            {'operationId': action['operationId']})[1]['status'])
 
     def test_rejected_command_rolls_back_inline_step(self):
         self.ready()

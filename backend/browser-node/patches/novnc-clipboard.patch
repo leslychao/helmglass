@@ -9,7 +9,7 @@
  // Extended clipboard pseudo-encoding formats
  const extendedClipboardFormatText   = 1;
  /*eslint-disable no-unused-vars */
-@@ -499,38 +501,15 @@
+@@ -499,38 +501,20 @@
  
      clipboardPasteFrom(text) {
          if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
@@ -46,18 +46,23 @@
 -            RFB.messages.clientCutText(this._sock, data);
 -        }
 +        if (typeof text !== 'string' || text.length > CLIPBOARD_TEXT_LIMIT ||
-+            text.includes('\0') || new TextEncoder().encode(text).length > CLIPBOARD_TEXT_LIMIT ||
-+            !this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] ||
-+            !this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
++            text.includes('\0') || new TextEncoder().encode(text).length > CLIPBOARD_TEXT_LIMIT) {
 +            this.dispatchEvent(new CustomEvent("clipboarderror"));
 +            return;
 +        }
 +        this._clipboardText = text;
++        // Connection readiness precedes the server's Extended Clipboard Caps.
++        if (!this._clipboardServerCapabilitiesActions[extendedClipboardActionCaps]) { return; }
++        if (!this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] ||
++            !this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
++            this.dispatchEvent(new CustomEvent("clipboarderror"));
++            return;
++        }
 +        RFB.messages.extendedClipboardNotify(this._sock, [extendedClipboardFormatText]);
      }
  
      getImageData() {
-@@ -2333,6 +2312,11 @@
+@@ -2333,6 +2317,11 @@
          let length = this._sock.rQshift32();
          length = toSigned32bit(length);
  
@@ -69,7 +74,17 @@
          if (this._sock.rQwait("ServerCutText content", Math.abs(length), 8)) { return false; }
  
          if (length >= 0) {
-@@ -2399,6 +2383,7 @@
+@@ -2388,5 +2377,8 @@
+                 ];
+                 RFB.messages.extendedClipboardCaps(this._sock, clientActions, {extendedClipboardFormatText: 0});
++                if (this._clipboardText !== null) {
++                    this.clipboardPasteFrom(this._clipboardText);
++                }
+-
++
+             } else if (actions === extendedClipboardActionRequest) {
+                 if (this._viewOnly) {
+@@ -2399,6 +2391,7 @@
  
                      if (formats & extendedClipboardFormatText) {
                          RFB.messages.extendedClipboardProvide(this._sock, [extendedClipboardFormatText], [this._clipboardText]);
@@ -77,7 +92,7 @@
                      }
                  }
  
-@@ -2457,6 +2442,10 @@
+@@ -2457,6 +2450,10 @@
                          size |= (sizeArray[1] << 16);
                          size |= (sizeArray[2] << 8);
                          size |= (sizeArray[3]);
@@ -88,7 +103,7 @@
                          let chunk = streamInflator.inflate(size);
  
                          if (format === extendedClipboardFormatText) {
-@@ -2479,6 +2468,10 @@
+@@ -2479,6 +2476,10 @@
                      }
  
                      textData = textData.replaceAll("\r\n", "\n");

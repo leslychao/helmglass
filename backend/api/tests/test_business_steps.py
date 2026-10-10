@@ -128,7 +128,7 @@ class BusinessStepsTest(unittest.TestCase):
         self.create()
         first = self.step("START", self.declare())
         remaining = self.declare(2)
-        _, failed = self.browser_action(first, "waitFor", {**self.client.browser_target(self.task['id'], 'Learn more', first['id']), 'state': 'hidden'})
+        _, failed = self.browser_action(first, "waitFor", {'textGone': 'Learn more'})
         self.assertEqual("FAILED", failed["status"])
         self.assertEqual("RUNNING", self.actual_step(first)["status"])
         _, observed = self.browser_action(first)

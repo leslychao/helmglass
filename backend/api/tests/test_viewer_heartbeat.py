@@ -6,6 +6,7 @@ import unittest
 import uuid
 
 import test_dev_contract as dev
+from test_viewer_revocation import ViewerSocket
 
 
 VIEWER = r'''
@@ -41,7 +42,7 @@ const result = await new Promise((resolve, reject) => {
   viewer.on('message', raw => {
     try {
       if (ready) {
-        // x11vnc announces an empty clipboard once after ServerInit; this is not a framebuffer update.
+        // An empty ServerCutText after ServerInit is not a framebuffer update.
         if (raw.length === 8 && raw[0] === 3 && raw.readUInt32BE(4) === 0) emptyClipboardMessages++;
         else dataAfterInit += raw.length;
         return;
@@ -84,6 +85,75 @@ class ViewerHeartbeatTest(unittest.TestCase):
     setUpClass = classmethod(dev.DevContractTest.setUpClass.__func__)
     fixture_sql = dev.DevContractTest.fixture_sql
 
+    def test_full_viewer_capacity_rejects_ticket_and_allows_replacement_and_recovery(self):
+        identity = dev.DisposableIdentity(self.settings, self.me['id'])
+        self.addCleanup(dev.DevContractTest.purge_identity, self, identity)
+        client = identity.client()
+        client.login_web()
+        client.login_mcp()
+        error, created, _ = client.tool('tasks.create', {'operationKey': str(uuid.uuid4()), 'task': {
+            'title': 'Viewer capacity acceptance', 'goal': 'Verify viewer admission and recovery',
+            'startUrl': 'https://example.com', 'prepare': True}})
+        self.assertFalse(error, created)
+        task_id = created['task']['id']
+
+        def task():
+            status, value = client.api('/api/tasks/' + task_id)
+            self.assertEqual(200, status)
+            return value
+
+        sockets = []
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline:
+                current = task()
+                if current.get('browser', {}).get('status') == 'LIVE':
+                    break
+                time.sleep(.2)
+            self.assertEqual('LIVE', current['browser']['status'])
+            browser_id = current['browser']['id']
+            viewer_ids = [str(uuid.uuid4()) for _ in range(3)]
+
+            def ticket(viewer_id):
+                return client.api('/api/browser-sessions/' + browser_id + '/ticket', 'POST',
+                    {'role': 'VIEWER', 'viewerId': viewer_id})
+
+            for viewer_id in viewer_ids[:2]:
+                status, value = ticket(viewer_id)
+                self.assertEqual(200, status, value)
+                sockets.append(ViewerSocket(client.base, value))
+                self.assertEqual(101, sockets[-1].status)
+            status, denied = ticket(viewer_ids[2])
+            self.assertEqual(409, status, 'A full viewer group must reject ticket issuance')
+            self.assertEqual('VIEWER_LIMIT_REACHED', denied['code'])
+
+            status, replacement = ticket(viewer_ids[0])
+            self.assertEqual(200, status, replacement)
+            sockets.append(ViewerSocket(client.base, replacement))
+            self.assertEqual(101, sockets[-1].status)
+            self.assertTrue(sockets[0].closed(5), 'Replacement releases the previous transport')
+            self.assertEqual(409, ticket(viewer_ids[2])[0], 'Replacement occupies only one slot')
+
+            sockets[1].close()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                status, recovered = ticket(viewer_ids[2])
+                if status == 200:
+                    break
+                self.assertEqual(409, status)
+                time.sleep(.1)
+            self.assertEqual(200, status, recovered)
+            sockets.append(ViewerSocket(client.base, recovered))
+            self.assertEqual(101, sockets[-1].status)
+            self.assertEqual(browser_id, task()['browser']['id'])
+            self.assertEqual('LIVE', task()['browser']['status'])
+        finally:
+            for viewer in sockets:
+                viewer.close()
+            current = task()
+            self.assertEqual(200, client.api('/api/tasks/' + task_id + '/commands', 'POST', {
+                'type': 'STOP', 'expectedVersion': current['version']})[0])
+
     def test_idle_public_view_and_missing_pong_recover_without_replacing_browser(self):
         identity = dev.DisposableIdentity(self.settings, self.me['id'])
         self.addCleanup(dev.DevContractTest.purge_identity, self, identity)
@@ -111,7 +181,10 @@ class ViewerHeartbeatTest(unittest.TestCase):
             self.assertEqual('LIVE', current['browser']['status'])
             browser = current['browser']
             viewer_id = str(uuid.uuid4())
-            for mode, duration in [('unresponsive', 35_000), ('reconnected', 21_000), ('idle', 300_000)]:
+            for mode, duration in [('unresponsive', 35_000), ('reconnected', 21_000), ('idle', 240_000)]:
+                # Each transport observation stays inside the task's five-minute idle lifetime.
+                self.assertEqual(200, client.api('/api/browser-sessions/' + browser['id'] + '/keep-open',
+                    'POST', {})[0])
                 status, ticket = client.api('/api/browser-sessions/' + browser['id'] + '/ticket',
                     'POST', {'role': 'VIEWER', 'viewerId': viewer_id})
                 self.assertEqual(200, status, ticket)

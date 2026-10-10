@@ -1,33 +1,39 @@
 import { randomUUID } from "node:crypto";
-import { setTimeout as delay } from "node:timers/promises";
+import path from "node:path";
+import { rm } from "node:fs/promises";
 import { createConnection } from "@playwright/mcp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { BrowserContext, Page } from "playwright";
 import { z } from "zod";
+import { inspectPrivateInput, snapshotUrl } from "./browser-privacy.js";
 
 export class BrowserRejection extends Error {
-  constructor(message: string, readonly code?: "OBSERVATION_LIMIT_EXCEEDED") {
+  constructor(message: string,
+    readonly code?: "OBSERVATION_LIMIT_EXCEEDED") {
     super(message);
   }
 }
+export class McpExecutionUnconfirmed extends Error {
+  constructor() { super("Browser execution must be stopped before releasing control"); }
+}
+const outputDirectory = "/tmp/helm-mcp";
 const refSchema = z.string().regex(/^(f\d+)?e\d+$/).max(40);
 const targetSchema = z.object({ observationId: z.uuid(), ref: refSchema });
 const fields = targetSchema.shape;
 const schemas: Record<string, z.ZodType> = {
   click: z.object(fields).strict(),
   fill: z.object({ ...fields, text: z.string().max(50_000) }).strict(),
-  press: z.object({ ...fields, key: z.string().min(1).max(100) }).strict(),
+  press: z.object({ key: z.string().min(1).max(100) }).strict(),
   selectOption: z.object({ ...fields, values: z.array(z.string().max(1000)).min(1).max(100) }).strict(),
   check: z.object({ ...fields, checked: z.boolean() }).strict(),
-  waitFor: z.union([
-    z.object({ ...fields, state: z.enum(["visible", "hidden", "attached", "detached"]).default("visible") }).strict(),
-    z.object({ ...fields, text: z.string().min(1).max(1000) }).strict()
-  ]),
+  waitFor: z.object({ text: z.string().min(1).max(1000).optional(),
+    textGone: z.string().min(1).max(1000).optional(), time: z.number().positive().max(30).optional()
+  }).strict().refine(value => value.text !== undefined || value.textGone !== undefined || value.time !== undefined),
   navigate: z.object({ url: z.string().max(8192) }).strict(),
   newTab: z.object({ url: z.string().max(8192).optional() }).strict(),
   selectTab: z.object({ index: z.number().int().nonnegative().max(19) }).strict(),
-  closeTab: z.object({}).strict(), goBack: z.object({}).strict(), reload: z.object({}).strict(),
+  closeTab: z.object({}).strict(), goBack: z.object({}).strict(),
   scroll: z.object({ x: z.number().min(-10_000).max(10_000).optional(), y: z.number().min(-10_000).max(10_000) }).strict()
 };
 
@@ -52,14 +58,8 @@ type Observation = {
   entries: Entry[]; issued: Map<string, NativeNode>; cursor?: string; offset: number; scope: Scope;
 };
 export type Sequence = { operationIds: string[] };
-type CallOptions = { helmPreserveRefs?: boolean; helmPublishText?: string; helmExplicitWait?: boolean };
 const observeSchema = z.union([z.object({}).strict(), targetSchema.strict(),
   z.object({ cursor: z.string().min(1).max(100) }).strict()]);
-
-function containsText(nodes: (NativeNode | string)[], text: string): boolean {
-  return nodes.some(node => typeof node === "string" ? node.includes(text)
-    : [node.name, node.text].some(value => value?.includes(text)) || containsText(node.children ?? [], text));
-}
 
 /** A session-local MCP connection. Chromium, tabs and access policy belong to server.ts. */
 export class BrowserMcp {
@@ -72,7 +72,9 @@ export class BrowserMcp {
   private selected?: Page;
   private observation?: Observation;
   private sequence?: { operationIds: string[]; next: number; observation: Observation };
-  private readonly listeners = new Map<Page, { changed: () => void; closed: () => void }>();
+  private pending?: ReturnType<Client["callTool"]>;
+  private unconfirmed = false;
+  private readonly listeners = new Map<Page, { changed: () => void; closed: () => void; dialog: () => void }>();
   private readonly pageAdded: (page: Page) => void;
   private captures = 0;
   private readonly metrics = { fullSnapshots: 0, targetSnapshots: 0, snapshotMillis: 0,
@@ -80,20 +82,23 @@ export class BrowserMcp {
     preflights: 0, preflightMillis: 0, actions: 0, actionMillis: 0, waits: 0, waitMillis: 0 };
 
   get isClosing(): boolean { return this.closing !== undefined; }
+  get requiresStop(): boolean { return this.unconfirmed; }
 
   constructor(private readonly context: BrowserContext, private readonly currentPage: () => Page,
     private readonly controlEpoch: () => number, private readonly assertAllowed: () => void) {
     this.pageAdded = page => {
       const changed = () => this.invalidate();
+      const dialog = () => { if (this.pending) this.unconfirmed = true; };
       const closed = () => {
         changed();
-        page.off("framenavigated", changed); page.off("close", closed); page.off("crash", changed);
+        page.off("framenavigated", changed); page.off("close", closed); page.off("crash", changed); page.off("dialog", dialog);
         this.listeners.delete(page);
       };
-      this.listeners.set(page, { changed, closed });
+      this.listeners.set(page, { changed, closed, dialog });
       page.on("framenavigated", changed);
       page.on("close", closed);
       page.on("crash", changed);
+      page.on("dialog", dialog);
       this.invalidate();
     };
     for (const page of context.pages()) this.pageAdded(page);
@@ -112,44 +117,46 @@ export class BrowserMcp {
       this.connection = await createConnection({
         snapshot: { mode: "none" }, webmcp: false, codegen: "none", imageResponses: "omit",
         saveSession: false, timeouts: { action: 20_000, navigation: 40_000 },
-        outputDir: "/tmp/helm-mcp", sharedBrowserContext: true
+        capabilities: ["vision"], outputDir: outputDirectory, sharedBrowserContext: true
       }, async () => this.context);
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       this.client = new Client({ name: "Helm Glass", version: "1.0.0" });
       await this.connection.connect(serverTransport);
       await this.client.connect(clientTransport);
-      const initialized = await this.client.callTool({ name: "browser_tabs", arguments: { action: "list", _meta: { json: true } } });
-      if (initialized.isError) throw new BrowserRejection("MCP initialization failed");
     })();
     await this.opening;
   }
 
-  private async call(name: string, args: Record<string, unknown>, signal?: AbortSignal,
-    options: CallOptions = {}): Promise<unknown> {
+  private async call(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     await this.open();
     this.assertAllowed();
     signal?.throwIfAborted();
+    if (this.unconfirmed) throw new McpExecutionUnconfirmed();
     let result;
+    // SDK cancellation and transport disposal do not acknowledge handler completion.
+    // Let the native RPC settle; the session's deadline watchdog bounds a stalled handler.
+    this.pending = this.client!.callTool({ name, arguments: { ...args, _meta: { json: true } } },
+      undefined, { timeout: 90_000 });
     try {
-      result = await this.client!.callTool({ name, arguments: { ...args, _meta: { json: true, ...options } } },
-        undefined, { signal, timeout: 45_000 });
-    } catch (error) {
-      await this.close();
-      throw error;
-    }
+      result = await this.pending;
+    } catch {
+      this.unconfirmed = true;
+      throw new McpExecutionUnconfirmed();
+    } finally { this.pending = undefined; }
+    if (this.unconfirmed) throw new McpExecutionUnconfirmed();
+    signal?.throwIfAborted();
     if (result.isError) {
       // Upstream error text is neither a public contract nor safe site data.
-      if (name === "browser_snapshot" && Array.isArray(result.content)) {
-        for (const item of result.content) {
-          const limit = item.type === "text" && typeof item.text === "string"
-            ? /HELM_SNAPSHOT_LIMIT(?:_(TEXT|TIME|NODES|DEPTH))?/.exec(item.text) : null;
-          if (limit) throw new BrowserRejection(`Page snapshot exceeds capture limits: ${limit[1] ?? "CAPTURE"}`, "OBSERVATION_LIMIT_EXCEEDED");
-        }
-      }
       throw new Error("Browser tool failed");
     }
-    const content = z.array(z.object({ type: z.literal("text"), text: z.string().max(2_097_152) }).strict()).length(1).parse(result.content);
-    return JSON.parse(content[0]!.text) as unknown;
+    const content = z.array(z.object({ type: z.literal("text"), text: z.string() }).strict()).length(1).safeParse(result.content);
+    if (!content.success) throw new Error("Invalid browser response");
+    if (Buffer.byteLength(content.data[0]!.text) > 2_097_152) {
+      if (name === "browser_snapshot")
+        throw new BrowserRejection("Browser response exceeds limit", "OBSERVATION_LIMIT_EXCEEDED");
+      throw new Error("Browser response exceeds limit");
+    }
+    return JSON.parse(content.data[0]!.text) as unknown;
   }
 
   private async synchronize(signal?: AbortSignal): Promise<Page> {
@@ -160,6 +167,7 @@ export class BrowserMcp {
       throw new BrowserRejection("Selected page is unavailable");
     if (this.selected !== page) {
       this.invalidate();
+      if (this.selected === undefined) await this.call("browser_tabs", { action: "list" }, signal);
       await this.call("browser_tabs", { action: "select", index: pages.indexOf(page) }, signal);
       if (this.currentPage() !== page || this.context.pages()[pages.indexOf(page)] !== page)
         throw new BrowserRejection("Selected page changed");
@@ -168,15 +176,44 @@ export class BrowserMcp {
     return page;
   }
 
-  private async capture(signal?: AbortSignal, ref?: string, options: CallOptions = {}): Promise<NativeNode[]> {
+  private async capture(signal?: AbortSignal, ref?: string): Promise<NativeNode[]> {
     this.captures++;
     if (ref) this.metrics.targetSnapshots++; else this.metrics.fullSnapshots++;
     const started = performance.now();
-    try { return snapshotResult.parse(await this.call("browser_snapshot", ref ? { target: ref } : {}, signal, options)).snapshot; }
+    try {
+      const snapshot = snapshotResult.parse(await this.call("browser_snapshot", ref ? { target: ref } : {}, signal)).snapshot;
+      await this.filterObservation(snapshot, signal);
+      return snapshot;
+    }
     finally {
       const elapsed = performance.now() - started;
       this.metrics.snapshotMillis += elapsed;
       if (ref) this.metrics.targetSnapshotMillis += elapsed; else this.metrics.fullSnapshotMillis += elapsed;
+    }
+  }
+
+  private async filterObservation(snapshot: NativeNode[], signal?: AbortSignal): Promise<void> {
+    const pending: NativeNode[] = [];
+    const visit = (nodes: (NativeNode | string)[]) => {
+      for (const node of nodes) {
+        if (typeof node === "string") continue;
+        if (node.url !== undefined) node.url = snapshotUrl(node.url);
+        if (node.ref) pending.push(node);
+        if (node.children) visit(node.children);
+      }
+    };
+    visit(snapshot);
+    const page = this.currentPage();
+    for (let offset = 0; offset < pending.length; offset += 16) {
+      signal?.throwIfAborted();
+      await Promise.all(pending.slice(offset, offset + 16).map(async node => {
+        const inspected = await page.locator(`aria-ref=${node.ref}`).evaluate(inspectPrivateInput, node.name ?? "")
+          .catch(() => ({ protectedInput: true, hiddenName: true }));
+        if (inspected.hiddenName) delete node.name;
+        if (inspected.protectedInput) {
+          delete node.text; delete node.placeholder; delete node.children;
+        }
+      }));
     }
   }
 
@@ -283,21 +320,30 @@ export class BrowserMcp {
   }
 
   private async checkPrivateInput(page: Page, ref: string, name: string, signal: AbortSignal): Promise<void> {
-    const protectedInput = await page.locator(`aria-ref=${ref}`).evaluate((element, accessibleName) => {
-      const typeValue = element.getAttribute("type") ?? "";
-      const values = ["autocomplete", "name", "id", "aria-label"].map(key => element.getAttribute(key) ?? "");
-      if (typeValue.length > 100 || values.some(value => value.length > 1000)) return true;
-      const type = typeValue.toLowerCase();
-      const hints = values.join(" ") + (element.matches('input, textarea, select, [contenteditable], [role="textbox"]') ? " " + accessibleName : "");
-      return ["password", "hidden"].includes(type) || /password|passwd|one.?time.?code|otp|verification.?code|security.?code|cc-|cc_?(?:number|exp|csc)|card.?number|cvc|cvv|payment|парол|однораз|код.подтверж|номер.карт/i.test(hints);
-    }, name, { signal }).catch(() => { throw new BrowserRejection("Reference is unavailable"); });
-    if (protectedInput) throw new BrowserRejection("Private input requires the user");
+    const inspected = await page.locator(`aria-ref=${ref}`).evaluate(inspectPrivateInput, name, { signal })
+      .catch(() => { throw new BrowserRejection("Reference is unavailable"); });
+    if (inspected.protectedInput) throw new BrowserRejection("Private input requires the user");
+  }
+
+  private async checkFocus(page: Page, signal: AbortSignal): Promise<void> {
+    for (const frame of page.frames()) {
+      signal.throwIfAborted();
+      if (frame.isDetached()) continue;
+      const focus = frame.locator(":focus");
+      try {
+        if (await focus.count() === 0) continue;
+        const inspected = await focus.evaluate(inspectPrivateInput, "", { signal });
+        if (inspected.protectedInput) throw new BrowserRejection("Private input requires the user");
+      } catch (error) {
+        if (error instanceof BrowserRejection) throw error;
+        throw new BrowserRejection("Keyboard focus could not be verified");
+      }
+    }
   }
 
   async act(type: string, args: Record<string, unknown>, operationId: string, sequence: Sequence | undefined,
-    signal: AbortSignal, options: { explicitWait?: boolean; observeAfter?: boolean } = {}): Promise<object | undefined> {
+    signal: AbortSignal): Promise<void> {
     let dispatched = false;
-    let observed = false;
     try {
       if (!schemas[type]) throw new BrowserRejection("Unsupported browser action");
       schemas[type]!.parse(args);
@@ -307,7 +353,7 @@ export class BrowserMcp {
         throw new BrowserRejection("Invalid operation sequence");
       if (this.sequence && (!sequence
         || JSON.stringify(sequence.operationIds) !== JSON.stringify(this.sequence.operationIds))) this.sequence = undefined;
-      const targeted = ["click", "fill", "press", "selectOption", "check", "waitFor"].includes(type);
+      const targeted = ["click", "fill", "selectOption", "check"].includes(type);
       let ref: string | undefined;
       let target: ReturnType<BrowserMcp["issuedTarget"]> | undefined;
       if (targeted) {
@@ -316,18 +362,11 @@ export class BrowserMcp {
         try {
           target = this.issuedTarget(args, operationId, sequence);
           ref = target.ref;
-          // Absence is the successful result of hidden/detached. Native ref lookup
-          // remains identity-bound; a replacement never satisfies attached/visible.
-          const absenceWait = type === "waitFor" && ["hidden", "detached"].includes(String(args["state"]));
-          const textWait = type === "waitFor" && typeof args["text"] === "string";
-          if (!absenceWait && !textWait) {
-            const snapshot = await this.capture(signal, ref, { helmPreserveRefs: true });
-            this.checkNativeTarget(snapshot, ref, target.issued);
-            await this.checkPrivateInput(page, ref, target.issued.name ?? "", signal);
-          }
+          await this.checkPrivateInput(page, ref, target.issued.name ?? "", signal);
           this.checkObservation(target.observation);
         } finally { this.metrics.preflightMillis += performance.now() - preflightStarted; }
       }
+      if (type === "press") await this.checkFocus(page, signal);
       signal.throwIfAborted();
       this.observation = undefined;
       dispatched = true;
@@ -335,27 +374,18 @@ export class BrowserMcp {
       if (type === "waitFor") this.metrics.waits++; else this.metrics.actions++;
       try {
         switch (type) {
-          case "click": await this.call("browser_click", { target: ref }, signal, { helmExplicitWait: options.explicitWait }); break;
-          case "fill": await this.call("browser_type", { target: ref, text: args["text"] }, signal, { helmExplicitWait: options.explicitWait }); break;
-          case "check": await this.call("browser_fill_form", { fields: [{ target: ref, name: "Field", type: "checkbox", value: String(args["checked"]) }] }, signal, { helmExplicitWait: options.explicitWait }); break;
-          case "selectOption": await this.call("browser_select_option", { target: ref, values: args["values"] }, signal, { helmExplicitWait: options.explicitWait }); break;
-          case "navigate": await this.call("browser_navigate", { url: args["url"] }, signal, { helmExplicitWait: options.explicitWait }); break;
-          case "goBack": await this.call("browser_navigate_back", {}, signal, { helmExplicitWait: options.explicitWait }); break;
+          case "click": await this.call("browser_click", { target: ref }, signal); break;
+          case "fill": await this.call("browser_type", { target: ref, text: args["text"] }, signal); break;
+          case "check": await this.call("browser_fill_form", { fields: [{ target: ref, name: "Field", type: "checkbox", value: String(args["checked"]) }] }, signal); break;
+          case "selectOption": await this.call("browser_select_option", { target: ref, values: args["values"] }, signal); break;
+          case "navigate": await this.call("browser_navigate", { url: args["url"] }, signal); break;
+          case "goBack": await this.call("browser_navigate_back", {}, signal); break;
           case "newTab": await this.call("browser_tabs", { action: "new", ...args }, signal); break;
           case "selectTab": await this.call("browser_tabs", { action: "select", ...args }, signal); break;
           case "closeTab": await this.call("browser_tabs", { action: "close" }, signal); break;
-          case "press": await page.locator(`aria-ref=${ref}`).press(z.string().parse(args["key"]), { signal }); break;
-          case "waitFor": {
-            if (typeof args["text"] === "string") {
-              observed = await this.waitForText(target!, args["text"], signal, options.observeAfter === true);
-            } else {
-              await page.locator(`aria-ref=${ref}`).waitFor({ state: z.enum(["visible", "hidden", "attached", "detached"]).parse(args["state"] ?? "visible"), timeout: 20_000, signal });
-              this.checkObservation(target!.observation);
-            }
-            break;
-          }
-          case "reload": await page.reload({ waitUntil: "domcontentloaded", signal }); break;
-          case "scroll": await page.mouse.wheel(z.number().parse(args["x"] ?? 0), z.number().parse(args["y"])); break;
+          case "press": await this.call("browser_press_key", { key: args["key"] }, signal); break;
+          case "waitFor": await this.call("browser_wait_for", args, signal); break;
+          case "scroll": await this.call("browser_mouse_wheel", { deltaX: args["x"] ?? 0, deltaY: args["y"] }, signal); break;
         }
         if (this.sequence) {
           this.sequence.next = (position ?? this.sequence.next) + 1;
@@ -363,43 +393,26 @@ export class BrowserMcp {
         }
       } catch (error) {
         this.sequence = undefined;
-        // Client cancellation is not a disposal acknowledgement. The patched server
-        // awaits the actual handler before releasing listeners and the context.
         await this.close();
         throw error;
       } finally {
         if (type === "waitFor") this.metrics.waitMillis += performance.now() - actionStarted;
         else this.metrics.actionMillis += performance.now() - actionStarted;
       }
-      return observed ? this.observationPage() : undefined;
     } catch (error) {
-      if (!dispatched && !(error instanceof z.ZodError))
+      if (!dispatched && !(error instanceof z.ZodError) && !(error instanceof McpExecutionUnconfirmed))
         throw new BrowserRejection(error instanceof BrowserRejection ? error.message : "Browser target could not be verified; observe again",
           error instanceof BrowserRejection ? error.code : undefined);
       throw error;
     }
   }
 
-  private async waitForText(target: ReturnType<BrowserMcp["issuedTarget"]>, text: string,
-    signal: AbortSignal, observeAfter: boolean): Promise<boolean> {
-    const deadline = AbortSignal.timeout(20_000);
-    const pending = AbortSignal.any([signal, deadline]);
-    for (;;) {
-      pending.throwIfAborted();
-      this.checkObservation(target.observation);
-      const time = new Date().toISOString();
-      const snapshot = await this.capture(pending, target.ref,
-        { helmPreserveRefs: true, ...(observeAfter ? { helmPublishText: text } : {}) });
-      this.checkObservation(target.observation);
-      if (containsText(snapshot, text)) {
-        if (!observeAfter) return false;
-        this.publish(snapshot, { page: target.observation.page, generation: this.generation,
-          epoch: this.controlEpoch(), time,
-          scope: { type: "region", observationId: target.observation.id, ref: target.ref } });
-        return true;
-      }
-      await delay(250, undefined, { signal: pending });
-    }
+  async screenshot(operationId: string, signal: AbortSignal): Promise<string> {
+    await this.synchronize(signal);
+    const filename = path.posix.join(outputDirectory, `screenshot-${z.uuid().parse(operationId)}.png`);
+    try { await this.call("browser_take_screenshot", { type: "png", filename, fullPage: false }, signal); }
+    catch (error) { await rm(filename, { force: true }); throw error; }
+    return filename;
   }
 
   close(): Promise<void> {
@@ -408,19 +421,15 @@ export class BrowserMcp {
     return this.closing ??= Promise.resolve().then(async () => {
       let failure: unknown;
       try { await this.opening; } catch (error) { failure = error; }
+      try { await this.pending; } catch { this.unconfirmed = true; }
       try { await this.connection?.close(); } catch (error) { failure ??= error; }
       try { await this.client?.close(); } catch (error) { failure ??= error; }
-      for (const page of this.context.pages()) {
-        for (const frame of page.frames()) {
-          try { await frame.locator(":root").ariaSnapshotJSON({ mode: "ai", depth: -1, timeout: 20_000 }); }
-          catch (error) { if (!frame.isDetached() && !page.isClosed()) failure ??= error; }
-        }
-      }
       this.context.off("page", this.pageAdded);
-      for (const [page, { changed, closed }] of this.listeners) {
-        page.off("framenavigated", changed); page.off("close", closed); page.off("crash", changed);
+      for (const [page, { changed, closed, dialog }] of this.listeners) {
+        page.off("framenavigated", changed); page.off("close", closed); page.off("crash", changed); page.off("dialog", dialog);
       }
       this.listeners.clear(); this.client = undefined; this.connection = undefined;
+      if (this.unconfirmed) throw new McpExecutionUnconfirmed();
       if (failure) throw new Error("Browser observation disposal failed", { cause: failure });
     });
   }

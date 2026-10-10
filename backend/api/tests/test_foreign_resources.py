@@ -87,7 +87,6 @@ class ForeignResourceTest(unittest.TestCase):
             self.fail("The owned browser command did not complete")
 
         complete("observe")
-        complete("reload")
         baseline = wait_task(lambda task: task.get("browser") is not None
                              and task["browser"]["status"] == "LIVE"
                              and task["browser"]["currentUrl"] == "https://example.com/"

@@ -103,4 +103,13 @@
   <changeSet id="31-operation-reconciliation" author="helmglass">
     <sqlFile path="031-operation-reconciliation.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="32-operation-verification-source" author="helmglass">
+    <sqlFile path="032-operation-verification-source.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="33-autonomous-uncertainty" author="helmglass">
+    <sqlFile path="033-autonomous-uncertainty.sql" relativeToChangelogFile="true"/>
+  </changeSet>
+  <changeSet id="34-unconfirmed-verification-command" author="helmglass">
+    <sqlFile path="034-unconfirmed-verification-command.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

@@ -151,7 +151,7 @@ test('completed downloads release staging files while archived artifacts and the
     try {
       assert.equal((await request('/sessions', {sessionId: id, ownerId: randomUUID(), startUrl: url})).status, 'LIVE');
       await request(base + '/control', {controlEpoch: 1, owner: 'CHATGPT', privateMode: false});
-      assert.equal((await action('waitFor', await target(request, base, 'Download'))).status, 'SUCCEEDED', 'Download fixture is available');
+      assert.equal((await action('waitFor', { text: 'Download' })).status, 'SUCCEEDED', 'Download fixture is available');
       const before = await sample(container);
       for (let index = 0; index < 5; index++) {
         assert.equal((await action('click', await target(request, base, 'Download'))).status, 'SUCCEEDED');

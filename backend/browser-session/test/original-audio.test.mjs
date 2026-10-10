@@ -12,7 +12,7 @@ assert.ok(worker && fixture && token, 'WORKER_URL, TEST_FIXTURE_URL and WORKER_T
 const headers = { 'X-Worker-Token': token, 'Content-Type': 'application/json' };
 async function request(route, body, method = body ? 'POST' : 'GET', signal) {
   const response = await fetch(worker + route, { method, headers, body: body ? JSON.stringify(body) : undefined, signal });
-  assert.ok(response.ok, `Worker HTTP ${response.status}`);
+  assert.ok(response.ok, `Worker HTTP ${response.status} on ${method} ${route} (${body?.type ?? ''} ${body?.arguments?.sourceRef ?? ''})`);
   return response.json();
 }
 
@@ -46,6 +46,8 @@ test('iframe original audio is discovered and captured in its source frame', { t
     const listed = await request(base + '/commands', command('listMedia', {}));
     assert.equal(listed.status, 'SUCCEEDED');
     for (const original of originals) {
+      assert.ok(listed.result.sources.some(item => item.url === original.fast),
+        'DOM discovery must include the original from each isolated iframe');
       const fast = listed.result.media.find(item => item.sourceUrl === original.fast);
       assert.ok(fast, 'listMedia must discover audio inside each isolated iframe');
       const receipt = await request(base + '/commands', command('captureAudio', {
@@ -113,11 +115,13 @@ test('original Blob bytes, lost-response receipt, deduplication and cancelled tr
     assert.equal(durable.result.artifact.sha256, original.sha256);
 
     const cancelledRef = 'cancelled-transfer-' + randomUUID();
-    const pending = request(base + '/commands', command('captureAudio', { sourceId: slow.id, sourceRef: cancelledRef }));
+    const cancelled = command('captureAudio', { sourceId: slow.id, sourceRef: cancelledRef });
+    const pending = request(base + '/commands', cancelled);
     await new Promise(resolve => setTimeout(resolve, 700)); const started = Date.now();
-    epoch += 1; await request(base + '/control', { controlEpoch: epoch, owner: 'NONE', privateMode: false });
+    await request(base + '/commands/' + cancelled.operationId + '/cancel', {});
     assert.equal((await pending).status, 'FAILED');
-    assert.ok(Date.now() - started < 2_000, 'Revoking control must promptly cancel the Blob stream');
+    assert.ok(Date.now() - started < 2_000, 'Cancelling the operation must promptly stop the Blob stream');
+    epoch += 1; await request(base + '/control', { controlEpoch: epoch, owner: 'NONE', privateMode: false });
     const artifacts = await request(base + '/artifacts');
     assert.equal(artifacts.artifacts.filter(item => item.sourceRef === cancelledRef).length, 0);
     assert.equal(artifacts.artifacts.length, 2, 'Only the two completed original transfers are published');

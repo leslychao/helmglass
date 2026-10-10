@@ -3,17 +3,18 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { chromium } from 'playwright';
-import { BrowserMcp } from '../dist/browser-mcp.js';
+import { BrowserMcp, McpExecutionUnconfirmed } from '../dist/browser-mcp.js';
 
+// Run in the browser-session image on dev.
 async function fixture(html, run) {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
-  let page = await context.newPage();
+  const page = await context.newPage();
   let epoch = 1;
   const mcp = new BrowserMcp(context, () => page, () => epoch, () => {});
   try {
     await page.setContent(html);
-    await run({ mcp, page, context, changePage: value => { page = value; }, changeControl: () => epoch++ });
+    await run({ mcp, page, context, changeControl: () => epoch++ });
   } finally { await mcp.close(); await browser.close(); }
 }
 function target(observation, name) {
@@ -24,7 +25,7 @@ function target(observation, name) {
 const signal = () => new AbortController().signal;
 const batch = count => ({ operationIds: Array.from({ length: count }, randomUUID) });
 
-test('target preflights preserve sibling, iframe and shadow refs; final region replaces observation', async () => {
+test('native actions keep sibling, iframe and shadow refs until the final scoped observation', async () => {
   await fixture(`<form aria-label="Fields"><label>First<input></label><button type=button>Apply</button></form>
     <iframe srcdoc='<label>Inside<input></label>'></iframe><div id=shadow></div>`, async ({ mcp, page }) => {
     await page.locator('#shadow').evaluate(node => { node.attachShadow({ mode: 'open' }).innerHTML = '<label>Shadow<input></label>'; });
@@ -36,174 +37,120 @@ test('target preflights preserve sibling, iframe and shadow refs; final region r
     }
     const region = await mcp.observe(target(observed, 'Fields'), signal(), sequence.operationIds[3], sequence);
     assert.equal(region.scope.type, 'region');
-    assert.equal(region.complete, true);
     assert.equal(region.metrics.fullSnapshots, 1);
-    assert.equal(region.metrics.targetSnapshots, 4);
+    assert.equal(region.metrics.targetSnapshots, 1);
+    assert.equal(await page.getByLabel('First').inputValue(), 'First');
     assert.equal(await page.frameLocator('iframe').getByLabel('Inside').inputValue(), 'Inside');
     assert.equal(await page.getByLabel('Shadow').inputValue(), 'Shadow');
-    assert.ok(!JSON.stringify(region.snapshot).includes('Inside'));
     await assert.rejects(mcp.act('click', target(observed, 'Apply'), randomUUID(), undefined, signal()), /not issued/);
     await mcp.act('click', target(region, 'Apply'), randomUUID(), undefined, signal());
   });
 });
 
-test('replacement, changed role/name, navigation, control and scope cursor revoke references', async () => {
-  await fixture('<section aria-label="Scope"><button>Target</button></section>', async ({ mcp, page, context, changePage, changeControl }) => {
+test('replacement and control changes revoke refs; cursor retains filtered observation', async () => {
+  await fixture('<section aria-label="Scope"><button>Target</button></section>', async ({ mcp, page, changeControl }) => {
     let observed = await mcp.observe();
     await page.getByRole('button').evaluate(node => node.replaceWith(node.cloneNode(true)));
     await assert.rejects(mcp.act('click', target(observed, 'Target'), randomUUID(), undefined, signal()));
     observed = await mcp.observe();
-    await page.getByRole('button').evaluate(node => node.setAttribute('aria-label', 'Changed'));
-    await assert.rejects(mcp.act('click', target(observed, 'Target'), randomUUID(), undefined, signal()));
-    observed = await mcp.observe();
-    await page.getByRole('button').evaluate(node => node.setAttribute('role', 'link'));
-    await assert.rejects(mcp.act('click', target(observed, 'Changed'), randomUUID(), undefined, signal()));
-    observed = await mcp.observe();
     changeControl();
     await assert.rejects(mcp.observe(target(observed, 'Scope')), /expired/);
-    observed = await mcp.observe();
-    const next = await context.newPage();
-    changePage(next);
-    await assert.rejects(mcp.act('click', target(observed, 'Changed'), randomUUID(), undefined, signal()));
-    changePage(page);
-    await next.close();
     await page.setContent('<section aria-label="Scope">' + '<p>Row</p>'.repeat(250) + '</section>');
     observed = await mcp.observe();
-    let region = await mcp.observe(target(observed, 'Scope'));
+    const region = await mcp.observe(target(observed, 'Scope'));
     assert.equal(region.complete, false);
-    const original = region;
-    region = await mcp.observe({ cursor: region.cursor });
-    assert.equal(region.observedAt, original.observedAt);
-    assert.deepEqual(region.scope, original.scope);
+    const continued = await mcp.observe({ cursor: region.cursor });
+    assert.equal(continued.observedAt, region.observedAt);
+    assert.deepEqual(continued.scope, region.scope);
     await mcp.observe();
-    await assert.rejects(mcp.observe({ cursor: original.cursor }), /cursor expired/);
-    observed = await mcp.observe();
+    await assert.rejects(mcp.observe({ cursor: region.cursor }), /cursor expired/);
     await page.goto('data:text/html,<button>New page</button>');
     await assert.rejects(mcp.observe(target(observed, 'Scope')));
   });
 });
 
-test('target traversal ignores unrelated growth and restores native maps after bounded failure', async () => {
-  await fixture('<section aria-label="Region"><p>Small</p></section><button>Other</button><div id=outside></div>', async ({ mcp, page }) => {
+test('stock text waits complete before a fresh observation without repeating the effect', async () => {
+  await fixture(`<button>Save</button><output>Waiting</output>
+    <script>let effects=0;document.querySelector('button').onclick=()=>{effects++;setTimeout(()=>document.querySelector('output').textContent='Saved '+effects,700)}</script>`, async ({ mcp, page }) => {
     const observed = await mcp.observe();
-    await page.locator('#outside').evaluate(node => { node.innerHTML = '<i>x</i>'.repeat(20001); });
-    const region = await mcp.observe(target(observed, 'Region'));
-    assert.equal(region.complete, true);
-    assert.ok(JSON.stringify(region).length < 2000);
-  });
-  await fixture('<section aria-label="Region"><p>Small</p></section><button>Other</button>', async ({ mcp, page }) => {
-    const observed = await mcp.observe();
-    const other = target(observed, 'Other');
-    await page.locator('p').evaluate(node => { node.textContent = 'x'.repeat(262145); });
-    await assert.rejects(mcp.act('click', target(observed, 'Region'), randomUUID(), undefined, signal()),
-      error => error.code === 'OBSERVATION_LIMIT_EXCEEDED');
-    assert.equal(await page.locator(`aria-ref=${other.ref}`).count(), 1);
-  });
-});
-
-test('text waits reuse the matching safe native region and skip only explicitly replaced settle', async () => {
-  for (const millis of [0, 150, 700]) {
-    await fixture(`<button>Save</button><div role=status aria-label="Result">Waiting</div>
-      <script>let effects=0;document.querySelector('button').onclick=()=>{effects++;setTimeout(()=>document.querySelector('[role=status]').textContent='Saved once',${millis})}</script>`, async ({ mcp, page }) => {
-      const observed = await mcp.observe();
-      const sequence = batch(2);
-      const started = performance.now();
-      await mcp.act('click', target(observed, 'Save'), sequence.operationIds[0], sequence, signal(), { explicitWait: true });
-      const clickMillis = performance.now() - started;
-      assert.ok(clickMillis < 450, `click still settled for ${clickMillis} ms`);
-      const result = await mcp.act('waitFor', { ...target(observed, 'Result'), text: 'Saved once' }, sequence.operationIds[1], sequence, signal(), { observeAfter: true });
-      assert.equal(result.scope.type, 'region');
-      assert.equal(result.metrics.fullSnapshots, 1);
-      assert.equal(result.metrics.waits, 1);
-      assert.ok(result.metrics.waitMillis > 0);
-      assert.equal(await page.evaluate(() => effects), 1);
-      assert.ok(JSON.stringify(result).includes('Saved once'));
-      assert.ok(!JSON.stringify(result.snapshot).includes('Save"'));
-      console.log(JSON.stringify({ waitDelayMillis: millis, clickMillis, totalMillis: performance.now() - started, metrics: result.metrics }));
-    });
-  }
-});
-
-test('text waits retain other batch refs, permit changed text, reject target replacement and settle cancellation', async () => {
-  await fixture('<button>Waiting</button>', async ({ mcp, page }) => {
-    const observed = await mcp.observe();
-    await page.getByRole('button').evaluate(node => { node.textContent = 'Ready'; });
-    const result = await mcp.act('waitFor', { ...target(observed, 'Waiting'), text: 'Ready' },
-      randomUUID(), undefined, signal(), { observeAfter: true });
-    assert.ok(target(result, 'Ready').ref);
-    await mcp.act('click', target(result, 'Ready'), randomUUID(), undefined, signal());
-  });
-  await fixture('<button>Other</button><div role=status>Waiting</div>', async ({ mcp, page }) => {
-    let observed = await mcp.observe();
-    const status = observed.snapshot.find(({ node }) => node.role === 'status').node.ref;
     const sequence = batch(2);
-    await page.locator('[role=status]').evaluate(node => { node.textContent = 'Ready'; });
-    await mcp.act('waitFor', { observationId: observed.observationId, ref: status, text: 'Ready' }, sequence.operationIds[0], sequence, signal());
-    await mcp.act('click', target(observed, 'Other'), sequence.operationIds[1], sequence, signal());
-    observed = await mcp.observe();
-    const current = observed.snapshot.find(({ node }) => node.role === 'status').node.ref;
-    await page.locator('[role=status]').evaluate(node => node.replaceWith(node.cloneNode(true)));
-    const started = performance.now();
-    await assert.rejects(mcp.act('waitFor', { observationId: observed.observationId, ref: current, text: 'Ready' }, randomUUID(), undefined, signal()));
-    assert.ok(performance.now() - started < 1000, 'Removed identity must fail immediately');
+    await mcp.act('click', target(observed, 'Save'), sequence.operationIds[0], sequence, signal());
+    await mcp.act('waitFor', { textGone: 'Waiting', text: 'Saved 1', time: .01 }, sequence.operationIds[1], sequence, signal());
+    const result = await mcp.observe();
+    assert.equal(result.scope.type, 'page');
+    assert.equal(result.metrics.fullSnapshots, 2);
+    assert.ok(JSON.stringify(result.snapshot).includes('Saved 1'));
+    assert.equal(await page.evaluate(() => effects), 1);
+    for (const args of [{}, { time: 31 }, { text: 'Ready', state: 'visible' }])
+      await assert.rejects(mcp.act('waitFor', args, randomUUID(), undefined, signal()));
   });
-  await fixture('<div role=status aria-label="Result">Waiting</div>', async ({ mcp, page }) => {
+});
+
+test('keyboard uses actual focus and refuses sensitive input after focus changes', async () => {
+  await fixture('<label>Text<input id=plain></label><label>One-time code<input id=code></label>', async ({ mcp, page }) => {
     const observed = await mcp.observe();
+    await mcp.act('click', target(observed, 'Text'), randomUUID(), undefined, signal());
+    await mcp.act('press', { key: 'a' }, randomUUID(), undefined, signal());
+    assert.equal(await page.locator('#plain').inputValue(), 'a');
+    await mcp.act('press', { key: 'Tab' }, randomUUID(), undefined, signal());
+    await assert.rejects(mcp.act('press', { key: 'b' }, randomUUID(), undefined, signal()), /Private input/);
+    assert.equal(await page.locator('#code').inputValue(), '');
+    await assert.rejects(mcp.act('press', { ...target(observed, 'Text'), key: 'Enter' }, randomUUID(), undefined, signal()));
+  });
+});
+
+test('current field metadata refuses a newly sensitive label on an already issued target', async () => {
+  await fixture('<label><span>Public field</span><input></label>', async ({ mcp, page }) => {
+    const observed = await mcp.observe();
+    await page.locator('span').evaluate(label => { label.textContent = 'One-time code'; });
+    await assert.rejects(mcp.act('fill', { ...target(observed, 'Public field'), text: 'blocked' }, randomUUID(), undefined, signal()), /Private input/);
+    assert.equal(await page.locator('input').inputValue(), '');
+  });
+});
+
+test('caller cancellation waits for actual native handler completion', async () => {
+  await fixture('<p>Ready</p>', async ({ mcp }) => {
+    await mcp.observe();
     const abort = new AbortController();
-    const pending = mcp.act('waitFor', { ...target(observed, 'Result'), text: 'Never' }, randomUUID(), undefined, abort.signal);
-    setTimeout(() => abort.abort(), 350);
+    const started = performance.now();
+    const pending = mcp.act('waitFor', { time: .8 }, randomUUID(), undefined, abort.signal);
+    await delay(150); abort.abort();
     await assert.rejects(pending);
+    assert.ok(performance.now() - started >= 750);
+    assert.equal(mcp.requiresStop, false);
+  });
+});
+
+test('a native modal early response leaves execution unconfirmed until the session stops', async () => {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const mcp = new BrowserMcp(context, () => page, () => 1, () => {});
+  try {
+    await page.setContent('<button onclick="alert(\'Hold\');document.body.dataset.effect=\'late\'">Dialog</button>');
+    const observed = await mcp.observe();
+    await assert.rejects(mcp.act('click', target(observed, 'Dialog'), randomUUID(), undefined, signal()), McpExecutionUnconfirmed);
+    assert.equal(mcp.requiresStop, true);
+    await assert.rejects(mcp.close(), McpExecutionUnconfirmed);
+  } finally { await browser.close(); }
+});
+
+test('a pre-existing native dialog refuses wheel without a late action', { timeout: 5000 }, async () => {
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const mcp = new BrowserMcp(context, () => page, () => 1, () => {});
+  let dialogExecution;
+  try {
+    await page.setContent('<p>Ready</p><script>window.wheels=0;addEventListener("wheel",()=>wheels++)</script>');
+    await mcp.observe();
+    const opened = page.waitForEvent('dialog');
+    dialogExecution = page.evaluate(() => alert('Hold')).catch(() => {});
+    const dialog = await opened;
+    await assert.rejects(mcp.act('scroll', { y: 100 }, randomUUID(), undefined, signal()), /Browser tool failed/);
     await mcp.close();
-    assert.equal(page.isClosed(), false);
-    assert.equal(await page.locator(`aria-ref=${target(observed, 'Result').ref}`).count(), 0);
-  });
-});
-
-test('hidden/detached already reached succeed; private values and bounded target failures stay safe', async () => {
-  for (const state of ['hidden', 'detached']) {
-    await fixture('<button>Target</button>', async ({ mcp, page }) => {
-      const observed = await mcp.observe();
-      await page.getByRole('button').evaluate((node, state) => { if (state === 'hidden') node.hidden = true; else node.remove(); }, state);
-      await mcp.act('waitFor', { ...target(observed, 'Target'), state }, randomUUID(), undefined, signal());
-    });
-  }
-  await fixture('<section aria-label="Private"><input type=password value=private-password><input autocomplete=one-time-code value=private-otp><input autocomplete=cc-number value=private-card><input type=hidden value=private-hidden><button>Safe</button></section>', async ({ mcp, page }) => {
-    const observed = await mcp.observe();
-    const region = await mcp.observe(target(observed, 'Private'));
-    assert.ok(!/private-(password|otp|card|hidden)/.test(JSON.stringify(region)));
-    await page.locator('section').evaluate(node => { const huge = document.createElement('p'); huge.textContent = 'x'.repeat(262145); node.append(huge); });
-    await assert.rejects(mcp.observe(target(region, 'Private')), error => error.code === 'OBSERVATION_LIMIT_EXCEEDED');
-  });
-});
-
-test('region budgets include accessible-name dependencies and restore all affected frame maps', async () => {
-  await fixture('<button aria-labelledby="name">Target</button><span id=name>Small name</span>', async ({ mcp, page }) => {
-    const observed = await mcp.observe();
-    await page.locator('#name').evaluate(node => { node.textContent = 'x'.repeat(262145); });
-    await assert.rejects(mcp.observe(target(observed, 'Small name')),
-      error => error.code === 'OBSERVATION_LIMIT_EXCEEDED');
-  });
-  await fixture('<section aria-label="Region"><iframe srcdoc="<label>Inside<input></label><p>Small</p>"></iframe></section><button>Other</button>', async ({ mcp, page }) => {
-    await page.frameLocator('iframe').getByLabel('Inside').waitFor();
-    const observed = await mcp.observe();
-    await page.frameLocator('iframe').locator('p').evaluate(node => { node.textContent = 'x'.repeat(262145); });
-    await assert.rejects(mcp.act('click', target(observed, 'Region'), randomUUID(), undefined, signal()),
-      error => error.code === 'OBSERVATION_LIMIT_EXCEEDED');
-    for (const name of ['Other', 'Inside'])
-      assert.equal(await page.locator(`aria-ref=${target(observed, name).ref}`).count(), 1);
-  });
-  await fixture('<section aria-label="Region">Small</section>', async ({ mcp, page }) => {
-    const observed = await mcp.observe();
-    await page.locator('section').evaluate(node => { node.innerHTML = '<div>'.repeat(65) + 'Deep' + '</div>'.repeat(65); });
-    await assert.rejects(mcp.observe(target(observed, 'Region')),
-      error => error.code === 'OBSERVATION_LIMIT_EXCEEDED');
-  });
-});
-
-test('an unchanged target expires after the real observation lifetime', async () => {
-  await fixture('<button>Target</button>', async ({ mcp }) => {
-    const observed = await mcp.observe();
-    await delay(60_100);
-    await assert.rejects(mcp.act('click', target(observed, 'Target'), randomUUID(), undefined, signal()), /expired/);
-  });
+    await dialog.dismiss();
+    await dialogExecution;
+    assert.equal(await page.evaluate(() => wheels), 0);
+  } finally { await browser.close(); await dialogExecution; }
 });

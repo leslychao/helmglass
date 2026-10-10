@@ -83,7 +83,14 @@ class TaskConsoleTest(unittest.TestCase):
             unknown = current()
             self.assertEqual("UNKNOWN_RESULT", unknown["request"]["type"])
             print("UNKNOWN UI " + self.admin.base + path.replace("/api", "", 1), flush=True)
-            # The operator inspects the real page and explicitly reports the observed failure.
+            observed = execute('observe', {})
+            pending = unknown['request']
+            error, verified, _ = self.admin.tool('tasks.respond', {
+                'taskId': task_id, 'requestId': pending['id'], 'requestVersion': pending['version'],
+                'operationKey': str(uuid.uuid4()), 'verification': {
+                    'outcome': 'UNCONFIRMED', 'observationOperationId': observed['id'],
+                    'evidence': 'The page is readable; stop without replaying the old click.'}})
+            self.assertFalse(error, verified)
             until(lambda value: value["request"] is None)
             session = str(uuid.UUID(current()["browser"]["id"]))
             container = "helm-browser-" + session

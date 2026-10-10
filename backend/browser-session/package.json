@@ -7,7 +7,6 @@
     "node": ">=24.17.0 <25"
   },
   "scripts": {
-    "postinstall": "node patches/playwright-core.mjs",
     "build": "tsc",
     "start": "node dist/server.js"
   },

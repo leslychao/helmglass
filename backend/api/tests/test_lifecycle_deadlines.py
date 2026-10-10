@@ -327,6 +327,51 @@ while(true){const s=JSON.parse(db.prepare('SELECT document FROM sessions WHERE i
         self.assertEqual(('LIVE', 'USER', accepted['controlEpoch']), (current['browser']['status'],
             current['browser']['controlOwner'], current['browser']['controlEpoch']))
 
+    def test_unavailable_archive_image_is_not_a_missing_receipt(self):
+        identity, client, model, task = self.ready()
+        session = str(uuid.UUID(task['browser']['id']))
+        scope = " WHERE owner_id=:owner AND id='" + session + "';"
+        self.fixture_sql(identity,
+            "UPDATE browser_sessions SET next_check_at=clock_timestamp()+interval '7 minutes'" + scope)
+        script = """import {DatabaseSync} from 'node:sqlite';
+const db=new DatabaseSync('/data/node.sqlite'),id=%s,owner=%s;
+const row=db.prepare('SELECT document FROM sessions WHERE id=?').get(id);
+const session=JSON.parse(row.document);
+if(session.ownerId!==owner)throw Error('Wrong fixture owner');
+const closed=await fetch('http://127.0.0.1:8090/sessions/'+id,{method:'DELETE',
+ headers:{'X-Worker-Token':process.env.WORKER_TOKEN},signal:AbortSignal.timeout(15000)});
+const stopped=await closed.json();
+if(closed.status!==200||!stopped.runtimeStoppedAt)throw Error('Execution was not stopped');
+const original=JSON.parse(db.prepare('SELECT document FROM sessions WHERE id=?').get(id).document);
+const get=async route=>{const r=await fetch('http://127.0.0.1:8090/sessions/'+id+'/'+route,
+ {headers:{'X-Worker-Token':process.env.WORKER_TOKEN},signal:AbortSignal.timeout(15000)});
+ await r.body?.cancel();return r.status;};
+const receiptRoute='commands/'+%s;
+let receipt,manifest;
+try{
+ db.prepare('UPDATE sessions SET document=? WHERE id=?').run(JSON.stringify({...original,
+  runtimeImage:'sha256:'+'0'.repeat(64)}),id);
+ receipt=await get(receiptRoute);manifest=await get('artifacts?archive=true');
+}finally{
+ const current=JSON.parse(db.prepare('SELECT document FROM sessions WHERE id=?').get(id).document);
+ db.prepare('UPDATE sessions SET document=? WHERE id=?').run(
+  JSON.stringify({...current,runtimeImage:original.runtimeImage}),id);
+}
+console.log(JSON.stringify({receipt,manifest,restoredReceipt:await get(receiptRoute),
+ restoredManifest:await get('artifacts?archive=true')}));
+""" % (json.dumps(session), json.dumps(identity.id), json.dumps(str(uuid.uuid4())))
+        try:
+            checked = json.loads(self.docker('exec', '-i', 'helmglass-browser-node-1',
+                'node', '--input-type=module', script=script))
+            self.assertEqual({'receipt': 502, 'manifest': 502,
+                'restoredReceipt': 404, 'restoredManifest': 200}, checked,
+                'An unavailable reader image cannot prove a receipt or artifact is absent')
+            self.assertEqual('helm-browser-' + session + '-data', self.docker('volume', 'inspect',
+                'helm-browser-' + session + '-data', '--format', '{{.Name}}'))
+        finally:
+            self.fixture_sql(identity,
+                "UPDATE browser_sessions SET next_check_at=clock_timestamp()" + scope)
+
     def test_hung_control_stops_execution_at_persisted_deadline(self):
         identity, client, model, task = self.ready()
         browser = task['browser']
@@ -346,9 +391,8 @@ while(true){const s=JSON.parse(db.prepare('SELECT document FROM sessions WHERE i
     def test_hung_read_is_failed_and_late_completion_does_not_resume_stopped_task(self):
         identity, client, model, task = self.ready()
         operation = str(uuid.uuid4())
-        target = model.browser_target(task['id'], 'Increment')
         error, receipt, _ = model.execute_in_scenario_step({'taskId': task['id'], 'action': {
-            'operationId': operation, 'type': 'waitFor', 'arguments': {**target, 'state': 'hidden'},
+            'operationId': operation, 'type': 'waitFor', 'arguments': {'textGone': 'Increment'},
             'instructionRevision': task['instructionRevision']}})
         self.assertFalse(error, receipt)
         self.wait_task(client, task['id'], lambda value: value['status'] == 'RUNNING')

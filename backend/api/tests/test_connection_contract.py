@@ -399,6 +399,24 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
                 self.assertTrue(preferred_client.respond(preferred,
                     {'connectionId': candidates[2]})[0])
 
+                # Requests without saved choices rebuild the same site boundary in the host form.
+                self.fixture_sql(identity, "UPDATE task_requests SET options='[]'::jsonb"
+                    + " WHERE owner_id=:owner AND id='"
+                    + str(uuid.UUID(task['request']['id'])) + "' AND status='PENDING';")
+                forms = []
+                client.elicitation_handler = lambda form: forms.append(form) or {'action': 'decline'}
+                try:
+                    error, receipt, _ = client.tool('tasks.respond', {
+                        'taskId': task['id'], 'requestId': task['request']['id'],
+                        'requestVersion': task['request']['version'],
+                        'operationKey': str(uuid.uuid4())})
+                finally:
+                    client.elicitation_handler = None
+                self.assertTrue(error, receipt)
+                self.assertEqual(1, len(forms), receipt)
+                offered = forms[0]['requestedSchema']['properties']['connectionId']['oneOf']
+                self.assertEqual(set(candidates[:2]), {option['const'] for option in offered})
+
     def test_subdomains_reuse_saved_accounts_and_keep_switch_destination(self):
         _, primary = self.owner()
         target = 'https://www.example.com/'

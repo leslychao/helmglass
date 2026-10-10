@@ -34,6 +34,9 @@ public final class Contracts {
       List<UUID> preferredConnectionIds,
       Boolean prepare) {}
 
+  public record OperationVerification(
+      String outcome, String evidence, UUID observationOperationId) {}
+
   public record TaskCommand(
       String type,
       Long expectedVersion,

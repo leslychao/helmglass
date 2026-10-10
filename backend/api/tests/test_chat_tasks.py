@@ -296,6 +296,46 @@ class ChatTaskTest(unittest.TestCase):
             **arguments, "operationKey": str(uuid.uuid4())})
         self.assertFalse(error, created)
 
+    def test_user_clarification_returns_a_new_card_for_the_same_task_and_browser(self):
+        initialized = self.client.rpc("initialize", {"protocolVersion": "2025-11-25",
+            "capabilities": self.client.mcp_capabilities,
+            "clientInfo": {"name": "helm-clarification-regression", "version": "1"}})
+        self.assertIn("For each new user clarification, call tasks.view once", initialized["instructions"])
+        tools = {tool["name"]: tool for tool in self.client.rpc("tools/list", {})["tools"]}
+        self.assertIn("уточнен", tools["tasks.view"]["description"])
+        self.assertNotIn("если она нужна", tools["tasks.view"]["description"])
+        self.assertIn("tasks.view", tools["tasks.command"]["description"])
+
+        original = self.start()
+        task = self.wait_task(original["task"], lambda value: value.get("browser")
+                              and value["browser"]["status"] == "LIVE")
+        view = {"taskId": task["id"], "operationKey": str(uuid.uuid4())}
+        error, shown, _ = self.client.tool("tasks.view", view)
+        self.assertFalse(error, shown)
+        self.assertNotEqual(original["generation"], shown["generation"])
+        self.assertEqual(task["browser"]["id"], shown["task"]["browser"]["id"])
+        amended, _ = self.mcp_command(task, "AMEND", title=task["title"],
+            goal="Observe only the public fixture, preserving the current browser",
+            startUrl=task["startUrl"])
+        self.assertEqual(task["instructionRevision"] + 1, amended["instructionRevision"])
+        binding = {"taskId": task["id"], "generation": shown["generation"]}
+        error, current, _ = self.client.tool("widget.state", binding)
+        self.assertFalse(error, current)
+        self.assertEqual(amended["goal"], current["task"]["goal"])
+        self.assertEqual(task["browser"]["id"], current["task"]["browser"]["id"])
+        error, replay, _ = self.client.tool("tasks.view", view)
+        self.assertFalse(error, replay)
+        self.assertEqual(shown["generation"], replay["generation"])
+        stale = {"taskId": task["id"], "generation": original["generation"]}
+        error, refusal, _ = self.client.tool("widget.state", stale)
+        self.assertFalse(error, refusal)
+        self.assertEqual("STALE_WIDGET", refusal["code"])
+        self.assertNotIn("task", refusal)
+        error, refusal, _ = self.client.tool("widget.browser", {
+            **stale, "viewerId": str(uuid.uuid4())})
+        self.assertTrue(error)
+        self.assertEqual("STALE_WIDGET", refusal["code"])
+
     def test_chat_answers_do_not_send_another_turn_and_widget_rotation_preserves_intent(self):
         state = self.start()
         task = state["task"]
@@ -409,6 +449,13 @@ class ChatTaskTest(unittest.TestCase):
             "requestVersion": pending["version"], "operationKey": str(uuid.uuid4())}
         error, _, _ = self.client.tool("tasks.respond", {**args, "answer": "Forged answer"})
         self.assertTrue(error)
+        error, refusal, _ = self.client.tool("tasks.respond", {**args,
+            "operationKey": str(uuid.uuid4()), "verification": {
+                "outcome": "SUCCEEDED", "evidence": "A model cannot answer this question",
+                "observationOperationId": str(uuid.uuid4())}})
+        self.assertTrue(error, refusal)
+        self.assertEqual("HOST_RESPONSE_REQUIRED", refusal["code"])
+        self.assertEqual(pending, self.current(task)["request"])
         wrong = self.transport("another-original-chat")
         error, refusal, _ = wrong.tool("tasks.respond", args)
         self.assertTrue(error)
@@ -695,7 +742,7 @@ class ChatTaskTest(unittest.TestCase):
         task = self.start()["task"]
         operation = str(uuid.uuid4())
         error, receipt, _ = self.client.execute_in_scenario_step({"taskId": task["id"], "action": {
-            "operationId": operation, "type": "waitFor", "arguments": {**self.client.browser_target(task['id'], 'Increment'), 'state': 'hidden'},
+            "operationId": operation, "type": "waitFor", "arguments": {'textGone': 'Increment'},
             "instructionRevision": task["instructionRevision"]}})
         self.assertFalse(error, receipt)
         deadline = time.monotonic() + 40

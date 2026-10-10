@@ -8,6 +8,7 @@
 <label>One-time code <input id="one-time-code" autocomplete="one-time-code"></label>
 <label>Ordinary text <input id="plain"></label>
 <button id="read-state" type="button">Read synthetic state</button>
+<button type="button" onclick="document.getElementById('one-time-code').focus()">Focus private code</button>
 <pre id="state"></pre>
 <script>
   const sensitive = ['password', 'current-password', 'new-password', 'one-time-code']

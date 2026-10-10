@@ -2148,7 +2148,9 @@ components:
       description: >-
         Standalone PAUSE is not supported and fails validation without effects, including repeats.
         Internal PAUSING, PAUSED and WAITING_USER states remain for browser closure and manual control.
-        RESUME retains version, ownership, original-chat, pending-request and UNKNOWN safeguards.
+        RESUME retains version, ownership, original-chat and pending-request safeguards.
+        A paused task with UNKNOWN may explicitly resume or reopen its browser for read-only
+        verification; navigation, tabs and scrolling remain available. New input waits for the agent decision.
       required:
         - type
         - expectedVersion
@@ -2220,9 +2222,20 @@ components:
         expectedVersion is the observed Task version. AMEND is accepted from the cabinet only
         for DRAFT. Human responses are accepted solely via native MCP elicitation tasks.respond;
         ANSWER, CONFIRM, REJECT and CHOOSE_CONNECTION from WEB or model arguments are rejected.
+        UNKNOWN_RESULT is reconciled by tasks.respond.verification after a successful observe
+        of the same task after the uncertain action. Its outcome, evidence and observationOperationId
+        record MCP_VERIFICATION rather than human consent; native form support is not required.
+        Outcomes are SUCCEEDED, FAILED and UNCONFIRMED. UNCONFIRMED preserves uncertainty while
+        allowing safe progress without replay or an assumption of success; evidence explains why.
+        UNKNOWN_RESULT waits for ChatGPT, not a user, and requests automatic continuation.
+        Legacy WAITING_USER/UNKNOWN_RESULT records recover automatically unless explicitly paused,
+        in protected login or under manual control. Idle closure and loss allow autonomous browser recovery.
+        RESUME also accepts WAITING_USER / UNKNOWN_RESULT, including a repeated continuation
+        with a closed browser. It preserves the pending verification and never replays the action;
+        the following observe opens a replacement browser for verification.
         Browser control commands use the tab-specific viewerId. FINISH_LOGIN saves state, not
-        proof of external authentication. A stopped/closed/lost browser requires explicit
-        confirmBrowserLoss before RESUME.
+        proof of external authentication. A stopped/closed/lost browser outside UNKNOWN recovery
+        requires explicit confirmBrowserLoss before RESUME. UNKNOWN recovery needs no additional confirmation.
     Task:
       type: object
       required:
@@ -3140,6 +3153,9 @@ components:
         an unreachable node or UNKNOWN operation is not reported as a successful close.
         OPEN_BROWSER allocates a new browser and resumes the same task after it is ready,
         removing only the pause caused by browser closure. Other holds remain in force.
+        It remains available after RESUME when the browser is CLOSED or LOST and an
+        unfinished task still awaits verification of UNKNOWN. RESUME authorizes continuation;
+        the next accepted browser read can also allocate the replacement browser.
         Both commands are available only in the authenticated web cabinet.
         TAKE_CONTROL enters manual control without starting a new login.
         BEGIN_LOGIN associates the same task browser with its canonical owned connection
