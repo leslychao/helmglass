@@ -79,6 +79,11 @@ export function browserViewerId(): string {
           <ng-content />
         </div>
         <div class="browser-view-tools">
+        @if (role() === 'CONTROLLER' && viewAllowed()) {
+          <button #clipboardButton class="icon-button" aria-label="Буфер обмена" hgTooltip="Буфер обмена"
+            [attr.aria-expanded]="clipboardOpen()" [disabled]="!connected()"
+            (click)="toggleClipboard()"><hg-icon name="copy" /></button>
+        }
         @if (allowStreamPause() && browser() && !['CLOSED', 'LOST'].includes(browser()?.status || '')) {
           <button class="icon-button" [attr.aria-label]="streamEnabled() ? 'Остановить трансляцию' : 'Возобновить трансляцию'"
             [hgTooltip]="streamEnabled() ? 'Остановить трансляцию' : 'Возобновить трансляцию'"
@@ -103,6 +108,23 @@ export function browserViewerId(): string {
         </div>
       </div>
     </header>
+    @if (clipboardOpen() && role() === 'CONTROLLER' && connected() && viewAllowed()) {
+      <section class="browser-clipboard" aria-label="Буфер обмена" (keydown.escape)="closeClipboard($event)">
+        <header><strong>Буфер обмена</strong><button class="icon-button" aria-label="Закрыть буфер обмена"
+          hgTooltip="Закрыть" (click)="closeClipboard()"><hg-icon name="close" /></button></header>
+        <p>Текст до 256 КиБ. Вставьте текст сюда или скопируйте его в удалённом браузере.</p>
+        <label>Передать в браузер<textarea #clipboardInput aria-label="Текст для вставки в браузер"
+          [value]="clipboardInputText()" (input)="clipboardInputChanged($event)" rows="3"></textarea></label>
+        <button class="button small" [disabled]="clipboardBusy()" (click)="pasteClipboard()">Вставить в браузер</button>
+        <label>Из браузера<textarea #clipboardOutput aria-label="Текст из удалённого браузера"
+          readonly [value]="clipboardRemoteText() ?? ''" rows="3"
+          placeholder="Выделите текст в удалённом браузере и нажмите Ctrl+C"></textarea></label>
+        <button class="button small" [disabled]="clipboardRemoteText() === null || clipboardBusy()"
+          (click)="copyClipboard()">Скопировать на компьютер</button>
+        @if (clipboardBusy()) { <p role="status">Передаём текст…</p> }
+        @if (clipboardError()) { <p class="error-banner" role="alert">{{ clipboardError() }}</p> }
+      </section>
+    }
     @if (addressError()) { <p class="error-banner" role="alert">{{ addressError() }}</p> }
     @if (role() === 'CONTROLLER' && task()) {
       <div class="browser-inline-notice"><hg-icon name="pause" />Вы управляете браузером. При выходе управление вернётся агенту; незавершённый вход и другие запросы сохранятся.</div>
@@ -365,6 +387,66 @@ export class BrowserViewer {
   readonly address = signal('');
   readonly addressError = signal('');
   readonly editingAddress = signal(false);
+  readonly clipboardOpen = signal(false);
+  readonly clipboardInputText = signal('');
+  readonly clipboardRemoteText = signal<string | null>(null);
+  readonly clipboardBusy = signal(false);
+  readonly clipboardError = signal('');
+  private readonly clipboardButton = viewChild<ElementRef<HTMLButtonElement>>('clipboardButton');
+  private readonly clipboardInput = viewChild<ElementRef<HTMLTextAreaElement>>('clipboardInput');
+  private readonly clipboardOutput = viewChild<ElementRef<HTMLTextAreaElement>>('clipboardOutput');
+
+  toggleClipboard() {
+    if (this.clipboardOpen()) this.closeClipboard();
+    else {
+      this.clipboardOpen.set(true);
+      requestAnimationFrame(() => this.clipboardInput()?.nativeElement.focus());
+    }
+  }
+  closeClipboard(event?: Event) {
+    event?.stopPropagation();
+    this.clipboardOpen.set(false);
+    this.clipboardButton()?.nativeElement.focus();
+  }
+  clipboardInputChanged(event: Event) {
+    if (event.target instanceof HTMLTextAreaElement) this.clipboardInputText.set(event.target.value);
+  }
+  pasteClipboard() {
+    if (this.role() !== 'CONTROLLER' || !this.connected() || !this.viewAllowed() || this.clipboardBusy()) return;
+    const text = this.clipboardInputText();
+    if (!this.clipboardTextAllowed(text)) {
+      this.clipboardError.set('Допустим текст до 256 КиБ UTF-8 без нулевых символов.');
+      return;
+    }
+    this.manualActivity();
+    this.frame()?.nativeElement.contentWindow?.postMessage({ type: 'helm-viewer-paste', text,
+      viewerEpoch: String(this.generation) }, location.origin);
+    this.frame()?.nativeElement.focus();
+  }
+  async copyClipboard() {
+    const text = this.clipboardRemoteText();
+    if (text === null || this.role() !== 'CONTROLLER' || !this.connected() || !this.viewAllowed()) return;
+    const generation = this.generation;
+    this.clipboardError.set('');
+    this.manualActivity();
+    try { await navigator.clipboard.writeText(text); }
+    catch {
+      if (generation !== this.generation || this.destroy.destroyed) return;
+      this.clipboardError.set('Браузер ограничил доступ к буферу компьютера. Скопируйте выделенный текст обычным Ctrl+C.');
+      this.clipboardOutput()?.nativeElement.focus();
+      this.clipboardOutput()?.nativeElement.select();
+    }
+  }
+  private clipboardTextAllowed(text: string): boolean {
+    return text.length <= 262144 && !text.includes('\0') && new TextEncoder().encode(text).length <= 262144;
+  }
+  private clearClipboard() {
+    this.clipboardOpen.set(false);
+    this.clipboardInputText.set('');
+    this.clipboardRemoteText.set(null);
+    this.clipboardBusy.set(false);
+    this.clipboardError.set('');
+  }
   private readonly expandButton = viewChild<ElementRef<HTMLButtonElement>>('expandButton');
   toggleStream() {
     this.streamEnabled.update(value => !value);
@@ -544,6 +626,23 @@ export class BrowserViewer {
         return;
       const state = event.data.state;
       if (typeof state !== 'string') return;
+      if (state === 'clipboard') {
+        if (this.role() !== 'CONTROLLER' || !this.connected()) return;
+        if ('text' in event.data && typeof event.data.text === 'string' && this.clipboardTextAllowed(event.data.text))
+          this.clipboardRemoteText.set(event.data.text);
+        if ('busy' in event.data && typeof event.data.busy === 'boolean') this.clipboardBusy.set(event.data.busy);
+        if ('error' in event.data && typeof event.data.error === 'string' && event.data.error.length <= 300)
+          this.clipboardError.set(event.data.error);
+        if ('manual' in event.data && event.data.manual === true) {
+          this.clipboardOpen.set(true);
+          requestAnimationFrame(() => {
+            const input = this.clipboardRemoteText() === null ? this.clipboardInput() : this.clipboardOutput();
+            input?.nativeElement.focus();
+            if (this.clipboardRemoteText() !== null) input?.nativeElement.select();
+          });
+        }
+        return;
+      }
       if (state === 'activity') {
         if (this.role() === 'CONTROLLER') this.manualActivity();
         return;
@@ -578,7 +677,10 @@ export class BrowserViewer {
         this.attempts = 0;
         this.exhausted.set(false);
         this.error.set('');
-      } else if (state === 'disconnected' || state === 'error') this.scheduleReconnect();
+      } else if (state === 'disconnected' || state === 'error') {
+        this.clearClipboard();
+        this.scheduleReconnect();
+      }
     };
     const recover = () => {
       this.online = navigator.onLine;
@@ -626,6 +728,7 @@ export class BrowserViewer {
     );
   }
   private cancel() {
+    this.clearClipboard();
     this.generation++;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;

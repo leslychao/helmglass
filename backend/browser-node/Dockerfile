@@ -7,10 +7,13 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:24.17.0-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl patch \
     && curl --fail --location https://github.com/novnc/noVNC/archive/refs/tags/v1.7.0.tar.gz -o /tmp/novnc.tar.gz \
     && mkdir /opt/novnc && tar -xzf /tmp/novnc.tar.gz --strip-components=1 -C /opt/novnc \
     && rm /tmp/novnc.tar.gz && rm -rf /var/lib/apt/lists/*
+COPY patches/novnc-clipboard.patch /tmp/novnc-clipboard.patch
+RUN patch --fuzz=0 -d /opt/novnc -p1 < /tmp/novnc-clipboard.patch && rm /tmp/novnc-clipboard.patch
+COPY src/viewer-client.js /opt/novnc/helm-viewer.js
 WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules

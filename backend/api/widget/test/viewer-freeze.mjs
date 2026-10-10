@@ -5,8 +5,13 @@ const origin = 'https://helm.example';
 const response = await fetch('http://127.0.0.1:8090/novnc/helm.html?parentOrigin=https://test.oaiusercontent.com');
 assert.equal(response.status, 200);
 const html = await response.text();
-const source = html.match(/<script type="module">([\s\S]*?)<\/script>/)[1]
-  .replace("import RFB from './core/rfb.js';", '');
+assert.ok(html.includes("startViewer(\"https://test.oaiusercontent.com\")"));
+const client = await fetch('http://127.0.0.1:8090/novnc/helm-viewer.js');
+assert.equal(client.status, 200);
+const source = (await client.text())
+  .replace(/^import RFB,.*$/m, 'const CLIPBOARD_TEXT_LIMIT = 262144;')
+  .replace('export function startViewer', 'function startViewer')
+  + '\nstartViewer("https://test.oaiusercontent.com");';
 
 async function fixture(viewOnly) {
   const listeners = new Map(), connections = [], snapshots = [];

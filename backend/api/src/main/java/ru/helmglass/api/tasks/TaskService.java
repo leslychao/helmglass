@@ -20,6 +20,7 @@ import ru.helmglass.api.JsonSupport;
 import ru.helmglass.api.ListQuery;
 import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
+import ru.helmglass.api.connections.ConnectionSite;
 import ru.helmglass.api.events.EventService;
 import ru.helmglass.api.mcp.ChatBindings;
 import tools.jackson.databind.JsonNode;
@@ -477,7 +478,7 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
             .query(String.class)
             .optional()
             .orElseThrow(ApiException::notFound);
-    if (!java.util.Objects.equals(task.site(), site(url))) {
+    if (!ConnectionSite.matches(site(url), task.site())) {
       throw ApiException.invalid("connectionId", "Подключение не относится к сайту задачи.");
     }
     boolean loginRequired =
@@ -524,8 +525,20 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
     if (origins.isEmpty()) {
       origins.add(parsed.getScheme() + "://" + parsed.getAuthority());
     }
+    // A related destination may not have been visited when the account was saved.
+    // Confirm that origin for this switch without copying storage between origins.
+    URI destination = URI.create(task.startUrl());
+    String destinationOrigin = destination.getScheme() + "://" + destination.getAuthority();
+    if (!origins.contains(destinationOrigin)) {
+      if (origins.size() >= 50) {
+        throw ApiException.conflict("PROFILE_ORIGIN_LIMIT", "Область подключения превышает 50 сайтов.");
+      }
+      origins.add(destinationOrigin);
+    }
     var arguments =
-        Map.of("connectionId", connectionId, "ownerId", owner, "origins", origins, "url", url);
+        Map.of(
+            "connectionId", connectionId, "ownerId", owner,
+            "origins", origins, "url", task.startUrl());
     UUID operation = UUID.randomUUID();
     Map<String, Object> instruction = new HashMap<>();
     instruction.put("revision", instructionRevision);
@@ -888,13 +901,13 @@ UPDATE tasks SET goal=:goal,title=:title,start_url=:url,site=:site,output_format
       validateConnections(owner, List.of(command.connectionId()));
       boolean candidate =
           jdbc.sql(
-                  "SELECT site=:site AND deleted_at IS NULL AND (:explicit OR status='READY') FROM"
+                  "SELECT site,deleted_at IS NULL AND (:explicit OR status='READY') available FROM"
                       + " connections WHERE id=:id AND owner_id=:owner")
-              .param("site", task.site())
               .param("explicit", !request.options().isEmpty())
               .param("id", command.connectionId())
               .param("owner", owner)
-              .query(Boolean.class)
+              .query((row, index) -> row.getBoolean("available")
+                  && ConnectionSite.matches(row.getString("site"), task.site()))
               .optional()
               .orElse(false);
       boolean offered = request.options().isEmpty();

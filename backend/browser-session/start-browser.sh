@@ -15,9 +15,13 @@ until xdpyinfo -display :99 >/dev/null 2>&1; do
   if [ "$attempt" -ge 50 ]; then exit 1; fi
   sleep 0.1
 done
-x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -viewonly -nopw -noxdamage -quiet &
+x0vncserver -display :99 -interface 127.0.0.1 -rfbport 5900 -SecurityTypes None \
+  -AlwaysShared -AcceptSetDesktopSize=0 -AcceptKeyEvents=0 -AcceptPointerEvents=0 \
+  -AcceptCutText=0 -SendCutText=0 -SetPrimary=0 -SendPrimary=0 -Log '*:stderr:0' &
 view_pid=$!
-x11vnc -display :99 -localhost -rfbport 5901 -forever -shared -nopw -noxdamage -quiet &
+x0vncserver -display :99 -interface 127.0.0.1 -rfbport 5901 -SecurityTypes None \
+  -AlwaysShared -AcceptSetDesktopSize=0 -SetPrimary=0 -SendPrimary=0 \
+  -MaxCutText 524289 -Log '*:stderr:0' &
 control_pid=$!
 node /app/dist/server.js &
 node_pid=$!

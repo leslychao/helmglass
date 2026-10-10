@@ -1,0 +1,101 @@
+--- a/core/rfb.js
++++ b/core/rfb.js
+@@ -71,6 +71,8 @@
+ // VeNCrypt security types
+ const securityTypePlain             = 256;
+ 
++export const CLIPBOARD_TEXT_LIMIT = 256 * 1024;
++
+ // Extended clipboard pseudo-encoding formats
+ const extendedClipboardFormatText   = 1;
+ /*eslint-disable no-unused-vars */
+@@ -499,38 +501,15 @@
+ 
+     clipboardPasteFrom(text) {
+         if (this._rfbConnectionState !== 'connected' || this._viewOnly) { return; }
+-
+-        if (this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] &&
+-            this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
+-
+-            this._clipboardText = text;
+-            RFB.messages.extendedClipboardNotify(this._sock, [extendedClipboardFormatText]);
+-        } else {
+-            let length, i;
+-            let data;
+-
+-            length = 0;
+-            // eslint-disable-next-line no-unused-vars
+-            for (let codePoint of text) {
+-                length++;
+-            }
+-
+-            data = new Uint8Array(length);
+-
+-            i = 0;
+-            for (let codePoint of text) {
+-                let code = codePoint.codePointAt(0);
+-
+-                /* Only ISO 8859-1 is supported */
+-                if (code > 0xff) {
+-                    code = 0x3f; // '?'
+-                }
+-
+-                data[i++] = code;
+-            }
+-
+-            RFB.messages.clientCutText(this._sock, data);
+-        }
++        if (typeof text !== 'string' || text.length > CLIPBOARD_TEXT_LIMIT ||
++            text.includes('\0') || new TextEncoder().encode(text).length > CLIPBOARD_TEXT_LIMIT ||
++            !this._clipboardServerCapabilitiesFormats[extendedClipboardFormatText] ||
++            !this._clipboardServerCapabilitiesActions[extendedClipboardActionNotify]) {
++            this.dispatchEvent(new CustomEvent("clipboarderror"));
++            return;
++        }
++        this._clipboardText = text;
++        RFB.messages.extendedClipboardNotify(this._sock, [extendedClipboardFormatText]);
+     }
+ 
+     getImageData() {
+@@ -2333,6 +2312,11 @@
+         let length = this._sock.rQshift32();
+         length = toSigned32bit(length);
+ 
++        // Bound the wire buffer before waiting; CRLF can double UTF-8 text size.
++        if (Math.abs(length) > 2 * CLIPBOARD_TEXT_LIMIT + 1024) {
++            this.dispatchEvent(new CustomEvent("clipboarderror"));
++            return this._fail("Clipboard limit exceeded");
++        }
+         if (this._sock.rQwait("ServerCutText content", Math.abs(length), 8)) { return false; }
+ 
+         if (length >= 0) {
+@@ -2399,6 +2383,7 @@
+ 
+                     if (formats & extendedClipboardFormatText) {
+                         RFB.messages.extendedClipboardProvide(this._sock, [extendedClipboardFormatText], [this._clipboardText]);
++                        this.dispatchEvent(new CustomEvent("clipboardsent"));
+                     }
+                 }
+ 
+@@ -2457,6 +2442,10 @@
+                         size |= (sizeArray[1] << 16);
+                         size |= (sizeArray[2] << 8);
+                         size |= (sizeArray[3]);
++                        if (size < 0 || size > 2 * CLIPBOARD_TEXT_LIMIT + 1) {
++                            this.dispatchEvent(new CustomEvent("clipboarderror"));
++                            return true;
++                        }
+                         let chunk = streamInflator.inflate(size);
+ 
+                         if (format === extendedClipboardFormatText) {
+@@ -2479,6 +2468,10 @@
+                     }
+ 
+                     textData = textData.replaceAll("\r\n", "\n");
++                    if (textData.includes("\0") || new TextEncoder().encode(textData).length > CLIPBOARD_TEXT_LIMIT) {
++                        this.dispatchEvent(new CustomEvent("clipboarderror"));
++                        return true;
++                    }
+ 
+                     this.dispatchEvent(new CustomEvent(
+                         "clipboard",

@@ -43,7 +43,7 @@ const Session = z.object({
   runtimeStoppedAt: z.string().datetime().optional(), cleanupComplete: z.boolean().default(false),
   deadlineCheckAt: z.number().nonnegative().default(0),
   pendingOperation: z.object({ id: z.string(), deadlineAt: z.string().datetime(),
-    cancelAt: z.string().datetime().optional(), kind: z.enum(["COMMAND", "CONTROL", "PROFILE"]) }).optional(),
+    cancelAt: z.string().datetime().optional(), policy: Policy.optional(), kind: z.enum(["COMMAND", "CONTROL", "PROFILE"]) }).optional(),
   status: z.enum(["STARTING", "LIVE", "CLOSING", "CLOSED", "UNKNOWN", "LOST"]),
   networkId: z.string().optional(), containerId: z.string().optional(), egressId: z.string().optional(),
   runtimeImage: z.string().optional(),
@@ -66,6 +66,7 @@ const tickets = new Map<string, Ticket & { sessionId: string }>();
 const viewers = new Map<string, Set<{ close: (reason: ViewerCloseReason) => void; viewerId: string; role: string; access: z.infer<typeof AccessBinding> }>>();
 const starting = new Map<string, Promise<Session>>();
 const closing = new Map<string, Promise<Session>>();
+const controls = new Map<string, { policy: Policy; completion: Promise<unknown> }>();
 const savingProfiles = new Set<string>();
 const changingCredentials = new Set<string>();
 
@@ -154,6 +155,67 @@ async function sessionJson(session: Session, endpoint: string, method = "GET", v
   }
   return response.json();
 }
+async function controlSession(id: string, policy: Policy, requestedDeadline?: string): Promise<unknown> {
+  const current = saved(id);
+  if (current.closeRequested || current.runtimeStoppedAt) throw new HttpError(409, "Browser closing");
+  const active = controls.get(id);
+  if (active) {
+    if (JSON.stringify(active.policy) !== JSON.stringify(policy)) throw new HttpError(409, "Control transfer in progress");
+    return active.completion;
+  }
+  const unchanged = JSON.stringify(policy) === JSON.stringify(current.policy);
+  if (policy.controlEpoch < current.policy.controlEpoch || policy.controlEpoch === current.policy.controlEpoch && !unchanged) {
+    throw new HttpError(409, "Stale control epoch");
+  }
+  const pending = current.pendingOperation;
+  if (unchanged && pending?.kind !== "CONTROL") return summary(current);
+  if (pending?.kind === "COMMAND" || savingProfiles.has(id)) throw new HttpError(409, "Browser work in progress");
+  if (pending?.kind === "CONTROL" && (pending.id !== `control:${policy.controlEpoch}`
+      || pending.policy && JSON.stringify(pending.policy) !== JSON.stringify(policy))) {
+    throw new HttpError(409, "Control transfer in progress");
+  }
+  if (policy.owner === "USER" && !policy.controllerId) throw new HttpError(400, "Controller identity required");
+  const deadlineAt = pending?.kind === "CONTROL" ? pending.deadlineAt
+    : requestedDeadline ?? new Date(Date.now() + 30_000).toISOString();
+  if (Date.parse(deadlineAt) <= Date.now()) throw new HttpError(408, "Control deadline exceeded");
+  save({ ...current, pendingOperation: { id: `control:${policy.controlEpoch}`, kind: "CONTROL", deadlineAt, policy } });
+  const completion = Promise.resolve().then(async () => {
+    disconnectViewers(id, "control_changed");
+    const result = await sessionJson(current, "/control", "POST", policy);
+    const applied = saved(id);
+    if (applied.closeRequested || applied.runtimeStoppedAt) throw new HttpError(409, "Browser closing");
+    save({ ...applied, policy });
+    if (!unchanged && policy.owner === "USER" && policy.privateMode && applied.connectionId) {
+      try {
+        const value = await credentials.read(applied.connectionId, applied.ownerId);
+        if (value) await sessionJson(saved(id), "/credentials/fill", "POST", { viewerId: policy.controllerId, ...value });
+      } catch (error) {
+        if (!(error instanceof StorageError) || error.code !== "PROFILE_STORAGE_UNAVAILABLE") throw error;
+        // Control succeeded; unavailable optional credentials do not revoke it.
+        save({ ...saved(id), profileSaveError: error.code });
+      }
+    }
+    const completed = saved(id);
+    if (completed.closeRequested || completed.runtimeStoppedAt) throw new HttpError(409, "Browser closing");
+    if (completed.pendingOperation?.id === `control:${policy.controlEpoch}`) {
+      save({ ...completed, pendingOperation: undefined });
+    }
+    return result;
+  });
+  const work = { policy, completion };
+  controls.set(id, work);
+  try { return await completion; }
+  catch (error) {
+    if (error instanceof HttpError && [400, 403, 413, 422].includes(error.status)) {
+      const rejected = saved(id);
+      if (rejected.pendingOperation?.id === `control:${policy.controlEpoch}`) {
+        save({ ...rejected, pendingOperation: undefined });
+      }
+    }
+    throw error;
+  } finally { if (controls.get(id) === work) controls.delete(id); }
+}
+
 async function prepareProfile(session: Session, connectionId: string, importId: string, origins?: string[]): Promise<void> {
   const endpoint = `/profile/import/${importId}`;
   const existing = await sessionRequest(session, endpoint);
@@ -495,10 +557,15 @@ async function recoverSessionRoutes(): Promise<void> {
     const manager = await inspect(config.self);
     if (!manager?.NetworkSettings.Networks[networkName]?.IPAddress) await docker(`/networks/${session.networkId}/connect`, "POST", { Container: config.self });
     const address = container.NetworkSettings.Networks[networkName]?.IPAddress;
-    if (!address) { save({ ...session, status: "UNKNOWN" }); continue; }
-    const routed = save({ ...session, address });
+    const current = saved(session.id);
+    if (current.closeRequested || current.runtimeStoppedAt) continue;
+    if (!address) { save({ ...current, status: "UNKNOWN" }); continue; }
+    const routed = save({ ...current, address });
     try { recordRuntimeState(session.id, RuntimeState.parse(await sessionJson(routed, "/health"))); }
-    catch { save({ ...saved(session.id), status: "UNKNOWN" }); }
+    catch {
+      const current = saved(session.id);
+      if (!current.closeRequested && !current.runtimeStoppedAt) save({ ...current, status: "UNKNOWN" });
+    }
       } catch {
         console.warn(JSON.stringify({ event: "session_route_unavailable", sessionId: session.id }));
       }
@@ -516,111 +583,14 @@ async function assets(url: URL, response: ServerResponse): Promise<void> {
     const trustedParent = requestedParent === config.publicOrigin || (requestedParent === parent.origin && parent.protocol === "https:" && !parent.port && parent.hostname.endsWith(".oaiusercontent.com"));
     if (!trustedParent) throw new HttpError(403, "Viewer parent origin denied");
     const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Helm Glass browser</title><style>html,body,#screen{width:100%;height:100%;margin:0;background:#111827;overflow:hidden}canvas{outline:none}</style></head><body><div id="screen"></div><script type="module">
-      import RFB from './core/rfb.js';
-      const parentOrigin = ${JSON.stringify(parent.origin)};
-      let rfb, pending, activeEpoch, navigating = false, frozen = false, generation = 0;
-      const report = (state, epoch) => {
-        const canvas = document.querySelector('#screen canvas');
-        window.parent.postMessage({type:'helm-viewer',state,viewerEpoch:epoch,width:canvas?.width,height:canvas?.height}, parentOrigin);
-      };
-      function connect(next) {
-        const rawPath = next.searchParams.get('path');
-        if (!rawPath) throw new Error('Missing transport');
-        const transport = new URL(rawPath, window.location.origin + '/');
-        const prefix = window.location.pathname.slice(0, window.location.pathname.indexOf('/novnc/'));
-        if (transport.origin !== window.location.origin || !transport.pathname.startsWith(prefix + '/sessions/') || !transport.pathname.endsWith('/view') || !transport.searchParams.has('ticket')) throw new Error('Invalid transport');
-        transport.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ownGeneration = ++generation, epoch = next.searchParams.get('viewerEpoch') ?? '';
-        activeEpoch = epoch;
-        const connection = new RFB(document.getElementById('screen'), transport.href);
-        rfb = connection;
-        connection.viewOnly = next.searchParams.get('view_only') === '1';
-        connection.scaleViewport = true; connection.resizeSession = false;
-        const dimensions = new MutationObserver(() => { if (ownGeneration === generation) report('resized', epoch); });
-        dimensions.observe(document.getElementById('screen'), {subtree:true,childList:true,attributes:true,attributeFilter:['width','height']});
-        connection.addEventListener('connect', () => { if (ownGeneration === generation) report('connected', epoch); });
-        connection.addEventListener('securityfailure', () => { if (ownGeneration === generation) report('error', epoch); });
-        connection.addEventListener('disconnect', () => {
-          dimensions.disconnect();
-          if (ownGeneration !== generation) return;
-          rfb = undefined;
-          if (pending) { const target = pending; pending = undefined; connect(target); }
-          else report('disconnected', epoch);
-        });
-      }
-      window.addEventListener('message', async event => {
-        if (event.source !== window.parent || event.origin !== parentOrigin || frozen) return;
-        if (event.data?.type === 'helm-viewer-freeze') {
-          if (event.data.viewerEpoch !== activeEpoch || rfb && !rfb.viewOnly) return;
-          frozen = true;
-          generation++;
-          pending = undefined;
-          try {
-            const canvas = document.querySelector('#screen canvas');
-            if (canvas) {
-              const snapshot = document.createElement('canvas'), bounds = canvas.getBoundingClientRect();
-              snapshot.width = canvas.width; snapshot.height = canvas.height;
-              const context = snapshot.getContext('2d');
-              if (context) {
-                context.drawImage(canvas, 0, 0);
-                snapshot.style.cssText = 'position:fixed;left:' + bounds.left + 'px;top:' + bounds.top
-                  + 'px;width:' + bounds.width + 'px;height:' + bounds.height + 'px';
-                document.body.append(snapshot);
-              }
-            }
-          } finally {
-            rfb?.disconnect();
-            rfb = undefined;
-          }
-          return;
-        }
-        if (typeof event.data?.url !== 'string') return;
-        if (event.data.type === 'helm-viewer-navigate') {
-          if (!rfb || rfb.viewOnly || navigating || event.data.viewerEpoch !== activeEpoch) return;
-          const connection = rfb, epoch = activeEpoch;
-          try {
-            const target = new URL(event.data.url);
-            if (!['https:', 'http:'].includes(target.protocol) || target.username || target.password || target.href.length > 4096) return;
-            navigating = true;
-            // Clipboard transfer and remote focus are asynchronous in X11.
-            // Keep the whole address together and never finish in a newer viewer.
-            connection.clipboardPasteFrom(target.href);
-            connection.sendKey(0xffe3, 'ControlLeft', true);
-            connection.sendKey(0x6c, 'KeyL');
-            connection.sendKey(0xffe3, 'ControlLeft', false);
-            await new Promise(resolve => setTimeout(resolve, 150));
-            if (rfb !== connection || activeEpoch !== epoch || connection.viewOnly) return;
-            connection.sendKey(0xffe3, 'ControlLeft', true);
-            connection.sendKey(0x76, 'KeyV');
-            connection.sendKey(0xffe3, 'ControlLeft', false);
-            await new Promise(resolve => setTimeout(resolve, 150));
-            if (rfb === connection && activeEpoch === epoch && !connection.viewOnly) connection.sendKey(0xff0d, 'Enter');
-          } catch { report('error', epoch); }
-          finally { navigating = false; }
-          return;
-        }
-        if (event.data.type !== 'helm-viewer-reconnect') return;
-        try {
-          const next = new URL(event.data.url, location.href);
-          if (next.origin !== location.origin || next.pathname !== location.pathname) return;
-          if (rfb) { pending = next; rfb.disconnect(); } else connect(next);
-        } catch { report('error', ''); }
-      });
-      for (const type of ['keydown', 'pointerdown', 'wheel', 'touchstart']) {
-        document.addEventListener(type, event => {
-          if (event.isTrusted && rfb && !rfb.viewOnly && !frozen) report('activity', activeEpoch);
-        }, {capture:true,passive:true});
-      }
-      window.addEventListener('keydown', event => {
-        if (event.key === 'Escape' && activeEpoch !== undefined) report('escape', activeEpoch);
-      }, true);
-      try { connect(new URL(location.href)); } catch { report('error', new URL(location.href).searchParams.get('viewerEpoch') ?? ''); }
+      import { startViewer } from './helm-viewer.js';
+      startViewer(${JSON.stringify(parent.origin)});
     </script></body></html>`;
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); response.end(html); return;
   }
   const info = await stat(filename);
   if (!info.isFile()) throw new HttpError(404, "Asset unavailable");
-  response.writeHead(200, { "Content-Type": mimeTypes[path.extname(filename)] ?? "application/octet-stream", "Content-Length": info.size, "Cache-Control": "private,max-age=3600" });
+  response.writeHead(200, { "Content-Type": mimeTypes[path.extname(filename)] ?? "application/octet-stream", "Content-Length": info.size, "Cache-Control": relative === "helm-viewer.js" || relative === "core/rfb.js" ? "no-store" : "private,max-age=3600" });
   await pipeline(createReadStream(filename), response);
 }
 
@@ -774,33 +744,7 @@ const server = http.createServer(async (request, response) => {
     }
     if (segments[2] === "control" && request.method === "POST") {
       const input = Policy.extend({ deadlineAt: z.string().datetime().optional() }).parse(await body(request));
-      const policy = Policy.parse(input);
-      const deadlineAt = input.deadlineAt ?? new Date(Date.now() + 30_000).toISOString();
-      if (Date.parse(deadlineAt) <= Date.now()) throw new HttpError(408, "Control deadline exceeded");
-      if (policy.controlEpoch < session.policy.controlEpoch) throw new HttpError(409, "Stale control epoch");
-      if (policy.owner === "USER" && !policy.controllerId) throw new HttpError(400, "Controller identity required");
-      save({ ...saved(session.id), pendingOperation: { id: `control:${policy.controlEpoch}`, kind: "CONTROL", deadlineAt } });
-
-      disconnectViewers(session.id, "control_changed");
-      const result = await sessionJson(session, "/control", "POST", policy);
-      const current = saved(session.id);
-      if (current.closeRequested) throw new HttpError(409, "Browser closing");
-      if (current.policy.controlEpoch <= policy.controlEpoch) save({ ...current, policy });
-      if (policy.owner === "USER" && policy.privateMode && current.connectionId) {
-        try {
-          const value = await credentials.read(current.connectionId, current.ownerId);
-          if (value) await sessionJson(saved(session.id), "/credentials/fill", "POST", { viewerId: policy.controllerId, ...value });
-        } catch (error) {
-          if (!(error instanceof StorageError) || error.code !== "PROFILE_STORAGE_UNAVAILABLE") throw error;
-          // The control transition succeeded. Storage failure only prevents optional autofill.
-          save({ ...saved(session.id), profileSaveError: error.code });
-        }
-      }
-      const completed = saved(session.id);
-      if (!completed.closeRequested && completed.pendingOperation?.id === `control:${policy.controlEpoch}`) {
-        save({ ...completed, pendingOperation: undefined });
-      }
-      reply(response, 200, result); return;
+      reply(response, 200, await controlSession(session.id, Policy.parse(input), input.deadlineAt)); return;
     }
     if (segments[2] === "ticket" && request.method === "POST") {
       const ticket = Ticket.parse(await body(request));

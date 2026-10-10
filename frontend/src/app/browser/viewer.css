@@ -43,6 +43,11 @@
 }
 
 .browser-session-body { padding: 17px; flex: 1; }
+.browser-clipboard { padding: 12px; border-bottom: 1px solid #e6ebf2; background: #fff; max-height: 55dvh; overflow: auto; }
+.browser-clipboard > header { display: flex; align-items: center; justify-content: space-between; }
+.browser-clipboard p { margin: 8px 0; font-size: 12px; }
+.browser-clipboard label { display: block; margin: 10px 0 6px; font-size: 12px; }
+.browser-clipboard textarea { display: block; width: 100%; margin-top: 5px; resize: vertical; }
 @media(max-width:520px) {
   .browser-controls { gap: 8px; }
   .browser-control-actions { flex: 1 1 150px; }

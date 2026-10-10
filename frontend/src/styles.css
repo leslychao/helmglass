@@ -2293,6 +2293,10 @@ hg-icon {
   height: 100%;
   object-fit: cover;
 }
+.topbar-separator {
+  height: 25px;
+  border-left: 1px solid var(--line);
+}
 .profile-trigger {
   display: flex;
   align-items: center;
@@ -2309,6 +2313,12 @@ hg-icon {
 .profile-trigger .icon {
   width: 13px;
   height: 13px;
+}
+.profile-name {
+  max-width: min(180px, 25vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .profile-menu {
   padding: 7px;

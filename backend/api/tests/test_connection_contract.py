@@ -353,6 +353,90 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertEqual(standalone["id"],task["browser"]["id"])
         self.assertEqual("CHATGPT",task["browser"]["controlOwner"])
 
+    def test_subdomain_account_choice_respects_site_boundaries(self):
+        identity, primary = self.owner()
+        _, foreign = self.owner()
+        cases = [
+            ('yang.yandex-team.ru', 'passport.yandex-team.ru', 'wiki.yandex-team.ru',
+             'yandex-team.ru.evil.com'),
+            ('app.example.co.uk', 'login.example.co.uk', 'docs.example.co.uk', 'other.co.uk'),
+            ('alice.github.io', 'login.alice.github.io', 'docs.alice.github.io', 'bob.github.io'),
+            ('amazonaws.com', 'www.amazonaws.com', 'docs.amazonaws.com', 'bucket.s3.amazonaws.com'),
+            ('alice.internal', 'alice.internal', 'alice.internal', 'docs.alice.internal'),
+            ('127.0.0.1', '127.0.0.1', '127.0.0.1', '127.0.0.2'),
+        ]
+        for first_host, second_host, target_host, unrelated_host in cases:
+            with self.subTest(target=target_host):
+                candidates = []
+                hosts = [first_host, second_host, unrelated_host]
+                if target_host == 'docs.amazonaws.com':
+                    hosts.extend('bucket-' + str(index) + '.s3.amazonaws.com' for index in range(50))
+                for index, host in enumerate(hosts):
+                    status, connection = primary.api('/api/connections', 'POST', {
+                        'name': ('Z candidate ' if index < 2 else 'A unrelated ') + str(index),
+                        'startUrl': 'https://' + host})
+                    self.assertEqual(200, status, connection)
+                    candidates.append(connection['id'])
+                created_ids = ','.join("'" + str(uuid.UUID(value)) + "'" for value in candidates)
+                self.fixture_sql(identity, "UPDATE connections SET status='READY' WHERE owner_id=:owner"
+                    + " AND id IN (" + created_ids + ");")
+                status, foreign_connection = foreign.api('/api/connections', 'POST', {
+                    'name': 'Foreign site boundary', 'startUrl': 'https://' + target_host})
+                self.assertEqual(200, status, foreign_connection)
+                client, task = self.create(primary, 'https://' + target_host)
+                self.assertIsNotNone(task['request'], task)
+                self.assertEqual('ACCOUNT_CHOICE', task['request']['type'])
+                self.assertEqual(set(candidates[:2]),
+                    {option['id'] for option in task['request']['options']})
+                for refused in (candidates[2], foreign_connection['id']):
+                    error, receipt, _ = client.respond(task, {'connectionId': refused})
+                    self.assertTrue(error, receipt)
+                preferred_client, preferred = self.create(primary, 'https://' + target_host,
+                                                          preferred=candidates[:2])
+                self.assertEqual('ACCOUNT_CHOICE', preferred['request']['type'])
+                self.assertEqual(set(candidates[:2]),
+                    {option['id'] for option in preferred['request']['options']})
+                self.assertTrue(preferred_client.respond(preferred,
+                    {'connectionId': candidates[2]})[0])
+
+    def test_subdomains_reuse_saved_accounts_and_keep_switch_destination(self):
+        _, primary = self.owner()
+        target = 'https://www.example.com/'
+        first = self.saved_connection(primary, 'Subdomain A')
+        automatic_client, automatic = self.create(primary, target)
+        self.assertEqual(first, automatic['browser']['connectionId'])
+        self.assertIsNone(automatic['request'])
+        observation = self.wait_operation(self.observe(automatic_client, automatic), automatic_client)
+        self.assertEqual('SUCCEEDED', observation['status'], observation)
+        current = primary.api('/api/tasks/' + automatic['id'])[1]
+        self.assertEqual(target, current['browser']['currentUrl'])
+        self.assertEqual(200, primary.api('/api/tasks/' + current['id'] + '/commands', 'POST', {
+            'type': 'STOP', 'expectedVersion': current['version']})[0])
+        self.await_connection(primary, first, lambda value: value['browser']['status'] == 'CLOSED')
+
+        second = self.saved_connection(primary, 'Subdomain B')
+        client, task = self.create(primary, target, preferred=[first])
+        self.assertEqual(first, task['browser']['connectionId'])
+        self.assertEqual('SUCCEEDED', self.wait_operation(self.observe(client, task), client)['status'])
+        task = primary.api('/api/tasks/' + task['id'])[1]
+        browser_id = task['browser']['id']
+        error, receipt, _ = client.tool('connections.select', {
+            'taskId': task['id'], 'connectionId': second,
+            'instructionRevision': task['instructionRevision'], 'operationKey': str(uuid.uuid4())})
+        self.assertFalse(error, receipt)
+        error, operations, _ = client.tool('operations.list', {'taskId': task['id']})
+        self.assertFalse(error, operations)
+        switches = [item for item in operations['items'] if item['type'] == 'applyConnection']
+        self.assertEqual(1, len(switches))
+        switched = self.wait_operation(switches[0]['id'], client)
+        self.assertEqual('SUCCEEDED', switched['status'], switched)
+        current = primary.api('/api/tasks/' + task['id'])[1]
+        self.assertEqual((browser_id, second, target),
+            (current['browser']['id'], current['browser']['connectionId'],
+             current['browser']['currentUrl']))
+        self.assertIsNone(current['request'])
+        self.assertEqual('SUCCEEDED', self.wait_operation(self.observe(client, current), client)['status'])
+
     def test_profile_is_saved_on_close_and_restored_with_updated_site_data(self):
         identity, primary = self.owner()
         fixture = Path(__file__).resolve().parents[2] / 'browser-session/test/fixtures/profile-lifetime.html'
@@ -1085,11 +1169,13 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual(200,status)
             candidates.append(value["id"])
         # Only the first candidate can be selected successfully; its profile was saved through login.
-        self.fixture_sql(identity,"UPDATE connections SET status='READY' WHERE owner_id=:owner;")
+        created_ids = ','.join("'" + str(uuid.UUID(value)) + "'" for value in candidates)
+        self.fixture_sql(identity, "UPDATE connections SET status='READY' WHERE owner_id=:owner"
+            + " AND id IN (" + created_ids + ");")
         _,login_required=primary.api("/api/connections","POST",{
             "name":"Needs login","site":"example.com","startUrl":"https://example.com"})
         _,wrong_site=primary.api("/api/connections","POST",{
-            "name":"Other site","site":"other.example.com","startUrl":"https://other.example.com"})
+            "name":"Other site","site":"other.example.org","startUrl":"https://other.example.org"})
         _,foreign_connection=foreign.api("/api/connections","POST",{
             "name":"Foreign","site":"example.com","startUrl":"https://example.com"})
         status,page=primary.api("/api/connections?site=example.com&status=READY&pageSize=10&page=2")

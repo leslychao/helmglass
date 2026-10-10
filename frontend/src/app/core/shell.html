@@ -85,13 +85,14 @@
           <b>{{ notifications()?.total }}</b>
         }
       </button>
+      <span class="topbar-separator" aria-hidden="true"></span>
       <button
         #profileButton
         cdkOverlayOrigin
         #profileOrigin="cdkOverlayOrigin"
         class="profile-trigger"
         hgTooltip="Профиль"
-        aria-label="Меню профиля"
+        [attr.aria-label]="'Меню профиля: ' + (session.user()?.name ?? '')"
         aria-haspopup="menu"
         [attr.aria-expanded]="popup() === 'profile'"
         [attr.aria-controls]="popup() === 'profile' ? 'topbar-popover' : null"
@@ -105,6 +106,7 @@
             {{ session.initials() }}
           }
         </span>
+        <span class="profile-name">{{ session.user()?.name }}</span>
         <hg-icon name="chevron-down" />
       </button>
       <ng-template

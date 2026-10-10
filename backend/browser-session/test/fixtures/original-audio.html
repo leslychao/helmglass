@@ -3,8 +3,8 @@
 <title>Original audio acceptance fixture</title>
 <h1>Original bytes acceptance</h1>
 <pre id="result">Loading</pre>
-<audio id="fast" aria-label="Original WAV" controls></audio>
-<audio id="slow" aria-label="Slow original WAV" controls></audio>
+<audio id="fast" aria-label="Original WAV" controls preload="none"></audio>
+<audio id="slow" aria-label="Slow original WAV" controls preload="none"></audio>
 <button id="profile-a">Save A</button><button id="profile-b">Save B</button>
 <button id="profile-read">Read identity</button><pre id="identity"></pre>
 <button id="profile-oversize">Write oversized IDB value</button><button id="profile-unsupported">Write unsupported IDB value</button><pre id="profile-write"></pre>
@@ -20,7 +20,7 @@
   header.setUint32(24, 16000, true); header.setUint32(28, 32000, true); header.setUint16(32, 2, true);
   header.setUint16(34, 16, true); text(36, 'data'); header.setUint32(40, samples * 2, true);
   for (let i = 0; i < samples; i++) header.setInt16(44 + i * 2, Math.round(Math.sin(i * Math.PI / 20) * 4000), true);
-  const blob = new Blob([bytes], { type: 'audio/wav' });
+  const blob = new Blob([bytes], { type: new URLSearchParams(location.search).get('mime') || 'audio/wav' });
   const fast = URL.createObjectURL(blob); const slow = URL.createObjectURL(blob);
   document.querySelector('#fast').src = fast; document.querySelector('#slow').src = slow;
   const originalFetch = window.fetch.bind(window);

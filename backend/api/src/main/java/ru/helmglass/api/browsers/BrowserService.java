@@ -666,7 +666,7 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
                 transactions.executeWithoutResult(
                     transaction -> {
                       tasks.lockOwner(candidate.owner());
-                      if (get(candidate.owner(), candidate.id()).controlEpoch() != work.epoch()) {
+                      if (!hasPendingControl(candidate.owner(), candidate.id(), work.epoch())) {
                         return;
                       }
                       if (Boolean.TRUE.equals(work.intent().input().saveConnection())) {
@@ -711,14 +711,27 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
       transactions.executeWithoutResult(
           transaction -> {
             tasks.lockOwner(candidate.owner());
-            closeForFailure(candidate.owner(), candidate.id(), "CONTROL_DEADLINE_EXCEEDED");
+            boolean stillExpired =
+                jdbc.sql(
+                        """
+                        SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE id=:id
+                          AND pending_control IS NOT NULL AND NOT close_requested
+                          AND status<>'CLOSED' AND control_deadline_at<=clock_timestamp())
+                        """)
+                    .param("id", candidate.id())
+                    .query(Boolean.class)
+                    .single();
+            if (stillExpired) {
+              closeForFailure(candidate.owner(), candidate.id(), "CONTROL_DEADLINE_EXCEEDED");
+            }
           });
     }
   }
 
   public void closeForFailure(UUID owner, UUID session, String reason) {
     SessionReference reference = reference(session);
-    if (reference.closeRequested()) {
+    if (reference.closeRequested()
+        || Set.of("CLOSED", "LOST").contains(get(owner, session).status())) {
       return;
     }
     if (reference.taskId() != null
@@ -757,11 +770,28 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
     };
   }
 
+  private boolean hasPendingControl(UUID owner, UUID session, long epoch) {
+    return jdbc.sql(
+            """
+            SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE id=:id AND owner_id=:owner
+              AND control_epoch=:epoch AND control_owner='TRANSFERRING'
+              AND pending_control IS NOT NULL AND NOT close_requested
+              AND status NOT IN ('CLOSED','CLOSING','LOST'))
+            """)
+        .param("id", session)
+        .param("owner", owner)
+        .param("epoch", epoch)
+        .query(Boolean.class)
+        .single();
+  }
+
   private boolean restoreRejectedControl(UUID owner, UUID id, ControlWork work) {
+    if (!hasPendingControl(owner, id, work.epoch())) {
+      return true;
+    }
     ControlIntent intent = work.intent();
     if (intent.previousOwner() == null
         || intent.previousPrivate() == null
-        || reference(id).closeRequested()
         || !work.deadline().isAfter(Instant.now())) {
       return false;
     }
@@ -782,6 +812,9 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
     transactions.executeWithoutResult(
         transaction -> {
           tasks.lockOwner(owner);
+          if (!hasPendingControl(owner, id, work.epoch())) {
+            return;
+          }
           jdbc.sql(
                   """
                   UPDATE browser_sessions SET control_owner=:control,private_mode=:private,
@@ -880,7 +913,7 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
     transactions.executeWithoutResult(
         transaction -> {
           tasks.lockOwner(owner);
-          if (reference(id).closeRequested() || get(owner, id).controlEpoch() != epoch) {
+          if (!hasPendingControl(owner, id, epoch)) {
             return;
           }
           jdbc.sql(
@@ -1043,8 +1076,7 @@ SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE (connection_id=:connection OR
     transactions.executeWithoutResult(
         transaction -> {
           tasks.lockOwner(owner);
-          if (reference(session).closeRequested()
-              || get(owner, session).controlEpoch() != controlEpoch) {
+          if (!hasPendingControl(owner, session, controlEpoch)) {
             return;
           }
           recordProfileSave(owner, connection, saved);

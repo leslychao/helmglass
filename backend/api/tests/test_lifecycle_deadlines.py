@@ -63,6 +63,7 @@ process.kill(pids[0],'SIGSTOP');console.log(pids[0]);"""
                 self.docker('exec', '-u', '1000', container, 'node', '-e',
                             "try{process.kill(" + str(pid) + ",'SIGCONT')}catch(e){if(e.code!=='ESRCH')throw e}")
         self.addCleanup(unfreeze_if_live)
+        return unfreeze_if_live
 
     def test_node_start_deadline_stops_a_frozen_initialization(self):
         identity, client = self.owner()
@@ -99,6 +100,232 @@ db.prepare('UPDATE sessions SET document=? WHERE id=?').run(JSON.stringify(sessi
             current = client.api('/api/tasks/' + task['id'])[1]
             self.assertEqual('CLOSED', current['browser']['status'])
             time.sleep(1)
+
+    def test_replayed_control_keeps_original_deadline_and_joins_pending_transfer(self):
+        identity, client, model, task = self.ready()
+        browser = task['browser']
+        resume = self.freeze_runtime(browser)
+        viewer = str(uuid.uuid4())
+        status, accepted = client.api('/api/browser-sessions/' + browser['id'] + '/control', 'POST', {
+            'type': 'TAKE', 'viewerId': viewer, 'controlEpoch': browser['controlEpoch']})
+        self.assertEqual(200, status, accepted)
+        epoch = accepted['controlEpoch']
+        script = """import {DatabaseSync} from 'node:sqlite';
+const db=new DatabaseSync('/data/node.sqlite');
+const id=%s,owner=%s,epoch=%s;
+const read=()=>{const s=JSON.parse(db.prepare('SELECT document FROM sessions WHERE id=?').get(id).document);
+  if(s.ownerId!==owner)throw Error('Wrong fixture owner');return s;};
+const until=Date.now()+10000;
+while(read().pendingOperation?.id!==`control:${epoch}`){
+  if(Date.now()>until)throw Error('Control was not dispatched');
+  await new Promise(r=>setTimeout(r,50));
+}
+const before=read().pendingOperation.deadlineAt;
+const repeat=fetch(`http://127.0.0.1:8090/sessions/${id}/control`,{method:'POST',
+  headers:{'X-Worker-Token':process.env.WORKER_TOKEN,'Content-Type':'application/json'},
+  body:JSON.stringify({controlEpoch:epoch,owner:'USER',privateMode:false,controllerId:%s,
+    deadlineAt:new Date(Date.parse(before)+60000).toISOString()})});
+await new Promise(r=>setTimeout(r,300));
+console.log(JSON.stringify({before,after:read().pendingOperation?.deadlineAt}));
+const result=await repeat;console.log(JSON.stringify({status:result.status}));await result.body?.cancel();
+""" % (json.dumps(browser['id']), json.dumps(identity.id), epoch, json.dumps(viewer))
+        process = subprocess.Popen(['docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+            'exec', '-i', 'helmglass-browser-node-1', 'node', '--input-type=module'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            process.stdin.write(script)
+            process.stdin.close()
+            timing = json.loads(process.stdout.readline())
+            resume()
+            response = json.loads(process.stdout.readline())
+            self.assertEqual(0, process.wait(timeout=40))
+            self.assertEqual(timing['before'], timing['after'], 'Replay must retain the original deadline')
+            self.assertEqual(200, response['status'], 'The identical pending transfer must share its result')
+            current = self.wait_task(client, task['id'], lambda value:
+                value['browser']['controlOwner'] == 'USER' or value['browser']['status'] == 'CLOSED')
+            self.assertEqual(('LIVE', 'USER', epoch), (current['browser']['status'],
+                current['browser']['controlOwner'], current['browser']['controlEpoch']))
+            completed_script = """import {DatabaseSync} from 'node:sqlite';
+import {randomBytes} from 'node:crypto';import {once} from 'node:events';import {WebSocket} from 'ws';
+const db=new DatabaseSync('/data/node.sqlite'),id=%s,owner=%s,viewer=%s,epoch=%s;
+const session=JSON.parse(db.prepare('SELECT document FROM sessions WHERE id=?').get(id).document);
+if(session.ownerId!==owner)throw Error('Wrong fixture owner');
+const base=`http://127.0.0.1:8090/sessions/${id}`;
+const headers={'X-Worker-Token':process.env.WORKER_TOKEN,'Content-Type':'application/json'};
+const ticket=randomBytes(32).toString('base64url');
+const grant=await fetch(base+'/ticket',{method:'POST',headers,body:JSON.stringify({ticket,
+ viewerId:viewer,role:'CONTROLLER',expiresAt:new Date(Date.now()+60000).toISOString(),
+ access:{channel:'WEB',grantId:'disposable-control-replay'}})});
+if(grant.status!==200)throw Error('Viewer ticket denied');await grant.body?.cancel();
+const socket=new WebSocket(base.replace('http:','ws:')+'/view?ticket='+ticket,
+ {headers:{Origin:new URL(process.env.PUBLIC_URL).origin}});
+let disconnected=false;socket.on('close',()=>disconnected=true);
+try{
+ await once(socket,'message',{signal:AbortSignal.timeout(5000)});
+ const send=async body=>{const r=await fetch(base+'/control',{method:'POST',headers,body:JSON.stringify(body)});
+  await r.body?.cancel();return r.status;};
+ const policy={controlEpoch:epoch,owner:'USER',privateMode:false,controllerId:viewer};
+ const replay=await send({...policy,deadlineAt:new Date(0).toISOString()});
+ const conflict=await send({...policy,controllerId:'another-controller'});
+ const stale=await send({...policy,controlEpoch:epoch-1});
+ await new Promise(r=>setTimeout(r,200));
+ console.log(JSON.stringify({replay,conflict,stale,disconnected}));
+}finally{socket.terminate();}
+""" % (json.dumps(browser['id']), json.dumps(identity.id), json.dumps(viewer), epoch)
+            checked = json.loads(self.docker('exec', '-i', 'helmglass-browser-node-1',
+                'node', '--input-type=module', script=completed_script))
+            self.assertEqual({'replay': 200, 'conflict': 409, 'stale': 409, 'disconnected': False}, checked)
+        finally:
+            resume()
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
+
+    def test_expired_control_candidate_does_not_close_a_completed_transfer(self):
+        identity, client, model, task = self.ready()
+        session = str(uuid.UUID(task['browser']['id']))
+        owner = str(uuid.UUID(identity.id))
+        self.fixture_sql(identity, 'SELECT 1;')
+        process = subprocess.Popen(['docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+            'exec', '-i', 'helmglass-postgres-1', 'psql', '-U', 'postgres', '-d', 'helmglass',
+            '-Atq', '-v', 'ON_ERROR_STOP=1'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        try:
+            process.stdin.write("SET idle_in_transaction_session_timeout='20s';BEGIN;"
+                + "SELECT pg_backend_pid() FROM accounts WHERE id='" + owner + "' FOR UPDATE;\n")
+            process.stdin.flush()
+            locker = int(process.stdout.readline())
+            self.fixture_sql(identity, "UPDATE browser_sessions SET pending_control='{}',"
+                "control_owner='TRANSFERRING',control_deadline_at=clock_timestamp()-interval '1 second',"
+                "control_next_check_at=clock_timestamp()+interval '6 minutes' "
+                "WHERE owner_id=:owner AND id='" + session + "';")
+            until = time.monotonic() + 12
+            while time.monotonic() < until:
+                waiting = int(self.fixture_sql(identity,
+                    "WITH RECURSIVE blocked(pid) AS (SELECT pid FROM pg_stat_activity WHERE "
+                    + str(locker) + "=ANY(pg_blocking_pids(pid)) UNION "
+                    "SELECT a.pid FROM pg_stat_activity a JOIN blocked b "
+                    "ON b.pid=ANY(pg_blocking_pids(a.pid))) SELECT count(*) FROM blocked;"))
+                if waiting >= 2:
+                    break
+                time.sleep(.2)
+            self.assertGreaterEqual(waiting, 2, 'Expiry and reconciliation must wait for the fixture owner')
+            process.stdin.write("UPDATE browser_sessions SET pending_control=NULL,control_owner='CHATGPT',"
+                "control_deadline_at=NULL,control_epoch=control_epoch+1 WHERE owner_id='" + owner
+                + "' AND id='" + session + "';COMMIT;\n")
+            process.stdin.close()
+            self.assertEqual(0, process.wait(timeout=5))
+            until = time.monotonic() + 6
+            while time.monotonic() < until:
+                current = client.api('/api/tasks/' + task['id'])[1]
+                self.assertEqual('LIVE', current['browser']['status'])
+                self.assertEqual('CHATGPT', current['browser']['controlOwner'])
+                self.assertNotEqual('PAUSED', current['status'])
+                time.sleep(.3)
+        finally:
+            if not process.stdin.closed:
+                process.stdin.close()
+            if process.poll() is None:
+                process.wait(timeout=25)
+            process.stdout.close()
+            process.stderr.close()
+
+    def test_late_control_failure_does_not_change_a_closed_browser(self):
+        identity, client, model, task = self.ready()
+        browser = task['browser']
+        session, owner = str(uuid.UUID(browser['id'])), str(uuid.UUID(identity.id))
+        self.freeze_runtime(browser)
+        status, accepted = client.api('/api/browser-sessions/' + session + '/control', 'POST', {
+            'type': 'TAKE', 'viewerId': str(uuid.uuid4()), 'controlEpoch': browser['controlEpoch']})
+        self.assertEqual(200, status, accepted)
+        script = """import {DatabaseSync} from 'node:sqlite';
+const db=new DatabaseSync('/data/node.sqlite'),id=%s,owner=%s,epoch=%s;
+const until=Date.now()+10000;
+while(true){const s=JSON.parse(db.prepare('SELECT document FROM sessions WHERE id=?').get(id).document);
+ if(s.ownerId!==owner)throw Error('Wrong fixture owner');
+ if(s.pendingOperation?.id===`control:${epoch}`)break;
+ if(Date.now()>until)throw Error('Control was not dispatched');
+ await new Promise(r=>setTimeout(r,50));}
+""" % (json.dumps(session), json.dumps(owner), accepted['controlEpoch'])
+        self.docker('exec', '-i', 'helmglass-browser-node-1', 'node', '--input-type=module', script=script)
+        process = subprocess.Popen(['docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
+            'exec', '-i', 'helmglass-postgres-1', 'psql', '-U', 'postgres', '-d', 'helmglass',
+            '-Atq', '-v', 'ON_ERROR_STOP=1'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True)
+        try:
+            process.stdin.write("SET idle_in_transaction_session_timeout='50s';BEGIN;"
+                + "SELECT pg_backend_pid() FROM accounts WHERE id='" + owner + "' FOR UPDATE;\n")
+            process.stdin.flush()
+            self.assertGreater(int(process.stdout.readline()), 0)
+            self.docker('stop', '--time', '1', 'helm-browser-' + session)
+            # Reproduce confirmed physical closure winning the owner lock before the late reply.
+            process.stdin.write("UPDATE browser_sessions SET status='CLOSED',closed_at=now(),"
+                "control_owner='NONE',pending_control=NULL,control_deadline_at=NULL,idle_close_at=NULL "
+                "WHERE owner_id='" + owner + "' AND id='" + session + "';"
+                "UPDATE tasks SET status='PAUSED',paused_explicitly=true WHERE owner_id='" + owner
+                + "' AND id='" + str(uuid.UUID(task['id'])) + "';SELECT 1;\n")
+            process.stdin.flush()
+            self.assertEqual('1', process.stdout.readline().strip())
+            until = time.monotonic() + 35
+            while time.monotonic() < until:
+                if 'Control delivery failed for session ' + session in self.docker(
+                        'logs', '--since', '60s', 'helmglass-api-1'):
+                    break
+                time.sleep(.3)
+            else:
+                self.fail('The dispatched control must return its late failure')
+            process.stdin.write('COMMIT;\n')
+            process.stdin.close()
+            self.assertEqual(0, process.wait(timeout=5))
+            until = time.monotonic() + 6
+            while time.monotonic() < until:
+                current = client.api('/api/tasks/' + task['id'])[1]
+                self.assertEqual(('CLOSED', 'NONE'), (current['browser']['status'],
+                    current['browser']['controlOwner']))
+                self.assertEqual('0', self.fixture_sql(identity,
+                    "SELECT count(*) FROM task_history WHERE owner_id=:owner AND task_id='"
+                    + str(uuid.UUID(task['id'])) + "' AND type='BROWSER_FAILURE';"),
+                    'A settled control must not add another failure after physical closure')
+                time.sleep(.3)
+        finally:
+            if not process.stdin.closed:
+                process.stdin.close()
+            if process.poll() is None:
+                process.wait(timeout=55)
+            process.stdout.close()
+            process.stderr.close()
+
+    def test_control_retry_after_node_restart_keeps_the_original_intent(self):
+        identity, client, model, task = self.ready()
+        self.assertEqual('1', self.fixture_sql(identity,
+            "SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED','QUEUED');"))
+        browser = task['browser']
+        resume = self.freeze_runtime(browser)
+        status, accepted = client.api('/api/browser-sessions/' + browser['id'] + '/control', 'POST', {
+            'type': 'TAKE', 'viewerId': str(uuid.uuid4()), 'controlEpoch': browser['controlEpoch']})
+        self.assertEqual(200, status, accepted)
+        script = """import {DatabaseSync} from 'node:sqlite';
+const db=new DatabaseSync('/data/node.sqlite'),id=%s,owner=%s,epoch=%s;
+const until=Date.now()+10000;
+while(true){const s=JSON.parse(db.prepare('SELECT document FROM sessions WHERE id=?').get(id).document);
+ if(s.ownerId!==owner)throw Error('Wrong fixture owner');
+ if(s.pendingOperation?.id===`control:${epoch}`){console.log(s.pendingOperation.deadlineAt);break;}
+ if(Date.now()>until)throw Error('Control was not dispatched');
+ await new Promise(r=>setTimeout(r,50));}
+""" % (json.dumps(browser['id']), json.dumps(identity.id), accepted['controlEpoch'])
+        before = self.docker('exec', '-i', 'helmglass-browser-node-1', 'node', '--input-type=module', script=script)
+        try:
+            self.docker('restart', '--time', '1', 'helmglass-browser-node-1')
+            after = self.docker('exec', '-i', 'helmglass-browser-node-1', 'node', '--input-type=module', script=script)
+            self.assertEqual(before, after, 'Restart and retry must not create another deadline')
+        finally:
+            resume()
+        current = self.wait_task(client, task['id'], lambda value:
+            value['browser']['controlOwner'] == 'USER' or value['browser']['status'] == 'CLOSED')
+        self.assertEqual(('LIVE', 'USER', accepted['controlEpoch']), (current['browser']['status'],
+            current['browser']['controlOwner'], current['browser']['controlEpoch']))
 
     def test_hung_control_stops_execution_at_persisted_deadline(self):
         identity, client, model, task = self.ready()

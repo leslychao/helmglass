@@ -8,7 +8,7 @@ import path from "node:path";
 import { PassThrough, Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { DatabaseSync } from "node:sqlite";
-import { chromium, type Browser, type BrowserContext, type Page, type Download } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page, type Frame, type Download } from "playwright";
 import { fetch, ProxyAgent } from "undici";
 import { WebSocketServer, createWebSocketStream, type WebSocket } from "ws";
 import { z } from "zod";
@@ -56,16 +56,17 @@ let activeOperation: string | undefined;
 let activeAbort: AbortController | undefined;
 let activeWork: Promise<object> | undefined;
 let browserMcp: BrowserMcp | undefined;
-let changingControl = false;
+let changingControl: { policy: Policy; completion: Promise<object> } | undefined;
 let navigationError: string | undefined;
 const viewers = new Set<WebSocket>();
 const pages = new Map<string, Page>();
 const pageIds = new WeakMap<Page, string>();
-const media = new Map<string, { id: string; pageId: string; sourceUrl: string; mimeType: string; headers: Record<string, string>; complete: boolean; observedAt: string }>();
+type MediaSource = { id: string; pageId: string; frame: Frame; sourceUrl: string; mimeType: string; headers: Record<string, string>; complete: boolean; observedAt: string };
+const media = new Map<string, MediaSource>();
 let mediaTruncated = false;
 const snapshotLimits = { nodes: 20_000, label: 2000, url: 8192, mimeType: 200, media: 100 };
 const pendingDownloads = new Map<string, { completion: Promise<unknown>; abort: AbortController; download: Download }>();
-let blobCapture: { nonce: string; page: Page; stream: PassThrough } | undefined;
+let blobCapture: { nonce: string; frame: Frame; stream: PassThrough } | undefined;
 
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 class BeforeEffectRejection extends HttpError {}
@@ -160,10 +161,10 @@ function registerPage(page: Page): void {
     const epoch = policy.controlEpoch;
     void response.request().allHeaders().then((headers) => {
       if (policy.privateMode || epoch !== policy.controlEpoch) return;
-      while (media.size >= snapshotLimits.media) { const first = media.keys().next().value; if (first) media.delete(first); mediaTruncated = true; }
       const existing = [...media.values()].find((item) => item.sourceUrl === response.url() && item.pageId === id);
+      if (!existing) while (media.size >= snapshotLimits.media) { const first = media.keys().next().value; if (first) media.delete(first); mediaTruncated = true; }
       const mediaId = existing?.id ?? randomUUID();
-      media.set(mediaId, { id: mediaId, pageId: id, sourceUrl: response.url(), mimeType: mime || "application/octet-stream", headers, complete: response.status() === 200, observedAt: new Date().toISOString() });
+      media.set(mediaId, { id: mediaId, pageId: id, frame: response.frame(), sourceUrl: response.url(), mimeType: mime || "application/octet-stream", headers, complete: response.status() === 200, observedAt: new Date().toISOString() });
     }).catch(() => {});
   });
 }
@@ -211,7 +212,7 @@ async function createContext(): Promise<BrowserContext> {
     await created.exposeBinding("__helmOriginalAudioChunk", async (source, payload: unknown) => {
       const input = z.object({ nonce: z.uuid(), data: z.string().max(87_384) }).parse(payload);
       const transfer = blobCapture;
-      if (!transfer || source.page !== transfer.page || input.nonce !== transfer.nonce || transfer.stream.destroyed || policy.privateMode) throw new Error("Audio transfer unavailable");
+      if (!transfer || source.frame !== transfer.frame || input.nonce !== transfer.nonce || transfer.stream.destroyed || policy.privateMode) throw new Error("Audio transfer unavailable");
       if (!transfer.stream.write(Buffer.from(input.data, "base64"))) await once(transfer.stream, "drain");
     });
     created.setDefaultTimeout(20_000); created.setDefaultNavigationTimeout(40_000);
@@ -280,47 +281,64 @@ async function listMedia(): Promise<object> {
   observationAllowed();
   const page = selectedPage(); const pageId = pageIds.get(page);
   if (!pageId) throw new HttpError(409, "Page unavailable");
-  const snapshot = await page.evaluate((limits) => {
-    const found: { url: string; mimeType: string; label: string }[] = [];
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-    let inspected = 0; let truncated = false;
-    const add = (url: string, mimeType: string, label: string) => {
-      // URLs are identifiers: never register a shortened URL as a real capture target.
-      if (url.length > limits.url || mimeType.length > limits.mimeType) { truncated = true; return; }
-      if (label.length > limits.label) truncated = true;
-      found.push({ url, mimeType, label: label.slice(0, limits.label) });
-    };
-    while (walker.nextNode()) {
-      if (inspected >= limits.nodes || found.length >= limits.media) { truncated = true; break; }
-      inspected += 1; const element = walker.currentNode;
-      if (element instanceof HTMLMediaElement && element.currentSrc) add(element.currentSrc, "audio/unknown", element.getAttribute("aria-label") ?? element.getAttribute("title") ?? "");
-      if (element instanceof HTMLSourceElement && element.src) add(element.src, element.type || "audio/unknown", element.parentElement?.getAttribute("aria-label") ?? "");
+  const sources: { url: string; mimeType: string; label: string }[] = [];
+  let inspected = 0; let frames = 0; let truncated = false;
+  for (const frame of page.frames()) {
+    if (frames >= snapshotLimits.media || inspected >= snapshotLimits.nodes || sources.length >= snapshotLimits.media) { truncated = true; break; }
+    frames++;
+    if (frame.isDetached()) continue;
+    const snapshot = await frame.evaluate((limits) => {
+      const found: { url: string; mimeType: string; label: string }[] = [];
+      const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
+      let inspected = 0; let truncated = false;
+      const add = (url: string, mimeType: string, label: string) => {
+        // URLs are identifiers: never register a shortened URL as a real capture target.
+        if (url.length > limits.url || mimeType.length > limits.mimeType) { truncated = true; return; }
+        if (label.length > limits.label) truncated = true;
+        found.push({ url, mimeType, label: label.slice(0, limits.label) });
+      };
+      while (walker.nextNode()) {
+        if (inspected >= limits.nodes || found.length >= limits.media) { truncated = true; break; }
+        inspected += 1; const element = walker.currentNode;
+        if (element instanceof HTMLMediaElement) {
+          const url = element.currentSrc || element.src;
+          if (url) add(url, "audio/unknown", element.getAttribute("aria-label") ?? element.getAttribute("title") ?? "");
+        }
+        if (element instanceof HTMLSourceElement && element.src) add(element.src, element.type || "audio/unknown", element.parentElement?.getAttribute("aria-label") ?? "");
+      }
+      return { sources: found, inspected, truncated };
+    }, { ...snapshotLimits, nodes: snapshotLimits.nodes - inspected, media: snapshotLimits.media - sources.length });
+    observationAllowed();
+    inspected += snapshot.inspected;
+    truncated ||= snapshot.truncated;
+    sources.push(...snapshot.sources);
+    for (const source of snapshot.sources) {
+      if (!["http:", "https:", "blob:"].includes(new URL(source.url).protocol)) continue;
+      const existing = [...media.values()].find((item) => item.sourceUrl === source.url && item.pageId === pageId);
+      if (existing) { existing.frame = frame; continue; }
+      while (media.size >= snapshotLimits.media) { const first = media.keys().next().value; if (first) media.delete(first); mediaTruncated = true; }
+      const id = randomUUID();
+      media.set(id, { id, pageId, frame, sourceUrl: source.url, mimeType: source.mimeType, headers: {}, complete: false, observedAt: new Date().toISOString() });
     }
-    return { sources: found, truncated };
-  }, snapshotLimits);
-  observationAllowed();
-  for (const source of snapshot.sources) {
-    if (!["http:", "https:", "blob:"].includes(new URL(source.url).protocol)) continue;
-    if ([...media.values()].some((item) => item.sourceUrl === source.url && item.pageId === pageId)) continue;
-    while (media.size >= snapshotLimits.media) { const first = media.keys().next().value; if (first) media.delete(first); mediaTruncated = true; }
-    const id = randomUUID();
-    media.set(id, { id, pageId, sourceUrl: source.url, mimeType: source.mimeType, headers: {}, complete: false, observedAt: new Date().toISOString() });
   }
-  return { media: [...media.values()].map(({ headers: _headers, ...item }) => item), sources: snapshot.sources, truncated: snapshot.truncated || mediaTruncated };
+  observationAllowed();
+  return { media: [...media.values()].map(({ headers: _headers, frame: _frame, ...item }) => item), sources, truncated: truncated || mediaTruncated };
 }
-async function captureBlob(source: { sourceUrl: string; pageId: string; mimeType: string }, sourceRef: string, name: string, signal: AbortSignal): Promise<object> {
+async function captureBlob(source: MediaSource, sourceRef: string, name: string, signal: AbortSignal): Promise<object> {
   signal.throwIfAborted();
   const page = pages.get(source.pageId);
   if (!page || page.isClosed()) throw new HttpError(409, "Source page is no longer available");
+  const frame = source.frame;
+  if (frame.isDetached()) throw new HttpError(409, "Source frame is no longer available");
   const stream = new PassThrough({ highWaterMark: 65_536 }); const nonce = randomUUID();
-  blobCapture = { nonce, page, stream };
+  blobCapture = { nonce, frame, stream };
   const metadata = { name, mimeType: "application/octet-stream", sourceUrl: source.sourceUrl, sourceRef, complete: true, pageId: source.pageId, operationId: activeOperation };
   const saved = saveArtifact(stream, metadata, signal);
   saved.catch(() => {});
   const abort = () => stream.destroy(new Error("Audio transfer cancelled"));
   signal.addEventListener("abort", abort, { once: true });
   try {
-    const transfer = page.evaluate(async ({ url, transferId }) => {
+    const transfer = frame.evaluate(async ({ url, transferId }) => {
       const bridge: unknown = Reflect.get(window, "__helmOriginalAudioChunk");
       if (typeof bridge !== "function") throw new Error("Audio transfer unavailable");
       const response = await fetch(url, { signal: AbortSignal.timeout(300_000) });
@@ -550,42 +568,45 @@ const server = http.createServer(async (request, response) => {
     }
     if (url.pathname === "/control" && request.method === "POST") {
       const input = Policy.parse(await body(request));
-      if (changingControl) throw new HttpError(409, "Control transfer in progress");
+      if (changingControl) {
+        if (JSON.stringify(input) !== JSON.stringify(changingControl.policy)) throw new HttpError(409, "Control transfer in progress");
+        reply(response, 200, await changingControl.completion); return;
+      }
       if (input.controlEpoch < policy.controlEpoch || (input.controlEpoch === policy.controlEpoch && JSON.stringify(input) !== JSON.stringify(policy))) throw new HttpError(409, "Stale control epoch");
       if (JSON.stringify(input) === JSON.stringify(policy)) { reply(response, 200, summary()); return; }
       // Never expose a renderer while a private password injection is still pending.
       if (activeAutofills || exportingProfile) throw new HttpError(409, "Private browser work is finishing");
       if (input.owner === "USER" && !input.controllerId) throw new HttpError(400, "Controller identity required");
       if (activeOperation && input.owner !== "NONE") throw new HttpError(409, "Wait for the dispatched action to finish");
-      changingControl = true;
-      try {
+      const transfer = { policy: input, completion: Promise.resolve().then(async () => {
         activeAbort?.abort();
         await activeWork;
         await closeMcp();
-      } catch (error) {
-        changingControl = false;
-        throw error;
-      }
-      if (input.privateMode) {
-        for (const transfer of pendingDownloads.values()) {
-          transfer.abort.abort();
-          void transfer.download.cancel().catch(() => {});
+        if (input.privateMode) {
+          for (const download of pendingDownloads.values()) {
+            download.abort.abort();
+            void download.download.cancel().catch(() => {});
+          }
         }
-      }
-      for (const viewer of viewers) viewer.terminate(); viewers.clear();
-      if (!input.privateMode || input.owner !== "USER") savedCredential = undefined;
-      if (!input.privateMode || (input.owner === "USER" && input.controllerId !== policy.controllerId)) credentialCapture.clear();
-      if (input.privateMode && !policy.privateMode) {
-        loginOrigins.clear(); loginScopeRevision++;
-        if (currentPage) {
-          const current = new URL(currentPage.url());
-          if (["http:", "https:"].includes(current.protocol)) loginOrigins.add(current.origin);
+        for (const viewer of viewers) viewer.terminate(); viewers.clear();
+        if (!input.privateMode || input.owner !== "USER") savedCredential = undefined;
+        if (!input.privateMode || (input.owner === "USER" && input.controllerId !== policy.controllerId)) credentialCapture.clear();
+        if (input.privateMode && !policy.privateMode) {
+          loginOrigins.clear(); loginScopeRevision++;
+          if (currentPage) {
+            const current = new URL(currentPage.url());
+            if (["http:", "https:"].includes(current.protocol)) loginOrigins.add(current.origin);
+          }
         }
-      }
-      policy = input; changingControl = false; media.clear(); mediaTruncated = false;
-      db.prepare("INSERT INTO state(id,value) VALUES('policy',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(JSON.stringify(policy));
-      if (currentPage && !currentPage.isClosed()) await credentialCapture.updatePage(currentPage);
-      reply(response, 200, summary()); return;
+        policy = input; media.clear(); mediaTruncated = false;
+        db.prepare("INSERT INTO state(id,value) VALUES('policy',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(JSON.stringify(policy));
+        if (currentPage && !currentPage.isClosed()) await credentialCapture.updatePage(currentPage);
+        return summary();
+      }) };
+      changingControl = transfer;
+      try { reply(response, 200, await transfer.completion); }
+      finally { if (changingControl === transfer) changingControl = undefined; }
+      return;
     }
     if (url.pathname === "/observe" && request.method === "GET") {
       if (activeWork) throw new HttpError(409, "Browser work in progress");
@@ -706,7 +727,7 @@ server.on("upgrade", (request, socket, head) => {
     if (controller && (policy.owner !== "USER" || viewerId !== policy.controllerId)) throw new HttpError(403, "Control unavailable");
     websocketServer.handleUpgrade(request, socket, head, (client) => {
       viewers.add(client);
-      // x11vnc's viewonly endpoint rejects input on the server, independently of the UI.
+      // The viewer endpoint rejects input and clipboard exchange independently of the UI.
       const upstream = net.connect(controller ? 5901 : 5900, "127.0.0.1");
       const stream = createWebSocketStream(client);
       const clean = () => { viewers.delete(client); upstream.destroy(); stream.destroy(); };

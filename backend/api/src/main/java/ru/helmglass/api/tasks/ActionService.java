@@ -35,6 +35,7 @@ import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.browsers.BrowserService;
 import ru.helmglass.api.browsers.WorkerClient;
+import ru.helmglass.api.connections.ConnectionSite;
 import ru.helmglass.api.events.EventService;
 import tools.jackson.databind.JsonNode;
 
@@ -66,6 +67,7 @@ public class ActionService {
   private final JdbcClient jdbc;
   private final JsonSupport json;
   private final TaskService tasks;
+  private final ConnectionSite connectionSites;
   private final TaskStepService steps;
   private final BrowserService browsers;
   private final WorkerClient worker;
@@ -86,6 +88,7 @@ public class ActionService {
       JdbcClient jdbc,
       JsonSupport json,
       TaskService tasks,
+      ConnectionSite connectionSites,
       TaskStepService steps,
       BrowserService browsers,
       WorkerClient worker,
@@ -96,6 +99,7 @@ public class ActionService {
     this.jdbc = jdbc;
     this.json = json;
     this.tasks = tasks;
+    this.connectionSites = connectionSites;
     this.steps = steps;
     this.browsers = browsers;
     this.worker = worker;
@@ -378,23 +382,8 @@ public class ActionService {
           null);
       return;
     }
-    if (connection == null && !task.preferredConnectionIds().isEmpty()) {
-      var matches =
-          jdbc.sql(
-                  "SELECT id,name FROM connections WHERE owner_id=:owner AND id IN (:ids) AND"
-                      + " site=:site AND deleted_at IS NULL ORDER BY last_used_at DESC NULLS"
-                      + " LAST,id")
-              .param("owner", owner)
-              .param("ids", task.preferredConnectionIds())
-              .param("site", task.site())
-              .query(
-                  (row, index) ->
-                      Map.of(
-                          "id",
-                          row.getObject("id", UUID.class).toString(),
-                          "label",
-                          row.getString("name")))
-              .list();
+    if (connection == null) {
+      var matches = connectionSites.choices(owner, task.site(), task.preferredConnectionIds());
       if (matches.size() > 1) {
         tasks.request(
             owner,
@@ -407,14 +396,8 @@ public class ActionService {
       }
       if (!matches.isEmpty()) {
         connection = UUID.fromString(matches.getFirst().get("id"));
-      } else if (jdbc.sql(
-              "SELECT EXISTS(SELECT 1 FROM connections WHERE owner_id=:owner AND id IN (:ids) AND"
-                  + " site=:site)")
-          .param("owner", owner)
-          .param("ids", task.preferredConnectionIds())
-          .param("site", task.site())
-          .query(Boolean.class)
-          .single()) {
+      } else if (!task.preferredConnectionIds().isEmpty()
+          && connectionSites.hasPreferred(owner, task.site(), task.preferredConnectionIds())) {
         tasks.request(
             owner,
             task.id(),
@@ -422,34 +405,6 @@ public class ActionService {
             "Предпочтительное подключение недоступно. Выберите аккаунт сайта для продолжения.",
             null,
             null);
-        return;
-      }
-    }
-    if (connection == null && task.preferredConnectionIds().isEmpty()) {
-      var matches =
-          jdbc.sql(
-                  "SELECT id,name FROM connections WHERE owner_id=:owner AND site=:site AND"
-                      + " deleted_at IS NULL AND status='READY' ORDER BY name,id LIMIT 50")
-              .param("owner", owner)
-              .param("site", task.site())
-              .query(
-                  (row, index) ->
-                      Map.of(
-                          "id",
-                          row.getObject("id", UUID.class).toString(),
-                          "label",
-                          row.getString("name")))
-              .list();
-      if (matches.size() == 1) {
-        connection = UUID.fromString(matches.getFirst().get("id"));
-      } else if (matches.size() > 1) {
-        tasks.request(
-            owner,
-            task.id(),
-            "ACCOUNT_CHOICE",
-            "Выберите аккаунт сайта.",
-            null,
-            json.tree(matches));
         return;
       }
     }

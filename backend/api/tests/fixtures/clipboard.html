@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>Clipboard acceptance</title>
+<style>body{margin:0}textarea{box-sizing:border-box;width:100%;height:600px;font:24px sans-serif}</style>
+<textarea autofocus aria-label="Clipboard acceptance"></textarea>
+<script>
+  if (new URL(location.href).searchParams.has('oversize'))
+    document.querySelector('textarea').value = 'я'.repeat(131072) + 'a';
+</script>
