@@ -66,6 +66,48 @@ async function api(path, body) {
 try {
   await page.goto(input.base + '/connections/' + input.connectionId + '/login');
   await ready(); await focusCanvas();
+  const typed = 'abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 !@#$%^&*()';
+  await page.keyboard.type(typed);
+  await copy(typed);
+  console.log('Real Chrome: ordinary letters, numbers and punctuation pass through noVNC');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.press('Backspace');
+  // keyboard.type uses insertText for Cyrillic, which cannot enter a remote canvas.
+  // Dispatch trusted keyboard events with the physical keys of the Russian layout.
+  const keyboard = await context.newCDPSession(page);
+  const russianKeys = [
+    ['й', 'KeyQ', 81], ['ц', 'KeyW', 87], ['у', 'KeyE', 69], ['к', 'KeyR', 82],
+    ['е', 'KeyT', 84], ['н', 'KeyY', 89], ['г', 'KeyU', 85], ['ш', 'KeyI', 73],
+    ['щ', 'KeyO', 79], ['з', 'KeyP', 80], ['ф', 'KeyA', 65], ['ы', 'KeyS', 83],
+    ['в', 'KeyD', 68], ['а', 'KeyF', 70], ['п', 'KeyG', 71], ['р', 'KeyH', 72],
+    ['о', 'KeyJ', 74], ['л', 'KeyK', 75], ['д', 'KeyL', 76], ['я', 'KeyZ', 90],
+    ['ч', 'KeyX', 88], ['с', 'KeyC', 67], ['м', 'KeyV', 86], ['и', 'KeyB', 66],
+    ['т', 'KeyN', 78], ['ь', 'KeyM', 77], ['х', 'BracketLeft', 219],
+    ['ъ', 'BracketRight', 221], ['ж', 'Semicolon', 186], ['э', 'Quote', 222],
+    ['б', 'Comma', 188], ['ю', 'Period', 190], ['ё', 'Backquote', 192],
+  ];
+  for (const uppercase of [false, true]) {
+    if (uppercase) await page.keyboard.down('Shift');
+    for (const [letter, code, windowsVirtualKeyCode] of russianKeys) {
+      const key = uppercase ? letter.toUpperCase() : letter;
+      const modifiers = uppercase ? 8 : 0;
+      await keyboard.send('Input.dispatchKeyEvent', {
+        type: 'keyDown', key, code, windowsVirtualKeyCode, text: key, modifiers,
+      });
+      await keyboard.send('Input.dispatchKeyEvent', {
+        type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers,
+      });
+    }
+    if (uppercase) await page.keyboard.up('Shift');
+  }
+  await keyboard.detach();
+  const russian = russianKeys.map(([key]) => key).join('');
+  await copy(russian + russian.toUpperCase());
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type(typed);
+  await copy(typed);
+  console.log('Real Chrome: Cyrillic key events and return to English preserve every character');
+  await page.keyboard.press('Control+a');
   const text = 'Привет 🌍\nстрока с emoji 🧪';
   await paste(text); await copy(text); await copy(text);
   console.log('Real Chrome: Unicode paste and repeated identical copy passed');

@@ -11,9 +11,15 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -32,6 +38,8 @@ public class ArtifactService {
   private final Path directory;
   private final ru.helmglass.api.JsonSupport json;
   private final Semaphore transfers = new Semaphore(2);
+  private final Semaphore waitingCalls = new Semaphore(16);
+  private final Map<UUID, Delivery> deliveries = new ConcurrentHashMap<>();
 
   public ArtifactService(
       JdbcClient jdbc,
@@ -250,6 +258,7 @@ ON CONFLICT(id) DO NOTHING
           .param("id", id)
           .param("owner", owner)
           .update();
+      signalDelivery(id);
       events.emit(owner, "artifact", id, 1);
       events.emit(owner, "task", task, 0);
     } catch (IOException | NoSuchAlgorithmException | ArithmeticException exception) {
@@ -257,6 +266,7 @@ ON CONFLICT(id) DO NOTHING
           .param("id", id)
           .param("owner", owner)
           .update();
+      signalDelivery(id);
       try {
         Files.deleteIfExists(temporary);
       } catch (IOException ignored) {
@@ -280,9 +290,59 @@ ON CONFLICT(id) DO NOTHING
         .optional();
   }
 
-  public Optional<Contracts.Artifact> findReady(UUID owner, UUID id) {
+  private Optional<Contracts.Artifact> findReady(UUID owner, UUID id) {
     return find(owner, id).filter(ArtifactService::ready);
   }
+
+  /** Waits for a verified delivery within the caller's remaining response budget. */
+  public Optional<Contracts.Artifact> awaitReady(UUID owner, UUID id, long deadlineNanos) {
+    if (System.nanoTime() >= deadlineNanos || !waitingCalls.tryAcquire()) {
+      return findReady(owner, id);
+    }
+    Delivery delivery =
+        deliveries.compute(
+            id,
+            (key, current) ->
+                current == null
+                    ? new Delivery(new CompletableFuture<>(), 1)
+                    : new Delivery(current.signal(), current.waiters() + 1));
+    try {
+      // Register before reading so a transfer finishing here cannot lose its notification.
+      var current = find(owner, id);
+      long remaining = deadlineNanos - System.nanoTime();
+      boolean terminal = current.isPresent() && !"UPLOADING".equals(current.get().status());
+      if (terminal || remaining <= 0) {
+        return current.filter(ArtifactService::ready);
+      }
+      try {
+        delivery.signal().get(remaining, TimeUnit.NANOSECONDS);
+      } catch (TimeoutException exception) {
+        // Another API instance may have delivered it; the durable record is authoritative.
+      } catch (InterruptedException exception) {
+        Thread.currentThread().interrupt();
+      } catch (ExecutionException exception) {
+        throw new IllegalStateException("Artifact delivery notification failed", exception);
+      }
+      return findReady(owner, id);
+    } finally {
+      deliveries.computeIfPresent(
+          id,
+          (key, current) ->
+              current.waiters() == 1
+                  ? null
+                  : new Delivery(current.signal(), current.waiters() - 1));
+      waitingCalls.release();
+    }
+  }
+
+  private void signalDelivery(UUID id) {
+    Delivery delivery = deliveries.get(id);
+    if (delivery != null) {
+      delivery.signal().complete(null);
+    }
+  }
+
+  private record Delivery(CompletableFuture<Void> signal, int waiters) {}
 
   private static boolean ready(Contracts.Artifact artifact) {
     return "READY".equals(artifact.status()) && artifact.complete() && artifact.sizeBytes() != null;

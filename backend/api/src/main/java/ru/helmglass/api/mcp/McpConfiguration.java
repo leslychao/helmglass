@@ -162,6 +162,15 @@ Never combine a ref remembered from an older observation with a new observationI
 the ref string looks unchanged. Read required refs through the current snapshot's cursor.
 For known independent ratings and fields, collect their refs from one observation and send
 an actions batch with one final observation. Read new conditional fields after that batch.
+Before leaving or submitting a form, read its complete current scope through cursor and
+finish every required conditional field. A count of the original fields or a successful
+next-page click does not prove the form is complete. Do not add unrequested optional text.
+Open page links with click on their issued ref so the browser follows the actual href,
+including its query and fragment, in the same browser context. If the observation is partial,
+read its cursor to find the link; a modal can be after the background page in the snapshot.
+Never reconstruct a link URL from screenshot text for navigate or newTab. When a visible link
+has no ARIA ref, click the link itself using a fresh screenshot. Use navigate/newTab only
+for exact URLs supplied by the user or returned as URLs by a tool.
 For a visible control absent from ARIA (for example native audio Play), request screenshot,
 then click with {screenshotId,x,y} from result.screenshotTarget instead of observationId/ref.
 Use CSS-pixel coordinates on the original image, not the scaled viewer. Screenshot targets
@@ -169,9 +178,10 @@ expire after 60 seconds and any action, navigation, viewport or control change. 
 screenshot before each coordinate click; do not batch several clicks from the same screenshot.
 This uses the stock MCP vision click and still refuses private inputs, including inside frames.
 Clicking a media container or label does not prove Play was pressed. When the user requires
-on-site playback, verify the running player and its end time with screenshots, wait for the
-actual duration (split waits longer than 30 seconds), and finish one player before starting
-another. Capturing or analyzing the original audio does not prove on-site playback.
+on-site playback, verify the running player and its end time with screenshots, wait only for
+the remaining playback time (split waits longer than 30 seconds), and finish one player before
+starting another. Playback continues between tool calls; a confirmed final timer needs no
+additional wait. Capturing or analyzing the original audio does not prove on-site playback.
 References expire after 60 seconds and are revoked by navigation, control changes and actions.
 An accepted actions sequence reserves its already issued refs only for that exact sequence.
 New conditional fields require a new observation. A stale reference is a failure before dispatch;

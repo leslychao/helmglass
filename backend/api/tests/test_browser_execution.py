@@ -223,18 +223,14 @@ console.log(JSON.stringify({rssKiB, leaked}));
         self.assertEqual('FAILED', refused['status'])
         self.assertEqual('SUCCEEDED', self.execute(action=self.action('scroll', {'y': 500}))['status'])
         shot = self.action('screenshot')
+        started = time.monotonic()
         error, result, receipt = self.client.tool('browser.execute', {
             'taskId': self.task['id'], 'action': shot})
+        screenshot_elapsed = time.monotonic() - started
         self.assertFalse(error, result)
         self.assertEqual('SUCCEEDED', result['status'], result)
-        delivery_deadline = time.monotonic() + 8
-        while not any(item['type'] == 'image' for item in receipt['content']):
-            self.assertEqual('PENDING', result['result']['imageDelivery'])
-            self.assertLess(time.monotonic(), delivery_deadline, 'Screenshot image not delivered')
-            time.sleep(.1)
-            error, result, receipt = self.client.tool('operations.get', {
-                'operationId': shot['operationId']})
-            self.assertFalse(error, result)
+        self.assertTrue(any(item['type'] == 'image' for item in receipt['content']),
+                        'A ready screenshot must be delivered in the original MCP call')
         self.assertEqual('READY', result['result']['imageDelivery'])
         target = result['result']['screenshotTarget']
         self.assertEqual(shot['operationId'], target['screenshotId'])
@@ -248,10 +244,32 @@ console.log(JSON.stringify({rssKiB, leaked}));
         self.assertEqual('SUCCEEDED', repeated['status'])
         self.assertEqual(shot['operationId'], repeated.get('id', repeated.get('operationId')))
         self.assertEqual(target, repeated['result']['screenshotTarget'])
+        self.fixture_sql(self.identity, "UPDATE artifacts SET status='UPLOADING' "
+            "WHERE owner_id=:owner AND operation_id='" + shot['operationId'] + "';")
+        try:
+            started = time.monotonic()
+            error, pending, pending_receipt = self.client.tool('operations.get', {
+                'operationId': shot['operationId']})
+            self.assertFalse(error, pending)
+            self.assertLess(time.monotonic() - started, 10, 'Delivery exceeded its response budget')
+            self.assertEqual('PENDING', pending['result']['imageDelivery'])
+            self.assertFalse(any(item['type'] == 'image' for item in pending_receipt['content']))
+        finally:
+            self.fixture_sql(self.identity, "UPDATE artifacts SET status='READY' "
+                "WHERE owner_id=:owner AND operation_id='" + shot['operationId'] + "';")
+        error, delivered, delivered_receipt = self.client.tool('operations.get', {
+            'operationId': shot['operationId']})
+        self.assertFalse(error, delivered)
+        self.assertEqual('READY', delivered['result']['imageDelivery'])
+        self.assertEqual(target, delivered['result']['screenshotTarget'])
+        self.assertEqual(image, next(item for item in delivered_receipt['content']
+                                    if item['type'] == 'image'))
         script = "import {existsSync} from 'node:fs'; console.log(existsSync('/tmp/helm-mcp/screenshot-" + shot['operationId'] + ".png'));"
         checked = subprocess.run(self.docker + ['exec', '-i', 'helm-browser-' + self.task['browser']['id'],
             'node', '--input-type=module'], input=script, text=True, capture_output=True, check=True, timeout=20)
         self.assertEqual('false', checked.stdout.strip())
+        print(f'Screenshot returned inline in {screenshot_elapsed:.3f}s; bounded pending delivery '
+              'and recovery used the same operation and image', flush=True)
 
     def test_sequence_stops_on_private_refusal_and_never_repeats_completed_effects(self):
         self.ready()

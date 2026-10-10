@@ -1,0 +1,33 @@
+--- a/unix/x0vncserver/XDesktop.cxx
++++ b/unix/x0vncserver/XDesktop.cxx
+@@ -369,6 +369,30 @@
+       break;
+   }
+ 
++  // Select an installed layout for the client's symbol before allocating a
++  // spare keycode, which Chromium may treat as a non-text key.
++  if (keycode > xkb->max_key_code) {
++    for (unsigned int group = 0; group < XkbNumKbdGroups; group++) {
++      if (group == state.group)
++        continue;
++      mods = XkbBuildCoreState(XkbStateMods(&state), group);
++      for (keycode = xkb->min_key_code;
++           keycode <= xkb->max_key_code;
++           keycode++) {
++        KeySym cursym;
++        unsigned int out_mods;
++        XkbTranslateKeyCode(xkb, keycode, mods, &out_mods, &cursym);
++        if (cursym == keysym)
++          break;
++      }
++      if (keycode <= xkb->max_key_code) {
++        if (!XkbLockGroup(dpy, XkbUseCoreKbd, group))
++          keycode = 0;
++        break;
++      }
++    }
++  }
++
+   if (keycode > xkb->max_key_code)
+     keycode = 0;
+ 

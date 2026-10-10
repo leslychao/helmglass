@@ -49,6 +49,7 @@ public class McpTools {
   private static final Logger log = LoggerFactory.getLogger(McpTools.class);
   private static final int IMAGE_LIMIT = 8 * 1024 * 1024;
   private static final int WIDGET_LIMIT = 1024 * 1024;
+  private static final long OPERATION_WAIT_NANOS = TimeUnit.SECONDS.toNanos(8);
   static final String OPERATION_RESULT_INSTRUCTIONS =
       "Используйте уже выданный результат SUCCEEDED сразу и продолжайте задание."
           + " Не вызывайте operations.get для повторного подтверждения готового результата."
@@ -424,6 +425,16 @@ public class McpTools {
                 + " snapshot содержит native ARIA nodes с path; observe.arguments: {} — страница,"
                 + " {observationId,ref} — область, {cursor} — продолжение; варианты несовместимы."
                 + " scope определяет область полноты. Адресный observe может завершать пакет."
+                + " Перед переходом или отправкой формы дочитайте актуальную область через cursor"
+                + " и заполните появившиеся обязательные поля. Число исходных ответов и успешный"
+                + " переход не доказывают полноту формы."
+                + " Не добавляйте непрошенный необязательный текст."
+                + " Ссылки страницы открывайте click по выданному ref: браузер использует настоящий"
+                + " href и тот же контекст. При неполном снимке дочитайте cursor: модальная ссылка"
+                + " может идти после фоновой страницы. Не переписывайте URL со screenshot для"
+                + " navigate/newTab; без ARIA ref нажмите саму ссылку по свежему screenshot."
+                + " navigate/newTab используют точный URL пользователя"
+                + " либо URL из ответа инструмента."
                 + " press.arguments: {key}; клавиша действует на текущий фокус. waitFor.arguments:"
                 + " text, textGone (1–1000 символов) и/или time (секунды, больше 0, не более 30)."
                 + " Ожидания выполняет штатный MCP на странице. Отсутствующие checked/selected"
@@ -1111,7 +1122,7 @@ public class McpTools {
     if (sequence == input.has("action")) {
       throw ApiException.invalid("action", "Передайте action или actions, но не оба поля.");
     }
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+    long deadline = System.nanoTime() + OPERATION_WAIT_NANOS;
     if (!sequence) {
       if (!input.path("action").isObject()) {
         throw ApiException.invalid("action", "Действие должно быть объектом.");
@@ -1119,7 +1130,7 @@ public class McpTools {
       Contracts.BrowserAction action =
           json.convert(input.path("action"), Contracts.BrowserAction.class);
       return operationResponse(
-          owner, executeAction(owner, task, chat, action, deadline, List.of(), callId));
+          owner, executeAction(owner, task, chat, action, deadline, List.of(), callId), deadline);
     }
     JsonNode supplied = input.path("actions");
     if (!supplied.isArray() || supplied.isEmpty() || supplied.size() > 8) {
@@ -1233,18 +1244,21 @@ public class McpTools {
   }
 
   private McpSchema.CallToolResult operation(UUID owner, UUID id) {
+    long deadline = System.nanoTime() + OPERATION_WAIT_NANOS;
     Contracts.Operation operation = actions.result(owner, id);
-    return operationResponse(owner, operation);
+    return operationResponse(owner, operation, deadline);
   }
 
-  private McpSchema.CallToolResult operationResponse(UUID owner, Contracts.Operation operation) {
+  private McpSchema.CallToolResult operationResponse(
+      UUID owner, Contracts.Operation operation, long deadline) {
     JsonNode result = operation.result();
     if ("screenshot".equals(operation.type())
         && "SUCCEEDED".equals(operation.status())
         && result != null
         && result.path("artifact").path("id").isString()) {
       UUID artifactId = UUID.fromString(result.path("artifact").path("id").asString());
-      var available = artifacts.findReady(owner, artifactId);
+      var available = artifacts.awaitReady(owner, artifactId, deadline);
+      actions.requireResultAccess(owner, operation.taskId());
       var response =
           McpSchema.CallToolResult.builder()
               .addTextContent(
