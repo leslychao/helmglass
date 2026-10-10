@@ -556,11 +556,11 @@ class DevContractTest(unittest.TestCase):
                    "helmglass-postgres-1", "psql", "-U", "postgres", "-d", "helmglass", "-At",
                    "-v", "ON_ERROR_STOP=1"]
         guard = "SELECT email FROM accounts WHERE id='" + owner + "';"
-        result = subprocess.run(command, input=guard, capture_output=True, text=True, timeout=20)
+        result = subprocess.run(command, input=guard, capture_output=True, encoding="utf-8", timeout=20)
         self.assertEqual(0, result.returncode)
         self.assertEqual(identity.username + "@example.com", result.stdout.strip())
         result = subprocess.run(command, input=statement.replace(":owner", "'" + owner + "'"),
-                                capture_output=True, text=True, timeout=20)
+                                capture_output=True, encoding="utf-8", timeout=20)
         self.assertEqual(0, result.returncode, "The fixture database operation failed")
         return result.stdout.strip()
 

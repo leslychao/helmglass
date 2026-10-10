@@ -2507,6 +2507,7 @@ components:
         - closeReason
         - taskId
         - connectionId
+        - connectionInfo
         - loginConfirmed
         - startedAt
         - closedAt
@@ -2551,6 +2552,11 @@ components:
           type: [string, "null"]
           format: uuid
           description: Canonical saved-connection destination, if already associated.
+        connectionInfo:
+          oneOf:
+            - $ref: "#/components/schemas/BrowserConnectionInfo"
+            - type: "null"
+          description: Context of the actual connection associated with this browser, checked against its owner. Null if unavailable. Its version changes independently of the browser version.
         loginConfirmed:
           type: boolean
           description: Server-persisted user declaration of a completed unsaved login. Cleared only after confirmed save; never an automatic external-authorization verdict.
@@ -2561,7 +2567,7 @@ components:
         closedAt:
           type: [string, "null"]
           format: date-time
-          description: Recorded closure or loss time. Duration stops here; a missing start is not zero.
+          description: Confirmed closure time. Null for an unavailable browser without confirmed closure. Session duration includes waiting and stops only at confirmed closure; a missing start is not zero.
         profileSaveError:
           type: [string, "null"]
           description: Safe failure of persisting this browser's selected connection.
@@ -2600,6 +2606,19 @@ components:
         TRANSFERRING is a durable pending policy. Controller tickets work only after USER
         acknowledgement; entering or leaving private mode denies model observation during the
         transition.
+    BrowserConnectionInfo:
+      type: object
+      required: [name, site, accountLabel, version]
+      properties:
+        name:
+          type: string
+        site:
+          type: string
+        accountLabel:
+          type: [string, "null"]
+          description: Connection account label. Does not confirm authentication on the website.
+        version:
+          type: integer
     CookieCheck:
       type: object
       description: Technical cookie suitability in the saved snapshot, not site authentication.
