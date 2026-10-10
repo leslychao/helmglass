@@ -69,13 +69,45 @@ const browserStates: Record<string, string> = {
       width: 14px;
       height: 14px;
     }
-    .session-facts { margin: 14px 0; font-size: 11px; }
+    .session-facts { margin: 0 0 18px; font-size: 11px; }
     .session-facts > div { display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 12px; padding: 11px 0; border-bottom: 1px solid #edf0f5; }
     .session-facts dt { color: #7b8da3; }
     .session-facts dd { margin: 0; color: #344b67; overflow-wrap: anywhere; }
     .session-elapsed { font-variant-numeric: tabular-nums; }
   `,
   template: `
+    <dl class="session-facts">
+      <div><dt>Состояние</dt><dd>{{ state() }}</dd></div>
+      @if (browser().connectionInfo; as connection) {
+        @if (connection.name) {
+          <div><dt>Подключение</dt><dd>{{ connection.name }}</dd></div>
+        }
+        @if (connection.site) {
+          <div><dt>Сайт</dt><dd>{{ connection.site }}</dd></div>
+        }
+        @if (connection.accountLabel) {
+          <div><dt>Аккаунт подключения</dt><dd>{{ connection.accountLabel }}</dd></div>
+        }
+      }
+      @if (browser().startedAt) {
+        <div><dt>Запущен</dt><dd>{{ browser().startedAt | date: 'dd.MM.yyyy HH:mm:ss' }}</dd></div>
+      }
+      @if (showElapsed()) {
+        <div><dt hgTooltip="Включает ожидания, а не только действия агента" tabindex="0">Время сессии</dt><dd class="session-elapsed">{{ elapsed() }}</dd></div>
+      }
+      @if (browser().status === 'LIVE' && browser().idleCloseAt) {
+        <div><dt>Автозакрытие при простое</dt><dd>
+          @if (idleExpired()) { Срок простоя истёк. Ожидаем подтверждения закрытия. }
+          @else { {{ browser().idleCloseAt | date: 'dd.MM.yyyy HH:mm:ss' }} }
+        </dd></div>
+      }
+      @if (browser().closedAt) {
+        <div><dt>Закрыт</dt><dd>{{ browser().closedAt | date: 'dd.MM.yyyy HH:mm:ss' }}</dd></div>
+        @if (closeReason()) {
+          <div><dt>Причина закрытия</dt><dd>{{ closeReason() }}</dd></div>
+        }
+      }
+    </dl>
     <span class="session-field-label">Идентификатор браузера</span>
     <div class="session-id">
       <code>{{ browser().id }}</code>
@@ -97,15 +129,6 @@ const browserStates: Record<string, string> = {
     @if (copyError()) {
       <p class="error-banner" role="alert">{{ copyError() }}</p>
     }
-    <dl class="session-facts">
-      <div><dt>Состояние</dt><dd>{{ state() }}</dd></div>
-      <div><dt>Запущен</dt><dd>{{ browser().startedAt ? (browser().startedAt | date: 'dd.MM.yyyy HH:mm:ss') : 'Нет данных' }}</dd></div>
-      @if (browser().closedAt) {
-        <div><dt>Закрыт</dt><dd>{{ browser().closedAt | date: 'dd.MM.yyyy HH:mm:ss' }}</dd></div>
-      }
-      <div><dt>Длительность</dt><dd class="session-elapsed">{{ elapsed() }}</dd></div>
-      <div><dt>Управление</dt><dd>{{ control() }}</dd></div>
-    </dl>
     @if (connectionContext()) {
       <hg-saved-credentials [browserId]="browser().id" [enabled]="active() && canFinish()" />
     }
@@ -120,13 +143,18 @@ export class BrowserSessionPanel implements OnInit {
   readonly connectionContext = input(false);
   private readonly now = signal(Date.now());
   readonly state = computed(() => browserStates[this.browser().status] ?? 'Нет свежих данных');
-  readonly control = computed(() => {
-    const browser = this.browser();
-    if (['CLOSED', 'LOST', 'QUEUED'].includes(browser.status)) return '—';
-    if (browser.controlOwner === 'TRANSFERRING') return 'Передача управления';
-    if (browser.controlOwner === 'USER') return this.controller() ? 'Вы' : 'Другое окно';
-    if (browser.controlOwner === 'CHATGPT') return 'Агент';
-    return browser.controlOwner === 'NONE' ? 'Свободно' : 'Нет данных';
+  readonly showElapsed = computed(() => !!this.browser().startedAt
+    && (!!this.browser().closedAt || !['CLOSED', 'LOST'].includes(this.browser().status)));
+  readonly idleExpired = computed(() => {
+    const deadline = this.browser().idleCloseAt;
+    return deadline !== null && Date.parse(deadline) <= this.now();
+  });
+  readonly closeReason = computed(() => {
+    switch (this.browser().closeReason) {
+      case 'USER': return 'По запросу пользователя';
+      case 'IDLE_TIMEOUT': return 'Из-за простоя';
+      default: return '';
+    }
   });
   readonly elapsed = computed(() => {
     const browser = this.browser();
@@ -185,7 +213,7 @@ export class BrowserSessionPanel implements OnInit {
       }
     });
     effect(onCleanup => {
-      if (!this.active() || !this.browser().startedAt || this.browser().closedAt) return;
+      if (!this.active() || !this.showElapsed() || this.browser().closedAt) return;
       this.now.set(Date.now());
       const timer = setInterval(() => this.now.set(Date.now()), 1000);
       onCleanup(() => clearInterval(timer));

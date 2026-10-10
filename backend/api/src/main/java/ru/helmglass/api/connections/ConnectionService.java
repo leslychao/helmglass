@@ -37,7 +37,8 @@ public class ConnectionService {
         FROM connections c
       """;
   private static final String ACTIVE_BROWSER =
-      " LEFT JOIN browser_sessions b ON b.connection_id=c.id AND b.status NOT IN ('CLOSED','LOST')";
+      " LEFT JOIN browser_sessions b ON b.connection_id=c.id AND b.owner_id=c.owner_id"
+          + " AND b.status NOT IN ('CLOSED','LOST')";
   private final JdbcClient jdbc;
   private final BrowserService browsers;
   private final BrowserPages browserPages;
@@ -71,7 +72,8 @@ public class ConnectionService {
 
   public Contracts.Connection get(UUID owner, UUID id) {
     String detail = SELECT + " LEFT JOIN LATERAL (SELECT s.* FROM browser_sessions s"
-        + " WHERE s.connection_id=c.id ORDER BY s.created_at DESC,s.id DESC LIMIT 1) b ON true";
+        + " WHERE s.connection_id=c.id AND s.owner_id=c.owner_id"
+        + " ORDER BY s.created_at DESC,s.id DESC LIMIT 1) b ON true";
     return jdbc.sql(detail + " WHERE c.id=:id AND c.owner_id=:owner AND c.deleted_at IS NULL")
         .param("id", id)
         .param("owner", owner)
@@ -468,6 +470,8 @@ WHERE t.owner_id=:owner AND (t.selected_connection_id=:id OR b.connection_id=:id
                 "LIVE".equals(row.getString("browser_status")),
                 row.getLong("browser_version"), row.getString("profile_save_error"),
                 row.getObject("task_id", UUID.class), row.getObject("id", UUID.class),
+                new Contracts.ConnectionInfo(row.getString("name"), row.getString("site"),
+                    row.getString("account_label"), row.getLong("version")),
                 row.getBoolean("login_confirmed"), Database.instant(row, "browser_started_at"),
                 Database.instant(row, "browser_closed_at"), Database.instant(row, "idle_close_at"),
                 row.getInt("idle_timeout_seconds"), Database.instant(row, "idle_warning_at"),

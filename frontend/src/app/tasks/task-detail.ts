@@ -14,6 +14,7 @@ import { ResourceUnavailable } from '../core/account';
 import { LiveEvents } from '../core/live-events';
 import {
   BrowserSession,
+  newestBrowser,
   Command,
   Page,
   Task,
@@ -140,13 +141,15 @@ export class TaskDetail {
       });
     });
     inject(LiveEvents)
-      .watch(['task', 'step', 'browser'])
+      .watch(['task', 'step', 'browser', 'connection'])
       .pipe(takeUntilDestroyed())
       .subscribe((change) => {
         if (
           change.resource === 'sync' ||
           change.entityId === this.params().get('id') ||
           (change.resource === 'browser' && change.entityId === this.task()?.browser?.id)
+          || (change.resource === 'connection'
+            && change.entityId === this.task()?.browser?.connectionId)
         ) {
           void this.load();
           if (this.historyOpen() && ['sync', 'step'].includes(change.resource)) {
@@ -292,19 +295,14 @@ export class TaskDetail {
   sessionChanged(browser: BrowserSession) {
     this.generation++;
     this.task.update((task) =>
-      task && task.browser?.id === browser.id && task.browser.version <= browser.version
-        ? { ...task, browser }
+      task && task.browser?.id === browser.id
+        ? { ...task, browser: newestBrowser(task.browser, browser) }
         : task,
     );
   }
   private applyTask(incoming: Task) {
     const current = this.task();
-    const browser =
-      current?.browser &&
-      current.browser.id === incoming.browser?.id &&
-      current.browser.version > incoming.browser.version
-        ? current.browser
-        : incoming.browser;
+    const browser = newestBrowser(current?.browser ?? null, incoming.browser);
     const task = { ...incoming, browser };
     this.task.set(task);
     this.pageContext.setResource('tasks', task.id, task.title || 'Задача без названия');

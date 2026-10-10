@@ -53,6 +53,11 @@ public class McpTools {
       "Используйте уже выданный результат SUCCEEDED сразу и продолжайте задание."
           + " Не вызывайте operations.get для повторного подтверждения готового результата."
           + " Используйте выданное result.observation вместо отдельного observe."
+          + " observationId и ref берите из одного наблюдения: ref из старого снимка нельзя"
+          + " соединять с новым observationId. При неполном observation дочитайте нужные refs"
+          + " через его cursor; новый observe({}) начинает снимок заново."
+          + " Известные независимые оценки и поля объединяйте в actions до 8 команд,"
+          + " с одним итоговым наблюдением. Условные поля читайте после пакета."
           + " operations.get нужен только для ACCEPTED/DISPATCHED, восстановления результата"
           + " после потери ответа или контекста, либо ещё не выданного изображения screenshot"
           + " (imageDelivery=PENDING; в пакете actions изображение получают отдельно)."
@@ -214,8 +219,7 @@ public class McpTools {
                 + " проверки подключений, страниц, шагов и аудио. После получения карточки"
                 + " продолжайте выполнение. Уточнения продолжают прежний taskId. Возвращает"
                 + " единственную"
-                + " карточку этого ответа: дополнительный tasks.view не нужен. Первую браузерную"
-                + " команду отправляйте с описанием step: отдельные DECLARE и START не нужны.",
+                + " карточку этого ответа: дополнительный tasks.view не нужен.",
             object(
                 Map.of(
                     "operationKey",
@@ -624,6 +628,7 @@ public class McpTools {
         }
       }
       properties.put("callId", uuid());
+      properties.put("stepTitle", Map.of("type", "string", "minLength", 1, "maxLength", 300));
       List<String> required = new ArrayList<>();
       if (schema.get("required") instanceof List<?> supplied) {
         for (Object value : supplied) {
@@ -633,11 +638,17 @@ public class McpTools {
         }
       }
       required.add("callId");
+      required.add("stepTitle");
       schema = new LinkedHashMap<>(schema);
       schema.put("properties", properties);
       schema.put("required", required);
       description += " callId — новый UUID каждого вызова; после потери ответа повторяйте"
-          + " тот же callId и аргументы. Шаг и длительность сохраняет сервер автоматически.";
+          + " тот же callId и аргументы. stepTitle — краткое однострочное название цели"
+          + " этого вызова: действие и предметный объект, например «Прочитать инструкцию"
+          + " к заданию» или «Сохранить аудиозапись для анализа речи». Для пакета укажите"
+          + " общую цель. Не включайте секреты, содержимое полей и внутренние рассуждения."
+          + " Название описывает намерение, не подтверждённый успех."
+          + " Шаг и длительность сохраняет сервер автоматически.";
     }
     Map<String, Object> metadata = new LinkedHashMap<>();
     metadata.put(
@@ -674,49 +685,18 @@ public class McpTools {
     return !name.startsWith("widget.") && !Set.of("tasks.list", "connections.list").contains(name);
   }
 
-  private static String callTitle(String tool, JsonNode input) {
-    if ("browser.execute".equals(tool)) {
-      if (input.has("actions")) {
-        return "Выполнить действия в браузере · " + input.path("actions").size();
-      }
-      return switch (input.path("action").path("type").asString()) {
-        case "navigate" -> "Открыть страницу";
-        case "observe" -> "Прочитать страницу";
-        case "click" -> "Нажать элемент";
-        case "fill" -> "Заполнить поле";
-        case "press" -> "Нажать клавишу";
-        case "selectOption" -> "Выбрать значение";
-        case "check" -> "Изменить отметку";
-        case "scroll" -> "Прокрутить страницу";
-        case "goBack" -> "Вернуться на предыдущую страницу";
-        case "newTab" -> "Открыть вкладку";
-        case "selectTab" -> "Выбрать вкладку";
-        case "closeTab" -> "Закрыть вкладку";
-        case "screenshot" -> "Получить снимок";
-        case "listMedia" -> "Найти медиа на странице";
-        case "captureAudio" -> "Сохранить аудио";
-        case "waitFor" -> "Дождаться изменения страницы";
-        default -> "Выполнить действие в браузере";
-      };
+  private static String stepTitle(JsonNode input) {
+    JsonNode title = input.path("stepTitle");
+    if (!title.isString()) {
+      throw ApiException.invalid("stepTitle", "Укажите название цели вызова.");
     }
-    return switch (tool) {
-      case "tasks.create" -> "Создать задачу";
-      case "tasks.bind" -> "Связать задачу с чатом";
-      case "tasks.view" -> "Показать задачу";
-      case "tasks.get" -> "Прочитать состояние задачи";
-      case "tasks.command" -> "Изменить состояние задачи";
-      case "tasks.ask" -> "Запросить ответ пользователя";
-      case "tasks.respond" -> "Получить ответ или проверить результат";
-      case "steps.list" -> "Прочитать шаги";
-      case "operations.list" -> "Прочитать список операций";
-      case "operations.get" -> "Проверить операцию";
-      case "connections.select" -> "Выбрать подключение";
-      case "artifacts.list" -> "Прочитать список файлов";
-      case "audio.analyze" -> "Распознать и проанализировать аудио";
-      case "audio.get" -> "Прочитать результат анализа аудио";
-      case "results.publish" -> "Сохранить результат задачи";
-      default -> tool;
-    };
+    String value = title.asString();
+    if (value.isBlank() || value.length() > 300
+        || value.codePoints().anyMatch(character -> Character.isISOControl(character)
+            || character == 0x2028 || character == 0x2029)) {
+      throw ApiException.invalid("stepTitle", "Название — одна непустая строка до 300 символов.");
+    }
+    return value.strip();
   }
 
   private McpSchema.CallToolResult measuredCall(
@@ -729,17 +709,19 @@ public class McpTools {
       Actor actor = actor(exchange.transportContext());
       JsonNode input = json.tree(request.arguments() == null ? Map.of() : request.arguments());
       UUID callId = null;
+      String title = null;
       if (agentTool(tool)) {
+        title = stepTitle(input);
         callId = uuid(input, "callId");
         if (!"tasks.create".equals(tool)) {
           task = steps.taskForCall(actor.id(), input);
           if (task == null) {
             throw ApiException.invalid("taskId", "Укажите ресурс задачи.");
           }
-          steps.begin(actor.id(), task, callId, tool, callTitle(tool, input), input);
+          steps.begin(actor.id(), task, callId, tool, title, input);
         }
       }
-      McpSchema.CallToolResult result = call(actor, exchange, request, callId);
+      McpSchema.CallToolResult result = call(actor, exchange, request, callId, title);
       boolean failed = Boolean.TRUE.equals(result.isError());
       if (callId != null) {
         steps.finish(actor.id(), callId, failed,
@@ -761,11 +743,13 @@ public class McpTools {
   }
 
   private McpSchema.CallToolResult call(
-      Actor actor, McpSyncServerExchange exchange, McpSchema.CallToolRequest request, UUID callId) {
+      Actor actor, McpSyncServerExchange exchange, McpSchema.CallToolRequest request, UUID callId,
+      String stepTitle) {
     try {
       Map<String, Object> arguments = new LinkedHashMap<>(
           request.arguments() == null ? Map.of() : request.arguments());
       arguments.remove("callId");
+      arguments.remove("stepTitle");
       JsonNode input = json.tree(arguments);
       UUID owner = actor.id();
       String name = request.name();
@@ -856,12 +840,15 @@ public class McpTools {
                               requested.preferredConnectionIds(),
                               requested.prepare() == null || requested.prepare()),
                           "MCP");
-                  steps.begin(owner, task.id(), callId, name, "Создать задачу",
+                  steps.begin(owner, task.id(), callId, name, stepTitle,
                       json.tree(request.arguments()));
                   chats.bind(owner, task.id(), chat);
                   actions.prepareBrowser(owner, task.id());
                   return data(owner, chats.show(owner, task.id(), chat));
                 });
+        // Cached creation results still have to validate the invocation's complete request.
+        steps.begin(owner, created.task().id(), callId, name, stepTitle,
+            json.tree(request.arguments()));
         return presentation(created);
       }
       UUID taskId = uuid(input, "taskId");
@@ -1339,6 +1326,7 @@ public class McpTools {
                 + state.task().status()
                 + ". Каждый вызов инструмента — отдельный шаг агента, который сервер сохраняет"
                 + " автоматически. Для каждого нового вызова используйте новый callId;"
+                + " stepTitle описывает цель конкретного вызова без секретов и рассуждений;"
                 + " после потери ответа повторяйте тот же callId и аргументы. Навигация и"
                 + " получение исходных данных записываются отдельными вызовами. Готовые SUCCEEDED и текст"
                 + " audio.analyze используйте сразу, без повторного чтения."

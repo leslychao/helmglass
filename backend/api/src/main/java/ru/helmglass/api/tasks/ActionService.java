@@ -1128,13 +1128,24 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
     String errorCode = null;
     String errorMessage = null;
     if ("FAILED".equals(status)) {
-      if ("OBSERVATION_LIMIT_EXCEEDED".equals(response.path("code").asString())) {
-        errorCode = "OBSERVATION_LIMIT_EXCEEDED";
-        errorMessage = "Страница превышает безопасные ограничения наблюдения.";
-      } else {
-        errorCode = "BROWSER_ACTION_FAILED";
-        errorMessage = "Браузер сообщил об отказе действия.";
-      }
+      String reported = response.path("code").asString("");
+      errorMessage = switch (reported) {
+        case "OBSERVATION_LIMIT_EXCEEDED" ->
+            "Страница превышает безопасные ограничения наблюдения.";
+        case "OBSERVATION_REFERENCE_NOT_ISSUED" ->
+            "ref не выдан в указанном наблюдении. Дочитайте его через cursor, если оно неполное."
+                + " Не переносите ref из предыдущего observationId. Действие не выполнялось.";
+        case "OBSERVATION_EXPIRED" ->
+            "Наблюдение заменено или устарело. Получите актуальное наблюдение или скриншот."
+                + " Действие не выполнялось.";
+        case "OBSERVATION_CURSOR_EXPIRED" ->
+            "cursor заменён или отозван. Используйте продолжение актуального наблюдения"
+                + " либо получите новое наблюдение.";
+        default -> "Браузер сообщил об отказе действия.";
+      };
+      errorCode = Set.of("OBSERVATION_LIMIT_EXCEEDED", "OBSERVATION_REFERENCE_NOT_ISSUED",
+          "OBSERVATION_EXPIRED", "OBSERVATION_CURSOR_EXPIRED").contains(reported)
+          ? reported : "BROWSER_ACTION_FAILED";
     } else if ("UNCONFIRMED".equals(status)) {
       errorCode = "RESULT_UNCONFIRMED";
       errorMessage = "Результат не установлен; продолжение разрешено без повтора действия.";

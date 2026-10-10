@@ -54,7 +54,8 @@
     .panel-toggle:hover{background:#f3f6fb}.panel-toggle[aria-expanded=true]{color:#326cc0;background:#edf4ff}
     .panel-toggle svg{width:18px;height:18px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
     .session-content{flex:1;min-height:0;overflow:auto;padding:8px;font-size:11px}.session-content small{font-size:10px;color:var(--muted)}.session-id{display:flex;gap:6px;margin-top:6px;padding:6px;border:1px solid var(--line);border-radius:6px;background:#f8fafc}.session-id code{flex:1;min-width:0;overflow-wrap:anywhere;user-select:all;font-size:11px;line-height:1.7}.session-id button{padding:0 5px;min-height:28px}
-    dl{margin:8px 0 0}dl>div{display:grid;grid-template-columns:78px minmax(0,1fr);gap:8px;padding:7px 0;border-bottom:1px solid #edf0f5}dt{font-size:11px;color:var(--muted)}dd{margin:0;color:#465d79;overflow-wrap:anywhere}#session-duration{font-variant-numeric:tabular-nums}
+    dl{margin:0 0 12px}dl>div{display:grid;grid-template-columns:78px minmax(0,1fr);gap:8px;padding:7px 0;border-bottom:1px solid #edf0f5}dt{font-size:11px;color:var(--muted)}dd{margin:0;color:#465d79;overflow-wrap:anywhere}#session-duration{font-variant-numeric:tabular-nums}
+    @container(max-width:599px){.session-content dl>div{grid-template-columns:minmax(0,1fr);gap:3px}}
     .steps-toolbar{display:flex;flex:none;align-items:center;gap:5px;padding:6px 8px;border-bottom:1px solid var(--line)}#steps-search{display:block;flex:1;width:0;padding:5px 6px;border:1px solid var(--line);border-radius:6px;font:inherit;font-size:11px;min-width:0}.steps-pagination{display:flex;flex:none;align-items:center;justify-content:space-between;gap:8px;padding:3px 8px;border-top:1px solid var(--line);font-size:10px}.steps-pagination button{margin:0;min-height:24px;padding:1px 8px}
     #idle-warning{display:flex;flex:none;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 10px;background:#fff9ec;border-top:1px solid #efe5d0;font-size:12px;color:#7a6640}
     .expanded .viewport{position:absolute;inset:0;z-index:1;width:100%;height:100%;max-width:none;aspect-ratio:auto;border:0;border-radius:0}
@@ -74,8 +75,19 @@
         </aside>
         <aside class="steps-panel" id="session-panel" aria-label="Сессия" hidden>
           <div class="steps-heading"><h2>Сессия</h2></div>
-          <div class="session-content"><small>Идентификатор браузера</small><div class="session-id"><code id="session-id">Нет данных</code><button id="copy-session" aria-label="Копировать идентификатор" title="Копировать идентификатор">⧉</button></div>
-            <dl><div><dt>Состояние</dt><dd id="session-status">Нет данных</dd></div><div><dt>Запущен</dt><dd id="session-start">Нет данных</dd></div><div id="session-closed-row" hidden><dt>Закрыт</dt><dd id="session-closed"></dd></div><div><dt>Длительность</dt><dd id="session-duration">Нет данных</dd></div><div><dt>Управление</dt><dd id="session-control">Нет данных</dd></div></dl>
+          <div class="session-content">
+            <dl>
+              <div><dt>Состояние</dt><dd id="session-status">Не запущен</dd></div>
+              <div id="session-connection-row" hidden><dt>Подключение</dt><dd id="session-connection"></dd></div>
+              <div id="session-site-row" hidden><dt>Сайт</dt><dd id="session-site"></dd></div>
+              <div id="session-account-row" hidden><dt>Аккаунт подключения</dt><dd id="session-account"></dd></div>
+              <div id="session-start-row" hidden><dt>Запущен</dt><dd id="session-start"></dd></div>
+              <div id="session-duration-row" hidden><dt tabindex="0" title="Включает ожидания, а не только действия агента">Время сессии</dt><dd id="session-duration"></dd></div>
+              <div id="session-idle-row" hidden><dt>Автозакрытие при простое</dt><dd id="session-idle"></dd></div>
+              <div id="session-closed-row" hidden><dt>Закрыт</dt><dd id="session-closed"></dd></div>
+              <div id="session-close-reason-row" hidden><dt>Причина закрытия</dt><dd id="session-close-reason"></dd></div>
+            </dl>
+            <div id="session-id-row" hidden><small>Идентификатор браузера</small><div class="session-id"><code id="session-id"></code><button id="copy-session" aria-label="Копировать идентификатор" title="Копировать идентификатор">⧉</button></div></div>
           </div>
         </aside>
         </div>

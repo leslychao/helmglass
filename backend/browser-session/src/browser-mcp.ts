@@ -10,7 +10,8 @@ import { inspectPrivateInput, snapshotUrl } from "./browser-privacy.js";
 
 export class BrowserRejection extends Error {
   constructor(message: string,
-    readonly code?: "OBSERVATION_LIMIT_EXCEEDED") {
+    readonly code?: "OBSERVATION_LIMIT_EXCEEDED" | "OBSERVATION_REFERENCE_NOT_ISSUED"
+      | "OBSERVATION_EXPIRED" | "OBSERVATION_CURSOR_EXPIRED") {
     super(message);
   }
 }
@@ -227,7 +228,7 @@ export class BrowserMcp {
     this.assertAllowed();
     if (value.page !== this.currentPage() || value.generation !== this.generation
       || value.epoch !== this.controlEpoch() || Date.now() - Date.parse(value.time) > 60_000)
-      throw new BrowserRejection("Observation expired or page changed; observe again");
+      throw new BrowserRejection("Observation expired or page changed; observe again", "OBSERVATION_EXPIRED");
   }
 
   async observe(args: Record<string, unknown> = {}, signal?: AbortSignal,
@@ -236,7 +237,7 @@ export class BrowserMcp {
     const page = await this.synchronize(signal);
     if ("cursor" in input) {
       if (!this.observation || input.cursor !== this.observation.cursor)
-        throw new BrowserRejection("Observation cursor expired");
+        throw new BrowserRejection("Observation cursor expired", "OBSERVATION_CURSOR_EXPIRED");
       this.checkObservation(this.observation);
     } else {
       let issued: NativeNode | undefined;
@@ -311,8 +312,11 @@ export class BrowserMcp {
     const reserved = this.sequence;
     const observation = reserved && position !== undefined && position >= reserved.next
       ? reserved.observation : this.observation;
-    if (!observation || observation.id !== input.observationId || !observation.issued.has(input.ref))
-      throw new BrowserRejection("Reference was not issued for this operation; observe again");
+    if (!observation || observation.id !== input.observationId)
+      throw new BrowserRejection("Observation was replaced; observe again", "OBSERVATION_EXPIRED");
+    if (!observation.issued.has(input.ref))
+      throw new BrowserRejection("Reference was not issued; continue the current observation with its cursor",
+        "OBSERVATION_REFERENCE_NOT_ISSUED");
     this.checkObservation(observation);
     if (sequence && !reserved) this.sequence = { operationIds: sequence.operationIds, next: position!, observation };
     return { observation, issued: observation.issued.get(input.ref)!, ref: input.ref };

@@ -15,9 +15,11 @@ import org.springframework.stereotype.Service;
 public final class ConnectionSite {
   private static final int CHOICE_LIMIT = 50;
   private static final String CANDIDATE =
-      "(rtrim(lower(site),'.')=:connectionSite"
+      "(rtrim(lower(site),'.') IN (:connectionSite,:connectionAlternateSite)"
           + " OR (:connectionSubdomains"
-          + " AND right(rtrim(lower(site),'.'),length(:connectionSuffix))=:connectionSuffix))";
+          + " AND (right(rtrim(lower(site),'.'),length(:connectionSuffix))=:connectionSuffix"
+          + " OR right(rtrim(lower(site),'.'),length(:connectionAlternateSuffix))"
+          + "=:connectionAlternateSuffix)))";
   private final JdbcClient jdbc;
 
   public ConnectionSite(JdbcClient jdbc) {
@@ -27,8 +29,10 @@ public final class ConnectionSite {
   private static Map<String, Object> parameters(Scope scope) {
     return Map.of(
         "connectionSite", scope.domain(),
+        "connectionAlternateSite", scope.alternateDomain(),
         "connectionSubdomains", scope.subdomains(),
-        "connectionSuffix", "." + scope.domain());
+        "connectionSuffix", "." + scope.domain(),
+        "connectionAlternateSuffix", "." + scope.alternateDomain());
   }
 
   private record Candidate(UUID id, String name, String site) {}
@@ -100,10 +104,14 @@ public final class ConnectionSite {
 
   private static boolean matches(String connectionHost, Scope target) {
     Scope connection = scope(connectionHost);
-    return !connection.domain().isEmpty() && connection.domain().equals(target.domain());
+    boolean sameDomain = connection.domain().equals(target.domain());
+    boolean alternateDomain = !connection.domain().equals(connection.alternateDomain())
+        && !target.domain().equals(target.alternateDomain())
+        && connection.alternateDomain().equals(target.domain());
+    return !connection.domain().isEmpty() && (sameDomain || alternateDomain);
   }
 
-  private record Scope(String domain, boolean subdomains) {}
+  private record Scope(String domain, String alternateDomain, boolean subdomains) {}
 
   private static Scope scope(String host) {
     String normalized = host == null ? "" : host.toLowerCase(Locale.ROOT);
@@ -112,11 +120,24 @@ public final class ConnectionSite {
     }
     try {
       InternetDomainName domain = InternetDomainName.from(normalized);
-      return domain.isUnderPublicSuffix()
-          ? new Scope(domain.topPrivateDomain().toString(), true) : new Scope(normalized, false);
+      if (!domain.isUnderPublicSuffix()) {
+        return new Scope(normalized, normalized, false);
+      }
+      InternetDomainName site = domain.topPrivateDomain();
+      String boundary = site.toString();
+      List<String> labels = site.parts();
+      String suffix = labels.getLast();
+      if (labels.size() == 2 && (suffix.equals("com") || suffix.equals("ru"))) {
+        // Only the agreed .com/.ru pair shares an account-selection boundary.
+        // Private suffixes retain their independent tenant boundaries.
+        String name = labels.getFirst();
+        String alternate = name + (suffix.equals("com") ? ".ru" : ".com");
+        return new Scope(boundary, alternate, true);
+      }
+      return new Scope(boundary, boundary, true);
     } catch (IllegalArgumentException exception) {
       // IP addresses and non-DNS hosts keep their exact-host boundary.
-      return new Scope(normalized, false);
+      return new Scope(normalized, normalized, false);
     }
   }
 }

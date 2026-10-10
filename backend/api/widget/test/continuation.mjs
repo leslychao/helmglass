@@ -81,6 +81,7 @@ const show = value => app.ontoolresult({ structuredContent: value, _meta: metada
 const stale = response({ code: 'STALE_WIDGET', message: 'Newer presentation exists' });
 const ticket = text({ url: 'https://helm.example/browser/view?ticket=fixture', expiresAt: '2099-01-01T00:00:00Z' });
 const liveBrowser = () => ({ id: crypto.randomUUID(), status: 'LIVE', privateMode: false, version: 1, controlOwner: 'CHATGPT', startedAt: '2026-10-09T00:00:00Z', closedAt: null, idleCloseAt: null, idleTimeoutSeconds: 300, idleWarningAt: null, cleanupState: 'NONE', cleanupError: null, closeReason: null,
+  connectionId: null, connectionInfo: null,
   currentUrl: 'https://secret-user:secret-password@site.example/work?token=secret#private' });
 const agentStepId = crypto.randomUUID();
 let agentStepVersion = 1;
@@ -703,4 +704,67 @@ assert.equal(elements.get('viewer').hidden, false, 'A freed viewer slot recovers
 assert.equal(elements.get('browser-state').hidden, true);
 assert.equal(messages.length, 0, 'Viewer recovery does not launch ChatGPT or perform a browser action');
 await app.onteardown();
-console.log('PASS widget idle warning and extension, execution, recovery, isolation, viewer admission and continuation races');
+await mount();
+let sessionState = presentation('IDLE', { ...liveBrowser(), connectionId: crypto.randomUUID(),
+  connectionInfo: { name: 'Подключение к заданию', site: 'site.example',
+    accountLabel: 'Тестовый аккаунт', version: 1 } });
+call = request => Promise.resolve(request.name === 'widget.state' ? response(sessionState)
+  : request.name === 'widget.steps' ? history() : ticket);
+show(sessionState); await settled();
+elements.get('session-toggle').listeners.get('click')();
+assert.equal(elements.get('session-connection').textContent, 'Подключение к заданию');
+assert.equal(elements.get('session-account').textContent, 'Тестовый аккаунт');
+assert.equal(elements.get('session-site').textContent, 'site.example');
+sessionState = { ...sessionState, task: { ...sessionState.task, browser: {
+  ...sessionState.task.browser, version: 3,
+  connectionInfo: { ...sessionState.task.browser.connectionInfo, name: 'Обновлённое подключение', version: 2 },
+} } };
+sources.at(-1).change('connection'); await settled();
+assert.equal(elements.get('session-connection').textContent, 'Обновлённое подключение');
+assert.equal(elements.get('session-panel').hidden, false, 'Connection changes preserve the open panel');
+sessionState = { ...sessionState, task: { ...sessionState.task, browser: {
+  ...sessionState.task.browser, version: 4,
+  connectionInfo: { ...sessionState.task.browser.connectionInfo, name: 'Устаревшее имя', version: 1 },
+} } };
+sources.at(-1).change('connection'); await settled();
+assert.equal(elements.get('session-connection').textContent, 'Обновлённое подключение',
+  'An older connection revision cannot replace its newer name');
+sessionState = { ...sessionState, task: { ...sessionState.task, browser: {
+  ...sessionState.task.browser, version: 3,
+  connectionInfo: { ...sessionState.task.browser.connectionInfo, name: 'Актуальный аккаунт', version: 3 },
+} } };
+sources.at(-1).change('connection'); await settled();
+assert.equal(elements.get('session-connection').textContent, 'Актуальный аккаунт',
+  'Browser and connection revisions advance independently');
+sessionState = { ...sessionState, task: { ...sessionState.task, browser: {
+  ...sessionState.task.browser, version: 5, connectionInfo: null,
+  idleCloseAt: new Date(Date.now() - 1000).toISOString(),
+} } };
+sources.at(-1).change('browser'); await settled();
+assert.equal(elements.get('session-account-row').hidden, true);
+assert.equal(elements.get('session-connection-row').hidden, true);
+assert.match(elements.get('session-idle').textContent, /Ожидаем подтверждения закрытия/);
+sessionState = { ...sessionState, task: { ...sessionState.task, browser: {
+  ...sessionState.task.browser, version: 6, status: 'CLOSED', closeReason: 'IDLE_TIMEOUT',
+  closedAt: '2026-10-09T00:05:00Z',
+} } };
+sources.at(-1).change('browser'); await settled();
+assert.equal(elements.get('session-duration').textContent, '00:05:00');
+assert.equal(elements.get('session-close-reason').textContent, 'Из-за простоя');
+assert.equal(elements.get('session-idle-row').hidden, true);
+assert.equal(intervals.size, 0, 'A confirmed close stops the session clock');
+sessionState = { ...sessionState, task: { ...sessionState.task, browser: {
+  ...sessionState.task.browser, version: 7, status: 'LOST', closedAt: null, closeReason: null,
+} } };
+sources.at(-1).change('browser'); await settled();
+assert.equal(elements.get('session-duration-row').hidden, true, 'An unconfirmed loss has no final duration');
+assert.equal(elements.get('session-closed-row').hidden, true);
+assert.equal(intervals.size, 0);
+sessionState = { ...sessionState, task: { ...sessionState.task, browser: {
+  ...sessionState.task.browser, version: 8, status: 'QUEUED', startedAt: null,
+} } };
+sources.at(-1).change('browser'); await settled();
+assert.equal(elements.get('session-start-row').hidden, true);
+assert.equal(elements.get('session-duration-row').hidden, true);
+await app.onteardown();
+console.log('PASS widget session context and lifecycle, idle extension, execution, recovery, isolation, viewer admission and continuation races');

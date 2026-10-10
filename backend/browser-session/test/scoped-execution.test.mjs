@@ -42,7 +42,8 @@ test('native actions keep sibling, iframe and shadow refs until the final scoped
     assert.equal(await page.getByLabel('First').inputValue(), 'First');
     assert.equal(await page.frameLocator('iframe').getByLabel('Inside').inputValue(), 'Inside');
     assert.equal(await page.getByLabel('Shadow').inputValue(), 'Shadow');
-    await assert.rejects(mcp.act('click', target(observed, 'Apply'), randomUUID(), undefined, signal()), /not issued/);
+    await assert.rejects(mcp.act('click', target(observed, 'Apply'), randomUUID(), undefined, signal()),
+      { code: 'OBSERVATION_EXPIRED' });
     await mcp.act('click', target(region, 'Apply'), randomUUID(), undefined, signal());
   });
 });
@@ -66,6 +67,26 @@ test('replacement and control changes revoke refs; cursor retains filtered obser
     await assert.rejects(mcp.observe({ cursor: region.cursor }), /cursor expired/);
     await page.goto('data:text/html,<button>New page</button>');
     await assert.rejects(mcp.observe(target(observed, 'Scope')));
+  });
+});
+
+test('unissued refs preserve the cursor for recovery without an effect', async () => {
+  await fixture('<p>Row</p>'.repeat(250) + '<button onclick="this.textContent=\'Chosen\'">Tail</button>', async ({ mcp, page }) => {
+    const previous = await mcp.observe();
+    const tail = target(await mcp.observe({ cursor: previous.cursor }), 'Tail');
+    const current = await mcp.observe();
+    await assert.rejects(mcp.act('click', { ...tail, observationId: current.observationId },
+      randomUUID(), undefined, signal()), { code: 'OBSERVATION_REFERENCE_NOT_ISSUED' });
+    assert.equal(await page.getByRole('button').textContent(), 'Tail');
+    const continued = await mcp.observe({ cursor: current.cursor });
+    assert.equal(continued.observationId, current.observationId);
+    assert.equal(continued.metrics.snapshots, current.metrics.snapshots);
+    await mcp.act('click', target(continued, 'Tail'), randomUUID(), undefined, signal());
+    assert.equal(await page.getByRole('button').textContent(), 'Chosen');
+    await assert.rejects(mcp.act('click', tail, randomUUID(), undefined, signal()),
+      { code: 'OBSERVATION_EXPIRED' });
+    await assert.rejects(mcp.observe({ cursor: current.cursor }),
+      { code: 'OBSERVATION_CURSOR_EXPIRED' });
   });
 });
 

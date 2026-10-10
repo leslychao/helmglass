@@ -357,6 +357,9 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         identity, primary = self.owner()
         _, foreign = self.owner()
         cases = [
+            ('region-one.com', 'login.region-one.ru', 'docs.region-one.ru', 'region-one.net'),
+            ('region-two.ru', 'login.region-two.com', 'docs.region-two.com', 'other.ru'),
+            ('uk.ru', 'login.uk.ru', 'docs.uk.ru', 'uk.com'),
             ('yang.yandex-team.ru', 'passport.yandex-team.ru', 'wiki.yandex-team.ru',
              'yandex-team.ru.evil.com'),
             ('app.example.co.uk', 'login.example.co.uk', 'docs.example.co.uk', 'other.co.uk'),
@@ -448,6 +451,57 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertEqual(1, len(switches))
         switched = self.wait_operation(switches[0]['id'], client)
         self.assertEqual('SUCCEEDED', switched['status'], switched)
+        current = primary.api('/api/tasks/' + task['id'])[1]
+        self.assertEqual((browser_id, second, target),
+            (current['browser']['id'], current['browser']['connectionId'],
+             current['browser']['currentUrl']))
+        self.assertIsNone(current['request'])
+        self.assertEqual('SUCCEEDED', self.wait_operation(self.observe(client, current), client)['status'])
+
+    def test_com_ru_alias_preserves_saved_profile_and_switch_destination(self):
+        identity, primary = self.owner()
+        target = 'https://example.com/'
+
+        def saved_ru_entry(label):
+            connection = self.saved_connection(primary, label, url=target)
+            # Model a .ru entry whose login reached .com. Keep the actual saved origins.
+            self.fixture_sql(identity,
+                "UPDATE connections SET site='example.ru',start_url='https://example.ru/' "
+                "WHERE owner_id=:owner AND id='" + str(uuid.UUID(connection)) + "';")
+            return connection
+
+        first = saved_ru_entry('Alias A')
+        automatic_client, automatic = self.create(primary, target)
+        self.assertIsNone(automatic['request'])
+        self.assertEqual(first, automatic['browser']['connectionId'])
+        self.assertEqual('SUCCEEDED',
+            self.wait_operation(self.observe(automatic_client, automatic), automatic_client)['status'])
+        current = primary.api('/api/tasks/' + automatic['id'])[1]
+        self.assertEqual(target, current['browser']['currentUrl'])
+        self.assertEqual('example.com', current['site'])
+        self.assertEqual('example.ru', primary.api('/api/connections/' + first)[1]['site'])
+        self.assertEqual('["https://example.com"]', self.fixture_sql(identity,
+            "SELECT authorized_origins::text FROM connections WHERE owner_id=:owner AND id='"
+            + str(uuid.UUID(first)) + "';"))
+        self.assertEqual(200, primary.api('/api/tasks/' + current['id'] + '/commands', 'POST', {
+            'type': 'STOP', 'expectedVersion': current['version']})[0])
+        self.await_connection(primary, first, lambda value: value['browser']['status'] == 'CLOSED')
+
+        second = saved_ru_entry('Alias B')
+        client, task = self.create(primary, target, preferred=[first])
+        self.assertEqual(first, task['browser']['connectionId'])
+        self.assertEqual('SUCCEEDED', self.wait_operation(self.observe(client, task), client)['status'])
+        task = primary.api('/api/tasks/' + task['id'])[1]
+        browser_id = task['browser']['id']
+        error, receipt, _ = client.tool('connections.select', {
+            'taskId': task['id'], 'connectionId': second,
+            'instructionRevision': task['instructionRevision'], 'operationKey': str(uuid.uuid4())})
+        self.assertFalse(error, receipt)
+        error, operations, _ = client.tool('operations.list', {'taskId': task['id']})
+        self.assertFalse(error, operations)
+        switches = [item for item in operations['items'] if item['type'] == 'applyConnection']
+        self.assertEqual(1, len(switches))
+        self.assertEqual('SUCCEEDED', self.wait_operation(switches[0]['id'], client)['status'])
         current = primary.api('/api/tasks/' + task['id'])[1]
         self.assertEqual((browser_id, second, target),
             (current['browser']['id'], current['browser']['connectionId'],

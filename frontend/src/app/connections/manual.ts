@@ -7,6 +7,7 @@ import { ResourceUnavailable } from '../core/account';
 import { LiveEvents } from '../core/live-events';
 import {
   BrowserSession,
+  newestBrowser,
   Connection,
   Task,
   browserSchema,
@@ -218,8 +219,8 @@ export class Manual {
   sessionChanged(browser: BrowserSession) {
     this.generation++;
     this.connection.update((current) =>
-      current?.browser?.id === browser.id && current.browser.version <= browser.version
-        ? { ...current, browser }
+      current?.browser?.id === browser.id
+        ? { ...current, browser: newestBrowser(current.browser, browser) }
         : current,
     );
     this.syncController();
@@ -231,12 +232,7 @@ export class Manual {
     this.connection.update((current) => {
       if (!current || current.id !== incoming.id) return incoming;
       const latest = incoming.version >= current.version ? incoming : current;
-      const browser =
-        incoming.browser?.id === current.browser?.id &&
-        current.browser &&
-        current.browser.version > (incoming.browser?.version ?? -1)
-          ? current.browser
-          : latest.browser;
+      const browser = newestBrowser(current.browser, incoming.browser);
       return { ...latest, browser };
     });
     this.syncController();

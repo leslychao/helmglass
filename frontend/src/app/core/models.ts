@@ -46,6 +46,9 @@ export const browserSchema = z.object({
   profileSaveError: z.nullable(z.string()),
   taskId: z.nullable(z.string()),
   connectionId: z.nullable(z.string()),
+  connectionInfo: z.nullable(z.object({
+    name: z.string(), site: z.string(), accountLabel: z.nullable(z.string()), version: z.number(),
+  })),
   loginConfirmed: z.boolean(),
   startedAt: z.nullable(z.string()),
   closedAt: z.nullable(z.string()),
@@ -57,6 +60,18 @@ export const browserSchema = z.object({
   closeReason: z.nullable(z.enum(['USER', 'IDLE_TIMEOUT'])),
 });
 export type BrowserSession = z.infer<typeof browserSchema>;
+
+export function newestBrowser(
+  current: BrowserSession | null, incoming: BrowserSession | null,
+): BrowserSession | null {
+  if (!current || !incoming || current.id !== incoming.id) return incoming;
+  const latest = incoming.version >= current.version ? incoming : current;
+  if (current.connectionId !== incoming.connectionId || !latest.connectionInfo) return latest;
+  const other = latest === incoming ? current : incoming;
+  return other.connectionInfo && other.connectionInfo.version > latest.connectionInfo.version
+    ? { ...latest, connectionInfo: other.connectionInfo }
+    : latest;
+}
 export const artifactSchema = z.object({
   id: z.string(),
   name: z.string(),

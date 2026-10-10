@@ -74,8 +74,13 @@ public class BrowserService {
   public Contracts.Browser get(UUID owner, UUID id) {
     return jdbc.sql(
             """
-            SELECT b.*,c.profile_save_error FROM browser_sessions b
+            SELECT b.*,c.profile_save_error,ci.name connection_name,ci.site connection_site,
+              ci.account_label connection_account_label,ci.version connection_version
+            FROM browser_sessions b
             LEFT JOIN connections c ON c.id=coalesce(b.pending_connection_id,b.connection_id)
+              AND c.owner_id=b.owner_id
+            LEFT JOIN connections ci ON ci.id=b.connection_id AND ci.owner_id=b.owner_id
+              AND ci.deleted_at IS NULL
             WHERE b.id=:id AND b.owner_id=:owner
             """)
         .param("id", id)
@@ -96,6 +101,11 @@ public class BrowserService {
                     row.getString("profile_save_error"),
                     row.getObject("task_id", UUID.class),
                     row.getObject("connection_id", UUID.class),
+                    row.getString("connection_name") == null ? null
+                        : new Contracts.ConnectionInfo(row.getString("connection_name"),
+                            row.getString("connection_site"),
+                            row.getString("connection_account_label"),
+                            row.getLong("connection_version")),
                     row.getBoolean("login_confirmed"),
                     Database.instant(row, "started_at"),
                     Database.instant(row, "closed_at"),

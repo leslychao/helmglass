@@ -376,6 +376,25 @@ class DevClient:
     def tool(self, name, arguments):
         if not name.startswith("widget.") and name not in ("tasks.list", "connections.list"):
             arguments.setdefault("callId", str(uuid.uuid4()))
+            titles = {
+                "tasks.create": "Создать задание для проверки приложения",
+                "tasks.bind": "Связать проверяемое задание с исходным чатом",
+                "tasks.view": "Показать ход проверяемого задания в чате",
+                "tasks.get": "Проверить текущее состояние тестового задания",
+                "tasks.command": "Изменить состояние проверяемого задания",
+                "tasks.ask": "Уточнить условия тестового задания у пользователя",
+                "tasks.respond": "Проверить ответ на запрос участия в задании",
+                "steps.list": "Проверить историю выполнения тестового задания",
+                "operations.list": "Найти сохранённые действия тестового задания",
+                "operations.get": "Проверить результат действия тестового задания",
+                "connections.select": "Подключить аккаунт для выполнения тестового задания",
+                "browser.execute": "Проверить страницу тестового задания",
+                "artifacts.list": "Найти файлы, сохранённые при выполнении задания",
+                "audio.analyze": "Распознать речь из записи тестового задания",
+                "audio.get": "Прочитать результаты анализа записи задания",
+                "results.publish": "Сохранить проверенный результат тестового задания",
+            }
+            arguments.setdefault("stepTitle", titles[name])
         result = self.rpc("tools/call", {"name": name, "arguments": arguments,
                                           "_meta": {"openai/session": self.chat}})
         if "structuredContent" in result:

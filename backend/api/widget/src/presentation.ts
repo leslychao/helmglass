@@ -2,6 +2,9 @@ import { z } from 'zod';
 
 const browserSchema = z.object({ id: z.uuid(), status: z.string(), privateMode: z.boolean(),
   currentUrl: z.string().nullable(), version: z.number().int(), controlOwner: z.string(),
+  connectionId: z.uuid().nullable(),
+  connectionInfo: z.object({ name: z.string(), site: z.string(), accountLabel: z.string().nullable(),
+    version: z.number().int() }).nullable(),
   startedAt: z.string().nullable(), closedAt: z.string().nullable(),
   idleCloseAt: z.string().nullable(), idleTimeoutSeconds: z.number(), idleWarningAt: z.string().nullable(),
   cleanupState: z.string(), cleanupError: z.string().nullable(), closeReason: z.enum(['USER', 'IDLE_TIMEOUT']).nullable() });

@@ -17,10 +17,12 @@ class AgentStepsTest(unittest.TestCase):
 
     def create(self, prepare=False):
         self.client.login_mcp()
-        error, presentation, _ = self.client.tool("tasks.create", {
+        self.creation_request = {
+            "stepTitle": "Создать задачу для проверки учёта вызовов агента",
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Учёт вызовов агента", "goal": "Прочитать страницу два раза",
-                "startUrl": "https://example.com", "prepare": prepare}})
+                "startUrl": "https://example.com", "prepare": prepare}}
+        error, presentation, _ = self.client.tool("tasks.create", self.creation_request)
         self.assertFalse(error, presentation)
         self.task = presentation["task"]
         self.widget = {"taskId": self.task["id"], "generation": presentation["generation"]}
@@ -71,6 +73,11 @@ class AgentStepsTest(unittest.TestCase):
             replies = list(executor.map(lambda _: self.client.tool("tasks.get", request), range(2)))
         self.assertTrue(all(not item[0] for item in replies), replies)
         self.assertEqual(first, self.listing())
+        error, refusal, _ = self.client.tool("tasks.get", {
+            **request, "stepTitle": "Проверить другое условие выполнения задания"})
+        self.assertTrue(error, refusal)
+        self.assertEqual("IDEMPOTENCY_CONFLICT", refusal["code"])
+        self.assertEqual(first, self.listing())
         error, refusal, _ = self.client.tool("steps.list", request)
         self.assertTrue(error, refusal)
         self.assertEqual("IDEMPOTENCY_CONFLICT", refusal["code"])
@@ -81,7 +88,9 @@ class AgentStepsTest(unittest.TestCase):
         self.client.browser_observation(self.task["id"])
         baseline = self.listing()["total"]
         task = self.current()
-        request = {"taskId": task["id"], "callId": str(uuid.uuid4()), "actions": [
+        request = {"taskId": task["id"], "callId": str(uuid.uuid4()),
+                   "stepTitle": "Прочитать инструкцию и проверить доступные элементы задания",
+                   "actions": [
             {"operationId": str(uuid.uuid4()), "type": "observe", "arguments": {},
              "instructionRevision": task["instructionRevision"],
              "controlEpoch": task["browser"]["controlEpoch"]} for _ in range(2)]}
@@ -94,6 +103,7 @@ class AgentStepsTest(unittest.TestCase):
         self.assertEqual(baseline + 1, page["total"])
         step = next(item for item in page["items"] if item["id"] == request["callId"])
         self.assertEqual("browser.execute", step["tool"])
+        self.assertEqual(request["stepTitle"], step["title"])
         self.assertFalse(self.client.tool("browser.execute", request)[0])
         self.assertEqual(page, self.listing())
 
@@ -135,6 +145,82 @@ class AgentStepsTest(unittest.TestCase):
         self.assertNotIn("steps.command", {item["name"] for item in schema})
         browser = next(item for item in schema if item["name"] == "browser.execute")
         self.assertIn("callId", browser["inputSchema"]["required"])
+        self.assertIn("stepTitle", browser["inputSchema"]["required"])
+
+    def test_business_titles_are_shared_searchable_and_creation_replay_is_checked(self):
+        self.create()
+        creation = next(item for item in self.listing()["items"]
+                        if item["id"] == self.creation_request["callId"])
+        self.assertEqual(self.creation_request["stepTitle"], creation["title"])
+        request = {"taskId": self.task["id"], "stepTitle": "Проверить готовность записи к анализу"}
+        self.assertFalse(self.client.tool("tasks.get", request)[0])
+        page = self.listing(search="готовность записи")
+        self.assertEqual(1, page["total"])
+        self.assertEqual(request["stepTitle"], page["items"][0]["title"])
+        error, widget, _ = self.client.tool("widget.steps", {
+            **self.widget, "search": "готовность записи"})
+        self.assertFalse(error, widget)
+        self.assertEqual(page, widget)
+        before = self.listing()
+        self.assertFalse(self.client.tool("tasks.create", self.creation_request)[0])
+        error, refusal, _ = self.client.tool("tasks.create", {
+            **self.creation_request, "stepTitle": "Создать другое задание"})
+        self.assertTrue(error, refusal)
+        self.assertEqual("IDEMPOTENCY_CONFLICT", refusal["code"])
+        self.assertEqual(before, self.listing())
+
+    def test_invalid_title_is_rejected_before_task_commands_or_step_registration(self):
+        self.create()
+        before, task = self.listing(), self.current()
+        for title in (None, "", "  ", 5, "x" * 301, "Строка\nСтрока", "Строка\rСтрока",
+                      "Строка\u2028Строка", "Строка\u2029Строка"):
+            with self.subTest(title=title):
+                arguments = {"taskId": self.task["id"], "callId": str(uuid.uuid4()),
+                             "stepTitle": title, "command": {"type": "RESUME",
+                             "expectedVersion": task["version"]}, "operationKey": str(uuid.uuid4())}
+                result = self.client.rpc("tools/call", {
+                    "name": "tasks.command", "arguments": arguments})
+                self.assertTrue(result.get("isError"), result)
+                self.assertIn("stepTitle", str(result))
+        arguments.pop("stepTitle")
+        result = self.client.rpc("tools/call", {"name": "tasks.command", "arguments": arguments})
+        self.assertTrue(result.get("isError"), result)
+        self.assertIn("stepTitle", str(result))
+        self.assertEqual(before, self.listing())
+        self.assertEqual(task, self.current())
+
+    def test_connection_context_shared_reads_updates_and_foreign_access(self):
+        self.create(prepare=True)
+        self.client.browser_observation(self.task["id"])
+        task = self.current()
+        self.assertIsNone(task["browser"]["connectionInfo"])
+        status, connection = self.client.api("/api/connections", "POST", {
+            "name": "Подключение к тестовому заданию", "site": "example.com",
+            "startUrl": "https://example.com"})
+        self.assertEqual(200, status, connection)
+        self.fixture_sql(self.identity, "UPDATE connections SET account_label='Тестовый аккаунт'"
+            " WHERE id='" + connection["id"] + "'; UPDATE browser_sessions SET connection_id='"
+            + connection["id"] + "' WHERE id='" + task["browser"]["id"] + "';")
+        expected = {"name": connection["name"], "site": "example.com",
+                    "accountLabel": "Тестовый аккаунт", "version": connection["version"]}
+        self.assertEqual(expected, self.current()["browser"]["connectionInfo"])
+        error, widget, _ = self.client.tool("widget.state", self.widget)
+        self.assertFalse(error, widget)
+        self.assertEqual(expected, widget["task"]["browser"]["connectionInfo"])
+        status, detail = self.client.api("/api/connections/" + connection["id"])
+        self.assertEqual(200, status, detail)
+        self.assertEqual(expected, detail["browser"]["connectionInfo"])
+        status, browser = self.client.api("/api/browser-sessions/" + task["browser"]["id"]
+                                         + "/keep-open", "POST", {})
+        self.assertEqual(200, status, browser)
+        self.assertEqual(expected, browser["connectionInfo"])
+        status, renamed = self.client.api("/api/connections/" + connection["id"], "PATCH", {
+            "name": "Обновлённое подключение", "expectedVersion": connection["version"]})
+        self.assertEqual(200, status, renamed)
+        expected.update(name=renamed["name"], version=renamed["version"])
+        self.assertEqual(expected, self.current()["browser"]["connectionInfo"])
+        self.assertEqual(404, self.admin.api("/api/connections/" + connection["id"])[0])
+        self.assertEqual(404, self.admin.api("/api/tasks/" + task["id"])[0])
 
 
 if __name__ == "__main__":

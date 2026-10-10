@@ -63,13 +63,18 @@ SELECT t.*,
     'currentUrl',CASE WHEN b.private_mode THEN NULL ELSE b.current_url END,
     'canView',b.status='LIVE','canControl',b.status='LIVE','version',b.version,
     'profileSaveError',c.profile_save_error,'taskId',b.task_id,'connectionId',b.connection_id,
+    'connectionInfo',CASE WHEN ci.id IS NOT NULL THEN jsonb_build_object(
+      'name',ci.name,'site',ci.site,'accountLabel',ci.account_label,'version',ci.version) END,
     'loginConfirmed',b.login_confirmed,'startedAt',b.started_at,'closedAt',b.closed_at,
     'idleCloseAt',b.idle_close_at,'idleTimeoutSeconds',b.idle_timeout_seconds,
     'idleWarningAt',b.idle_warning_at,'cleanupState',b.cleanup_state,
     'cleanupError',b.cleanup_error,'closeReason',b.close_reason)
     FROM browser_sessions b
     LEFT JOIN connections c ON c.id=coalesce(b.pending_connection_id,b.connection_id)
-    WHERE b.id=t.browser_session_id)::text browser_json,
+      AND c.owner_id=b.owner_id
+    LEFT JOIN connections ci ON ci.id=b.connection_id AND ci.owner_id=b.owner_id
+      AND ci.deleted_at IS NULL
+    WHERE b.id=t.browser_session_id AND b.owner_id=t.owner_id)::text browser_json,
   (SELECT jsonb_build_object(
     'browserSeconds',coalesce(sum(extract(epoch FROM coalesce(u.ended_at,now())-u.started_at)) FILTER(WHERE u.kind='BROWSER'),0),
     'executionSeconds',coalesce(sum(extract(epoch FROM coalesce(u.ended_at,now())-u.started_at)) FILTER(WHERE u.kind='EXECUTION'),0),

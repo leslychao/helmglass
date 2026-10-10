@@ -113,6 +113,9 @@ final class McpSchemas {
             Map.entry("profileSaveError", nullable(string())),
             Map.entry("taskId", nullable(string())),
             Map.entry("connectionId", nullable(string())),
+            Map.entry("connectionInfo", nullable(object(Map.of(
+                "name", string(), "site", string(), "accountLabel", nullable(string()),
+                "version", integer())))),
             Map.entry("loginConfirmed", Map.of("type", "boolean")),
             Map.entry("startedAt", nullable(string())),
             Map.entry("closedAt", nullable(string())),

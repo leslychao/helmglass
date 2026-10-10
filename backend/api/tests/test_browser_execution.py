@@ -267,12 +267,18 @@ console.log(JSON.stringify({rssKiB, leaked}));
 
     def test_pagination_is_bounded_and_keeps_original_timestamp(self):
         self.ready()
+        previous = self.observation()
+        previous_tail = self.target(previous, 'Save delayed')
         result = self.click('Large form')
         self.assertEqual('SUCCEEDED', result['status'])
         observed = result['result']['observation']
         self.assertFalse(observed['complete'])
         self.assertLessEqual(len(observed['snapshot']), 200)
         self.assertLessEqual(len(json.dumps(observed, ensure_ascii=False).encode()), 32768)
+        unissued = self.execute(action=self.action('click', {
+            **previous_tail, 'observationId': observed['observationId']}))
+        self.assertEqual('FAILED', unissued['status'])
+        self.assertEqual('OBSERVATION_REFERENCE_NOT_ISSUED', unissued['errorCode'])
         continued = self.execute(action=self.action('observe', {'cursor': observed['cursor']}))['result']
         self.assertEqual(observed['observedAt'], continued['observedAt'])
         self.assertEqual(observed['metrics']['snapshots'], continued['metrics']['snapshots'])
@@ -280,6 +286,7 @@ console.log(JSON.stringify({rssKiB, leaked}));
         self.observation()
         expired = self.execute(action=self.action('observe', {'cursor': observed['cursor']}))
         self.assertEqual('FAILED', expired['status'])
+        self.assertEqual('OBSERVATION_CURSOR_EXPIRED', expired['errorCode'])
 
     def test_capture_limits_do_not_change_successful_action_receipt(self):
         self.ready()
@@ -381,12 +388,14 @@ console.log(JSON.stringify({rssKiB, leaked}));
             self.assertEqual('VALIDATION', refusal['code'])
         for arguments in ({'state': 'visible', 'text': 'Saved'}, {'time': 31}, {'time': 0}):
             refusal = self.client.rpc('tools/call', {'name': 'browser.execute', 'arguments': {
+                'callId': str(uuid.uuid4()), 'stepTitle': 'Дождаться появления результата задания',
                 'taskId': self.task['id'], 'action': self.action('waitFor', arguments)}})
             self.assertTrue(refusal['isError'], refusal)
         missing_arguments = self.action('observe')
         missing_arguments['arguments'] = None
         # Null is rejected by the published object schema before Helm's handler.
         refusal = self.client.rpc('tools/call', {'name': 'browser.execute', 'arguments': {
+            'callId': str(uuid.uuid4()), 'stepTitle': 'Прочитать страницу тестового задания',
             'taskId': self.task['id'], 'actions': [missing_arguments]}})
         self.assertTrue(refusal['isError'], refusal)
         self.assertIn('/actions/0/arguments', refusal['content'][0]['text'])

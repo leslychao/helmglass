@@ -132,6 +132,7 @@ public final class Contracts {
       String profileSaveError,
       UUID taskId,
       UUID connectionId,
+      ConnectionInfo connectionInfo,
       boolean loginConfirmed,
       Instant startedAt,
       Instant closedAt,
@@ -141,6 +142,8 @@ public final class Contracts {
       String cleanupState,
       String cleanupError,
       String closeReason) {}
+
+  public record ConnectionInfo(String name, String site, String accountLabel, long version) {}
 
   public record CookieCheck(int usableCount, Instant checkedAt) {
     public CookieCheck {

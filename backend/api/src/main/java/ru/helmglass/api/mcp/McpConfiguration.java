@@ -158,6 +158,10 @@ snapshot entries contain path (child indices) and node (native attributes or tex
 boolean states such as checked and selected mean false. Use option labels with selectOption.
 For click, fill, check and selectOption provide observationId and the exact ref
 issued by the current observation. Never send selectors, JavaScript, filenames or raw MCP calls.
+Never combine a ref remembered from an older observation with a new observationId, even if
+the ref string looks unchanged. Read required refs through the current snapshot's cursor.
+For known independent ratings and fields, collect their refs from one observation and send
+an actions batch with one final observation. Read new conditional fields after that batch.
 For a visible control absent from ARIA (for example native audio Play), request screenshot,
 then click with {screenshotId,x,y} from result.screenshotTarget instead of observationId/ref.
 Use CSS-pixel coordinates on the original image, not the scaled viewer. Screenshot targets
@@ -174,6 +178,11 @@ New conditional fields require a new observation. A stale reference is a failure
 observe again and choose a new operationId only after establishing that no effect occurred.
 complete=false/limited=true means the observation is partial. Use observe with its cursor to
 read the same cached snapshot; its original timestamp, scope and expiry do not change.
+Do not start observe({}) again to reach its missing tail. Every action's automatic observation
+starts a new snapshot and its first response can be partial too; an old tail is not issued
+under that new observationId. OBSERVATION_REFERENCE_NOT_ISSUED is a refusal before any effect;
+continue the current cursor. OBSERVATION_EXPIRED requires a fresh observation, and
+OBSERVATION_CURSOR_EXPIRED requires the current cursor or a fresh observation.
 observe arguments are mutually exclusive: {} for the page, {observationId,ref} for an issued
 region, or {cursor} for continuation. scope identifies page or region; complete applies only
 to that scope. For example, read a known form with observe({observationId,ref:formRef}).

@@ -38,7 +38,19 @@ public class WidgetEvents {
         event ->
             "sync".equals(event.resource())
                 || binding.task().equals(event.entityId())
-                || event.entityId() != null && event.entityId().equals(binding.browser()));
+                || event.entityId() != null && event.entityId().equals(binding.browser())
+                || "connection".equals(event.resource())
+                    && isTaskConnection(binding, event.entityId()));
+  }
+
+  private boolean isTaskConnection(Binding binding, UUID connection) {
+    return connection != null && jdbc.sql("""
+        SELECT EXISTS(SELECT 1 FROM tasks t JOIN browser_sessions b ON b.id=t.browser_session_id
+          WHERE t.id=:task AND t.owner_id=:owner AND b.owner_id=:owner
+            AND b.connection_id=:connection)
+        """)
+        .param("task", binding.task()).param("owner", binding.owner())
+        .param("connection", connection).query(Boolean.class).single();
   }
 
   private boolean valid(String token) {

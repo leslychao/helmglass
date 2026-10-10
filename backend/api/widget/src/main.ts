@@ -248,9 +248,20 @@ function render(next: Presentation): void {
   if (current?.generation === next.generation) {
     if (next.task.version < current.task.version) return;
     const previousBrowser = current.task.browser;
+    const incomingBrowser = next.task.browser;
     if (previousBrowser && next.task.browser?.id === previousBrowser.id
         && next.task.browser.version < previousBrowser.version) {
       next = { ...next, task: { ...next.task, browser: previousBrowser } };
+    }
+    const browser = next.task.browser;
+    const otherBrowser = browser === previousBrowser ? incomingBrowser : previousBrowser;
+    if (browser && otherBrowser?.id === browser.id
+        && otherBrowser.connectionId === browser.connectionId
+        && browser.connectionInfo && otherBrowser.connectionInfo
+        && otherBrowser.connectionInfo.version > browser.connectionInfo.version) {
+      next = { ...next, task: { ...next.task, browser: {
+        ...browser, connectionInfo: otherBrowser.connectionInfo,
+      } } };
     }
   }
   current = next;
@@ -266,7 +277,8 @@ function render(next: Presentation): void {
   element('event-count', HTMLSpanElement).textContent = String(next.task.stepCount);
   videoToggle.disabled = !browser || ['CLOSED', 'LOST'].includes(browser.status);
   renderSession();
-  if (!sessionTimer && browser?.startedAt && !browser.closedAt) {
+  if (!sessionTimer && browser?.startedAt && !browser.closedAt
+      && !['CLOSED', 'LOST'].includes(browser.status)) {
     sessionTimer = setInterval(renderClock, 1000);
   }
   if (finished || !browser || browser.status !== 'LIVE' || browser.privateMode || browserId && browser.id !== browserId) closeViewer();
@@ -715,15 +727,37 @@ function renderSession(): void {
   renderIdle();
   const browser = current?.task.browser;
   const states: Record<string, string> = { LIVE: 'Работает', CLOSED: 'Закрыт', LOST: 'Утрачен', CLOSING: 'Закрывается', STARTING: 'Запускается', QUEUED: 'Ожидает запуска', UNREACHABLE: 'Нет связи' };
-  element('session-id', HTMLElement).textContent = browser?.id ?? 'Нет данных';
+  const connection = browser?.connectionInfo;
+  element('session-id-row', HTMLElement).hidden = !browser;
+  element('session-id', HTMLElement).textContent = browser?.id ?? '';
   element('session-status', HTMLElement).textContent = browser ? states[browser.status] ?? browser.status : 'Не запущен';
-  element('session-start', HTMLElement).textContent = browser?.startedAt ? new Date(browser.startedAt).toLocaleString('ru-RU') : 'Нет данных';
+  element('session-connection-row', HTMLElement).hidden = !connection?.name;
+  element('session-connection', HTMLElement).textContent = connection?.name ?? '';
+  element('session-site-row', HTMLElement).hidden = !connection?.site;
+  element('session-site', HTMLElement).textContent = connection?.site ?? '';
+  element('session-account-row', HTMLElement).hidden = !connection?.accountLabel;
+  element('session-account', HTMLElement).textContent = connection?.accountLabel ?? '';
+  element('session-start-row', HTMLElement).hidden = !browser?.startedAt;
+  element('session-start', HTMLElement).textContent = browser?.startedAt ? new Date(browser.startedAt).toLocaleString('ru-RU') : '';
   element('session-closed-row', HTMLElement).hidden = !browser?.closedAt;
   element('session-closed', HTMLElement).textContent = browser?.closedAt ? new Date(browser.closedAt).toLocaleString('ru-RU') : '';
+  element('session-close-reason-row', HTMLElement).hidden = !browser?.closedAt || !browser.closeReason;
+  element('session-close-reason', HTMLElement).textContent = browser?.closeReason === 'USER' ? 'По запросу пользователя' : browser?.closeReason === 'IDLE_TIMEOUT' ? 'Из-за простоя' : '';
+  element('session-idle-row', HTMLElement).hidden = browser?.status !== 'LIVE' || !browser.idleCloseAt;
+  let idleText = '';
+  if (browser?.idleCloseAt) {
+    idleText = Date.parse(browser.idleCloseAt) <= Date.now()
+      ? 'Срок простоя истёк. Ожидаем подтверждения закрытия.'
+      : new Date(browser.idleCloseAt).toLocaleString('ru-RU');
+  }
+  element('session-idle', HTMLElement).textContent = idleText;
   const seconds = browser?.startedAt ? Math.max(0, Math.floor(((browser.closedAt ? Date.parse(browser.closedAt) : Date.now()) - Date.parse(browser.startedAt)) / 1000)) : null;
-  element('session-duration', HTMLElement).textContent = seconds === null || !Number.isFinite(seconds) ? 'Нет данных' : [Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60), seconds % 60].map(value => String(value).padStart(2, '0')).join(':');
-  element('session-control', HTMLElement).textContent = browser?.controlOwner === 'USER' ? 'Пользователь в Helm Glass' : browser?.controlOwner === 'CHATGPT' ? 'Агент' : browser?.controlOwner === 'TRANSFERRING' ? 'Передача управления' : '—';
-  if (browser?.closedAt) { clearInterval(sessionTimer); sessionTimer = undefined; }
+  element('session-duration-row', HTMLElement).hidden = seconds === null || !Number.isFinite(seconds)
+    || !!browser && !browser.closedAt && ['CLOSED', 'LOST'].includes(browser.status);
+  element('session-duration', HTMLElement).textContent = seconds === null || !Number.isFinite(seconds) ? '' : [Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60), seconds % 60].map(value => String(value).padStart(2, '0')).join(':');
+  if (!browser || browser.closedAt || ['CLOSED', 'LOST'].includes(browser.status)) {
+    clearInterval(sessionTimer); sessionTimer = undefined;
+  }
 }
 
 sessionToggle.addEventListener('click', () => {
