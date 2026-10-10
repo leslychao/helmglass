@@ -223,14 +223,31 @@ console.log(JSON.stringify({rssKiB, leaked}));
         self.assertEqual('FAILED', refused['status'])
         self.assertEqual('SUCCEEDED', self.execute(action=self.action('scroll', {'y': 500}))['status'])
         shot = self.action('screenshot')
-        result = self.execute(action=shot)
+        error, result, receipt = self.client.tool('browser.execute', {
+            'taskId': self.task['id'], 'action': shot})
+        self.assertFalse(error, result)
         self.assertEqual('SUCCEEDED', result['status'], result)
-        self.assertEqual('image/png', result['result']['artifact']['mimeType'])
-        self.assertGreater(result['result']['artifact']['sizeBytes'], 0)
+        delivery_deadline = time.monotonic() + 8
+        while not any(item['type'] == 'image' for item in receipt['content']):
+            self.assertEqual('PENDING', result['result']['imageDelivery'])
+            self.assertLess(time.monotonic(), delivery_deadline, 'Screenshot image not delivered')
+            time.sleep(.1)
+            error, result, receipt = self.client.tool('operations.get', {
+                'operationId': shot['operationId']})
+            self.assertFalse(error, result)
+        self.assertEqual('READY', result['result']['imageDelivery'])
+        target = result['result']['screenshotTarget']
+        self.assertEqual(shot['operationId'], target['screenshotId'])
+        self.assertGreater(target['width'], 0)
+        self.assertGreater(target['height'], 0)
+        image = next(item for item in receipt['content'] if item['type'] == 'image')
+        self.assertEqual('image/png', image['mimeType'])
+        self.assertTrue(image['data'])
         self.assertNotIn('/tmp/helm-mcp', str(result))
         repeated = self.execute(action=shot)
         self.assertEqual('SUCCEEDED', repeated['status'])
         self.assertEqual(shot['operationId'], repeated.get('id', repeated.get('operationId')))
+        self.assertEqual(target, repeated['result']['screenshotTarget'])
         script = "import {existsSync} from 'node:fs'; console.log(existsSync('/tmp/helm-mcp/screenshot-" + shot['operationId'] + ".png'));"
         checked = subprocess.run(self.docker + ['exec', '-i', 'helm-browser-' + self.task['browser']['id'],
             'node', '--input-type=module'], input=script, text=True, capture_output=True, check=True, timeout=20)

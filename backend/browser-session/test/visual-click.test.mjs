@@ -16,7 +16,7 @@ async function fixture(html, run) {
   const signal = new AbortController().signal;
   const screenshot = async () => {
     const shot = await mcp.screenshot(randomUUID(), signal);
-    files.push(typeof shot === 'string' ? shot : shot.filename);
+    files.push(shot.filename);
     return shot.target;
   };
   const click = (args) => mcp.act('click', args, randomUUID(), undefined, signal);

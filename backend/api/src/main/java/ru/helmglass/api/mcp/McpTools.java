@@ -401,7 +401,8 @@ public class McpTools {
                 + " Ожидания выполняет штатный MCP на странице. Отсутствующие checked/selected"
                 + " означают false. selectOption принимает видимые названия options. Условные поля"
                 + " ищите в новом observation. Короткие команды возвращают готовый результат;"
-                + " только для ACCEPTED/DISPATCHED или потерянного ответа нужен operations.get."
+                + " Для ACCEPTED/DISPATCHED, потерянного ответа или screenshot с"
+                + " result.imageDelivery=PENDING нужен operations.get."
                 + " После изменения страницы возвращается observation: используйте её вместо"
                 + " отдельного observe. listMedia, captureAudio и screenshot по умолчанию"
                 + " возвращают только свой результат. Шаг сохраняется автоматически. Группируйте заранее"
@@ -450,7 +451,9 @@ public class McpTools {
         tool(
             "operations.get",
             "Проверить исход операции после ACCEPTED/DISPATCHED или потери ответа. Если"
-                + " browser.execute уже вернул SUCCEEDED и результат, повторное чтение не нужно.",
+                + " screenshot вернул result.imageDelivery=PENDING, получить изображение этой же"
+                + " операции без повторного снимка. В остальных случаях SUCCEEDED с результатом"
+                + " повторно читать не нужно.",
             object(Map.of("operationId", uuid()), "operationId"),
             true,
             false));
@@ -1232,23 +1235,28 @@ public class McpTools {
         && result.path("artifact").path("id").isString()) {
       UUID artifactId = UUID.fromString(result.path("artifact").path("id").asString());
       var available = artifacts.findReady(owner, artifactId);
+      var response =
+          McpSchema.CallToolResult.builder()
+              .addTextContent(
+                  json.write(
+                      Map.of(
+                          "operationId", operation.id(),
+                          "status", operation.status(),
+                          "result",
+                          Map.of(
+                              "screenshotTarget", modelData(result.path("screenshotTarget")),
+                              "imageDelivery", available.isEmpty() ? "PENDING" : "READY"))));
       if (available.isEmpty()) {
-        return McpSchema.CallToolResult.builder()
-            .addTextContent(json.write(modelData(json.tree(operation))))
+        return response
             .addTextContent(
-                "Снимок получен. Доставка файла ещё не подтверждена; проверьте artifacts.list. Не"
-                    + " повторяйте действие.")
+                "Снимок получен, изображение ещё доставляется. Получите его через operations.get"
+                    + " с этим operationId, даже при SUCCEEDED. Не повторяйте screenshot ради"
+                    + " доставки. Координатный клик разрешён только по полученному изображению; "
+                    + "если screenshotTarget истёк, получите свежий снимок.")
             .build();
       }
       Contracts.Artifact artifact = available.get();
-      return McpSchema.CallToolResult.builder()
-          .addTextContent(
-              json.write(
-                  Map.of(
-                      "operationId", operation.id(),
-                      "status", operation.status(),
-                      "result",
-                      Map.of("screenshotTarget", modelData(result.path("screenshotTarget"))))))
+      return response
           .addContent(
               McpSchema.ImageContent.builder(
                       Base64.getEncoder().encodeToString(imageBytes(owner, artifact)),

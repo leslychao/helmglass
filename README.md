@@ -230,6 +230,8 @@ python backend/api/tests/evaluate_audio.py
 
 Для проверки виджета в `test_results.py` нужны Node.js 24, зависимости
 `backend/api/widget`, установленные через `npm ci`, и доступ к Docker API dev.
+Проверка ответов задач в `test_task_commands.py` использует Node.js 24 и зависимости
+`frontend`, установленные через `npm ci`, для валидации реального ответа dev схемой кабинета.
 Гонки callback проверяются с управляемым host в Node.js на dev; это не проверка ChatGPT.
 Проверка буфера использует опубликованный dev-код, установленный Chrome и зависимости
 Playwright из `backend/browser-session`; создаёт и удаляет одно временное подключение.

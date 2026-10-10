@@ -135,7 +135,7 @@ final class McpSchemas {
             Map.entry("operationId", nullable(string())),
             Map.entry("command",
                 Map.of("type", "string", "enum",
-                    List.of("ANSWER", "CONFIRM", "REJECT", "CHOOSE_CONNECTION"))),
+                    List.of("ANSWER", "CONFIRM", "REJECT", "CHOOSE_CONNECTION", "PROCEED"))),
             Map.entry("text", nullable(string())),
             Map.entry("connectionId", nullable(string())),
             Map.entry("answeredAt", string())));

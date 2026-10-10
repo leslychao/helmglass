@@ -89,7 +89,7 @@ export const responseSchema = z.object({
   type: z.string(),
   prompt: z.string(),
   operationId: z.nullable(z.string()),
-  command: z.enum(['ANSWER', 'CONFIRM', 'REJECT', 'CHOOSE_CONNECTION']),
+  command: z.enum(['ANSWER', 'CONFIRM', 'REJECT', 'CHOOSE_CONNECTION', 'PROCEED']),
   text: z.nullable(z.string()),
   connectionId: z.nullable(z.string()),
   answeredAt: z.string(),

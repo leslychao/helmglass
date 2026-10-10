@@ -2362,7 +2362,7 @@ components:
         stepCount:
           type: integer
           minimum: 0
-          description: Total persisted business steps, independent of the current page or search.
+          description: Total persisted agent tool calls, independent of the current page or search.
         createdAt:
           type: string
           format: date-time
@@ -2487,7 +2487,7 @@ components:
           format: uuid
         command:
           type: string
-          enum: [ANSWER, CONFIRM, REJECT, CHOOSE_CONNECTION]
+          enum: [ANSWER, CONFIRM, REJECT, CHOOSE_CONNECTION, PROCEED]
         text:
           type: [string, "null"]
         connectionId:

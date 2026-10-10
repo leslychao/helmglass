@@ -54,13 +54,13 @@ const result = await build({entryPoints:['src/main.ts'],bundle:true,format:'esm'
     builder.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export const App=globalThis.WidgetTestApp'}));
   }}]});
 process.stdout.write(result.outputFiles[0].text);
-"""], cwd="backend/api/widget", text=True, capture_output=True, timeout=30)
+"""], cwd="backend/api/widget", text=True, encoding="utf-8", capture_output=True, timeout=30)
         self.assertEqual(0, build.returncode, build.stderr)
         bundled = "data:text/javascript;base64," + base64.b64encode(build.stdout.encode()).decode()
-        script = Path("backend/api/widget/test/continuation.mjs").read_text().replace("WIDGET_UNDER_TEST", bundled)
+        script = Path("backend/api/widget/test/continuation.mjs").read_text(encoding="utf-8").replace("WIDGET_UNDER_TEST", bundled)
         checked = subprocess.run(["docker", "--host", "tcp://" + self.settings["DEV_HOST"] + ":2375",
             "exec", "-i", "helmglass-browser-node-1", "node", "--input-type=module"],
-            input=script, text=True, capture_output=True, timeout=30)
+            input=script, text=True, encoding="utf-8", capture_output=True, timeout=30)
         self.assertEqual(0, checked.returncode, checked.stderr[-3000:])
 
     def test_published_viewer_freezes_without_reconnecting(self):

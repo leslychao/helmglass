@@ -82,11 +82,12 @@ const stale = response({ code: 'STALE_WIDGET', message: 'Newer presentation exis
 const ticket = text({ url: 'https://helm.example/browser/view?ticket=fixture', expiresAt: '2099-01-01T00:00:00Z' });
 const liveBrowser = () => ({ id: crypto.randomUUID(), status: 'LIVE', privateMode: false, version: 1, controlOwner: 'CHATGPT', startedAt: '2026-10-09T00:00:00Z', closedAt: null, idleCloseAt: null, idleTimeoutSeconds: 300, idleWarningAt: null, cleanupState: 'NONE', cleanupError: null, closeReason: null,
   currentUrl: 'https://secret-user:secret-password@site.example/work?token=secret#private' });
-const businessStepId = crypto.randomUUID();
-let businessStepVersion = 1;
-const history = () => text({ items: [{ id: businessStepId, sequence: 20, version: businessStepVersion,
-  status: businessStepVersion === 1 ? 'RUNNING' : 'SUCCEEDED', title: 'Проверить цену товара',
-  result: businessStepVersion === 1 ? null : 'Цена товара подтверждена: 100 рублей',
+const agentStepId = crypto.randomUUID();
+let agentStepVersion = 1;
+const history = () => text({ items: [{ id: agentStepId, sequence: 20, version: agentStepVersion,
+  status: agentStepVersion === 1 ? 'RUNNING' : 'FAILED', title: 'Прочитать страницу',
+  tool: 'browser.execute', durationMs: agentStepVersion === 1 ? null : 123,
+  result: agentStepVersion === 1 ? null : 'Инструмент отклонил запрос.',
   createdAt: '2026-10-08T00:00:00Z', updatedAt: '2026-10-08T00:00:00Z' }], total: 20, page: 1, pageSize: 10 });
 function viewerState(state, viewerEpoch = new URL(elements.get('viewer').src).searchParams.get('viewerEpoch'), dimensions = {}) {
   windowListeners.get('message')?.({ source: elements.get('viewer').contentWindow, origin: 'https://helm.example',
@@ -304,17 +305,17 @@ assert.equal(links.at(-1).url, metadata(state).taskUrl);
 
 const historyCalls = calls.filter(item => item.name === 'widget.steps').length;
 const sourceBeforeHistory = elements.get('viewer').src;
-const businessRow = elements.get('steps').children[0];
-const disclosure = businessRow.children[0];
-const result = businessRow.children[1];
+const stepRow = elements.get('steps').children[0];
+const disclosure = stepRow.children[0];
+const result = stepRow.children[1];
 assert.equal(disclosure.disabled, true, 'A step without a result has no disclosure');
 assert.equal(disclosure.getAttribute('aria-expanded'), null);
-businessStepVersion++;
+agentStepVersion++;
 sources.at(-1).change('step'); await settled();
-assert.equal(elements.get('steps').children[0], businessRow, 'An update must preserve the business step row');
+assert.equal(elements.get('steps').children[0], stepRow, 'An update must preserve the agent step row');
 assert.equal(elements.get('steps').children.length, 1, 'Status updates do not append progress entries');
 assert.equal(elements.get('event-count').textContent, '20');
-assert.match(disclosure.children[0].textContent, /Выполнен/);
+assert.match(disclosure.children[0].textContent, /Вызов отклонён · browser.execute · 123 мс/);
 assert.equal(disclosure.disabled, false);
 assert.equal(disclosure.getAttribute('aria-expanded'), 'false');
 assert.equal(result.hidden, true, 'A newly available result starts collapsed');
@@ -322,9 +323,9 @@ disclosure.click();
 assert.equal(result.hidden, false);
 assert.equal(disclosure.getAttribute('aria-expanded'), 'true');
 elements.get('steps-content').scrollTop = 123;
-businessStepVersion++;
+agentStepVersion++;
 sources.at(-1).change('step'); await settled();
-assert.equal(elements.get('steps').children[0], businessRow);
+assert.equal(elements.get('steps').children[0], stepRow);
 assert.equal(disclosure.getAttribute('aria-expanded'), 'true', 'Updates preserve disclosure state');
 assert.equal(result.hidden, false);
 assert.equal(elements.get('steps-content').scrollTop, 123, 'Updates preserve panel scroll position');

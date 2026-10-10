@@ -1,7 +1,8 @@
-"""Removal of the standalone pause command at the deployed REST and MCP boundaries."""
+"""Task command and recorded response contracts at the deployed REST/MCP boundaries."""
 
 import json
 from pathlib import Path
+import subprocess
 import unittest
 import uuid
 
@@ -15,6 +16,51 @@ class TaskCommandsTest(unittest.TestCase):
     fixture_sql = usage.UsageAdministrationTest.fixture_sql
     purge_identity = usage.UsageAdministrationTest.purge_identity
     wait_operation = usage.UsageAdministrationTest.wait_operation
+
+    def test_unconfirmed_response_preserves_task_list_and_detail_contracts(self):
+        status, task = self.client.api("/api/tasks", "POST", {
+            "title": "Recorded unconfirmed response", "goal": "Read a saved verification",
+            "prepare": False})
+        self.assertEqual(200, status)
+        request_id = str(uuid.uuid4())
+        self.fixture_sql(self.identity,
+            "INSERT INTO task_requests(id,task_id,owner_id,type,prompt,status,"
+            "instruction_revision,answer,answer_command,answer_source,verification,answered_at) "
+            f"VALUES('{request_id}','{task['id']}',:owner,'UNKNOWN_RESULT','Check the result',"
+            f"'ANSWERED',{task['instructionRevision']},'Continue without replaying the action',"
+            "'PROCEED','MCP_VERIFICATION','{\"outcome\":\"UNCONFIRMED\"}',now());")
+        status, page = self.client.api("/api/tasks?pageSize=5")
+        self.assertEqual(200, status)
+        self.assertEqual(1, page["total"])
+        status, current = self.client.api("/api/tasks/" + task["id"])
+        self.assertEqual(200, status)
+        self.assertEqual(page["items"][0], current)
+        self.assertEqual("PROCEED", current["lastResponse"]["command"])
+
+        validation = subprocess.run(["node", "--input-type=module", "-e", """
+import {readFileSync} from 'node:fs';
+import assert from 'node:assert/strict';
+import {pageSchema, taskSchema, responseSchema} from './frontend/src/app/core/models.ts';
+const page = JSON.parse(readFileSync(0, 'utf8'));
+const parsed = pageSchema(taskSchema).safeParse(page);
+assert.equal(parsed.success, true, parsed.success ? '' : JSON.stringify(parsed.error.issues));
+const response = page.items[0].lastResponse;
+for (const command of ['ANSWER', 'CONFIRM', 'REJECT', 'CHOOSE_CONNECTION', 'PROCEED']) {
+  assert.equal(responseSchema.safeParse({...response, command}).success, true, command);
+}
+assert.equal(responseSchema.safeParse({...response, command: 'RETRY'}).success, false);
+"""], input=json.dumps(page), text=True, capture_output=True, timeout=15)
+        self.assertEqual(0, validation.returncode, validation.stderr)
+
+    def test_published_mcp_accepts_unconfirmed_recorded_response(self):
+        self.client.login_mcp()
+        tools = self.client.rpc("tools/list", {})["tools"]
+        for name in ("tasks.create", "tasks.view", "widget.continuation", "widget.state"):
+            schema = next(tool for tool in tools if tool["name"] == name)["outputSchema"]
+            if name == "widget.state":
+                schema = schema["anyOf"][0]
+            response = schema["properties"]["task"]["properties"]["lastResponse"]
+            self.assertIn("PROCEED", response["properties"]["command"]["enum"], name)
 
     def test_pause_is_not_a_published_task_command(self):
         self.client.login_mcp()
