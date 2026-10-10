@@ -11,6 +11,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Semaphore;
 import org.springframework.beans.factory.annotation.Value;
@@ -82,6 +83,16 @@ public class ArtifactService {
             "GET",
             "/sessions/" + session + "/artifacts?archive=true&after=" + source.cursor(),
             null);
+    if (!page.path("artifacts").isArray()
+        || page.path("artifacts").size() > 100
+        || !page.path("nextCursor").isIntegralNumber()
+        || page.path("nextCursor").asLong() < source.cursor()
+        || !page.path("hasMore").isBoolean()
+        || page.path("hasMore").asBoolean()
+            && page.path("nextCursor").asLong() <= source.cursor()) {
+      throw ApiException.conflict(
+          "ARTIFACT_MANIFEST_INVALID", "Список исходных файлов не подтверждён.");
+    }
     for (JsonNode metadata : page.path("artifacts")) {
       UUID operation =
           metadata.path("operationId").isString()
@@ -116,6 +127,16 @@ public class ArtifactService {
 
   private synchronized void transferArtifact(
       UUID owner, UUID task, UUID session, UUID operation, JsonNode metadata) {
+    if (!metadata.path("sizeBytes").isIntegralNumber()
+        || metadata.path("sizeBytes").asLong() < 0
+        || metadata.path("sizeBytes").asLong() > 2_147_483_648L
+        || !metadata.path("sha256").isString()
+        || !metadata.path("sha256").asString().matches("[a-fA-F0-9]{64}")) {
+      throw ApiException.invalid(
+          "artifact", "Для переноса нужны размер и SHA-256 исходного файла.");
+    }
+    long expectedSize = metadata.path("sizeBytes").asLong();
+    String expectedHash = metadata.path("sha256").asString();
     UUID id = UUID.fromString(metadata.path("id").asString());
     if (jdbc.sql(
             "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id=:id AND (owner_id<>:owner OR task_id IS"
@@ -150,13 +171,21 @@ public class ArtifactService {
           .param("task", task)
           .update();
     }
-    if (jdbc.sql(
-            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE id=:id AND owner_id=:owner AND"
-                + " status='READY')")
-        .param("id", id)
-        .param("owner", owner)
-        .query(Boolean.class)
-        .single()) {
+    var delivered =
+        jdbc.sql(
+                "SELECT size_bytes=:size AND lower(sha256)=lower(:hash) FROM artifacts"
+                    + " WHERE id=:id AND owner_id=:owner AND status='READY'")
+            .param("id", id)
+            .param("owner", owner)
+            .param("size", expectedSize)
+            .param("hash", expectedHash)
+            .query(Boolean.class)
+            .optional();
+    if (delivered.isPresent()) {
+      if (!delivered.get()) {
+        throw ApiException.conflict(
+            "ARTIFACT_INTEGRITY_MISMATCH", "Квитанция исходного файла изменилась.");
+      }
       return;
     }
     String name = metadata.path("name").asString("file");
@@ -165,7 +194,7 @@ public class ArtifactService {
       throw ApiException.invalid("artifact", "Некорректные свойства файла.");
     }
     jdbc.sql(
-            """
+"""
 INSERT INTO artifacts(id,owner_id,task_id,operation_id,name,mime_type,status,complete,source_url,source_ref,duration_seconds,relative_path)
 VALUES (:id,:owner,:task,:operation,:name,:mime,'UPLOADING',:complete,:url,:ref,:duration,:path)
 ON CONFLICT(id) DO NOTHING
@@ -196,15 +225,16 @@ ON CONFLICT(id) DO NOTHING
           var output = Files.newOutputStream(temporary)) {
         byte[] buffer = new byte[65536];
         for (int count; (count = input.read(buffer)) != -1; ) {
+          bytes = Math.addExact(bytes, count);
+          if (bytes > expectedSize) {
+            throw new IOException("Artifact exceeds declared size");
+          }
           output.write(buffer, 0, count);
           digest.update(buffer, 0, count);
-          bytes = Math.addExact(bytes, count);
         }
       }
       String hash = HexFormat.of().formatHex(digest.digest());
-      if (metadata.path("sizeBytes").isNumber() && metadata.path("sizeBytes").asLong() != bytes
-          || metadata.path("sha256").isString()
-              && !hash.equalsIgnoreCase(metadata.path("sha256").asString())) {
+      if (expectedSize != bytes || !hash.equalsIgnoreCase(expectedHash)) {
         throw new IOException("Artifact integrity mismatch");
       }
       Files.move(
@@ -239,19 +269,28 @@ ON CONFLICT(id) DO NOTHING
   }
 
   public Contracts.Artifact get(UUID owner, UUID id) {
+    return find(owner, id).orElseThrow(ApiException::notFound);
+  }
+
+  private Optional<Contracts.Artifact> find(UUID owner, UUID id) {
     return jdbc.sql("SELECT * FROM artifacts WHERE id=:id AND owner_id=:owner")
         .param("id", id)
         .param("owner", owner)
         .query(this::map)
-        .optional()
-        .orElseThrow(ApiException::notFound);
+        .optional();
+  }
+
+  public Optional<Contracts.Artifact> findReady(UUID owner, UUID id) {
+    return find(owner, id).filter(ArtifactService::ready);
+  }
+
+  private static boolean ready(Contracts.Artifact artifact) {
+    return "READY".equals(artifact.status()) && artifact.complete() && artifact.sizeBytes() != null;
   }
 
   public Contracts.Artifact getReady(UUID owner, UUID id) {
     Contracts.Artifact artifact = get(owner, id);
-    if (!"READY".equals(artifact.status())
-        || !artifact.complete()
-        || artifact.sizeBytes() == null) {
+    if (!ready(artifact)) {
       throw ApiException.conflict("FILE_NOT_READY", "Исходный файл пока не сохранён полностью.");
     }
     return artifact;

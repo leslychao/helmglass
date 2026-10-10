@@ -29,10 +29,11 @@ class AdministrativeAuditTest(unittest.TestCase):
             self.purge_identity(self.identity)
 
     def profile_count(self, connection):
-        script = ("import {DatabaseSync} from 'node:sqlite';"
-                  "const db=new DatabaseSync('/data/node.sqlite',{readOnly:true});"
-                  "console.log(db.prepare('SELECT count(*) AS n FROM profiles WHERE id=? AND owner=?')"
-                  ".get(process.argv[1],process.argv[2]).n); db.close();")
+        script = ("import {Vault} from '/app/dist/vault.js';"
+                  "const vault=new Vault(process.env.VAULT_ADDR,process.env.VAULT_ROLE_ID,process.env.VAULT_SECRET_ID);"
+                  "const saved=await vault.read(process.argv[1]);"
+                  "if(saved&&saved.data.owner!==process.argv[2])throw Error('Foreign fixture profile');"
+                  "console.log(saved?.data.profile?1:0);")
         result = subprocess.run(["docker", "--host", "tcp://" + self.settings["DEV_HOST"] + ":2375",
             "exec", "helmglass-browser-node-1", "node", "--input-type=module", "-e", script,
             str(uuid.UUID(connection)), str(uuid.UUID(self.identity.id))],

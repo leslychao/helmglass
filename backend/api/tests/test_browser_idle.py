@@ -26,8 +26,10 @@ class BrowserIdleTest(unittest.TestCase):
                 return task
             time.sleep(.25)
         browser = task.get('browser') or {}
+        history = client.api('/api/tasks/' + task_id + '/history')[1].get('items', [])[:4]
         self.fail('Expected browser lifecycle transition was not confirmed: '
-            + str((task['status'], task['waitReason'], browser.get('status'))))
+            + str((task['status'], task['waitReason'], browser.get('status'), browser.get('closeReason')))
+            + '; latest history: ' + str([(event.get('type'), event.get('detail')) for event in history]))
 
     def ready(self):
         identity, client = self.owner()
@@ -314,6 +316,53 @@ class BrowserIdleTest(unittest.TestCase):
                     self.assertEqual('CANCELLED', model.tool('operations.get', {'operationId': operation})[1]['status'])
                 self.command(client, task['id'], 'STOP')
                 self.wait_task(client, task['id'], lambda value: value['status'] == 'STOPPED')
+
+    def test_native_answer_after_closure_preserves_question_and_never_replays_old_confirmation(self):
+        for kind in ('QUESTION', 'CONFIRMATION'):
+            with self.subTest(kind=kind):
+                _, client, model, task = self.ready()
+                operation = str(uuid.uuid4())
+                if kind == 'QUESTION':
+                    error, _, _ = model.tool('tasks.ask', {'taskId': task['id'],
+                        'instructionRevision': task['instructionRevision'], 'operationKey': operation,
+                        'prompt': 'Choose before continuing after closure'})
+                else:
+                    target = model.browser_target(task['id'], 'Increment')
+                    error, _, _ = model.execute_in_scenario_step({'taskId': task['id'], 'action': {
+                        'operationId': operation, 'type': 'click', 'arguments': target,
+                        'confirmationPrompt': 'Increment the synthetic counter once?',
+                        'instructionRevision': task['instructionRevision']}})
+                self.assertFalse(error)
+                pending = client.api('/api/tasks/' + task['id'])[1]['request']
+
+                def close_before_answer(form):
+                    self.command(client, task['id'], 'CLOSE_BROWSER')
+                    self.wait_task(client, task['id'], lambda value: value['browser']['status'] == 'CLOSED')
+                    return {'action': 'accept', 'content': {'answer': 'Keep my answer'}
+                        if kind == 'QUESTION' else {'proceed': True}}
+
+                model.elicitation_handler = close_before_answer
+                try:
+                    error, answered, _ = model.tool('tasks.respond', {'taskId': task['id'],
+                        'requestId': pending['id'], 'requestVersion': pending['version'],
+                        'operationKey': str(uuid.uuid4())})
+                finally:
+                    model.elicitation_handler = None
+                self.assertFalse(error, answered)
+                self.assertIsNone(answered['request'])
+                self.assertEqual(('PAUSED', 'CLOSED'), (answered['status'], answered['browser']['status']))
+                if kind == 'QUESTION':
+                    self.assertEqual('Keep my answer', answered['lastResponse']['text'])
+                else:
+                    self.command(client, task['id'], 'OPEN_BROWSER')
+                    self.wait_task(client, task['id'], lambda value: value['browser']['status'] == 'LIVE')
+                    until = time.monotonic() + 10
+                    while time.monotonic() < until:
+                        receipt = model.tool('operations.get', {'operationId': operation})[1]
+                        if receipt['status'] == 'CANCELLED':
+                            break
+                        time.sleep(.2)
+                    self.assertEqual(('CANCELLED', 'STALE_BROWSER'), (receipt['status'], receipt['errorCode']))
 
 
 if __name__ == '__main__':

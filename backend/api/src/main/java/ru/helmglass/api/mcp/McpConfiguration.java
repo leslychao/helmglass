@@ -92,8 +92,9 @@ browser closure and manual control; RESUME preserves its existing safeguards.
 Returning control, leaving its browser view, or clicking Resume browser in Helm Glass authorizes
 continuing the same task once the browser is ready. Read current task state and safely observe
 the current page before acting; do not ask again for permission already given. Other pending
-requests, protected login, independent pauses and UNKNOWN still block work. Idle task browsers
-close after 15 minutes; passive widget viewing does not extend them. Never poll tools just to
+requests, protected login, independent pauses and UNKNOWN still block work. Browsers waiting
+for ChatGPT or a user close after 5 idle minutes; manual control allows 15 minutes without input.
+Status reads, passive viewing, video, heartbeat and idempotent replays never extend them. Never poll tools just to
 keep a browser alive. Ask for missing information or a necessary
 user decision with tasks.ask; use confirmationPrompt only for a specific action needing consent.
 Use tasks.respond only for QUESTION, ACCOUNT_CHOICE, CONFIRMATION and UNKNOWN_RESULT, with the

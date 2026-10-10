@@ -709,12 +709,66 @@ paths:
           $ref: "#/components/responses/ApplicationError"
         "409":
           $ref: "#/components/responses/ApplicationError"
+  /browser-sessions/{session}/pages/{visit}/activity:
+    parameters:
+      - name: session
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      - name: visit
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    post:
+      operationId: browserPageActivity
+      description: WEB owner only. Registers trusted manual input without key or field contents. Requires a live active controller visit and matching controlEpoch. Monotonic sequence deduplicates reports; observers, stale visits and MCP cannot extend a browser.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [controlEpoch, sequence]
+              properties:
+                controlEpoch: {type: integer, format: int64, minimum: 0}
+                sequence: {type: integer, format: int64, minimum: 1}
+      responses:
+        "200":
+          description: Activity accepted or already recorded; only a new sequence extends the deadline.
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
+  /admin/browsers/{id}/retry-cleanup:
+    parameters:
+      - $ref: "#/components/parameters/Id"
+    post:
+      operationId: retryBrowserCleanup
+      description: WEB administrator retries the same failed artifact delivery and cleanup of a confirmed stopped browser. Does not reopen execution. Recorded in the administrative audit.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Cleanup scheduled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Browser"
+        "403":
+          $ref: "#/components/responses/ApplicationError"
+        "404":
+          $ref: "#/components/responses/ApplicationError"
+        "409":
+          $ref: "#/components/responses/ApplicationError"
   /browser-sessions/{id}/keep-open:
     parameters:
       - $ref: "#/components/parameters/Id"
     post:
       operationId: keepBrowserOpen
-      description: Extend the same live task browser by 15 minutes without resuming the task or changing control. A closing browser cannot be extended.
+      description: Extend the same live task or connection browser from now by 5 minutes while waiting or 15 minutes under manual control. Does not resume the task or change control. A closing browser cannot be extended; an idempotent replay does not renew the deadline.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
       responses:
@@ -1463,7 +1517,7 @@ paths:
       - $ref: "#/components/parameters/Id"
     get:
       operationId: adminNodeBrowsers
-      description: Administrator-only occupied browsers of one existing node. CLOSED and QUEUED are excluded. Contains service metadata, never private titles, URLs or browser content.
+      description: Administrator-only browsers of one existing node. Includes stopped browsers with unfinished cleanup; these do not count as occupied. QUEUED and fully cleaned browsers are excluded. Contains service metadata, never private titles, URLs or browser content.
       parameters:
         - $ref: "#/components/parameters/Sort"
         - $ref: "#/components/parameters/Direction"
@@ -2433,6 +2487,10 @@ components:
       type: object
       required:
         - idleCloseAt
+        - idleTimeoutSeconds
+        - idleWarningAt
+        - cleanupState
+        - cleanupError
         - closeReason
         - taskId
         - connectionId
@@ -2454,7 +2512,21 @@ components:
         idleCloseAt:
           type: [string, "null"]
           format: date-time
-          description: Persisted idle deadline. Null while protected by an operation, control transfer, or connected manual controller. Passive viewers do not renew it.
+          description: Persisted idle deadline. Null only during a bounded operation or control transfer. Manual control expires after 15 minutes without input. Status, viewing, video and heartbeat never renew it.
+        idleTimeoutSeconds:
+          type: integer
+          enum: [300, 900]
+        idleWarningAt:
+          type: [string, "null"]
+          format: date-time
+          description: Server warning time, 60 seconds before a waiting deadline or 300 seconds before manual idle closure.
+        cleanupState:
+          type: string
+          enum: [NONE, PENDING, RUNNING, FAILED, COMPLETE]
+          description: Delivery and disk cleanup after execution has stopped. Does not occupy a browser slot.
+        cleanupError:
+          type: [string, "null"]
+          description: Safe artifact delivery or cleanup failure; administrative retry after three failures.
         closeReason:
           type: [string, "null"]
           enum: [USER, IDLE_TIMEOUT, null]
@@ -3331,7 +3403,14 @@ components:
         - ownerEmail
         - taskStatus
         - status
+        - cleanupState
+        - cleanupError
       properties:
+        cleanupState:
+          type: string
+          enum: [NONE, PENDING, RUNNING, FAILED, COMPLETE]
+        cleanupError:
+          type: [string, "null"]
         id:
           type: string
           format: uuid

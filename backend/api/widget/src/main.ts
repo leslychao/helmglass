@@ -106,9 +106,23 @@ function needsLogin(): boolean {
     || current?.task.browser?.privateMode === true;
 }
 
+const waitingReasons: Record<string, string> = {
+    USER_BROWSER_LIMIT: 'Ожидаем свободного места в вашем лимите браузеров.',
+    BROWSER_CAPACITY: 'Все места браузерного узла заняты. Задача сохраняет очередь.',
+    NODE_UNAVAILABLE: 'Браузерный узел недоступен. Ожидаем восстановления связи.',
+    ADMIN_PAUSED: 'Новые запуски приостановлены администратором.',
+    DEPLOYMENT_DRAIN: 'Новые запуски ожидают завершения обновления сервиса.',
+    ADMIN_PAUSED_DEPLOYMENT_DRAIN: 'Новые запуски приостановлены администратором и ожидают обновления сервиса.',
+    CONNECTION_BUSY: 'Выбранное подключение занято другим браузером. Ожидаем его освобождения.'
+};
+
 function renderNotice(): void {
+  const waiting = waitingReasons[current?.task.waitReason ?? ''];
   if (connectionError) notice(connectionError, true);
-  else if (current?.task.browser?.cleanupState === 'FAILED') notice('Браузер освобождён, но сохранение файлов не завершено. Исходные файлы сохранены; требуется повтор администратора.', true);
+  else if (current?.task.browser?.cleanupState === 'FAILED') notice(current.task.browser.cleanupError === 'CLEANUP_FAILED'
+    ? 'Браузер освобождён, файлы перенесены, но очистка диска не завершена. Требуется повтор администратора.'
+    : 'Браузер освобождён, но сохранение файлов не завершено. Исходные файлы сохранены; требуется повтор администратора.', true);
+  else if (waiting) notice(waiting);
   else if (current?.continuationStatus === 'MESSAGE_SENT') {
     notice('Запрос передан в исходный чат. Ожидаем следующую команду ChatGPT.');
   } else if (current?.continuationStatus === 'SENDING') {

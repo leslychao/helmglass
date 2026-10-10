@@ -86,8 +86,18 @@ public class AdminController {
         "asc".equals(taskDirection),
         auditSort,
         "asc".equals(auditDirection),
-        new ListQuery(null, List.of(), List.of(), List.of(), null, null, usageSort,
-            "asc".equals(usageDirection), usagePage, usagePageSize, null));
+        new ListQuery(
+            null,
+            List.of(),
+            List.of(),
+            List.of(),
+            null,
+            null,
+            usageSort,
+            "asc".equals(usageDirection),
+            usagePage,
+            usagePageSize,
+            null));
   }
 
   @PostMapping("/users/{id}/tasks/{task}/stop")
@@ -196,7 +206,12 @@ public class AdminController {
   @PostMapping("/browsers/{id}/retry-cleanup")
   Object retryCleanup(@PathVariable UUID id, @RequestHeader("Idempotency-Key") String key) {
     Actor actor = identity.administrator();
-    return idempotency.execute(actor.id(), key, "admin:browser:cleanup:" + id, Map.of(),
-        JsonNode.class, () -> json.tree(admission.retryCleanup(id)));
+    return idempotency.execute(
+        actor.id(),
+        key,
+        "admin:browser:cleanup:" + id,
+        Map.of(),
+        JsonNode.class,
+        () -> json.tree(admission.retryCleanup(actor, id)));
   }
 }

@@ -39,9 +39,9 @@ import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.browsers.BrowserService;
 import ru.helmglass.api.connections.ConnectionService;
 import ru.helmglass.api.tasks.ActionService;
+import ru.helmglass.api.tasks.TaskQueries;
 import ru.helmglass.api.tasks.TaskService;
 import ru.helmglass.api.tasks.TaskStepService;
-import ru.helmglass.api.tasks.TaskQueries;
 import tools.jackson.databind.JsonNode;
 
 @Service
@@ -134,7 +134,8 @@ public class McpTools {
         tool(
             "connections.select",
             "Выбрать собственное подключение. Выполняйте автономно в рамках поручения;"
-                + " confirmationPrompt задавайте только если переключение требует решения пользователя.",
+                + " confirmationPrompt задавайте только если переключение требует решения"
+                + " пользователя.",
             object(
                 Map.of(
                     "taskId",
@@ -156,9 +157,9 @@ public class McpTools {
     result.add(
         tool(
             "tasks.get",
-            "Актуальное поручение, состояние, вопросы и результаты собственной задачи."
-                + " lastResponse содержит последний принятый ответ пользователя для текущей ревизии:"
-                + " учитывайте его при продолжении после нативного ответа пользователя в чате.",
+            "Актуальное поручение, состояние, вопросы и результаты собственной задачи. lastResponse"
+                + " содержит последний принятый ответ пользователя для текущей ревизии: учитывайте"
+                + " его при продолжении после нативного ответа пользователя в чате.",
             object(task, "taskId"),
             true,
             false));
@@ -181,10 +182,10 @@ public class McpTools {
     result.add(
         tool(
             "tasks.create",
-            "Создать новую самостоятельную задачу только по явному поручению пользователя и связать с"
-                + " исходным чатом. Уточнения продолжают прежний taskId. Возвращает единственную карточку"
-                + " этого ответа: дополнительный tasks.view не нужен. Первую браузерную команду"
-                + " отправляйте с описанием step: отдельные DECLARE и START не нужны.",
+            "Создать новую самостоятельную задачу только по явному поручению пользователя и связать"
+                + " с исходным чатом. Уточнения продолжают прежний taskId. Возвращает единственную"
+                + " карточку этого ответа: дополнительный tasks.view не нужен. Первую браузерную"
+                + " команду отправляйте с описанием step: отдельные DECLARE и START не нужны.",
             object(
                 Map.of(
                     "operationKey",
@@ -214,53 +215,91 @@ public class McpTools {
         tool(
             "tasks.view",
             "Показать карточку текущей задачи по новому обращению пользователя, если она нужна."
-                + " Только один раз за ответ; tasks.create уже показывает карточку. При автоматическом"
-                + " продолжении не вызывать: прежний виджет обновляется событиями. Не привязывает и не запускает задачу.",
+                + " Только один раз за ответ; tasks.create уже показывает карточку. При"
+                + " автоматическом продолжении не вызывать: прежний виджет обновляется событиями."
+                + " Не привязывает и не запускает задачу.",
             object(Map.of("taskId", uuid(), "operationKey", key()), "taskId", "operationKey"),
             false,
             false));
-    result.add(tool("tasks.bind",
-        "По явному поручению связать задачу кабинета с этим чатом и подготовить её браузер. Затем показать tasks.view.",
-        object(Map.of("taskId", uuid(), "operationKey", key()), "taskId", "operationKey"), false, false));
-    result.add(tool("steps.list",
-        "Прочитать бизнес-шаги задачи перед продолжением. Сохраняйте прежние stepId и ключи;"
-            + " технические повторы не создают новых шагов.",
-        object(Map.of("taskId", uuid(), "page", Map.of("type", "integer", "minimum", 1),
-            "search", text(300), "beforeSequence", Map.of("type", "integer", "minimum", 1)),
-            "taskId"), true, false));
-    result.add(tool("steps.command",
-        "Управлять бизнес-шагом: WAIT, COMPLETE, SKIP, RETRY; DECLARE/START только для отдельного"
-            + " планирования. При выполнении создавайте и начинайте шаг через browser.execute.step"
-            + " одним вызовом. Навигация, получение файла и проверка адресата — действия внутри"
-            + " предметного шага, если сами не являются целью пользователя. Один шаг — одна"
-            + " предметная операция над объектом; 20 товаров — 20 шагов. operationKey/objectKey"
-            + " стабильны и не зависят от заголовка. COMPLETE требует предметного результата,"
-            + " для SUCCEEDED/PARTIAL — подтверждений. Успешный клик не доказывает достижение цели."
-            + " MODEL_RESULT сохраняет вывод ChatGPT и источники, а не независимую проверку сервера.",
-        object(Map.of("taskId", uuid(), "operationKey", key(), "command", stepCommandSchema()),
-            "taskId", "operationKey", "command"), false, false));
-    result.add(tool("widget.steps", "Бизнес-шаги актуального виджета: одна запись на предметную операцию над объектом.",
-        object(Map.of("taskId", uuid(), "generation", uuid(),
-            "page", Map.of("type", "integer", "minimum", 1),
-            "search", Map.of("type", "string", "maxLength", 1000),
-            "beforeSequence", Map.of("type", "integer", "minimum", 1)),
-            "taskId", "generation"), true, false));
+    result.add(
+        tool(
+            "tasks.bind",
+            "По явному поручению связать задачу кабинета с этим чатом и подготовить её браузер."
+                + " Затем показать tasks.view.",
+            object(Map.of("taskId", uuid(), "operationKey", key()), "taskId", "operationKey"),
+            false,
+            false));
+    result.add(
+        tool(
+            "steps.list",
+            "Прочитать бизнес-шаги задачи перед продолжением. Сохраняйте прежние stepId и ключи;"
+                + " технические повторы не создают новых шагов.",
+            object(
+                Map.of(
+                    "taskId",
+                    uuid(),
+                    "page",
+                    Map.of("type", "integer", "minimum", 1),
+                    "search",
+                    text(300),
+                    "beforeSequence",
+                    Map.of("type", "integer", "minimum", 1)),
+                "taskId"),
+            true,
+            false));
+    result.add(
+        tool(
+            "steps.command",
+            "Управлять бизнес-шагом: WAIT, COMPLETE, SKIP, RETRY; DECLARE/START только для"
+                + " отдельного планирования. При выполнении создавайте и начинайте шаг через"
+                + " browser.execute.step одним вызовом. Навигация, получение файла и проверка"
+                + " адресата — действия внутри предметного шага, если сами не являются целью"
+                + " пользователя. Один шаг — одна предметная операция над объектом; 20 товаров — 20"
+                + " шагов. operationKey/objectKey стабильны и не зависят от заголовка. COMPLETE"
+                + " требует предметного результата, для SUCCEEDED/PARTIAL — подтверждений. Успешный"
+                + " клик не доказывает достижение цели. MODEL_RESULT сохраняет вывод ChatGPT и"
+                + " источники, а не независимую проверку сервера.",
+            object(
+                Map.of("taskId", uuid(), "operationKey", key(), "command", stepCommandSchema()),
+                "taskId",
+                "operationKey",
+                "command"),
+            false,
+            false));
+    result.add(
+        tool(
+            "widget.steps",
+            "Бизнес-шаги актуального виджета: одна запись на предметную операцию над объектом.",
+            object(
+                Map.of(
+                    "taskId",
+                    uuid(),
+                    "generation",
+                    uuid(),
+                    "page",
+                    Map.of("type", "integer", "minimum", 1),
+                    "search",
+                    Map.of("type", "string", "maxLength", 1000),
+                    "beforeSequence",
+                    Map.of("type", "integer", "minimum", 1)),
+                "taskId",
+                "generation"),
+            true,
+            false));
     result.add(
         tool(
             "tasks.command",
             "Изменить поручение или жизненный цикл задачи. STOP окончателен; RESUME завершённой"
-                + " задачи допускается только по явной просьбе пользователя в свободном исходном чате."
-                + " REQUIRE_LOGIN приостанавливает задачу и показывает «Войти на сайт»"
-                + " в текущем виджете. Кнопка открывает подключение в Helm Glass;"
-                + " отсутствующее подключение создаётся автоматически."
-                + " Для LOGIN не вызывайте tasks.respond: нативная форма не нужна."
-                + " После «Завершить вход» виджет запрашивает продолжение той же задачи"
-                + " в исходном чате."
-                + " FINISH с SUCCEEDED закрывает браузер; подтверждайте CLOSED через tasks.get."
-                + " При FINISH command.text заменяет result.summary: передайте полный итог"
-                + " с полученными данными, а не сообщение «результат сохранён»."
-                + " Ответы на вопросы и согласие пользователя принимаются только"
-                + " через tasks.respond.",
+                + " задачи допускается только по явной просьбе пользователя в свободном исходном"
+                + " чате. REQUIRE_LOGIN приостанавливает задачу и показывает «Войти на сайт» в"
+                + " текущем виджете. Кнопка открывает подключение в Helm Glass; отсутствующее"
+                + " подключение создаётся автоматически. Для LOGIN не вызывайте tasks.respond:"
+                + " нативная форма не нужна. После «Завершить вход» виджет запрашивает продолжение"
+                + " той же задачи в исходном чате. FINISH с SUCCEEDED закрывает браузер;"
+                + " подтверждайте CLOSED через tasks.get. При FINISH command.text заменяет"
+                + " result.summary: передайте полный итог с полученными данными, а не сообщение"
+                + " «результат сохранён». Ответы на вопросы и согласие пользователя принимаются"
+                + " только через tasks.respond.",
             object(
                 Map.of("taskId", uuid(), "operationKey", key(), "command", commandSchema()),
                 "taskId",
@@ -271,8 +310,9 @@ public class McpTools {
     result.add(
         tool(
             "tasks.ask",
-            "Запросить решение пользователя только если данных недостаточно или поручение противоречиво."
-                + " Сохраните ожидание, затем вызовите tasks.respond для нативного вопроса в этом чате.",
+            "Запросить решение пользователя только если данных недостаточно или поручение"
+                + " противоречиво. Сохраните ожидание, затем вызовите tasks.respond для нативного"
+                + " вопроса в этом чате.",
             object(
                 Map.of(
                     "taskId",
@@ -289,59 +329,91 @@ public class McpTools {
                 "instructionRevision"),
             false,
             false));
-    result.add(tool("tasks.respond",
-        "Показать QUESTION, ACCOUNT_CHOICE, CONFIRMATION или UNKNOWN_RESULT в нативной форме GPT."
-            + " LOGIN и MANUAL_CONTROL выполняются в Helm Glass через кнопку текущего виджета;"
-            + " не вызывайте этот инструмент для входа. Сервер получает ответ напрямую"
-            + " от host; не передавайте ответ, согласие или выбор аккаунта аргументами."
-            + " После отмены или таймаута повторный показ допустим только по новому обращению пользователя.",
-        object(Map.of("taskId", uuid(), "requestId", uuid(), "requestVersion",
-            Map.of("type", "integer", "minimum", 1), "operationKey", key()),
-            "taskId", "requestId", "requestVersion", "operationKey"), false, false));
+    result.add(
+        tool(
+            "tasks.respond",
+            "Показать QUESTION, ACCOUNT_CHOICE, CONFIRMATION или UNKNOWN_RESULT в нативной форме"
+                + " GPT. LOGIN и MANUAL_CONTROL выполняются в Helm Glass через кнопку текущего"
+                + " виджета; не вызывайте этот инструмент для входа. Сервер получает ответ напрямую"
+                + " от host; не передавайте ответ, согласие или выбор аккаунта аргументами. После"
+                + " отмены или таймаута повторный показ допустим только по новому обращению"
+                + " пользователя.",
+            object(
+                Map.of(
+                    "taskId",
+                    uuid(),
+                    "requestId",
+                    uuid(),
+                    "requestVersion",
+                    Map.of("type", "integer", "minimum", 1),
+                    "operationKey",
+                    key()),
+                "taskId",
+                "requestId",
+                "requestVersion",
+                "operationKey"),
+            false,
+            false));
     result.add(
         tool(
             "browser.execute",
             "Выполнить action или последовательность actions (до 8) внутри бизнес-шага."
                 + " click/fill/press/check/selectOption/waitFor требуют в arguments одновременно"
-                + " observationId и ref из выданного наблюдения; одного ref недостаточно."
-                + " snapshot содержит native ARIA nodes с path;"
-                + " observe.arguments: {} — страница, {observationId,ref} — область, {cursor} — продолжение;"
-                + " варианты несовместимы. scope определяет область полноты. Адресный observe может завершать пакет."
-                + " waitFor: state visible/hidden/attached/detached либо text (буквальный текст 1–1000 символов)"
-                + " внутри безопасного snapshot указанного ref. Действие→waitFor в одном пакете заменяет фиксированную паузу."
-                + " отсутствующие checked/selected означают false."
-                + " selectOption принимает видимые названия options."
-                + " Условные поля ищите в новом observation."
-                + " Короткие команды возвращают готовый результат; только для ACCEPTED/DISPATCHED"
-                + " или потерянного ответа нужен operations.get. После изменения страницы возвращается"
-                + " observation: используйте её вместо отдельного observe. listMedia, captureAudio"
-                + " и screenshot по умолчанию возвращают только свой результат."
-                + " Для нового шага передайте step вместо отдельных DECLARE/START; для существующего stepId."
-                + " Группируйте заранее известные независимые заполнения в actions;"
-                + " не объединяйте действия, требующие промежуточного решения."
-                + " Каждый элемент имеет свой стабильный operationId. Последовательность останавливается"
-                + " на первом неподтверждённом успехе; complete=false и nextOperationId требуют проверки."
-                + " confirmationPrompt указывайте"
-                + " только если конкретный шаг требует решения пользователя: задайте этот вопрос в чате,"
-                + " получите ответ через tasks.respond с requestId/requestVersion."
-                + " operationId сохраняется при повторе; при потере ответа"
-                + " запрашивать operations.get. Не передавать пароли и коды: вход выполняется в"
-                + " кабинете. captureAudio требует sourceId из listMedia, sourceRef и"
+                + " observationId и ref из выданного наблюдения; одного ref недостаточно. snapshot"
+                + " содержит native ARIA nodes с path; observe.arguments: {} — страница,"
+                + " {observationId,ref} — область, {cursor} — продолжение; варианты несовместимы."
+                + " scope определяет область полноты. Адресный observe может завершать пакет."
+                + " waitFor: state visible/hidden/attached/detached либо text (буквальный текст"
+                + " 1–1000 символов) внутри безопасного snapshot указанного ref. Действие→waitFor в"
+                + " одном пакете заменяет фиксированную паузу. отсутствующие checked/selected"
+                + " означают false. selectOption принимает видимые названия options. Условные поля"
+                + " ищите в новом observation. Короткие команды возвращают готовый результат;"
+                + " только для ACCEPTED/DISPATCHED или потерянного ответа нужен operations.get."
+                + " После изменения страницы возвращается observation: используйте её вместо"
+                + " отдельного observe. listMedia, captureAudio и screenshot по умолчанию"
+                + " возвращают только свой результат. Для нового шага передайте step вместо"
+                + " отдельных DECLARE/START; для существующего stepId. Группируйте заранее"
+                + " известные независимые заполнения в actions; не объединяйте действия, требующие"
+                + " промежуточного решения. Каждый элемент имеет свой стабильный operationId."
+                + " Последовательность останавливается на первом неподтверждённом успехе;"
+                + " complete=false и nextOperationId требуют проверки. confirmationPrompt"
+                + " указывайте только если конкретный шаг требует решения пользователя: задайте"
+                + " этот вопрос в чате, получите ответ через tasks.respond с"
+                + " requestId/requestVersion. operationId сохраняется при повторе; при потере"
+                + " ответа запрашивать operations.get. Не передавать пароли и коды: вход"
+                + " выполняется в кабинете. captureAudio требует sourceId из listMedia, sourceRef и"
                 + " sourceContext с идентификатором задания, точной инструкцией и вопросами."
-                + " listMedia может содержать звуки уведомлений и медиа других страниц."
-                + " До captureAudio сопоставьте источник с нужным сообщением через его плеер;"
+                + " listMedia может содержать звуки уведомлений и медиа других страниц. До"
+                + " captureAudio сопоставьте источник с нужным сообщением через его плеер;"
                 + " sourceRef сам по себе не подтверждает это соответствие.",
-            object(Map.of("taskId", uuid(), "action", actionSchema(),
-                "actions", array(actionSchema(), 8)), "taskId"),
+            object(
+                Map.of(
+                    "taskId",
+                    uuid(),
+                    "action",
+                    actionSchema(),
+                    "actions",
+                    array(actionSchema(), 8)),
+                "taskId"),
             false,
             true));
-    result.add(tool("operations.list",
-        "Найти ранее отправленные операции задачи или бизнес-шага после восстановления контекста."
-            + " Возвращает идентификаторы и состояния, по 10 записей. Результат читать через"
-            + " operations.get; неизвестное действие не повторять.",
-        object(Map.of("taskId", uuid(), "stepId", uuid(),
-            "page", Map.of("type", "integer", "minimum", 1, "maximum", 1000000)),
-            "taskId"), true, false));
+    result.add(
+        tool(
+            "operations.list",
+            "Найти ранее отправленные операции задачи или бизнес-шага после восстановления"
+                + " контекста. Возвращает идентификаторы и состояния, по 10 записей. Результат"
+                + " читать через operations.get; неизвестное действие не повторять.",
+            object(
+                Map.of(
+                    "taskId",
+                    uuid(),
+                    "stepId",
+                    uuid(),
+                    "page",
+                    Map.of("type", "integer", "minimum", 1, "maximum", 1000000)),
+                "taskId"),
+            true,
+            false));
     result.add(
         tool(
             "operations.get",
@@ -350,25 +422,50 @@ public class McpTools {
             object(Map.of("operationId", uuid()), "operationId"),
             true,
             false));
-    result.add(tool("audio.analyze",
-        "Запустить локальный анализ собственного сохранённого аудио. Для текста mode=transcript;"
-            + " для звучания mode=full. Повтор переиспользует анализ, повышение режима сохраняет"
-            + " расшифровку. Ожидает до 8 секунд и возвращает первую страницу transcript с items,"
-            + " sectionComplete, hasMore и nextCursor. Используйте готовые items сразу; audio.get"
-            + " нужен только для незавершённого анализа, следующих страниц или других разделов."
-            + " Доступен из любого своего чата без передачи управления задачей.",
-        object(Map.of("artifactId", uuid(), "mode", Map.of("type", "string", "enum",
-            List.of("transcript", "full"))), "artifactId", "mode"), false, false));
-    result.add(tool("audio.get",
-        "Прочитать состояние и текстовые результаты локального анализа. Разделы: transcript,"
-            + " intervals, acoustics, emotions. Прочитайте все страницы по nextCursor/hasMore;"
-            + " sectionComplete отдельно показывает полноту стадии. PARTIAL/FAILED не являются"
-            + " полным успехом. Аудиофайл модели не передаётся.",
-        object(Map.of("analysisId", uuid(), "section", Map.of("type", "string", "enum",
-                List.of("transcript", "intervals", "acoustics", "emotions")),
-            "cursor", Map.of("type", "string", "pattern", "^[0-9]{1,19}$"),
-            "limit", Map.of("type", "integer", "minimum", 1, "maximum", 100)), "analysisId"),
-        true, false));
+    result.add(
+        tool(
+            "audio.analyze",
+            "Запустить локальный анализ собственного сохранённого аудио. Для текста"
+                + " mode=transcript; для звучания mode=full. Повтор переиспользует анализ,"
+                + " повышение режима сохраняет расшифровку. Ожидает до 8 секунд и возвращает первую"
+                + " страницу transcript с items, sectionComplete, hasMore и nextCursor. Используйте"
+                + " готовые items сразу; audio.get нужен только для незавершённого анализа,"
+                + " следующих страниц или других разделов. Доступен из любого своего чата без"
+                + " передачи управления задачей.",
+            object(
+                Map.of(
+                    "artifactId",
+                    uuid(),
+                    "mode",
+                    Map.of("type", "string", "enum", List.of("transcript", "full"))),
+                "artifactId",
+                "mode"),
+            false,
+            false));
+    result.add(
+        tool(
+            "audio.get",
+            "Прочитать состояние и текстовые результаты локального анализа. Разделы: transcript,"
+                + " intervals, acoustics, emotions. Прочитайте все страницы по nextCursor/hasMore;"
+                + " sectionComplete отдельно показывает полноту стадии. PARTIAL/FAILED не являются"
+                + " полным успехом. Аудиофайл модели не передаётся.",
+            object(
+                Map.of(
+                    "analysisId",
+                    uuid(),
+                    "section",
+                    Map.of(
+                        "type",
+                        "string",
+                        "enum",
+                        List.of("transcript", "intervals", "acoustics", "emotions")),
+                    "cursor",
+                    Map.of("type", "string", "pattern", "^[0-9]{1,19}$"),
+                    "limit",
+                    Map.of("type", "integer", "minimum", 1, "maximum", 100)),
+                "analysisId"),
+            true,
+            false));
     result.add(
         tool(
             "results.publish",
@@ -400,10 +497,27 @@ public class McpTools {
             object(presentation, "taskId", "generation"),
             true,
             false));
-    result.add(tool("widget.keep-open", "Оставить браузер ещё на 15 минут без запуска задачи.",
-        object(Map.of("taskId", uuid(), "generation", uuid(), "browserId", uuid(),
-            "operationKey", key()), "taskId", "generation", "browserId", "operationKey"),
-        false, false));
+    result.add(
+        tool(
+            "widget.keep-open",
+            "Продлить браузер на 5 минут ожидания или 15 минут ручного управления без запуска"
+                + " задачи.",
+            object(
+                Map.of(
+                    "taskId",
+                    uuid(),
+                    "generation",
+                    uuid(),
+                    "browserId",
+                    uuid(),
+                    "operationKey",
+                    key()),
+                "taskId",
+                "generation",
+                "browserId",
+                "operationKey"),
+            false,
+            false));
     result.add(
         tool(
             "widget.claim",
@@ -473,7 +587,8 @@ public class McpTools {
             .annotations(
                 McpSchema.ToolAnnotations.builder()
                     .readOnlyHint(readOnly)
-                    .destructiveHint(Set.of("browser.execute", "tasks.command", "tasks.respond").contains(name))
+                    .destructiveHint(
+                        Set.of("browser.execute", "tasks.command", "tasks.respond").contains(name))
                     .openWorldHint(openWorld)
                     .idempotentHint(true)
                     .build())
@@ -483,25 +598,33 @@ public class McpTools {
     } else if (Set.of("tasks.create", "tasks.view", "widget.continuation").contains(name)) {
       builder.outputSchema(McpSchemas.presentation());
     }
-    return new SyncToolSpecification(builder.build(),
-        (exchange, request) -> measuredCall(name, exchange, request));
+    return new SyncToolSpecification(
+        builder.build(), (exchange, request) -> measuredCall(name, exchange, request));
   }
 
-  private McpSchema.CallToolResult measuredCall(String tool,
-      McpSyncServerExchange exchange, McpSchema.CallToolRequest request) {
+  private McpSchema.CallToolResult measuredCall(
+      String tool, McpSyncServerExchange exchange, McpSchema.CallToolRequest request) {
     UUID callId = UUID.randomUUID();
     long started = System.nanoTime();
     String outcome = "ERROR";
     Object suppliedTask = request.arguments() == null ? null : request.arguments().get("taskId");
-    String taskId = suppliedTask instanceof String value
-        && value.matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}") ? value : "-";
+    String taskId =
+        suppliedTask instanceof String value
+                && value.matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+            ? value
+            : "-";
     try {
       McpSchema.CallToolResult result = call(exchange, request);
       outcome = Boolean.TRUE.equals(result.isError()) ? "ERROR" : "OK";
       return result;
     } finally {
-      log.info("MCP_CALL id={} tool={} task={} durationMs={} outcome={}", callId, tool, taskId,
-          TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), outcome);
+      log.info(
+          "MCP_CALL id={} tool={} task={} durationMs={} outcome={}",
+          callId,
+          tool,
+          taskId,
+          TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+          outcome);
     }
   }
 
@@ -515,8 +638,11 @@ public class McpTools {
       UUID owner = actor.id();
       String name = request.name();
       if ("tasks.respond".equals(name)
-          && !arguments.keySet().equals(Set.of("taskId", "requestId", "requestVersion", "operationKey"))) {
-        throw ApiException.invalid("arguments", "Ответ пользователя нельзя передать аргументами модели.");
+          && !arguments
+              .keySet()
+              .equals(Set.of("taskId", "requestId", "requestVersion", "operationKey"))) {
+        throw ApiException.invalid(
+            "arguments", "Ответ пользователя нельзя передать аргументами модели.");
       }
       if ("tasks.list".equals(name)) {
         return textResult(tasks.list(owner, listQuery(arguments)));
@@ -525,8 +651,12 @@ public class McpTools {
         return textResult(connections.list(owner, listQuery(arguments)));
       }
       if ("operations.list".equals(name)) {
-        return textResult(actions.list(owner, uuid(input, "taskId"),
-            input.has("stepId") ? uuid(input, "stepId") : null, listQuery(arguments).page()));
+        return textResult(
+            actions.list(
+                owner,
+                uuid(input, "taskId"),
+                input.has("stepId") ? uuid(input, "stepId") : null,
+                listQuery(arguments).page()));
       }
       if ("operations.get".equals(name)) {
         UUID operationId = uuid(input, "operationId");
@@ -542,16 +672,22 @@ public class McpTools {
         if (!Set.of("analysisId", "section", "cursor", "limit").containsAll(arguments.keySet())) {
           throw ApiException.invalid("arguments", "Недопустимые параметры audio.get.");
         }
-        return textResult(audioAnalyses.page(owner, uuid(input, "analysisId"),
-            input.path("section").asString("transcript"),
-            Long.parseLong(input.path("cursor").asString("0")), input.path("limit").asInt(100), null, null));
+        return textResult(
+            audioAnalyses.page(
+                owner,
+                uuid(input, "analysisId"),
+                input.path("section").asString("transcript"),
+                Long.parseLong(input.path("cursor").asString("0")),
+                input.path("limit").asInt(100),
+                null,
+                null));
       }
       if ("audio.analyze".equals(name)) {
         if (!arguments.keySet().equals(Set.of("artifactId", "mode"))) {
           throw ApiException.invalid("arguments", "Требуются artifactId и mode.");
         }
-        return textResult(audioAnalyses.analyzeAndRead(
-            owner, uuid(input, "artifactId"), string(input, "mode")));
+        return textResult(
+            audioAnalyses.analyzeAndRead(owner, uuid(input, "artifactId"), string(input, "mode")));
       }
       if ("steps.list".equals(name)) {
         var values = new LinkedMultiValueMap<String, String>();
@@ -601,28 +737,57 @@ public class McpTools {
                 () -> data(owner, chats.show(owner, taskId, chat))));
       }
       if ("tasks.bind".equals(name)) {
-        return textResult(idempotency.execute(owner, string(input, "operationKey"), name,
-            Map.of("arguments", arguments, "chatId", chat), Contracts.Task.class, () -> {
-              chats.bind(owner, taskId, chat);
-              return actions.prepareBrowser(owner, taskId);
-            }));
+        return textResult(
+            idempotency.execute(
+                owner,
+                string(input, "operationKey"),
+                name,
+                Map.of("arguments", arguments, "chatId", chat),
+                Contracts.Task.class,
+                () -> {
+                  chats.bind(owner, taskId, chat);
+                  return actions.prepareBrowser(owner, taskId);
+                }));
       }
       chats.requireOriginal(owner, taskId, chat);
-      if (Set.of("browser.execute", "connections.select", "tasks.ask", "results.publish", "steps.command").contains(name)
+      if (Set.of(
+                  "browser.execute",
+                  "connections.select",
+                  "tasks.ask",
+                  "results.publish",
+                  "steps.command")
+              .contains(name)
           || "tasks.command".equals(name)
-              && !Set.of("RESUME", "STOP").contains(input.path("command").path("type").asString())) {
+              && !Set.of("RESUME", "STOP")
+                  .contains(input.path("command").path("type").asString())) {
         chats.requireCurrent(owner, taskId, chat);
       }
       return switch (name) {
-        case "steps.command" -> textResult(idempotency.execute(owner,
-            string(input, "operationKey"), name, arguments, Contracts.TaskStep.class, () -> {
-              chats.acceptCommand(owner, taskId, chat);
-              return steps.command(owner, taskId,
-                  json.convert(input.path("command"), Contracts.StepCommand.class));
-            }));
-        case "tasks.respond" -> textResult(elicitation.respond(exchange, actor, chat, taskId,
-            uuid(input, "requestId"), input.path("requestVersion").asLong(),
-            string(input, "operationKey")));
+        case "steps.command" ->
+            textResult(
+                idempotency.execute(
+                    owner,
+                    string(input, "operationKey"),
+                    name,
+                    arguments,
+                    Contracts.TaskStep.class,
+                    () -> {
+                      chats.acceptCommand(owner, taskId, chat);
+                      return steps.command(
+                          owner,
+                          taskId,
+                          json.convert(input.path("command"), Contracts.StepCommand.class));
+                    }));
+        case "tasks.respond" ->
+            textResult(
+                elicitation.respond(
+                    exchange,
+                    actor,
+                    chat,
+                    taskId,
+                    uuid(input, "requestId"),
+                    input.path("requestVersion").asLong(),
+                    string(input, "operationKey")));
         case "connections.select" ->
             textResult(
                 idempotency.execute(
@@ -637,35 +802,37 @@ public class McpTools {
                           owner,
                           taskId,
                           input.path("instructionRevision").asLong(),
-                          uuid(input, "connectionId"), input.path("confirmationPrompt").asString(null));
+                          uuid(input, "connectionId"),
+                          input.path("confirmationPrompt").asString(null));
                     }));
         case "tasks.command" -> {
           Contracts.TaskCommand command =
               json.convert(input.path("command"), Contracts.TaskCommand.class);
           yield textResult(
-                idempotency.execute(
-                    owner,
-                    string(input, "operationKey"),
-                    name,
-                    arguments,
-                    Contracts.Task.class,
-                    () -> {
-                      boolean reopensContinuation =
-                          Set.of("RESUME", "AMEND").contains(command.type());
-                      if (!reopensContinuation && !"STOP".equals(command.type())) {
-                        chats.acceptCommand(owner, taskId, chat);
-                      }
-                      Contracts.Task result = "REQUIRE_LOGIN".equals(command.type())
-                          ? browsers.requireLogin(owner, taskId, command.expectedVersion())
-                          : tasks.command(actor, taskId, command);
-                      if ("PREPARE".equals(command.type())) {
-                        result = actions.prepareBrowser(owner, taskId);
-                      }
-                      if (reopensContinuation) {
-                        chats.acceptCommand(owner, taskId, chat);
-                      }
-                      return result;
-                    }));
+              idempotency.execute(
+                  owner,
+                  string(input, "operationKey"),
+                  name,
+                  arguments,
+                  Contracts.Task.class,
+                  () -> {
+                    boolean reopensContinuation =
+                        Set.of("RESUME", "AMEND").contains(command.type());
+                    if (!reopensContinuation && !"STOP".equals(command.type())) {
+                      chats.acceptCommand(owner, taskId, chat);
+                    }
+                    Contracts.Task result =
+                        "REQUIRE_LOGIN".equals(command.type())
+                            ? browsers.requireLogin(owner, taskId, command.expectedVersion())
+                            : tasks.command(actor, taskId, command);
+                    if ("PREPARE".equals(command.type())) {
+                      result = actions.prepareBrowser(owner, taskId);
+                    }
+                    if (reopensContinuation) {
+                      chats.acceptCommand(owner, taskId, chat);
+                    }
+                    return result;
+                  }));
         }
         case "tasks.ask" ->
             textResult(
@@ -735,8 +902,13 @@ public class McpTools {
           if (state.task().browser() == null || !browserId.equals(state.task().browser().id())) {
             throw ApiException.conflict("BROWSER_UNAVAILABLE", "Браузер задачи изменился.");
           }
-          idempotency.execute(owner, string(input, "operationKey"), name, arguments,
-              Contracts.Browser.class, () -> browsers.keepOpen(owner, browserId));
+          idempotency.execute(
+              owner,
+              string(input, "operationKey"),
+              name,
+              arguments,
+              Contracts.Browser.class,
+              () -> browsers.keepOpen(owner, browserId));
           yield presentation(data(owner, chats.state(owner, taskId, chat, generation)));
         }
         case "widget.browser" -> {
@@ -751,15 +923,17 @@ public class McpTools {
                   new Contracts.TicketInput("VIEWER", string(input, "viewerId"))));
         }
         case "widget.continuation" ->
-            presentation(data(owner,
-                chats.reported(
+            presentation(
+                data(
                     owner,
-                    taskId,
-                    chat,
-                    uuid(input, "generation"),
-                    uuid(input, "continuationId"),
-                    input.path("sent").asBoolean(),
-                    input.path("reason").asString(null))));
+                    chats.reported(
+                        owner,
+                        taskId,
+                        chat,
+                        uuid(input, "generation"),
+                        uuid(input, "continuationId"),
+                        input.path("sent").asBoolean(),
+                        input.path("reason").asString(null))));
         default -> throw ApiException.invalid("name", "Неизвестный инструмент.");
       };
     } catch (ApiException exception) {
@@ -817,7 +991,8 @@ public class McpTools {
       if (!input.path("action").isObject()) {
         throw ApiException.invalid("action", "Действие должно быть объектом.");
       }
-      Contracts.BrowserAction action = json.convert(input.path("action"), Contracts.BrowserAction.class);
+      Contracts.BrowserAction action =
+          json.convert(input.path("action"), Contracts.BrowserAction.class);
       return operationResponse(
           owner, executeAction(owner, task, chat, action, deadline, List.of(), false));
     }
@@ -835,52 +1010,96 @@ public class McpTools {
       if (action.operationId() == null || !identifiers.add(action.operationId())) {
         throw ApiException.invalid("operationId", "Каждому действию нужен уникальный operationId.");
       }
-      if ("observe".equals(action.type()) && action.arguments().has("ref")
+      if ("observe".equals(action.type())
+          && action.arguments() != null
+          && action.arguments().has("ref")
           && commands.size() != supplied.size() - 1) {
-        throw ApiException.invalid("actions", "Адресный observe должен завершать последовательность.");
+        throw ApiException.invalid(
+            "actions", "Адресный observe должен завершать последовательность.");
       }
-      commands.add(new Contracts.BrowserAction(action.operationId(), action.stepId(), action.type(),
-          action.arguments(), action.instructionRevision(), action.controlEpoch(),
-          action.confirmationPrompt(), action.step(),
-          action.observeAfter() == null && commands.size() < supplied.size() - 1
-              ? Boolean.FALSE : action.observeAfter()));
+      commands.add(
+          new Contracts.BrowserAction(
+              action.operationId(),
+              action.stepId(),
+              action.type(),
+              action.arguments(),
+              action.instructionRevision(),
+              action.controlEpoch(),
+              action.confirmationPrompt(),
+              action.step(),
+              action.observeAfter() == null && commands.size() < supplied.size() - 1
+                  ? Boolean.FALSE
+                  : action.observeAfter()));
     }
     List<UUID> sequenceIds = commands.stream().map(Contracts.BrowserAction::operationId).toList();
     List<Contracts.Operation> completed = new ArrayList<>();
     for (int index = 0; index < commands.size(); index++) {
       Contracts.BrowserAction action = commands.get(index);
       if (!completed.isEmpty() && System.nanoTime() >= deadline) {
-        return sequenceResult(owner, task, Map.of("operations", completed, "complete", false,
-            "nextOperationId", action.operationId()));
+        return sequenceResult(
+            owner,
+            task,
+            Map.of(
+                "operations",
+                completed,
+                "complete",
+                false,
+                "nextOperationId",
+                action.operationId()));
       }
       Contracts.Operation result;
       try {
-        boolean explicitWait = index + 1 < commands.size()
-            && "waitFor".equals(commands.get(index + 1).type());
+        boolean explicitWait =
+            index + 1 < commands.size() && "waitFor".equals(commands.get(index + 1).type());
         result = executeAction(owner, task, chat, action, deadline, sequenceIds, explicitWait);
       } catch (ApiException exception) {
         if (completed.isEmpty()) {
           throw exception;
         }
-        return sequenceResult(owner, task, Map.of("operations", completed, "complete", false,
-            "nextOperationId", action.operationId(), "error", exception.response()));
+        return sequenceResult(
+            owner,
+            task,
+            Map.of(
+                "operations",
+                completed,
+                "complete",
+                false,
+                "nextOperationId",
+                action.operationId(),
+                "error",
+                exception.response()));
       }
       completed.add(result);
       if (!"SUCCEEDED".equals(result.status())) {
-        return sequenceResult(owner, task, Map.of("operations", completed, "complete", false,
-            "nextOperationId", action.operationId()));
+        return sequenceResult(
+            owner,
+            task,
+            Map.of(
+                "operations",
+                completed,
+                "complete",
+                false,
+                "nextOperationId",
+                action.operationId()));
       }
     }
     return sequenceResult(owner, task, Map.of("operations", completed, "complete", true));
   }
 
-  private McpSchema.CallToolResult sequenceResult(UUID owner, UUID task, Map<String, Object> result) {
+  private McpSchema.CallToolResult sequenceResult(
+      UUID owner, UUID task, Map<String, Object> result) {
     actions.requireResultAccess(owner, task);
     return textResult(result);
   }
 
-  private Contracts.Operation executeAction(UUID owner, UUID task, String chat,
-      Contracts.BrowserAction action, long deadline, List<UUID> sequence, boolean explicitWait) {
+  private Contracts.Operation executeAction(
+      UUID owner,
+      UUID task,
+      String chat,
+      Contracts.BrowserAction action,
+      long deadline,
+      List<UUID> sequence,
+      boolean explicitWait) {
     chats.requireCurrent(owner, task, chat);
     Contracts.Operation result = actions.submit(owner, task, action, sequence, explicitWait);
     if (Set.of("ACCEPTED", "DISPATCHED", "SUCCEEDED").contains(result.status())) {
@@ -901,9 +1120,19 @@ public class McpTools {
         && result != null
         && result.path("artifact").path("id").isString()) {
       UUID artifactId = UUID.fromString(result.path("artifact").path("id").asString());
-      Contracts.Artifact artifact = artifacts.getReady(owner, artifactId);
+      var available = artifacts.findReady(owner, artifactId);
+      if (available.isEmpty()) {
+        return McpSchema.CallToolResult.builder()
+            .addTextContent(json.write(modelData(json.tree(operation))))
+            .addTextContent(
+                "Снимок получен. Доставка файла ещё не подтверждена; проверьте artifacts.list. Не"
+                    + " повторяйте действие.")
+            .build();
+      }
+      Contracts.Artifact artifact = available.get();
       return McpSchema.CallToolResult.builder()
-          .addTextContent(json.write(Map.of("operationId", operation.id(), "status", operation.status())))
+          .addTextContent(
+              json.write(Map.of("operationId", operation.id(), "status", operation.status())))
           .addContent(
               McpSchema.ImageContent.builder(
                       Base64.getEncoder().encodeToString(imageBytes(owner, artifact)),
@@ -936,13 +1165,23 @@ public class McpTools {
     }
   }
 
-  public record Presentation(Contracts.Task task, UUID generation, UUID continuationId,
-      String continuationStatus, Long continuationRevision, String continuationReason,
+  public record Presentation(
+      Contracts.Task task,
+      UUID generation,
+      UUID continuationId,
+      String continuationStatus,
+      Long continuationRevision,
+      String continuationReason,
       List<AudioAnalysisService.Summary> audio) {}
 
   private Presentation data(UUID owner, ChatBindings.State state) {
-    return new Presentation(tasks.get(owner, state.taskId()), state.generation(), state.continuationId(),
-        state.continuationStatus(), state.continuationRevision(), state.continuationReason(),
+    return new Presentation(
+        tasks.get(owner, state.taskId()),
+        state.generation(),
+        state.continuationId(),
+        state.continuationStatus(),
+        state.continuationRevision(),
+        state.continuationReason(),
         audioAnalyses.summaries(owner, state.taskId()));
   }
 
@@ -955,12 +1194,17 @@ public class McpTools {
             .orElse("");
     return McpSchema.CallToolResult.builder()
         .structuredContent(state)
-        .addTextContent("Задача «" + state.task().title() + "»: " + state.task().status()
-            + ". Выполнение: browser.execute с step создаёт и начинает бизнес-шаг за один вызов;"
-            + " отдельные steps.command DECLARE/START не нужны. Объединяйте заранее известные"
-            + " действия в actions, используйте возвращённую observation. Навигация и получение"
-            + " исходных данных входят в предметный шаг. Готовые SUCCEEDED и текст audio.analyze"
-            + " используйте сразу, без повторного чтения. Завершайте шаг после проверки результата.")
+        .addTextContent(
+            "Задача «"
+                + state.task().title()
+                + "»: "
+                + state.task().status()
+                + ". Выполнение: browser.execute с step создаёт и начинает бизнес-шаг за один"
+                + " вызов; отдельные steps.command DECLARE/START не нужны. Объединяйте заранее"
+                + " известные действия в actions, используйте возвращённую observation. Навигация и"
+                + " получение исходных данных входят в предметный шаг. Готовые SUCCEEDED и текст"
+                + " audio.analyze используйте сразу, без повторного чтения. Завершайте шаг после"
+                + " проверки результата.")
         .meta(
             Map.of(
                 "publicUrl",
@@ -975,7 +1219,9 @@ public class McpTools {
   }
 
   private McpSchema.CallToolResult textResult(Object value) {
-    return McpSchema.CallToolResult.builder().addTextContent(json.write(modelData(json.tree(value)))).build();
+    return McpSchema.CallToolResult.builder()
+        .addTextContent(json.write(modelData(json.tree(value))))
+        .build();
   }
 
   private Object modelData(JsonNode value) {
@@ -983,7 +1229,9 @@ public class McpTools {
       boolean audio = value.path("mimeType").asString("").startsWith("audio/");
       Map<String, Object> result = new LinkedHashMap<>();
       for (var entry : value.properties()) {
-        if (audio && Set.of("sourceUrl", "downloadUrl", "url", "blob", "base64").contains(entry.getKey())) {
+        if (audio
+            && Set.of("sourceUrl", "downloadUrl", "url", "blob", "base64")
+                .contains(entry.getKey())) {
           continue;
         }
         result.put(entry.getKey(), modelData(entry.getValue()));
@@ -1009,28 +1257,39 @@ public class McpTools {
         new SyncResourceSpecification(
             resource,
             (exchange, request) -> {
-              actor(exchange.transportContext());
-              Map<String, Object> csp =
-                  Map.of(
-                      "connectDomains",
-                      List.of(publicUrl),
-                      "resourceDomains",
-                      List.of(publicUrl),
-                      "frameDomains",
-                      List.of(publicUrl));
-              var contents =
-                  McpSchema.TextResourceContents.builder(widgetUri, widgetHtml)
-                      .mimeType("text/html;profile=mcp-app")
-                      .meta(
-                          Map.of(
-                              "ui",
-                              Map.of("prefersBorder", true, "csp", csp),
-                              "openai/widgetCSP",
-                              Map.of("redirect_domains", List.of(publicUrl)),
-                              "openai/widgetDescription",
-                              "Исходная задача Helm Glass и просмотр того же браузера."))
-                      .build();
-              return McpSchema.ReadResourceResult.builder(List.of(contents)).build();
+              long started = System.nanoTime();
+              String outcome = "ERROR";
+              try {
+                actor(exchange.transportContext());
+                Map<String, Object> csp =
+                    Map.of(
+                        "connectDomains",
+                        List.of(publicUrl),
+                        "resourceDomains",
+                        List.of(publicUrl),
+                        "frameDomains",
+                        List.of(publicUrl));
+                var contents =
+                    McpSchema.TextResourceContents.builder(widgetUri, widgetHtml)
+                        .mimeType("text/html;profile=mcp-app")
+                        .meta(
+                            Map.of(
+                                "ui",
+                                Map.of("prefersBorder", true, "csp", csp),
+                                "openai/widgetCSP",
+                                Map.of("redirect_domains", List.of(publicUrl)),
+                                "openai/widgetDescription",
+                                "Исходная задача Helm Glass и просмотр того же браузера."))
+                        .build();
+                var result = McpSchema.ReadResourceResult.builder(List.of(contents)).build();
+                outcome = "OK";
+                return result;
+              } finally {
+                log.info(
+                    "MCP_RESOURCE name=task-widget durationMs={} outcome={}",
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                    outcome);
+              }
             }));
   }
 
@@ -1113,8 +1372,8 @@ public class McpTools {
   private static Map<String, Object> commandSchema() {
     return object(
         Map.ofEntries(
-            Map.entry("type", choice("PREPARE", "AMEND", "RESUME", "STOP", "FINISH",
-                "REQUIRE_LOGIN")),
+            Map.entry(
+                "type", choice("PREPARE", "AMEND", "RESUME", "STOP", "FINISH", "REQUIRE_LOGIN")),
             Map.entry("expectedVersion", Map.of("type", "integer", "minimum", 1)),
             Map.entry("title", text(200)),
             Map.entry("goal", text(20000)),
@@ -1122,10 +1381,17 @@ public class McpTools {
             Map.entry("outputFormat", choice("TEXT", "TABLE", "REPORT")),
             Map.entry("preferredConnectionIds", array(uuid(), 50)),
             Map.entry("confirmBrowserLoss", bool()),
-            Map.entry("text", Map.of("type", "string", "maxLength", 20000,
-                "description", "Для FINISH — полный итог с полученными данными и ограничениями;"
-                    + " заменяет result.summary, включая ранее опубликованный."
-                    + " Для REQUIRE_LOGIN — объяснение необходимости входа.")),
+            Map.entry(
+                "text",
+                Map.of(
+                    "type",
+                    "string",
+                    "maxLength",
+                    20000,
+                    "description",
+                    "Для FINISH — полный итог с полученными данными и ограничениями;"
+                        + " заменяет result.summary, включая ранее опубликованный."
+                        + " Для REQUIRE_LOGIN — объяснение необходимости входа.")),
             Map.entry("outcome", choice("SUCCEEDED", "PARTIAL", "NOT_ACHIEVED"))),
         "type",
         "expectedVersion");
@@ -1133,21 +1399,42 @@ public class McpTools {
 
   private static Map<String, Object> stepCommandSchema() {
     var source = object(Map.of("title", text(300), "url", text(4096)), "title", "url");
-    Map<String, Object> evidence = Map.of("oneOf", List.of(
-        object(Map.of("type", choice("OPERATION"), "operationId", uuid()), "type", "operationId"),
-        object(Map.of("type", choice("ARTIFACT"), "artifactId", uuid()), "type", "artifactId"),
-        object(Map.of("type", choice("MODEL_RESULT"), "text", text(4000),
-            "sources", array(source, 10)), "type", "text", "sources")));
-    return object(Map.ofEntries(
-        Map.entry("type", choice("DECLARE", "START", "WAIT", "COMPLETE", "SKIP", "RETRY")),
-        Map.entry("stepId", uuid()),
-        Map.entry("expectedVersion", Map.of("type", "integer", "minimum", 1)),
-        Map.entry("instructionRevision", Map.of("type", "integer", "minimum", 1)),
-        Map.entry("operationKey", text(128)), Map.entry("objectKey", text(500)),
-        Map.entry("title", text(300)), Map.entry("completionCriterion", text(2000)),
-        Map.entry("outcome", choice("SUCCEEDED", "PARTIAL", "FAILED")),
-        Map.entry("result", text(4000)), Map.entry("evidence", array(evidence, 20))),
-        "type", "instructionRevision");
+    Map<String, Object> evidence =
+        Map.of(
+            "oneOf",
+            List.of(
+                object(
+                    Map.of("type", choice("OPERATION"), "operationId", uuid()),
+                    "type",
+                    "operationId"),
+                object(
+                    Map.of("type", choice("ARTIFACT"), "artifactId", uuid()), "type", "artifactId"),
+                object(
+                    Map.of(
+                        "type",
+                        choice("MODEL_RESULT"),
+                        "text",
+                        text(4000),
+                        "sources",
+                        array(source, 10)),
+                    "type",
+                    "text",
+                    "sources")));
+    return object(
+        Map.ofEntries(
+            Map.entry("type", choice("DECLARE", "START", "WAIT", "COMPLETE", "SKIP", "RETRY")),
+            Map.entry("stepId", uuid()),
+            Map.entry("expectedVersion", Map.of("type", "integer", "minimum", 1)),
+            Map.entry("instructionRevision", Map.of("type", "integer", "minimum", 1)),
+            Map.entry("operationKey", text(128)),
+            Map.entry("objectKey", text(500)),
+            Map.entry("title", text(300)),
+            Map.entry("completionCriterion", text(2000)),
+            Map.entry("outcome", choice("SUCCEEDED", "PARTIAL", "FAILED")),
+            Map.entry("result", text(4000)),
+            Map.entry("evidence", array(evidence, 20))),
+        "type",
+        "instructionRevision");
   }
 
   private static Map<String, Object> actionSchema() {
@@ -1158,9 +1445,20 @@ public class McpTools {
             "stepId",
             uuid(),
             "step",
-            object(Map.of("operationKey", text(128), "objectKey", text(500),
-                "title", text(300), "completionCriterion", text(2000)),
-                "operationKey", "objectKey", "title", "completionCriterion"),
+            object(
+                Map.of(
+                    "operationKey",
+                    text(128),
+                    "objectKey",
+                    text(500),
+                    "title",
+                    text(300),
+                    "completionCriterion",
+                    text(2000)),
+                "operationKey",
+                "objectKey",
+                "title",
+                "completionCriterion"),
             "observeAfter",
             bool(),
             "confirmationPrompt",

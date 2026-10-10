@@ -22,8 +22,6 @@ WHERE status IN ('STARTING','UNREACHABLE');
 
 ALTER TABLE operations ADD COLUMN deadline_at timestamptz,
   ADD COLUMN cancel_requested_at timestamptz,
-  ADD COLUMN deadline_handled boolean NOT NULL DEFAULT false,
-  ADD COLUMN receipt_archived boolean NOT NULL DEFAULT false,
   ADD COLUMN next_check_at timestamptz NOT NULL DEFAULT now();
 UPDATE operations SET deadline_at=coalesce(dispatched_at,now())+
   CASE WHEN type IN ('captureAudio','applyConnection')

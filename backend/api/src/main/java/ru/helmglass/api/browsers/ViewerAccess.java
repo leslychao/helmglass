@@ -36,7 +36,7 @@ public class ViewerAccess {
   public Receipt revoke(UUID owner, String channel, String grant) {
     String key = grant == null ? "" : grant;
     jdbc.sql(
-            """
+"""
 INSERT INTO viewer_revocations(owner_id,channel,grant_id) VALUES (:owner,:channel,:grant)
 ON CONFLICT(owner_id,channel,grant_id) DO UPDATE SET attempts=0,next_attempt_at=now(),requested_at=now(),last_error=NULL
 """)
@@ -55,7 +55,7 @@ ON CONFLICT(owner_id,channel,grant_id) DO UPDATE SET attempts=0,next_attempt_at=
 
   public Map<String, Boolean> status(UUID owner, String channel) {
     return jdbc.sql(
-            """
+"""
 SELECT count(*)>0 pending,coalesce(bool_or(attempts>=20),false) failed
 FROM viewer_revocations WHERE owner_id=:owner AND channel=:channel
 """)
@@ -73,28 +73,6 @@ FROM viewer_revocations WHERE owner_id=:owner AND channel=:channel
 
   /** No new grant's viewer can race a delayed channel-wide closure from an earlier grant. */
   public void beforeTicket(Actor actor) {
-    var pending =
-        jdbc.sql(
-                """
-SELECT owner_id,channel,grant_id,attempts FROM viewer_revocations
-WHERE owner_id=:owner AND channel=:channel ORDER BY requested_at LIMIT 20
-""")
-            .param("owner", actor.id())
-            .param("channel", actor.channel())
-            .query(
-                (row, index) ->
-                    new Intent(
-                        row.getObject("owner_id", UUID.class),
-                        row.getString("channel"),
-                        row.getString("grant_id"),
-                        row.getInt("attempts")))
-            .list();
-    for (Intent intent : pending) {
-      if (!deliver(intent)) {
-        throw ApiException.conflict(
-            "VIEWER_REVOCATION_PENDING", "Дождитесь подтверждения отзыва предыдущего просмотра.");
-      }
-    }
     if (status(actor.id(), actor.channel()).get("viewerClosePending")) {
       throw ApiException.conflict(
           "VIEWER_REVOCATION_PENDING", "Закрытие прежних просмотров ещё продолжается.");
@@ -105,7 +83,7 @@ WHERE owner_id=:owner AND channel=:channel ORDER BY requested_at LIMIT 20
   public void deliverPending() {
     var pending =
         jdbc.sql(
-                """
+"""
 SELECT owner_id,channel,grant_id,attempts FROM viewer_revocations
 WHERE attempts<20 AND next_attempt_at<=now() ORDER BY requested_at LIMIT 20
 """)
@@ -126,7 +104,7 @@ WHERE attempts<20 AND next_attempt_at<=now() ORDER BY requested_at LIMIT 20
                 .optional();
             var current =
                 jdbc.sql(
-                        """
+"""
 SELECT attempts FROM viewer_revocations WHERE owner_id=:owner AND channel=:channel AND grant_id=:grant
 AND attempts<20 AND next_attempt_at<=now() FOR UPDATE
 """)
@@ -168,7 +146,7 @@ AND attempts<20 AND next_attempt_at<=now() FOR UPDATE
       int attempts = Math.min(20, intent.attempts() + 1);
       int delay = 1 << Math.min(6, attempts);
       jdbc.sql(
-              """
+"""
 UPDATE viewer_revocations SET attempts=:attempts,next_attempt_at=now()+(:delay*interval '1 second'),last_error=:error
 WHERE owner_id=:owner AND channel=:channel AND grant_id=:grant
 """)

@@ -1,8 +1,7 @@
-"""Confirmed Chromium loss preserves originals before releasing the owned slot."""
+"""Confirmed execution loss releases its slot while failed artifact delivery retains the original volume."""
 
 import hashlib
 import json
-import os
 import subprocess
 import time
 import unittest
@@ -63,13 +62,19 @@ class LostArchiveTest(unittest.TestCase):
         self.assertEqual("SUCCEEDED", receipt["status"])
         return receipt
 
-    def test_lost_browser_archives_before_release_and_requires_new_browser_consent(self):
+    def test_lost_browser_releases_slot_before_archive_retry_and_requires_new_browser_consent(self):
+        self.archive_failure('SOURCE_HASH')
+
+    def test_unavailable_artifact_destination_does_not_hold_execution_or_delete_original(self):
+        self.archive_failure('DESTINATION_UNAVAILABLE')
+
+    def archive_failure(self, failure):
         self.assertEqual(200, self.admin_command("LIMITS", browserLimitMode="CUSTOM", browserLimit=1)[0])
         self.client.login_mcp()
         error, presentation, _ = self.client.tool("tasks.create", {
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "LOST archive acceptance", "goal": "Preserve an original before cleanup",
-                "startUrl": os.environ["TEST_FIXTURE_URL"], "prepare": True}})
+                "startUrl": self.client.browser_fixture_url(), "prepare": True}})
         self.assertFalse(error, presentation)
         task = presentation["task"]
         container = None
@@ -89,7 +94,7 @@ class LostArchiveTest(unittest.TestCase):
             scope = " WHERE owner_id=:owner AND id='" + session + "';"
             # Delay only this fixture's background import until the native file is complete.
             self.fixture_sql(self.identity, "UPDATE browser_sessions SET artifact_cursor=9007199254740991" + scope)
-            self.execute(task, "click", self.client.browser_target(task['id'], 'Download a completed result after this action returns'))
+            click = self.execute(task, "click", self.client.browser_target(task['id'], 'Download a completed result after this action returns'))
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 page = self.worker("/sessions/" + session + "/artifacts?archive=true")
@@ -98,7 +103,10 @@ class LostArchiveTest(unittest.TestCase):
                     original = page["value"]["artifacts"][0]
                     break
                 time.sleep(.2)
-            self.assertIsNotNone(original)
+            if original is None:
+                observed = self.execute(task, 'observe', {})
+                self.fail('Completed native download missing; page reported requested='
+                    + str('Download requested' in json.dumps(observed)))
             self.assertTrue(original["complete"])
             self.assertEqual(len(expected), original["sizeBytes"])
             self.assertEqual(hashlib.sha256(expected).hexdigest(), original["sha256"])
@@ -108,15 +116,36 @@ class LostArchiveTest(unittest.TestCase):
                 "SELECT count(*) FROM artifacts WHERE owner_id=:owner AND id='" + artifact + "';"))
 
             # Corrupt one known byte in this tiny synthetic original. The immutable metadata
-            # retains its correct hash, so archival must fail without releasing the slot.
+            # retains its correct hash, so delivery must fail while execution releases its slot.
             def write_first_byte(value):
                 script = ("import fs from 'node:fs';const file=fs.openSync('/data/artifacts/"
                           + artifact + "','r+');try{fs.writeSync(file,Buffer.from(["
                           + str(value) + "]),0,1,0);}finally{fs.closeSync(file);}")
-                self.docker("exec", "--user", "1000", "-i", container, "node",
-                            "--input-type=module", script=script)
+                running = json.loads(self.docker("inspect", "--format", "{{json .State.Running}}", container))
+                if running:
+                    self.docker("exec", "--user", "1000", "-i", container, "node",
+                                "--input-type=module", script=script)
+                else:
+                    # Repair only the synthetic byte, through the same original image with no network.
+                    self.docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                                "--user", "1000", "--entrypoint", "node", "-i",
+                                "--mount", "type=volume,source=" + container + "-data,target=/data",
+                                inspected["Image"], "--input-type=module", script=script)
 
-            write_first_byte(expected[0] ^ 1)
+            def repair_delivery():
+                if failure == 'SOURCE_HASH':
+                    write_first_byte(expected[0])
+                else:
+                    self.docker('exec', '--user', '10001', 'helmglass-api-1',
+                                'rmdir', '/data/artifacts/' + artifact)
+
+            if failure == 'SOURCE_HASH':
+                write_first_byte(expected[0] ^ 1)
+            else:
+                # Make only this disposable destination unavailable to the atomic publish.
+                # Other artifact receivers and owners remain usable.
+                self.docker('exec', '--user', '10001', 'helmglass-api-1',
+                            'mkdir', '/data/artifacts/' + artifact)
             corrupted = True
             self.fixture_sql(self.identity, "UPDATE browser_sessions SET artifact_cursor=0" + scope)
             script = r"""import fs from 'node:fs';const pids=[];
@@ -130,13 +159,13 @@ if(pids.length!==1)throw Error('Expected exactly one owned main Chromium');
 process.kill(pids[0],'SIGKILL');"""
             self.docker("exec", "--user", "1000", "-i", container, "node",
                         "--input-type=module", script=script)
-            lost = self.wait_task(task, lambda value: value["browser"]["status"] == "LOST")
+            lost = self.wait_task(task, lambda value: value["browser"]["status"] == "CLOSED")
             self.assertEqual("WAITING_USER", lost["status"])
             self.assertEqual("BROWSER_LOST", lost["request"]["type"])
             self.assertEqual(session, lost["browser"]["id"])
             endpoint = "/api/admin/users/" + self.identity.id
-            self.assertEqual(1, self.admin.api(endpoint)[1]["user"]["browserCount"])
-            self.assertEqual("LOST", self.worker("/sessions/" + session)["value"]["status"])
+            self.assertEqual(0, self.admin.api(endpoint)[1]["user"]["browserCount"])
+            self.assertEqual("CLOSED", self.worker("/sessions/" + session)["value"]["status"])
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 state = self.fixture_sql(self.identity,
@@ -147,8 +176,19 @@ process.kill(pids[0],'SIGKILL');"""
             self.assertEqual("FAILED", state)
             status, _, _ = self.client.request(self.client.base + "/api/artifacts/" + artifact + "/download")
             self.assertEqual(409, status)
-            self.assertEqual("LOST", self.current(task)["browser"]["status"])
-            self.assertEqual(1, self.admin.api(endpoint)[1]["user"]["browserCount"])
+            self.assertEqual("CLOSED", self.current(task)["browser"]["status"])
+            self.assertEqual(0, self.admin.api(endpoint)[1]["user"]["browserCount"])
+
+            failed = self.wait_task(task, lambda value: value["browser"]["cleanupState"] == "FAILED")
+            self.assertEqual("ARTIFACT_DELIVERY_FAILED", failed["browser"]["cleanupError"])
+            self.assertEqual('SUCCEEDED', self.client.tool('operations.get', {'operationId': click['id']})[1]['status'])
+            self.assertEqual("3", self.fixture_sql(self.identity,
+                "SELECT cleanup_attempts FROM browser_sessions WHERE owner_id=:owner AND id='" + session + "';"))
+            self.assertFalse(json.loads(self.docker("inspect", "--format", "{{json .State.Running}}", container)))
+            self.assertEqual(container + "-data", json.loads(self.docker("volume", "inspect", container + "-data"))[0]["Name"])
+            self.assertEqual(403, self.client.api('/api/admin/browsers/' + session + '/retry-cleanup', 'POST', {})[0])
+            time.sleep(4)
+            self.assertEqual("FAILED", self.current(task)["browser"]["cleanupState"])
 
             # A failed source belongs to this session. Another owner must still receive
             # a live browser and finish its action while the original stays blocked.
@@ -165,15 +205,16 @@ process.kill(pids[0],'SIGKILL');"""
             neighbor_task = shown["task"]
             self.execute(neighbor_task, "observe", {}, neighbor_client)
             self.assertEqual("LIVE", self.current(neighbor_task, neighbor_client)["browser"]["status"])
-            self.assertEqual("LOST", self.current(task)["browser"]["status"])
+            self.assertEqual("CLOSED", self.current(task)["browser"]["status"])
             node_id = self.worker("/health")["value"]["nodeId"]
             nodes = self.admin.api("/api/admin/nodes")[1]
             node = next(value for value in nodes if value["id"] == node_id)
             self.assertEqual("ONLINE", node["status"], "An artifact error must not mark the healthy node offline")
 
-            write_first_byte(expected[0])
+            repair_delivery()
             corrupted = False
-            closed = self.wait_task(task, lambda value: value["browser"]["status"] == "CLOSED")
+            self.assertEqual(200, self.admin.api('/api/admin/browsers/' + session + '/retry-cleanup', 'POST', {})[0])
+            closed = self.wait_task(task, lambda value: value["browser"]["cleanupState"] == "COMPLETE")
             self.assertEqual("WAITING_USER", closed["status"])
             self.assertEqual("BROWSER_LOST", closed["request"]["type"])
             self.assertEqual("CLOSED", self.worker("/sessions/" + session)["value"]["status"])
@@ -199,7 +240,10 @@ process.kill(pids[0],'SIGKILL');"""
             self.assertEqual(1, self.admin.api(endpoint)[1]["user"]["browserCount"])
         finally:
             if corrupted:
-                write_first_byte(expected[0])
+                repair_delivery()
+                current = self.current(task)
+                if current['browser']['cleanupState'] == 'FAILED':
+                    self.assertEqual(200, self.admin.api('/api/admin/browsers/' + session + '/retry-cleanup', 'POST', {})[0])
             if neighbor_task:
                 current = self.current(neighbor_task, neighbor_client)
                 status, _ = neighbor_client.api("/api/tasks/" + neighbor_task["id"] + "/commands", "POST", {

@@ -31,6 +31,8 @@
 <button onclick="for(let i=0;i<21;i++){document.body.appendChild(document.createElement('iframe')).srcdoc='<p>Frame '+i+'</p>'}">Many frames</button>
 <button onclick="const frame=document.createElement('iframe'); frame.srcdoc='<script>document.addEventListener(&quot;DOMContentLoaded&quot;,()=>document.body.remove())<\/script>'; document.body.appendChild(frame)">Unavailable frame</button>
 <button onclick="window.open(location.href+'?popup=1')">Popup</button>
+<button onclick="setTimeout(()=>{const link=document.createElement('a');link.href=window.URL.createObjectURL(new Blob(['Helm Glass pre-private completed download\n'],{type:'text/plain'}));link.download='completed-result.txt';document.body.appendChild(link);link.click();document.querySelector('#download-state').textContent='Download requested';setTimeout(()=>{window.URL.revokeObjectURL(link.href);link.remove()},10000)},3000)">Download a completed result after this action returns</button>
+<output id="download-state">No download requested</output>
 <section aria-label="Async result">
   <button onclick="counter++;setTimeout(()=>{document.querySelector('#async-result').textContent='Saved '+counter},700)">Save delayed</button>
   <button onclick="document.querySelector('#async-result').textContent='Waiting'">Reset result</button>

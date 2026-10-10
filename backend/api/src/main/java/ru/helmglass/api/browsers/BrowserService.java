@@ -35,7 +35,8 @@ public class BrowserService {
   private static final Logger log = LoggerFactory.getLogger(BrowserService.class);
   private static final int WAIT_IDLE_SECONDS = 300;
   private static final int MANUAL_IDLE_SECONDS = 900;
-  private static final String IDLE_PROTECTED = """
+  private static final String IDLE_PROTECTED =
+      """
       ((b.pending_control IS NOT NULL AND b.control_deadline_at>clock_timestamp())
        OR EXISTS(SELECT 1 FROM operations o WHERE o.session_id=b.id AND o.status='DISPATCHED'
          AND o.deadline_at+interval '10 seconds'>clock_timestamp()))
@@ -71,7 +72,8 @@ public class BrowserService {
   }
 
   public Contracts.Browser get(UUID owner, UUID id) {
-    return jdbc.sql("""
+    return jdbc.sql(
+            """
             SELECT b.*,c.profile_save_error FROM browser_sessions b
             LEFT JOIN connections c ON c.id=coalesce(b.pending_connection_id,b.connection_id)
             WHERE b.id=:id AND b.owner_id=:owner
@@ -90,13 +92,19 @@ public class BrowserService {
                     row.getBoolean("private_mode") ? null : row.getString("current_url"),
                     "LIVE".equals(row.getString("status")),
                     "LIVE".equals(row.getString("status")),
-                    row.getLong("version"), row.getString("profile_save_error"),
+                    row.getLong("version"),
+                    row.getString("profile_save_error"),
                     row.getObject("task_id", UUID.class),
-                    row.getObject("connection_id", UUID.class), row.getBoolean("login_confirmed"),
-                    Database.instant(row, "started_at"), Database.instant(row, "closed_at"),
-                    Database.instant(row, "idle_close_at"), row.getInt("idle_timeout_seconds"),
-                    Database.instant(row, "idle_warning_at"), row.getString("cleanup_state"),
-                    row.getString("cleanup_error"), row.getString("close_reason")))
+                    row.getObject("connection_id", UUID.class),
+                    row.getBoolean("login_confirmed"),
+                    Database.instant(row, "started_at"),
+                    Database.instant(row, "closed_at"),
+                    Database.instant(row, "idle_close_at"),
+                    row.getInt("idle_timeout_seconds"),
+                    Database.instant(row, "idle_warning_at"),
+                    row.getString("cleanup_state"),
+                    row.getString("cleanup_error"),
+                    row.getString("close_reason")))
         .optional()
         .orElseThrow(ApiException::notFound);
   }
@@ -136,32 +144,55 @@ public class BrowserService {
     if (connectionId != null) {
       tasks.validateConnections(owner, List.of(connectionId));
       if (taskId != null) {
-        var idle = jdbc.sql("""
-                SELECT b.id FROM browser_sessions b JOIN connections c ON c.id=b.connection_id
-                WHERE b.owner_id=:owner AND b.connection_id=:connection AND b.task_id IS NULL
-                  AND b.status='LIVE' AND b.control_owner='NONE' AND NOT b.private_mode
-                  AND b.pending_control IS NULL AND NOT b.close_requested AND c.status='READY'
-                FOR UPDATE OF b
-                """)
-            .param("owner", owner).param("connection", connectionId).query(UUID.class).optional();
+        var idle =
+            jdbc.sql(
+                    """
+                    SELECT b.id FROM browser_sessions b JOIN connections c ON c.id=b.connection_id
+                    WHERE b.owner_id=:owner AND b.connection_id=:connection AND b.task_id IS NULL
+                      AND b.status='LIVE' AND b.control_owner='NONE' AND NOT b.private_mode
+                      AND b.pending_control IS NULL AND NOT b.close_requested AND c.status='READY'
+                    FOR UPDATE OF b
+                    """)
+                .param("owner", owner)
+                .param("connection", connectionId)
+                .query(UUID.class)
+                .optional();
         if (idle.isPresent()) {
           UUID session = idle.get();
           long epoch = get(owner, session).controlEpoch() + 1;
           Contracts.Browser previous = get(owner, session);
-          jdbc.sql("""
+          jdbc.sql(
+                  """
                   UPDATE browser_sessions SET task_id=:task,control_owner='CHATGPT',
                     control_epoch=:epoch,version=version+1 WHERE id=:id
                   """)
-              .param("task", taskId).param("epoch", epoch).param("id", session).update();
+              .param("task", taskId)
+              .param("epoch", epoch)
+              .param("id", session)
+              .update();
           jdbc.sql("UPDATE tasks SET browser_session_id=:session WHERE id=:task")
-              .param("session", session).param("task", taskId).update();
-          jdbc.sql("UPDATE usage_intervals SET ended_at=now() WHERE session_id=:id AND ended_at IS NULL")
-              .param("id", session).update();
+              .param("session", session)
+              .param("task", taskId)
+              .update();
+          jdbc.sql(
+                  "UPDATE usage_intervals SET ended_at=now() WHERE session_id=:id AND ended_at IS"
+                      + " NULL")
+              .param("id", session)
+              .update();
           startUsage(reference(session), session, "BROWSER");
           boolean reopening = "PAUSED".equals(tasks.get(owner, taskId).status());
-          tasks.change(owner, taskId, reopening ? "PAUSED" : "WAITING_CHATGPT",
-              reopening ? "BROWSER_OPEN_REQUESTED" : null, "Подключён открытый браузер");
-          queueInternalControl(owner, session, "ADOPT", previous, connectionId,
+          tasks.change(
+              owner,
+              taskId,
+              reopening ? "PAUSED" : "WAITING_CHATGPT",
+              reopening ? "BROWSER_OPEN_REQUESTED" : null,
+              "Подключён открытый браузер");
+          queueInternalControl(
+              owner,
+              session,
+              "ADOPT",
+              previous,
+              connectionId,
               "LOGIN".equals(tasks.get(owner, taskId).waitReason()));
           events.emit(owner, "browser", session, 0);
           return session;
@@ -185,7 +216,7 @@ public class BrowserService {
     UUID id = UUID.randomUUID();
     long sequence = events.emit(owner, "browser", id, 1);
     jdbc.sql(
-            """
+"""
 INSERT INTO browser_sessions(id,owner_id,task_id,connection_id,current_url,allocation_sequence,control_owner,control_epoch)
 VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
 """)
@@ -203,8 +234,12 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
           .param("task", taskId)
           .update();
       boolean paused = "PAUSED".equals(tasks.get(owner, taskId).status());
-      tasks.change(owner, taskId, paused ? "PAUSED" : "QUEUED",
-          paused ? "BROWSER_OPEN_REQUESTED" : "BROWSER_CAPACITY", "Ожидание свободного браузера");
+      tasks.change(
+          owner,
+          taskId,
+          paused ? "PAUSED" : "QUEUED",
+          paused ? "BROWSER_OPEN_REQUESTED" : "BROWSER_CAPACITY",
+          "Ожидание свободного браузера");
     }
     return id;
   }
@@ -218,7 +253,8 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
     if (expectedVersion == null || expectedVersion != task.version()) {
       throw ApiException.conflict("STALE_VERSION", "Задача изменилась.");
     }
-    if (!task.allowedCommands().contains("OPEN_BROWSER") || tasks.hasDispatched(id)
+    if (!task.allowedCommands().contains("OPEN_BROWSER")
+        || tasks.hasDispatched(id)
         || tasks.hasUnknown(id)) {
       throw ApiException.conflict("ACTION_UNAVAILABLE", "Новый браузер сейчас открыть нельзя.");
     }
@@ -233,13 +269,17 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
         || (task.request() != null && "LOGIN".equals(task.request().type()))) {
       long epoch = opened.controlEpoch() + 1;
 
-      jdbc.sql("""
+      jdbc.sql(
+              """
               UPDATE browser_sessions SET private_mode=true,
                 control_owner=CASE WHEN pending_control IS NULL THEN 'NONE' ELSE 'TRANSFERRING' END,
                 pending_control=CASE WHEN pending_control IS NULL THEN NULL
                   ELSE jsonb_set(pending_control,'{keepPrivate}','true') END,
                 control_epoch=:epoch,version=version+1 WHERE id=:id
-              """).param("id", session).param("epoch", epoch).update();
+              """)
+          .param("id", session)
+          .param("epoch", epoch)
+          .update();
     }
     if ("LIVE".equals(opened.status())) {
       tasks.browserReady(owner, id);
@@ -252,8 +292,7 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
     identity.requireActive(owner);
     tasks.lockOwner(owner);
     Contracts.Browser browser = get(owner, id);
-    if (!"LIVE".equals(browser.status())
-        || reference(id).closeRequested()) {
+    if (!"LIVE".equals(browser.status()) || reference(id).closeRequested()) {
       throw ApiException.conflict("BROWSER_UNAVAILABLE", "Браузер уже закрывается или недоступен.");
     }
     refreshIdle(owner, id, true);
@@ -263,12 +302,26 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
   @Transactional
   public void refreshIdle(UUID owner, UUID id, boolean activity) {
     tasks.lockOwner(owner);
-    var state = jdbc.sql("SELECT b.idle_close_at,b.control_owner," + IDLE_PROTECTED + " AS protected"
-            + " FROM browser_sessions b WHERE b.id=:id AND b.owner_id=:owner"
-            + " AND b.status='LIVE' AND NOT b.close_requested")
-        .param("id", id).param("owner", owner)
-        .query((row, index) -> new IdleState(Database.instant(row, "idle_close_at"),
-            row.getBoolean("protected"), "USER".equals(row.getString("control_owner")))).optional();
+    var state =
+        jdbc.sql(
+                "SELECT b.idle_close_at,b.control_owner,"
+                    + IDLE_PROTECTED
+                    + " AS protected,"
+                    + " CASE WHEN t.status IN ('PARTIAL','NOT_ACHIEVED','FAILED') THEN"
+                    + " t.completed_at+interval '5 minutes' END AS result_deadline"
+                    + " FROM browser_sessions b LEFT JOIN tasks t ON t.id=b.task_id"
+                    + " WHERE b.id=:id AND b.owner_id=:owner"
+                    + " AND b.status='LIVE' AND NOT b.close_requested")
+            .param("id", id)
+            .param("owner", owner)
+            .query(
+                (row, index) ->
+                    new IdleState(
+                        Database.instant(row, "idle_close_at"),
+                        row.getBoolean("protected"),
+                        "USER".equals(row.getString("control_owner")),
+                        Database.instant(row, "result_deadline")))
+            .optional();
     if (state.isEmpty()) {
       return;
     }
@@ -279,8 +332,14 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
       }
       setIdleDeadline(owner, id, null, current.manual());
     } else if (activity || current.deadline() == null) {
-      setIdleDeadline(owner, id, Instant.now().plusSeconds(
-          current.manual() ? MANUAL_IDLE_SECONDS : WAIT_IDLE_SECONDS), current.manual());
+      setIdleDeadline(
+          owner,
+          id,
+          Instant.now().plusSeconds(current.manual() ? MANUAL_IDLE_SECONDS : WAIT_IDLE_SECONDS),
+          current.manual());
+    } else if (current.resultDeadline() != null
+        && current.resultDeadline().isAfter(current.deadline())) {
+      setIdleDeadline(owner, id, current.resultDeadline(), current.manual());
     } else if (!current.deadline().isAfter(Instant.now())) {
       UUID task = reference(id).taskId();
       if (task != null) {
@@ -288,46 +347,63 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
       } else {
         requestClose(owner, id);
         jdbc.sql("UPDATE browser_sessions SET close_reason='IDLE_TIMEOUT' WHERE id=:id")
-            .param("id", id).update();
+            .param("id", id)
+            .update();
       }
     }
   }
 
   private void setIdleDeadline(UUID owner, UUID id, Instant deadline, boolean manual) {
-    jdbc.sql("UPDATE browser_sessions SET idle_close_at=:deadline,idle_warning_at=:warning,"
-            + "idle_timeout_seconds=:seconds,version=version+1 WHERE id=:id")
+    jdbc.sql(
+            "UPDATE browser_sessions SET idle_close_at=:deadline,idle_warning_at=:warning,"
+                + "idle_timeout_seconds=:seconds,version=version+1 WHERE id=:id")
         .param("deadline", deadline == null ? null : java.sql.Timestamp.from(deadline))
-        .param("warning", deadline == null ? null : java.sql.Timestamp.from(
-            deadline.minusSeconds(manual ? 300 : 60)))
+        .param(
+            "warning",
+            deadline == null
+                ? null
+                : java.sql.Timestamp.from(deadline.minusSeconds(manual ? 300 : 60)))
         .param("seconds", manual ? MANUAL_IDLE_SECONDS : WAIT_IDLE_SECONDS)
-        .param("id", id).update();
+        .param("id", id)
+        .update();
     events.emit(owner, "browser", id, 0);
   }
 
   @Scheduled(fixedDelay = 2000)
   public void expireIdleBrowsers() {
-    var candidates = jdbc.sql("""
-            SELECT b.id,b.owner_id FROM browser_sessions b
-            WHERE b.status='LIVE' AND NOT b.close_requested
-              AND ((b.idle_close_at IS NULL AND NOT %1$s)
-                OR (b.idle_close_at IS NOT NULL AND %1$s)
-                OR b.idle_close_at<=clock_timestamp())
-            ORDER BY b.idle_close_at NULLS FIRST,b.id LIMIT 20
-            """.formatted(IDLE_PROTECTED))
-        .query((row, index) -> new PendingControl(row.getObject("id", UUID.class),
-            row.getObject("owner_id", UUID.class))).list();
+    var candidates =
+        jdbc.sql(
+                """
+                SELECT b.id,b.owner_id FROM browser_sessions b LEFT JOIN tasks t ON t.id=b.task_id
+                WHERE b.status='LIVE' AND NOT b.close_requested
+                  AND ((b.idle_close_at IS NULL AND NOT %1$s)
+                    OR (b.idle_close_at IS NOT NULL AND %1$s)
+                    OR b.idle_close_at<=clock_timestamp()
+                    OR (t.status IN ('PARTIAL','NOT_ACHIEVED','FAILED')
+                      AND b.idle_close_at<t.completed_at+interval '5 minutes'))
+                ORDER BY b.idle_close_at NULLS FIRST,b.id LIMIT 20
+                """
+                    .formatted(IDLE_PROTECTED))
+            .query(
+                (row, index) ->
+                    new PendingControl(
+                        row.getObject("id", UUID.class), row.getObject("owner_id", UUID.class)))
+            .list();
     for (PendingControl candidate : candidates) {
       try {
-        transactions.executeWithoutResult(transaction ->
-            refreshIdle(candidate.owner(), candidate.id(), false));
+        transactions.executeWithoutResult(
+            transaction -> refreshIdle(candidate.owner(), candidate.id(), false));
       } catch (ApiException | WorkerClient.WorkerException exception) {
-        log.warn("Browser idle reconciliation will retry for {}: {}",
-            candidate.id(), exception.getClass().getSimpleName());
+        log.warn(
+            "Browser idle reconciliation will retry for {}: {}",
+            candidate.id(),
+            exception.getClass().getSimpleName());
       }
     }
   }
 
-  private record IdleState(Instant deadline, boolean protectedNow, boolean manual) {}
+  private record IdleState(
+      Instant deadline, boolean protectedNow, boolean manual, Instant resultDeadline) {}
 
   @Transactional
   public Contracts.Ticket ticket(
@@ -372,7 +448,8 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
             "expiresAt",
             expiry.toString(),
             "access",
-            Map.of("channel", actor.channel(), "grantId", actor.sessionId())));
+            Map.of("channel", actor.channel(), "grantId", actor.sessionId())),
+        Duration.ofSeconds(2));
     String path = "browser/sessions/" + id + "/view?ticket=" + token;
     String url =
         "/browser/novnc/helm.html?autoconnect=1&resize=scale&path="
@@ -408,9 +485,11 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
       }
     }
     if (sessionSave || confirmLogin || finishLogin) {
-      if (!"USER".equals(browser.controlOwner()) || !browser.privateMode()
+      if (!"USER".equals(browser.controlOwner())
+          || !browser.privateMode()
           || !input.viewerId().equals(reference.controllerId())) {
-        throw Identity.denied("Подтвердить и сохранить вход можно в управляющем защищённом просмотре.");
+        throw Identity.denied(
+            "Подтвердить и сохранить вход можно в управляющем защищённом просмотре.");
       }
     }
     if (reference.taskId() != null
@@ -419,9 +498,11 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
           "ACTION_UNRESOLVED", "Сначала дождитесь или проверьте результат текущего действия.");
     }
     if (confirmLogin) {
-      jdbc.sql("UPDATE browser_sessions SET login_confirmed=true,login_completed=true,"
-              + "version=version+1 WHERE id=:id")
-          .param("id", id).update();
+      jdbc.sql(
+              "UPDATE browser_sessions SET login_confirmed=true,login_completed=true,"
+                  + "version=version+1 WHERE id=:id")
+          .param("id", id)
+          .update();
       events.emit(owner, "browser", id, browser.version() + 1);
       return get(owner, id);
     }
@@ -454,13 +535,15 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
               .query((row, index) -> row.getString("account_subject"))
               .optional()
               .orElse(null);
-      if (previous != null && input.accountSubject() != null
+      if (previous != null
+          && input.accountSubject() != null
           && !previous.equals(input.accountSubject().trim())) {
         throw ApiException.conflict(
             "ACCOUNT_MISMATCH", "Создайте отдельное подключение для другого аккаунта.");
       }
       jdbc.sql("UPDATE connections SET profile_save_error=NULL WHERE id=:id")
-          .param("id", input.connectionId()).update();
+          .param("id", input.connectionId())
+          .update();
     }
     if (reference.taskId() != null) {
       tasks.suspendBrowserWork(reference.taskId());
@@ -477,11 +560,15 @@ VALUES (:id,:owner,:task,:connection,:url,:sequence,:control,1)
               input.accountSubject());
     }
     long epoch = browser.controlEpoch() + 1;
-    boolean keepPrivate = "RETURN".equals(input.type()) && browser.privateMode()
-        && !jdbc.sql("SELECT login_completed FROM browser_sessions WHERE id=:id")
-            .param("id", id).query(Boolean.class).single();
+    boolean keepPrivate =
+        "RETURN".equals(input.type())
+            && browser.privateMode()
+            && !jdbc.sql("SELECT login_completed FROM browser_sessions WHERE id=:id")
+                .param("id", id)
+                .query(Boolean.class)
+                .single();
     jdbc.sql(
-            """
+"""
 UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
   private_mode=true,pending_control=CAST(:intent AS jsonb),version=version+1,
   control_deadline_at=clock_timestamp()+(:seconds*interval '1 second'),
@@ -490,7 +577,16 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
   pending_connection_id=CASE WHEN :saving THEN :connection ELSE pending_connection_id END WHERE id=:id
 """)
         .param("epoch", epoch)
-        .param("intent", json.write(new ControlIntent(input, keepPrivate, browser.controlOwner(), browser.privateMode(), reference.controllerId(), browser.connectionId())))
+        .param(
+            "intent",
+            json.write(
+                new ControlIntent(
+                    input,
+                    keepPrivate,
+                    browser.controlOwner(),
+                    browser.privateMode(),
+                    reference.controllerId(),
+                    browser.connectionId())))
         .param("seconds", Boolean.TRUE.equals(input.saveConnection()) ? 360 : 30)
         .param("newLogin", "BEGIN_LOGIN".equals(input.type()) && !browser.privateMode())
         .param("saving", Boolean.TRUE.equals(input.saveConnection()))
@@ -503,119 +599,212 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
 
   @Scheduled(fixedDelay = 500)
   public void deliverControlIntents() {
-    var pending = jdbc.sql("""
-            SELECT id,owner_id FROM browser_sessions WHERE pending_control IS NOT NULL
-              AND status='LIVE' AND NOT close_requested
-              AND control_next_check_at<=clock_timestamp()
-            ORDER BY control_next_check_at,id LIMIT 20
-            """).query((row, index) -> new PendingControl(row.getObject("id", UUID.class),
-                row.getObject("owner_id", UUID.class))).list();
-    for (PendingControl candidate : pending) {
-      if (!controlSlots.tryAcquire()) break;
-      ControlWork work = transactions.execute(transaction -> {
-        tasks.lockOwner(candidate.owner());
-        return jdbc.sql("""
-                UPDATE browser_sessions SET control_next_check_at=clock_timestamp()+interval '6 minutes'
-                WHERE id=:id AND pending_control IS NOT NULL AND NOT close_requested
+    var pending =
+        jdbc.sql(
+                """
+                SELECT id,owner_id FROM browser_sessions WHERE pending_control IS NOT NULL
+                  AND status='LIVE' AND NOT close_requested
                   AND control_next_check_at<=clock_timestamp()
-                RETURNING pending_control::text,control_epoch,control_deadline_at
-                """).param("id", candidate.id()).query((row, index) -> new ControlWork(
-                    json.convert(json.read(row.getString("pending_control")), ControlIntent.class),
-                    row.getLong("control_epoch"), Database.instant(row, "control_deadline_at")))
-            .optional().orElse(null);
-      });
-      if (work == null) { controlSlots.release(); continue; }
-      controlDelivery.execute(() -> {
+                ORDER BY control_next_check_at,id LIMIT 20
+                """)
+            .query(
+                (row, index) ->
+                    new PendingControl(
+                        row.getObject("id", UUID.class), row.getObject("owner_id", UUID.class)))
+            .list();
+    for (PendingControl candidate : pending) {
+      if (!controlSlots.tryAcquire()) {
+        break;
+      }
       try {
-        applyControl(candidate.owner(), candidate.id(), work);
-      } catch (RuntimeException exception) {
-        if (exception instanceof WorkerClient.WorkerException rejected
-            && Set.of(400, 403, 413, 422).contains(rejected.status())
-            && restoreRejectedControl(candidate.owner(), candidate.id(), work)) {
-          return;
+        ControlWork work =
+            transactions.execute(
+                transaction -> {
+                  tasks.lockOwner(candidate.owner());
+                  return jdbc.sql(
+                          """
+                          UPDATE browser_sessions SET control_next_check_at=clock_timestamp()+interval '6 minutes'
+                          WHERE id=:id AND pending_control IS NOT NULL AND NOT close_requested
+                            AND control_next_check_at<=clock_timestamp()
+                          RETURNING pending_control::text,control_epoch,control_deadline_at
+                          """)
+                      .param("id", candidate.id())
+                      .query(
+                          (row, index) ->
+                              new ControlWork(
+                                  json.convert(
+                                      json.read(row.getString("pending_control")),
+                                      ControlIntent.class),
+                                  row.getLong("control_epoch"),
+                                  Database.instant(row, "control_deadline_at")))
+                      .optional()
+                      .orElse(null);
+                });
+        if (work == null) {
+          controlSlots.release();
+          continue;
         }
-        // A lost acknowledgement cannot restore authority safely. Closing wins over a late reply.
-        transactions.executeWithoutResult(transaction -> {
-          tasks.lockOwner(candidate.owner());
-          if (get(candidate.owner(), candidate.id()).controlEpoch() != work.epoch()) return;
-          if (Boolean.TRUE.equals(work.intent().input().saveConnection())) {
-            recordProfileFailure(candidate.owner(), work.intent().input().connectionId(),
-                new WorkerClient.WorkerException("PROFILE_SAVE_FAILED", 0));
-          }
-          closeForFailure(candidate.owner(), candidate.id(), "CONTROL_UNCONFIRMED");
-        });
-      } finally { controlSlots.release(); }
-      });
+        controlDelivery.execute(
+            () -> {
+              try {
+                applyControl(candidate.owner(), candidate.id(), work);
+              } catch (RuntimeException exception) {
+                log.warn(
+                    "Control delivery failed for session {} at epoch {}: {}",
+                    candidate.id(),
+                    work.epoch(),
+                    exception instanceof WorkerClient.WorkerException failure
+                        ? failure.code() + "/" + failure.status()
+                        : exception.getClass().getSimpleName());
+                if (exception instanceof WorkerClient.WorkerException rejected
+                    && Set.of(400, 403, 413, 422).contains(rejected.status())
+                    && restoreRejectedControl(candidate.owner(), candidate.id(), work)) {
+                  return;
+                }
+                // A lost acknowledgement cannot restore authority safely. Closing wins over a late
+                // reply.
+                transactions.executeWithoutResult(
+                    transaction -> {
+                      tasks.lockOwner(candidate.owner());
+                      if (get(candidate.owner(), candidate.id()).controlEpoch() != work.epoch()) {
+                        return;
+                      }
+                      if (Boolean.TRUE.equals(work.intent().input().saveConnection())) {
+                        recordProfileFailure(
+                            candidate.owner(),
+                            work.intent().input().connectionId(),
+                            new WorkerClient.WorkerException("PROFILE_SAVE_FAILED", 0));
+                      }
+                      closeForFailure(candidate.owner(), candidate.id(), "CONTROL_UNCONFIRMED");
+                    });
+              } finally {
+                controlSlots.release();
+              }
+            });
+      } catch (RuntimeException exception) {
+        controlSlots.release();
+        throw exception;
+      }
     }
   }
 
   @jakarta.annotation.PreDestroy
-  void stopControlDelivery() { controlDelivery.shutdownNow(); }
+  void stopControlDelivery() {
+    controlDelivery.shutdownNow();
+  }
 
   @Scheduled(fixedDelay = 2000)
   public void expireControlIntents() {
-    var expired = jdbc.sql("""
-            SELECT id,owner_id FROM browser_sessions WHERE pending_control IS NOT NULL
-              AND NOT close_requested AND control_deadline_at<=clock_timestamp()
-            ORDER BY control_deadline_at,id LIMIT 20
-            """).query((row, index) -> new PendingControl(row.getObject("id", UUID.class),
-                row.getObject("owner_id", UUID.class))).list();
+    var expired =
+        jdbc.sql(
+                """
+                SELECT id,owner_id FROM browser_sessions WHERE pending_control IS NOT NULL
+                  AND NOT close_requested AND control_deadline_at<=clock_timestamp()
+                ORDER BY control_deadline_at,id LIMIT 20
+                """)
+            .query(
+                (row, index) ->
+                    new PendingControl(
+                        row.getObject("id", UUID.class), row.getObject("owner_id", UUID.class)))
+            .list();
     for (PendingControl candidate : expired) {
-      transactions.executeWithoutResult(transaction -> {
-        tasks.lockOwner(candidate.owner());
-        closeForFailure(candidate.owner(), candidate.id(), "CONTROL_DEADLINE_EXCEEDED");
-      });
+      transactions.executeWithoutResult(
+          transaction -> {
+            tasks.lockOwner(candidate.owner());
+            closeForFailure(candidate.owner(), candidate.id(), "CONTROL_DEADLINE_EXCEEDED");
+          });
     }
   }
 
   public void closeForFailure(UUID owner, UUID session, String reason) {
     SessionReference reference = reference(session);
-    if (reference.closeRequested()) return;
-    if (reference.taskId() != null && !"STOPPING".equals(tasks.get(owner, reference.taskId()).status())) {
+    if (reference.closeRequested()) {
+      return;
+    }
+    if (reference.taskId() != null
+        && !"STOPPING".equals(tasks.get(owner, reference.taskId()).status())) {
       tasks.closeBrowser(owner, reference.taskId());
-      tasks.history(owner, reference.taskId(), "BROWSER_FAILURE", "Браузер закрывается", reason);
+      tasks.history(
+          owner,
+          reference.taskId(),
+          "BROWSER_FAILURE",
+          "Браузер закрывается",
+          failureMessage(reason));
     } else {
-      jdbc.sql("UPDATE browser_sessions SET close_requested=true,pending_control=NULL,"
-              + "version=version+1 WHERE id=:id").param("id", session).update();
+      jdbc.sql(
+              "UPDATE browser_sessions SET close_requested=true,pending_control=NULL,"
+                  + "version=version+1 WHERE id=:id")
+          .param("id", session)
+          .update();
     }
     events.emit(owner, "browser", session, 0);
   }
 
   private record ControlWork(ControlIntent intent, long epoch, Instant deadline) {}
 
+  private static String failureMessage(String reason) {
+    return switch (reason) {
+      case "START_FAILED" -> "Не удалось запустить браузер. Частичные ресурсы закрываются.";
+      case "START_DEADLINE_EXCEEDED" ->
+          "Истёк общий срок запуска браузера с восстановлением профиля.";
+      case "CONTROL_DEADLINE_EXCEEDED", "CONTROL_UNCONFIRMED" ->
+          "Передача управления не подтверждена в срок. Браузер закрывается для сохранения"
+              + " приватности.";
+      case "PROFILE_DEADLINE_EXCEEDED" -> "Сохранение профиля не завершилось в срок.";
+      case "READ_UNCONFIRMED" -> "Не удалось подтвердить завершение чтения страницы.";
+      default ->
+          "Операция не завершилась в технический срок. Неизвестные внешние эффекты сохранены.";
+    };
+  }
+
   private boolean restoreRejectedControl(UUID owner, UUID id, ControlWork work) {
     ControlIntent intent = work.intent();
-    if (intent.previousOwner() == null || intent.previousPrivate() == null
-        || reference(id).closeRequested() || !work.deadline().isAfter(Instant.now())) return false;
+    if (intent.previousOwner() == null
+        || intent.previousPrivate() == null
+        || reference(id).closeRequested()
+        || !work.deadline().isAfter(Instant.now())) {
+      return false;
+    }
     long epoch = work.epoch() + 1;
     Map<String, Object> policy = new HashMap<>();
     policy.put("controlEpoch", epoch);
     policy.put("owner", intent.previousOwner());
     policy.put("privateMode", intent.previousPrivate());
     policy.put("deadlineAt", work.deadline().toString());
-    if (intent.previousController() != null) policy.put("controllerId", intent.previousController());
+    if (intent.previousController() != null) {
+      policy.put("controllerId", intent.previousController());
+    }
     try {
       worker.call("POST", "/sessions/" + id + "/control", policy, remaining(work.deadline()));
     } catch (WorkerClient.WorkerException exception) {
       return false;
     }
-    transactions.executeWithoutResult(transaction -> {
-      tasks.lockOwner(owner);
-      jdbc.sql("""
-              UPDATE browser_sessions SET control_owner=:control,private_mode=:private,
-                controller_id=:controller,control_epoch=:epoch,pending_control=NULL,
-                control_deadline_at=NULL,pending_connection_id=NULL,version=version+1
-              WHERE id=:id AND control_epoch=:previous AND NOT close_requested
-              """).param("id", id).param("previous", work.epoch()).param("epoch", epoch)
-          .param("control", intent.previousOwner()).param("private", intent.previousPrivate())
-          .param("controller", intent.previousController()).update();
-      if (Boolean.TRUE.equals(intent.input().saveConnection())) {
-        recordProfileFailure(owner, intent.input().connectionId(),
-            new WorkerClient.WorkerException("PROFILE_SAVE_FAILED", 422));
-      }
-      refreshIdle(owner, id, true);
-      events.emit(owner, "browser", id, 0);
-    });
+    transactions.executeWithoutResult(
+        transaction -> {
+          tasks.lockOwner(owner);
+          jdbc.sql(
+                  """
+                  UPDATE browser_sessions SET control_owner=:control,private_mode=:private,
+                    controller_id=:controller,control_epoch=:epoch,pending_control=NULL,
+                    control_deadline_at=NULL,pending_connection_id=NULL,version=version+1
+                  WHERE id=:id AND control_epoch=:previous AND NOT close_requested
+                  """)
+              .param("id", id)
+              .param("previous", work.epoch())
+              .param("epoch", epoch)
+              .param("control", intent.previousOwner())
+              .param("private", intent.previousPrivate())
+              .param("controller", intent.previousController())
+              .update();
+          if (Boolean.TRUE.equals(intent.input().saveConnection())) {
+            recordProfileFailure(
+                owner,
+                intent.input().connectionId(),
+                new WorkerClient.WorkerException("PROFILE_SAVE_FAILED", 422));
+          }
+          refreshIdle(owner, id, true);
+          events.emit(owner, "browser", id, 0);
+        });
     return true;
   }
 
@@ -630,15 +819,27 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
     boolean incompleteLogin = intent.keepPrivate();
     boolean privateMode = "BEGIN_LOGIN".equals(input.type()) || sessionSave || incompleteLogin;
     boolean internal = Set.of("ADOPT", "LOGIN").contains(input.type());
-    String control = take || sessionSave ? "USER"
-        : internal && intent.keepPrivate() || reference.taskId() == null ? "NONE" : "CHATGPT";
+    String control =
+        take || sessionSave
+            ? "USER"
+            : internal && intent.keepPrivate() || reference.taskId() == null ? "NONE" : "CHATGPT";
     if ("ADOPT".equals(input.type())) {
-      worker.call("POST", "/sessions/" + id + "/bind",
-          Map.of("ownerId", owner, "taskId", reference.taskId()), remaining(work.deadline()));
+      worker.call(
+          "POST",
+          "/sessions/" + id + "/bind",
+          Map.of("ownerId", owner, "taskId", reference.taskId()),
+          remaining(work.deadline()));
     }
-    if ("LOGIN".equals(input.type()) && intent.previousConnection() != null
-        && !intent.previousConnection().equals(input.connectionId()) && Boolean.FALSE.equals(intent.previousPrivate())) {
-      if (!exportProfile(owner, id, intent.previousConnection(), id + ":switch:" + epoch, remaining(work.deadline()))) {
+    if ("LOGIN".equals(input.type())
+        && intent.previousConnection() != null
+        && !intent.previousConnection().equals(input.connectionId())
+        && Boolean.FALSE.equals(intent.previousPrivate())) {
+      if (!exportProfile(
+          owner,
+          id,
+          intent.previousConnection(),
+          id + ":switch:" + epoch,
+          remaining(work.deadline()))) {
         throw new WorkerClient.WorkerException("PROFILE_SAVE_FAILED", 0);
       }
     }
@@ -652,107 +853,129 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
     }
     if (("FINISH_LOGIN".equals(input.type()) || sessionSave)
         && Boolean.TRUE.equals(input.saveConnection())) {
-      saveProfile(owner, id, input.connectionId(), input.accountLabel(), input.accountSubject(), epoch, work.deadline());
+      saveProfile(
+          owner,
+          id,
+          input.connectionId(),
+          input.accountLabel(),
+          input.accountSubject(),
+          epoch,
+          work.deadline());
     }
     worker.call("POST", "/sessions/" + id + "/control", payload, remaining(work.deadline()));
-    if ("LOGIN".equals(input.type()) && input.connectionId() != null
+    if ("LOGIN".equals(input.type())
+        && input.connectionId() != null
         && !input.connectionId().equals(intent.previousConnection())) {
-      String startUrl = jdbc.sql("SELECT start_url FROM connections WHERE id=:id")
-          .param("id", input.connectionId()).query(String.class).single();
-      worker.call("POST", "/sessions/" + id + "/login-context",
-          Map.of("ownerId", owner, "connectionId", input.connectionId(), "startUrl", startUrl), remaining(work.deadline()));
+      String startUrl =
+          jdbc.sql("SELECT start_url FROM connections WHERE id=:id")
+              .param("id", input.connectionId())
+              .query(String.class)
+              .single();
+      worker.call(
+          "POST",
+          "/sessions/" + id + "/login-context",
+          Map.of("ownerId", owner, "connectionId", input.connectionId(), "startUrl", startUrl),
+          remaining(work.deadline()));
     }
-    transactions.executeWithoutResult(transaction -> {
-    tasks.lockOwner(owner);
-    if (reference(id).closeRequested() || get(owner, id).controlEpoch() != epoch) return;
-    jdbc.sql(
-            """
-            UPDATE browser_sessions SET control_owner=:control,private_mode=:private,
-              controller_id=:controller,pending_control=NULL,control_deadline_at=NULL,
-              login_confirmed=CASE WHEN :saved THEN false ELSE login_confirmed END,
-              version=version+1 WHERE id=:id
-            """)
-        .param("control", control)
-        .param("private", privateMode)
-        .param("controller", take || sessionSave ? input.viewerId() : null)
-        .param("saved", Boolean.TRUE.equals(input.saveConnection()))
-        .param("id", id)
-        .update();
-    if (internal) {
-      jdbc.sql("UPDATE browser_sessions SET connection_id=coalesce(pending_connection_id,connection_id),"
-              + "pending_connection_id=NULL WHERE id=:id").param("id", id).update();
-      if ("ADOPT".equals(input.type())) tasks.browserReady(owner, reference.taskId());
-      refreshIdle(owner, id, true);
-      events.emit(owner, "browser", id, 0);
-      return;
-    }
-    if (sessionSave) {
-      refreshIdle(owner, id, true);
-      events.emit(owner, "browser", id, browser.version() + 1);
-      return;
-    }
-    jdbc.sql(
-            "UPDATE usage_intervals SET ended_at=now() WHERE session_id=:id AND kind='MANUAL' AND"
-                + " ended_at IS NULL")
-        .param("id", id)
-        .update();
-    if (take) {
-      startUsage(reference, id, "MANUAL");
-    }
-    Contracts.Task task =
-        reference.taskId() == null ? null : tasks.get(owner, reference.taskId());
-    // Browser control does not reopen a result; only an explicit task RESUME may do that.
-    if (task != null && !TaskService.TERMINAL.contains(task.status())
-        && !"STOPPING".equals(task.status())) {
-      if (take) {
-        tasks.change(
-            owner,
-            task.id(),
-            "WAITING_USER",
-            privateMode ? "LOGIN" : "MANUAL_CONTROL",
-            privateMode ? "Защищённый вход пользователя" : "Ручное управление");
-      } else {
-        boolean paused =
-            jdbc.sql("SELECT paused_explicitly FROM tasks WHERE id=:id")
-                .param("id", task.id())
-                .query(Boolean.class)
-                .single();
-        boolean resume = Boolean.TRUE.equals(input.resume());
-        if (!resume || paused) {
-          jdbc.sql("UPDATE tasks SET paused_explicitly=true WHERE id=:id")
-              .param("id", task.id())
-              .update();
-        }
-        String pendingReason = incompleteLogin ? "LOGIN" : null;
-        if (task.request() != null) {
-          boolean completedLogin = "FINISH_LOGIN".equals(input.type())
-              || jdbc.sql("SELECT login_completed FROM browser_sessions WHERE id=:id")
-                  .param("id", id).query(Boolean.class).single();
-          if ("MANUAL_CONTROL".equals(task.request().type())
-              || ("LOGIN".equals(task.request().type()) && completedLogin)) {
-            tasks.cancelRequest(task.id());
-          } else {
-            pendingReason = task.request().type();
+    transactions.executeWithoutResult(
+        transaction -> {
+          tasks.lockOwner(owner);
+          if (reference(id).closeRequested() || get(owner, id).controlEpoch() != epoch) {
+            return;
           }
-        }
-        String state = "WAITING_CHATGPT";
-        if (paused || !resume) {
-          state = "PAUSED";
-        } else if (pendingReason != null) {
-          state = "WAITING_USER";
-        }
-        tasks.change(
-            owner,
-            task.id(),
-            state,
-            pendingReason,
-            "Управление возвращено");
-        tasks.requestContinuation(task.id());
-      }
-    }
-    events.emit(owner, "browser", id, browser.version() + 2);
-    refreshIdle(owner, id, true);
-    });
+          jdbc.sql(
+                  """
+                  UPDATE browser_sessions SET control_owner=:control,private_mode=:private,
+                    controller_id=:controller,pending_control=NULL,control_deadline_at=NULL,
+                    login_confirmed=CASE WHEN :saved THEN false ELSE login_confirmed END,
+                    version=version+1 WHERE id=:id
+                  """)
+              .param("control", control)
+              .param("private", privateMode)
+              .param("controller", take || sessionSave ? input.viewerId() : null)
+              .param("saved", Boolean.TRUE.equals(input.saveConnection()))
+              .param("id", id)
+              .update();
+          if (internal) {
+            jdbc.sql(
+                    "UPDATE browser_sessions SET"
+                        + " connection_id=coalesce(pending_connection_id,connection_id),pending_connection_id=NULL"
+                        + " WHERE id=:id")
+                .param("id", id)
+                .update();
+            if ("ADOPT".equals(input.type())) {
+              tasks.browserReady(owner, reference.taskId());
+            }
+            refreshIdle(owner, id, true);
+            events.emit(owner, "browser", id, 0);
+            return;
+          }
+          if (sessionSave) {
+            refreshIdle(owner, id, true);
+            events.emit(owner, "browser", id, browser.version() + 1);
+            return;
+          }
+          jdbc.sql(
+                  "UPDATE usage_intervals SET ended_at=now() WHERE session_id=:id AND kind='MANUAL'"
+                      + " AND ended_at IS NULL")
+              .param("id", id)
+              .update();
+          if (take) {
+            startUsage(reference, id, "MANUAL");
+          }
+          Contracts.Task task =
+              reference.taskId() == null ? null : tasks.get(owner, reference.taskId());
+          // Browser control does not reopen a result; only an explicit task RESUME may do that.
+          if (task != null
+              && !TaskService.TERMINAL.contains(task.status())
+              && !"STOPPING".equals(task.status())) {
+            if (take) {
+              tasks.change(
+                  owner,
+                  task.id(),
+                  "WAITING_USER",
+                  privateMode ? "LOGIN" : "MANUAL_CONTROL",
+                  privateMode ? "Защищённый вход пользователя" : "Ручное управление");
+            } else {
+              boolean paused =
+                  jdbc.sql("SELECT paused_explicitly FROM tasks WHERE id=:id")
+                      .param("id", task.id())
+                      .query(Boolean.class)
+                      .single();
+              boolean resume = Boolean.TRUE.equals(input.resume());
+              if (!resume || paused) {
+                jdbc.sql("UPDATE tasks SET paused_explicitly=true WHERE id=:id")
+                    .param("id", task.id())
+                    .update();
+              }
+              String pendingReason = incompleteLogin ? "LOGIN" : null;
+              if (task.request() != null) {
+                boolean completedLogin =
+                    "FINISH_LOGIN".equals(input.type())
+                        || jdbc.sql("SELECT login_completed FROM browser_sessions WHERE id=:id")
+                            .param("id", id)
+                            .query(Boolean.class)
+                            .single();
+                if ("MANUAL_CONTROL".equals(task.request().type())
+                    || ("LOGIN".equals(task.request().type()) && completedLogin)) {
+                  tasks.cancelRequest(task.id());
+                } else {
+                  pendingReason = task.request().type();
+                }
+              }
+              String state = "WAITING_CHATGPT";
+              if (paused || !resume) {
+                state = "PAUSED";
+              } else if (pendingReason != null) {
+                state = "WAITING_USER";
+              }
+              tasks.change(owner, task.id(), state, pendingReason, "Управление возвращено");
+              tasks.requestContinuation(task.id());
+            }
+          }
+          events.emit(owner, "browser", id, browser.version() + 2);
+          refreshIdle(owner, id, true);
+        });
   }
 
   private record PendingControl(UUID id, UUID owner) {}
@@ -760,7 +983,7 @@ UPDATE browser_sessions SET control_owner='TRANSFERRING',control_epoch=:epoch,
   private void requireAvailableConnection(UUID connection, UUID session) {
     boolean occupied =
         jdbc.sql(
-                """
+"""
 SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE (connection_id=:connection OR pending_connection_id=:connection)
  AND id<>:session AND status NOT IN ('CLOSED','LOST'))
 """)
@@ -774,7 +997,12 @@ SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE (connection_id=:connection OR
   }
 
   private void saveProfile(
-      UUID owner, UUID session, UUID connection, String label, String subject, long controlEpoch,
+      UUID owner,
+      UUID session,
+      UUID connection,
+      String label,
+      String subject,
+      long controlEpoch,
       Instant deadline) {
     if (connection == null) {
       throw ApiException.invalid("connectionId", "Выберите подключение для сохранения входа.");
@@ -782,8 +1010,8 @@ SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE (connection_id=:connection OR
     tasks.validateConnections(owner, List.of(connection));
     requireAvailableConnection(connection, session);
     String identityLabel = label == null ? null : TaskService.required(label, "accountLabel", 300);
-    String identitySubject = subject == null
-        ? null : TaskService.required(subject, "accountSubject", 500);
+    String identitySubject =
+        subject == null ? null : TaskService.required(subject, "accountSubject", 500);
     var previous =
         jdbc.sql("SELECT account_subject FROM connections WHERE id=:id")
             .param("id", connection)
@@ -794,44 +1022,62 @@ SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE (connection_id=:connection OR
       throw ApiException.conflict(
           "ACCOUNT_MISMATCH", "Вход принадлежит другому аккаунту. Создайте отдельное подключение.");
     }
-    JsonNode saved = worker.call(
-        "POST",
-        "/sessions/" + session + "/profile/export",
-        Map.of("connectionId", connection, "ownerId", owner,
-            "origins", connectionOrigins(owner, connection), "includeLoginOrigins", true,
-            "operationId", session + ":" + controlEpoch, "deadlineAt", deadline.toString()), remaining(deadline));
-    transactions.executeWithoutResult(transaction -> {
-    tasks.lockOwner(owner);
-    if (reference(session).closeRequested() || get(owner, session).controlEpoch() != controlEpoch) return;
-    recordProfileSave(owner, connection, saved);
-    jdbc.sql("UPDATE connections SET authorized_origins=CAST(:origins AS jsonb) WHERE id=:id")
-        .param("origins", json.write(saved.path("origins"))).param("id", connection).update();
-    jdbc.sql(
-            "UPDATE connections SET"
-                + " status='READY',account_label=COALESCE(:label,account_label),"
-                + "account_subject=COALESCE(:subject,account_subject),version=version+1,"
-                + "updated_at=now(),last_used_at=now()"
-                + " WHERE id=:id")
-        .param("label", identityLabel)
-        .param("subject", identitySubject)
-        .param("id", connection)
-        .update();
-    jdbc.sql(
-            "UPDATE browser_sessions SET connection_id=:connection,pending_connection_id=NULL WHERE"
-                + " id=:session AND owner_id=:owner")
-        .param("connection", connection)
-        .param("session", session)
-        .param("owner", owner)
-        .update();
-    jdbc.sql(
-            "UPDATE tasks SET selected_connection_id=:connection WHERE browser_session_id=:session"
-                + " AND owner_id=:owner")
-        .param("connection", connection)
-        .param("session", session)
-        .param("owner", owner)
-        .update();
-    events.emit(owner, "connection", connection, 0);
-    });
+    JsonNode saved =
+        worker.call(
+            "POST",
+            "/sessions/" + session + "/profile/export",
+            Map.of(
+                "connectionId",
+                connection,
+                "ownerId",
+                owner,
+                "origins",
+                connectionOrigins(owner, connection),
+                "includeLoginOrigins",
+                true,
+                "operationId",
+                session + ":" + controlEpoch,
+                "deadlineAt",
+                deadline.toString()),
+            remaining(deadline));
+    transactions.executeWithoutResult(
+        transaction -> {
+          tasks.lockOwner(owner);
+          if (reference(session).closeRequested()
+              || get(owner, session).controlEpoch() != controlEpoch) {
+            return;
+          }
+          recordProfileSave(owner, connection, saved);
+          jdbc.sql("UPDATE connections SET authorized_origins=CAST(:origins AS jsonb) WHERE id=:id")
+              .param("origins", json.write(saved.path("origins")))
+              .param("id", connection)
+              .update();
+          jdbc.sql(
+                  "UPDATE connections SET"
+                      + " status='READY',account_label=COALESCE(:label,account_label),"
+                      + "account_subject=COALESCE(:subject,account_subject),version=version+1,"
+                      + "updated_at=now(),last_used_at=now()"
+                      + " WHERE id=:id")
+              .param("label", identityLabel)
+              .param("subject", identitySubject)
+              .param("id", connection)
+              .update();
+          jdbc.sql(
+                  "UPDATE browser_sessions SET connection_id=:connection,pending_connection_id=NULL"
+                      + " WHERE id=:session AND owner_id=:owner")
+              .param("connection", connection)
+              .param("session", session)
+              .param("owner", owner)
+              .update();
+          jdbc.sql(
+                  "UPDATE tasks SET selected_connection_id=:connection WHERE"
+                      + " browser_session_id=:session AND owner_id=:owner")
+              .param("connection", connection)
+              .param("session", session)
+              .param("owner", owner)
+              .update();
+          events.emit(owner, "connection", connection, 0);
+        });
   }
 
   private static Duration remaining(Instant deadline) {
@@ -846,7 +1092,7 @@ SELECT EXISTS(SELECT 1 FROM browser_sessions WHERE (connection_id=:connection OR
   public void recordSuccessfulUse(UUID owner, UUID session) {
     var changed =
         jdbc.sql(
-                """
+"""
 UPDATE connections SET last_used_at=now(),version=version+1
 WHERE owner_id=:owner AND deleted_at IS NULL AND status='READY'
   AND id=(SELECT connection_id FROM browser_sessions WHERE id=:session AND owner_id=:owner)
@@ -870,7 +1116,8 @@ RETURNING id,version
       tasks.closeBrowser(owner, browser.taskId());
       return;
     }
-    jdbc.sql("""
+    jdbc.sql(
+            """
             UPDATE browser_sessions SET close_requested=true,version=version+1,
               pending_control=NULL,pending_connection_id=NULL,
               closed_at=CASE WHEN status='QUEUED' THEN now() ELSE closed_at END,
@@ -885,15 +1132,21 @@ RETURNING id,version
   public void reconcile(UUID id, JsonNode result) {
     SessionReference initial = reference(id);
     Contracts.Browser before = get(initial.ownerId(), id);
-    if ("CLOSED".equals(before.status())) return;
-    if ("LIVE".equals(result.path("status").asString()) && !"LIVE".equals(before.status())
-        && !initial.closeRequested() && !"TRANSFERRING".equals(before.controlOwner())) {
+    if ("CLOSED".equals(before.status())) {
+      return;
+    }
+    if ("LIVE".equals(result.path("status").asString())
+        && !"LIVE".equals(before.status())
+        && !initial.closeRequested()
+        && !"TRANSFERRING".equals(before.controlOwner())) {
       Map<String, Object> desired = new HashMap<>();
       desired.put("owner", before.controlOwner());
       desired.put("privateMode", before.privateMode());
       desired.put("controlEpoch", before.controlEpoch());
       desired.put("deadlineAt", Instant.now().plusSeconds(30).toString());
-      if (initial.controllerId() != null) desired.put("controllerId", initial.controllerId());
+      if (initial.controllerId() != null) {
+        desired.put("controllerId", initial.controllerId());
+      }
       worker.call("POST", "/sessions/" + id + "/control", desired, Duration.ofSeconds(30));
     }
     transactions.executeWithoutResult(transaction -> reconcileState(id, result));
@@ -906,14 +1159,19 @@ RETURNING id,version
       tasks.lockTask(reference.ownerId(), reference.taskId());
     }
     String state = result.path("status").asString("UNKNOWN");
-    if (reference.connectionId() != null && !result.path("profileRevision").isNumber()
+    if (reference.connectionId() != null
+        && !result.path("profileRevision").isNumber()
         && reference.connectionId().toString().equals(result.path("profileConnectionId").asString())
         && result.path("profileSaveError").isString()) {
-      int changed = jdbc.sql("""
-              UPDATE connections SET profile_save_error=:error,version=version+1
-              WHERE id=:id AND profile_save_error IS DISTINCT FROM :error
-              """).param("error", result.path("profileSaveError").asString())
-          .param("id", reference.connectionId()).update();
+      int changed =
+          jdbc.sql(
+                  """
+                  UPDATE connections SET profile_save_error=:error,version=version+1
+                  WHERE id=:id AND profile_save_error IS DISTINCT FROM :error
+                  """)
+              .param("error", result.path("profileSaveError").asString())
+              .param("id", reference.connectionId())
+              .update();
       if (changed != 0) {
         events.emit(reference.ownerId(), "connection", reference.connectionId(), 0);
       }
@@ -921,9 +1179,13 @@ RETURNING id,version
     if (reference.connectionId() != null
         && reference.connectionId().toString().equals(result.path("profileConnectionId").asString())
         && result.path("profileRevision").isNumber()) {
-      recordProfileSave(reference.ownerId(), reference.connectionId(),
-          result.path("profileRevision").asLong(), result.path("profileSavedAt").asString(null),
-          result.path("profileSaveError").asString(null), cookieCheck(result));
+      recordProfileSave(
+          reference.ownerId(),
+          reference.connectionId(),
+          result.path("profileRevision").asLong(),
+          result.path("profileSavedAt").asString(null),
+          result.path("profileSaveError").asString(null),
+          cookieCheck(result));
     }
     String status =
         switch (state) {
@@ -933,13 +1195,17 @@ RETURNING id,version
     if (Set.of("CLOSED", "LOST").contains(status) && !result.path("runtimeStoppedAt").isString()) {
       status = "UNREACHABLE";
     }
-    if ("LOST".equals(status) && result.path("runtimeStoppedAt").isString()) status = "CLOSED";
+    if ("LOST".equals(status) && result.path("runtimeStoppedAt").isString()) {
+      status = "CLOSED";
+    }
     if (reference.closeRequested() && Set.of("LIVE", "STARTING").contains(status)) {
       status = "CLOSING";
     }
     Contracts.Browser previousBrowser = get(reference.ownerId(), id);
     String previous = previousBrowser.status();
-    if ("CLOSED".equals(previous)) return;
+    if ("CLOSED".equals(previous)) {
+      return;
+    }
     String reportedUrl = result.path("currentUrl").asString(null);
     boolean urlChanged =
         !previousBrowser.privateMode()
@@ -947,10 +1213,10 @@ RETURNING id,version
             && !reportedUrl.equals(previousBrowser.currentUrl());
     jdbc.sql(
             "UPDATE browser_sessions SET"
-                + " status=:status,last_seen_at=now(),current_url=coalesce(:url,current_url),"
-                + "cleanup_state=CASE WHEN :status='CLOSED' AND cleanup_state='NONE' THEN :cleanup ELSE cleanup_state END,"
-                + "version=version+CASE WHEN status IS DISTINCT FROM :status OR current_url IS DISTINCT FROM coalesce(:url,current_url) THEN 1 ELSE 0 END"
-                + " WHERE id=:id")
+                + " status=:status,last_seen_at=now(),current_url=coalesce(:url,current_url),cleanup_state=CASE"
+                + " WHEN :status='CLOSED' AND cleanup_state='NONE' THEN :cleanup ELSE cleanup_state"
+                + " END,version=version+CASE WHEN status IS DISTINCT FROM :status OR current_url IS"
+                + " DISTINCT FROM coalesce(:url,current_url) THEN 1 ELSE 0 END WHERE id=:id")
         .param("status", status)
         .param("cleanup", result.path("cleanupState").asString("NONE"))
         .param("url", result.path("currentUrl").asString(null))
@@ -978,6 +1244,14 @@ RETURNING id,version
       refreshIdle(reference.ownerId(), id, false);
     }
     if (Set.of("CLOSED", "LOST").contains(status)) {
+      if (reference.taskId() != null && result.path("failureCode").isString()) {
+        tasks.history(
+            reference.ownerId(),
+            reference.taskId(),
+            "BROWSER_FAILURE",
+            "Исполнение браузера прекращено",
+            failureMessage(result.path("failureCode").asString()));
+      }
       jdbc.sql(
               "UPDATE browser_sessions SET"
                   + " closed_at=coalesce(closed_at,now()),control_owner='NONE',private_mode=false,controller_id=NULL,idle_close_at=NULL,pending_control=NULL"
@@ -1006,15 +1280,8 @@ RETURNING id,version
               "Задача, история и сохранённые результаты доступны.");
         } else if (!reference.closeRequested()
             && !TaskService.TERMINAL.contains(task.status())
-            && !Set.of("CLOSED", "LOST").contains(previous)
-            && !tasks.hasUnknown(task.id())) {
-          tasks.request(
-              reference.ownerId(),
-              task.id(),
-              "BROWSER_LOST",
-              "Браузер утрачен. Для продолжения потребуется отдельное согласие на новый браузер.",
-              null,
-              null);
+            && !Set.of("CLOSED", "LOST").contains(previous)) {
+          tasks.browserLost(reference.ownerId(), task.id());
         }
       }
     }
@@ -1039,15 +1306,19 @@ RETURNING id,version
     if (task.version() != expectedVersion) {
       throw ApiException.conflict("STALE_VERSION", "Задача изменилась.");
     }
-    if (tasks.hasDispatched(taskId) || tasks.hasUnknown(taskId)
+    if (tasks.hasDispatched(taskId)
+        || tasks.hasUnknown(taskId)
         || Set.of("DRAFT", "STOPPING", "STOPPED", "SUCCEEDED", "PARTIAL", "NOT_ACHIEVED", "FAILED")
             .contains(task.status())
         || (task.request() != null && !"LOGIN".equals(task.request().type()))) {
       throw ApiException.conflict("ACTION_UNRESOLVED", "Сначала завершите текущее действие.");
     }
-    UUID connection = jdbc.sql("SELECT selected_connection_id FROM tasks WHERE id=:id")
-        .param("id", taskId).query((row, index) -> row.getObject(1, UUID.class))
-        .optional().orElse(null);
+    UUID connection =
+        jdbc.sql("SELECT selected_connection_id FROM tasks WHERE id=:id")
+            .param("id", taskId)
+            .query((row, index) -> row.getObject(1, UUID.class))
+            .optional()
+            .orElse(null);
     UUID session = ensure(owner, taskId, connection, task.startUrl());
     if (session == null) {
       return tasks.get(owner, taskId);
@@ -1055,24 +1326,30 @@ RETURNING id,version
     tasks.cancelQueued(taskId);
     if (connection != null) {
       jdbc.sql("UPDATE connections SET status='LOGIN_REQUIRED',version=version+1 WHERE id=:id")
-          .param("id", connection).update();
+          .param("id", connection)
+          .update();
       events.emit(owner, "connection", connection, 0);
     }
     Contracts.Browser browser = get(owner, session);
     SessionReference previous = reference(session);
     boolean switching = connection != null && !connection.equals(previous.connectionId());
-    if (switching) requireAvailableConnection(connection, session);
+    if (switching) {
+      requireAvailableConnection(connection, session);
+    }
     if (switching || !browser.privateMode() || !"USER".equals(browser.controlOwner())) {
       if ("LIVE".equals(browser.status())) {
         queueInternalControl(owner, session, "LOGIN", browser, connection, true);
       } else {
-        jdbc.sql("UPDATE browser_sessions SET private_mode=true,control_owner='NONE',"
-                + "controller_id=NULL,login_completed=false,version=version+1 WHERE id=:id")
-            .param("id", session).update();
+        jdbc.sql(
+                "UPDATE browser_sessions SET private_mode=true,control_owner='NONE',"
+                    + "controller_id=NULL,login_completed=false,version=version+1 WHERE id=:id")
+            .param("id", session)
+            .update();
       }
     }
     if (task.request() == null) {
-      tasks.request(owner, taskId, "LOGIN", "Войдите на сайт в защищённом браузере задачи.", null, null);
+      tasks.request(
+          owner, taskId, "LOGIN", "Войдите на сайт в защищённом браузере задачи.", null, null);
     }
     return tasks.get(owner, taskId);
   }
@@ -1080,17 +1357,20 @@ RETURNING id,version
   public List<String> connectionOrigins(UUID owner, UUID connection) {
     tasks.validateConnections(owner, List.of(connection));
     return jdbc.sql("SELECT start_url,authorized_origins::text FROM connections WHERE id=:id")
-        .param("id", connection).query((row, index) -> {
-          List<String> origins = new ArrayList<>();
-          for (JsonNode origin : json.read(row.getString(2))) {
-            origins.add(origin.asString());
-          }
-          if (origins.isEmpty()) {
-            URI url = URI.create(row.getString(1));
-            origins.add(url.getScheme() + "://" + url.getAuthority());
-          }
-          return List.copyOf(origins);
-        }).single();
+        .param("id", connection)
+        .query(
+            (row, index) -> {
+              List<String> origins = new ArrayList<>();
+              for (JsonNode origin : json.read(row.getString(2))) {
+                origins.add(origin.asString());
+              }
+              if (origins.isEmpty()) {
+                URI url = URI.create(row.getString(1));
+                origins.add(url.getScheme() + "://" + url.getAuthority());
+              }
+              return List.copyOf(origins);
+            })
+        .single();
   }
 
   /** Attempt one final save; a storage failure must not prevent the requested closure. */
@@ -1100,12 +1380,16 @@ RETURNING id,version
     if (!reference.closeRequested()) {
       return false;
     }
-    int claimed = jdbc.sql("""
-            UPDATE browser_sessions b SET close_profile_attempted=true
-            WHERE b.id=:id AND NOT b.close_profile_attempted AND NOT b.private_mode
-              AND EXISTS(SELECT 1 FROM connections c WHERE c.id=b.connection_id
-                AND c.status='READY' AND c.deleted_at IS NULL)
-            """).param("id", session).update();
+    int claimed =
+        jdbc.sql(
+                """
+                UPDATE browser_sessions b SET close_profile_attempted=true
+                WHERE b.id=:id AND NOT b.close_profile_attempted AND NOT b.private_mode
+                  AND EXISTS(SELECT 1 FROM connections c WHERE c.id=b.connection_id
+                    AND c.status='READY' AND c.deleted_at IS NULL)
+                """)
+            .param("id", session)
+            .update();
     if (claimed == 0) {
       return true;
     }
@@ -1113,17 +1397,26 @@ RETURNING id,version
     try {
       if (!"NONE".equals(browser.controlOwner())) {
         long epoch = browser.controlEpoch() + 1;
-        worker.call("POST", "/sessions/" + session + "/control",
+        worker.call(
+            "POST",
+            "/sessions/" + session + "/control",
             Map.of("controlEpoch", epoch, "owner", "NONE", "privateMode", false),
             Duration.ofSeconds(5));
-        jdbc.sql("""
+        jdbc.sql(
+                """
                 UPDATE browser_sessions SET control_epoch=:epoch,control_owner='NONE',
                   controller_id=NULL,version=version+1 WHERE id=:id
-                """).param("epoch", epoch).param("id", session).update();
-        jdbc.sql("""
+                """)
+            .param("epoch", epoch)
+            .param("id", session)
+            .update();
+        jdbc.sql(
+                """
                 UPDATE usage_intervals SET ended_at=now()
                 WHERE session_id=:id AND kind='MANUAL' AND ended_at IS NULL
-                """).param("id", session).update();
+                """)
+            .param("id", session)
+            .update();
       }
       refreshProfile(owner, session, session + ":close", Duration.ofSeconds(20));
     } catch (WorkerClient.WorkerException exception) {
@@ -1138,26 +1431,46 @@ RETURNING id,version
   }
 
   private boolean refreshProfile(UUID owner, UUID session, String operationId, Duration timeout) {
-    var connection = jdbc.sql("""
-            SELECT c.id FROM connections c JOIN browser_sessions b ON b.connection_id=c.id
-            WHERE b.id=:session AND b.owner_id=:owner AND b.status IN ('LIVE','CLOSING')
-              AND NOT b.private_mode AND c.status='READY' AND c.deleted_at IS NULL
-            """).param("session", session).param("owner", owner).query(UUID.class).optional();
+    var connection =
+        jdbc.sql(
+                """
+                SELECT c.id FROM connections c JOIN browser_sessions b ON b.connection_id=c.id
+                WHERE b.id=:session AND b.owner_id=:owner AND b.status IN ('LIVE','CLOSING')
+                  AND NOT b.private_mode AND c.status='READY' AND c.deleted_at IS NULL
+                """)
+            .param("session", session)
+            .param("owner", owner)
+            .query(UUID.class)
+            .optional();
     if (connection.isEmpty()) {
       return true;
     }
     return exportProfile(owner, session, connection.get(), operationId, timeout);
   }
 
-  private boolean exportProfile(UUID owner, UUID session, UUID connection, String operationId, Duration timeout) {
+  private boolean exportProfile(
+      UUID owner, UUID session, UUID connection, String operationId, Duration timeout) {
     try {
-      JsonNode result = worker.call("POST", "/sessions/" + session + "/profile/export",
-          Map.of("connectionId", connection, "ownerId", owner,
-              "origins", connectionOrigins(owner, connection), "operationId", operationId,
-              "deadlineAt", Instant.now().plus(timeout).toString()), timeout);
+      JsonNode result =
+          worker.call(
+              "POST",
+              "/sessions/" + session + "/profile/export",
+              Map.of(
+                  "connectionId",
+                  connection,
+                  "ownerId",
+                  owner,
+                  "origins",
+                  connectionOrigins(owner, connection),
+                  "operationId",
+                  operationId,
+                  "deadlineAt",
+                  Instant.now().plus(timeout).toString()),
+              timeout);
       if (!result.path("saved").asBoolean(false)
           || !connection.toString().equals(result.path("profileRef").asString())
-          || result.path("revision").asLong(0) < 1 || !result.path("savedAt").isString()) {
+          || result.path("revision").asLong(0) < 1
+          || !result.path("savedAt").isString()) {
         throw new WorkerClient.WorkerException("PROFILE_SAVE_FAILED", 502);
       }
       recordProfileSave(owner, connection, result);
@@ -1168,48 +1481,71 @@ RETURNING id,version
     }
   }
 
-  private void recordProfileFailure(UUID owner, UUID connection, WorkerClient.WorkerException error) {
+  private void recordProfileFailure(
+      UUID owner, UUID connection, WorkerClient.WorkerException error) {
     String failure = error.code().startsWith("PROFILE_") ? error.code() : "PROFILE_SAVE_FAILED";
-    int changed = jdbc.sql("""
-            UPDATE connections SET profile_save_error=:failure,version=version+1
-            WHERE id=:id AND profile_save_error IS DISTINCT FROM :failure
-            """).param("failure", failure).param("id", connection).update();
+    int changed =
+        jdbc.sql(
+                """
+                UPDATE connections SET profile_save_error=:failure,version=version+1
+                WHERE id=:id AND profile_save_error IS DISTINCT FROM :failure
+                """)
+            .param("failure", failure)
+            .param("id", connection)
+            .update();
     if (changed != 0) {
       events.emit(owner, "connection", connection, 0);
     }
   }
 
   private void recordProfileSave(UUID owner, UUID connection, JsonNode result) {
-    recordProfileSave(owner, connection, result.path("revision").asLong(),
-        result.path("savedAt").asString(), null, cookieCheck(result));
+    recordProfileSave(
+        owner,
+        connection,
+        result.path("revision").asLong(),
+        result.path("savedAt").asString(),
+        null,
+        cookieCheck(result));
   }
 
   private Contracts.CookieCheck cookieCheck(JsonNode result) {
     JsonNode value = result.path("cookieCheck");
-    return value.isMissingNode() || value.isNull() ? null
+    return value.isMissingNode() || value.isNull()
+        ? null
         : json.convert(value, Contracts.CookieCheck.class);
   }
 
-  private void recordProfileSave(UUID owner, UUID connection, long revision, String savedAt,
-      String error, Contracts.CookieCheck check) {
-    int changed = jdbc.sql("""
-            UPDATE connections SET profile_revision=:revision,
-              profile_saved_at=CAST(:saved AS timestamptz),profile_save_error=:error,
-              cookie_usable_count=:count,cookie_checked_at=CAST(:checked AS timestamptz),
-              version=version+1
-            WHERE id=:id AND profile_revision<=:revision
-              AND (CAST(:error AS text) IS NOT NULL OR profile_save_error IS NULL
-                OR profile_revision<:revision OR cookie_checked_at IS NULL
-                OR CAST(:checked AS timestamptz)>cookie_checked_at)
-              AND (profile_revision<:revision OR cookie_checked_at IS NULL
-                OR CAST(:checked AS timestamptz)>=cookie_checked_at)
-              AND (profile_revision<>:revision OR profile_save_error IS DISTINCT FROM :error
-                OR cookie_checked_at IS DISTINCT FROM CAST(:checked AS timestamptz)
-                OR cookie_usable_count IS DISTINCT FROM :count)
-            """).param("revision", revision).param("saved", savedAt).param("error", error)
-        .param("count", check == null ? null : check.usableCount(), Types.INTEGER)
-        .param("checked", check == null ? null : check.checkedAt().toString())
-        .param("id", connection).update();
+  private void recordProfileSave(
+      UUID owner,
+      UUID connection,
+      long revision,
+      String savedAt,
+      String error,
+      Contracts.CookieCheck check) {
+    int changed =
+        jdbc.sql(
+                """
+                UPDATE connections SET profile_revision=:revision,
+                  profile_saved_at=CAST(:saved AS timestamptz),profile_save_error=:error,
+                  cookie_usable_count=:count,cookie_checked_at=CAST(:checked AS timestamptz),
+                  version=version+1
+                WHERE id=:id AND profile_revision<=:revision
+                  AND (CAST(:error AS text) IS NOT NULL OR profile_save_error IS NULL
+                    OR profile_revision<:revision OR cookie_checked_at IS NULL
+                    OR CAST(:checked AS timestamptz)>cookie_checked_at)
+                  AND (profile_revision<:revision OR cookie_checked_at IS NULL
+                    OR CAST(:checked AS timestamptz)>=cookie_checked_at)
+                  AND (profile_revision<>:revision OR profile_save_error IS DISTINCT FROM :error
+                    OR cookie_checked_at IS DISTINCT FROM CAST(:checked AS timestamptz)
+                    OR cookie_usable_count IS DISTINCT FROM :count)
+                """)
+            .param("revision", revision)
+            .param("saved", savedAt)
+            .param("error", error)
+            .param("count", check == null ? null : check.usableCount(), Types.INTEGER)
+            .param("checked", check == null ? null : check.checkedAt().toString())
+            .param("id", connection)
+            .update();
     if (changed != 0) {
       events.emit(owner, "connection", connection, 0);
     }
@@ -1247,21 +1583,42 @@ RETURNING id,version
   public record SessionReference(
       UUID ownerId, UUID taskId, UUID connectionId, String controllerId, boolean closeRequested) {}
 
-  private record ControlIntent(Contracts.ControlInput input, boolean keepPrivate,
-      String previousOwner, Boolean previousPrivate, String previousController, UUID previousConnection) {}
+  private record ControlIntent(
+      Contracts.ControlInput input,
+      boolean keepPrivate,
+      String previousOwner,
+      Boolean previousPrivate,
+      String previousController,
+      UUID previousConnection) {}
 
-  private void queueInternalControl(UUID owner, UUID session, String type, Contracts.Browser previous,
-      UUID connection, boolean privateMode) {
-    Contracts.ControlInput input = new Contracts.ControlInput(type, null, true, false, connection, null, null);
-    ControlIntent intent = new ControlIntent(input, privateMode, previous.controlOwner(),
-        previous.privateMode(), reference(session).controllerId(), previous.connectionId());
-    jdbc.sql("""
+  private void queueInternalControl(
+      UUID owner,
+      UUID session,
+      String type,
+      Contracts.Browser previous,
+      UUID connection,
+      boolean privateMode) {
+    Contracts.ControlInput input =
+        new Contracts.ControlInput(type, null, true, false, connection, null, null);
+    ControlIntent intent =
+        new ControlIntent(
+            input,
+            privateMode,
+            previous.controlOwner(),
+            previous.privateMode(),
+            reference(session).controllerId(),
+            previous.connectionId());
+    jdbc.sql(
+            """
             UPDATE browser_sessions SET control_owner='TRANSFERRING',private_mode=true,
               control_epoch=control_epoch+1,pending_control=CAST(:intent AS jsonb),
               pending_connection_id=:connection,control_deadline_at=clock_timestamp()+interval '6 minutes',
               control_next_check_at=clock_timestamp(),version=version+1 WHERE id=:id
-            """).param("id", session).param("intent", json.write(intent))
-        .param("connection", connection).update();
+            """)
+        .param("id", session)
+        .param("intent", json.write(intent))
+        .param("connection", connection)
+        .update();
     events.emit(owner, "browser", session, 0);
   }
 }

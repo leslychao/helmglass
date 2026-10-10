@@ -454,6 +454,8 @@ async function execute(command: Command): Promise<object> {
   const fingerprint = createHash("sha256").update(JSON.stringify(command)).digest("hex");
   const previous = db.prepare("SELECT fingerprint FROM operations WHERE id=?").get(command.operationId);
   if (previous) {
+    // Cancellation can arrive before dispatch. Its durable receipt fences any late command.
+    if (previous["fingerprint"] === "") return receipt(command.operationId) ?? { operationId: command.operationId, status: "FAILED" };
     if (previous["fingerprint"] !== fingerprint) throw new HttpError(409, "Operation identity conflict");
     return receipt(command.operationId) ?? { operationId: command.operationId, status: "UNKNOWN" };
   }
@@ -668,8 +670,10 @@ const server = http.createServer(async (request, response) => {
     const cancel = /^\/commands\/([^/]+)\/cancel$/.exec(url.pathname);
     if (cancel?.[1] && request.method === "POST") {
       const id = z.uuid().parse(cancel[1]);
+      db.prepare("INSERT OR IGNORE INTO operations(id,fingerprint,status,result) VALUES(?,'','FAILED',?)")
+        .run(id, JSON.stringify({ code: "CANCELLED_BEFORE_DISPATCH" }));
       if (activeOperation === id) activeAbort?.abort(new Error("Operation cancelled"));
-      reply(response, 200, receipt(id) ?? { operationId: id, status: "FAILED", code: "NOT_DISPATCHED" });
+      reply(response, 200, receipt(id));
       return;
     }
     const resolve = /^\/commands\/([^/]+)\/resolve$/.exec(url.pathname);

@@ -41,20 +41,23 @@ const Session = z.object({
   initializing: z.boolean().default(false),
   startDeadlineAt: z.string().datetime().optional(), closeRequested: z.boolean().default(false),
   runtimeStoppedAt: z.string().datetime().optional(), cleanupComplete: z.boolean().default(false),
+  deadlineCheckAt: z.number().nonnegative().default(0),
   pendingOperation: z.object({ id: z.string(), deadlineAt: z.string().datetime(),
     cancelAt: z.string().datetime().optional(), kind: z.enum(["COMMAND", "CONTROL", "PROFILE"]) }).optional(),
   status: z.enum(["STARTING", "LIVE", "CLOSING", "CLOSED", "UNKNOWN", "LOST"]),
   networkId: z.string().optional(), containerId: z.string().optional(), egressId: z.string().optional(),
+  runtimeImage: z.string().optional(),
   address: z.string().optional(), policy: Policy,
   profileRevision: z.number().int().nonnegative().optional(), profileSavedAt: z.string().optional(),
   profileSaveError: z.string().optional(),
+  failureCode: z.string().optional(),
   cookieCheck: CookieCheck.optional(),
 });
 type Session = z.infer<typeof Session>;
 type Policy = z.infer<typeof Policy>;
 const CreateSession = z.object({ deadlineAt: z.string().datetime().optional(), sessionId: z.uuid(), ownerId: z.string().min(1).max(200), taskId: z.string().max(200).optional(), startUrl: z.string().max(8192), connectionId: z.string().max(200).optional(), restoreProfile: z.boolean().default(true) }).strict();
 const DockerIdentity = z.object({ Id: z.string() });
-const DockerInspect = z.object({ Id: z.string(), State: z.object({ Running: z.boolean() }), NetworkSettings: z.object({ Networks: z.record(z.string(), z.object({ IPAddress: z.string() })) }) });
+const DockerInspect = z.object({ Id: z.string(), Image: z.string(), State: z.object({ Running: z.boolean() }), NetworkSettings: z.object({ Networks: z.record(z.string(), z.object({ IPAddress: z.string() })) }) });
 const RuntimeState = z.object({ status: z.enum(["STARTING", "LIVE", "LOST"]), currentUrl: z.string().optional(), navigationError: z.string().optional(), controlEpoch: z.number().int().nonnegative(), controlOwner: z.enum(["CHATGPT", "USER", "NONE"]), privateMode: z.boolean(), controllerId: z.string().optional() });
 const AccessBinding = z.object({ channel: z.enum(["WEB", "MCP"]), grantId: z.string().min(1).max(200) }).strict();
 const Ticket = z.object({ ticket: z.string().min(32).max(512), role: z.enum(["VIEWER", "CONTROLLER"]), viewerId: z.string().min(1).max(200), expiresAt: z.string().datetime(), access: AccessBinding });
@@ -109,6 +112,7 @@ function summaries(): Session[] {
 function summary(session: Session): object {
   return { id: session.id, ownerId: session.ownerId, taskId: session.taskId, nodeId: config.nodeId, status: session.status, controlEpoch: session.policy.controlEpoch, controlOwner: session.policy.owner, privateMode: session.policy.privateMode,
     runtimeStoppedAt: session.runtimeStoppedAt ?? null,
+    failureCode: session.failureCode ?? null,
     cleanupState: session.cleanupComplete ? "COMPLETE" : session.runtimeStoppedAt ? "PENDING" : "NONE",
     profileConnectionId: session.connectionId, profileRevision: session.profileRevision,
     profileSavedAt: session.profileSavedAt, profileSaveError: session.profileSaveError ?? null,
@@ -133,7 +137,8 @@ async function sessionRequest(session: Session, endpoint: string, method = "GET"
   if (!session.address) throw new HttpError(409, "Browser unavailable");
   const pending = saved(session.id).pendingOperation;
   const timeout = endpoint.startsWith("/artifacts/") ? 360_000
-    : pending ? Math.max(1, Math.min(360_000, Date.parse(pending.deadlineAt) - Date.now() + 1000))
+    : endpoint.endsWith("/cancel") ? 2000
+    : method === "POST" && pending ? Math.max(1, Math.min(360_000, Date.parse(pending.deadlineAt) - Date.now()))
     : endpoint.startsWith("/profile") ? 300_000 : endpoint.startsWith("/commands") ? 90_000 : 30_000;
   const response = await fetch(`http://${session.address}:8080${endpoint}`, {
     method, headers: { "X-Worker-Token": session.token, "Content-Type": "application/json" },
@@ -155,9 +160,14 @@ async function prepareProfile(session: Session, connectionId: string, importId: 
   await existing.body?.cancel();
   if (existing.ok) return;
   if (existing.status !== 404) throw new HttpError(409, "Profile import unavailable");
+  const current = saved(session.id);
+  const deadline = current.pendingOperation?.deadlineAt ?? current.startDeadlineAt;
+  const remaining = deadline ? Date.parse(deadline) - Date.now() : 300_000;
+  if (remaining <= 0) throw new HttpError(408, "Profile import deadline exceeded");
   const source = await credentials.stream(connectionId, session.ownerId);
   const request = http.request({ hostname: session.address, port: 8080,
     path: endpoint + (origins ? "?origins=" + encodeURIComponent(JSON.stringify(origins)) : ""), method: "POST",
+    signal: AbortSignal.timeout(Math.min(300_000, remaining)),
     headers: { "X-Worker-Token": session.token, "Content-Type": "application/x-ndjson" } });
   request.setTimeout(300_000, () => request.destroy(new Error("Profile import timed out")));
   const result = new Promise<void>((resolve, reject) => {
@@ -207,13 +217,14 @@ async function createSession(input: z.infer<typeof CreateSession>): Promise<Sess
   try {
     session = saved(input.sessionId);
     if (session.ownerId !== input.ownerId || session.taskId !== input.taskId) throw new HttpError(409, "Session identity conflict");
+    if (session.closeRequested || session.runtimeStoppedAt) return closeSession(session);
     if (session.status !== "STARTING" && !session.initializing) return session;
   } catch (error) {
     if (!(error instanceof HttpError) || error.status !== 404) throw error;
     if (db.prepare("SELECT value FROM settings WHERE id='draining'").get()?.["value"] === "true") throw new HttpError(409, "Node does not accept new browsers");
     if (summaries().length >= config.capacity) throw new HttpError(409, "Browser capacity reached");
     if (input.startUrl !== "about:blank" && !["http:", "https:"].includes(new URL(input.startUrl).protocol)) throw new HttpError(400, "Invalid start URL");
-    session = save({ id: input.sessionId, ownerId: input.ownerId, taskId: input.taskId, startUrl: input.startUrl, connectionId: input.connectionId, restoreProfile: input.restoreProfile, initializing: true, startDeadlineAt: input.deadlineAt ?? new Date(Date.now() + 360_000).toISOString(), closeRequested: false, cleanupComplete: false, token: randomBytes(32).toString("base64url"), status: "STARTING", policy: { controlEpoch: 0, owner: "NONE", privateMode: false } });
+    session = save({ id: input.sessionId, ownerId: input.ownerId, taskId: input.taskId, startUrl: input.startUrl, connectionId: input.connectionId, restoreProfile: input.restoreProfile, initializing: true, startDeadlineAt: input.deadlineAt ?? new Date(Date.now() + 360_000).toISOString(), closeRequested: false, cleanupComplete: false, deadlineCheckAt: 0, token: randomBytes(32).toString("base64url"), status: "STARTING", policy: { controlEpoch: 0, owner: "NONE", privateMode: false } });
   }
   if (session.closeRequested || session.startDeadlineAt && Date.parse(session.startDeadlineAt) <= Date.now()) {
     return closeSession(session);
@@ -273,7 +284,7 @@ async function createSession(input: z.infer<typeof CreateSession>): Promise<Sess
   if (!container || !container.State.Running) return save({ ...session, status: "LOST" });
   const address = container.NetworkSettings.Networks[prefix]?.IPAddress;
   if (!address) throw new HttpError(502, "Browser isolation network unavailable");
-  session = save({ ...session, containerId: container.Id, egressId: egress.Id, address });
+  session = save({ ...session, containerId: container.Id, runtimeImage: container.Image, egressId: egress.Id, address });
   for (let attempt = 0; attempt < 4; attempt += 1) {
     if (saved(session.id).closeRequested) throw new HttpError(409, "Session closing");
     if (session.startDeadlineAt && Date.parse(session.startDeadlineAt) <= Date.now()) throw new HttpError(408, "Startup deadline exceeded");
@@ -291,7 +302,7 @@ async function createSession(input: z.infer<typeof CreateSession>): Promise<Sess
       if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, [1000, 3000, 10000][attempt]));
     }
   }
-  return save({ ...session, status: "LOST", initializing: false });
+  return save({ ...session, status: "LOST", initializing: false, failureCode: "START_FAILED" });
 }
 async function startSession(input: z.infer<typeof CreateSession>): Promise<Session> {
   let pending = starting.get(input.sessionId);
@@ -316,20 +327,21 @@ async function finishClose(id: string): Promise<Session> {
   save({ ...session, closeRequested: true, status: "CLOSING" });
   disconnectViewers(id, "session_closed");
   try {
-    // Creation observes closeRequested at every durable resource boundary. Never wait forever.
-    const creator = starting.get(id);
-    if (creator) {
-      const settled = await Promise.race([creator.then(() => true, () => true),
-        new Promise<false>(resolve => setTimeout(() => resolve(false), 10_000))]);
-      if (!settled) return saved(id);
-    }
+    // Stop execution even if profile restoration has not returned. Removing these containers
+    // also fences an already sent Docker start; the original named volume remains intact.
+    const creating = starting.has(id);
     session = saved(id);
     const container = await inspect(session.containerId ?? `helm-browser-${id}`);
+    if (container && !session.runtimeImage) {
+      session = save({ ...saved(id), runtimeImage: container.Image });
+    }
     if (container?.State.Running) await docker(`/containers/${container.Id}/stop?t=10`, "POST");
+    if (creating && container) await removeDocker(`/containers/${container.Id}?force=true`);
     const stopped = await inspect(session.containerId ?? `helm-browser-${id}`);
     if (stopped?.State.Running) return saved(id);
     const egress = await inspect(session.egressId ?? `helm-browser-${id}-egress`);
     if (egress?.State.Running) await docker(`/containers/${egress.Id}/stop?t=1`, "POST");
+    if (creating && egress) await removeDocker(`/containers/${egress.Id}?force=true`);
     const stoppedEgress = await inspect(session.egressId ?? `helm-browser-${id}-egress`);
     if (stoppedEgress?.State.Running) return saved(id);
     // Keep the original volume and receipts until the API acknowledges verified delivery.
@@ -340,7 +352,7 @@ async function finishClose(id: string): Promise<Session> {
 
 let archiveBusy = false;
 let archiveSession: string | undefined;
-async function withArchive(session: Session, work: (reader: Session) => Promise<void>): Promise<void> {
+async function withArchive(session: Session, work: (reader: Session) => Promise<void>): Promise<boolean> {
   if (!session.runtimeStoppedAt || session.cleanupComplete) throw new HttpError(409, "Archive unavailable");
   if (archiveBusy) throw new HttpError(409, "Archive reader busy");
   archiveBusy = true;
@@ -349,6 +361,12 @@ async function withArchive(session: Session, work: (reader: Session) => Promise<
     let reader = await inspect(name);
     if (reader && archiveSession !== session.id) { await removeDocker(`/containers/${reader.Id}?force=true`); reader = undefined; }
     if (!reader) {
+      // Docker would otherwise silently create an empty volume and hide lost delivery data.
+      try { await docker(`/volumes/helm-browser-${session.id}-data`); }
+      catch (error) {
+        if (!session.containerId && error instanceof HttpError && error.status === 404) return false;
+        throw error;
+      }
       const networkName = `helm-browser-${session.id}`;
       try { await docker(`/networks/${networkName}`); }
       catch (error) {
@@ -360,13 +378,16 @@ async function withArchive(session: Session, work: (reader: Session) => Promise<
       if (!manager?.NetworkSettings.Networks[networkName]) {
         await docker(`/networks/${networkName}/connect`, "POST", { Container: config.self });
       }
+      const sourceImage = session.runtimeImage ?? (await inspect(session.containerId ?? `helm-browser-${session.id}`))?.Image;
+      if (!sourceImage) throw new HttpError(502, "Original runtime image unavailable");
       const created = DockerIdentity.parse(await (await docker(`/containers/create?name=${name}`, "POST", {
-        Image: config.sessionImage, Entrypoint: ["node", "/app/dist/archive-reader.js"], User: "1000:1000",
+        Image: sourceImage,
+        Entrypoint: ["node", "/app/dist/archive-reader.js"], User: "1000:1000",
         Env: [`SESSION_TOKEN=${session.token}`], Labels: { "helmglass.node": config.nodeId, "helmglass.archive": "true" },
         HostConfig: { NetworkMode: networkName, ReadonlyRootfs: true, CapDrop: ["ALL"],
           SecurityOpt: ["no-new-privileges:true"], Memory: 268_435_456, PidsLimit: 32,
           Mounts: [{ Type: "volume", Source: `helm-browser-${session.id}-data`, Target: "/data", ReadOnly: true }],
-          LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "1" } } },
+          LogConfig: { Type: "local", Config: { "max-size": "1m", "max-file": "2" } } },
       })).json());
       await docker(`/containers/${created.Id}/start`, "POST");
       reader = await inspect(created.Id); archiveSession = session.id;
@@ -379,12 +400,14 @@ async function withArchive(session: Session, work: (reader: Session) => Promise<
       catch (error) { if (attempt >= 3) throw error; await new Promise(resolve => setTimeout(resolve, [1000, 3000, 10000][attempt])); }
     }
     await work(target);
+    return true;
   } finally { archiveBusy = false; }
 }
 
 async function cleanupSession(session: Session): Promise<Session> {
   if (!session.runtimeStoppedAt) throw new HttpError(409, "Execution stop is not confirmed");
   if (session.cleanupComplete) return session;
+  if (starting.has(session.id)) throw new HttpError(409, "Startup is still releasing disk resources");
   if (archiveBusy) throw new HttpError(409, "Archive reader busy");
   archiveBusy = true;
   try {
@@ -404,30 +427,47 @@ async function cleanupSession(session: Session): Promise<Session> {
   } finally { archiveBusy = false; }
 }
 
-async function watchDeadlines(): Promise<void> {
-  const candidates = summaries().filter(session => session.closeRequested
-    || session.initializing && session.startDeadlineAt && Date.parse(session.startDeadlineAt) <= Date.now()
-    || session.pendingOperation && Date.parse(session.pendingOperation.deadlineAt) <= Date.now());
-  await Promise.allSettled(candidates.slice(0, 20).map(async session => {
-    if (session.closeRequested || session.initializing) { await closeSession(session); return; }
-    const operation = session.pendingOperation;
-    if (!operation) return;
-    if (!operation.cancelAt) {
-      save({ ...saved(session.id), pendingOperation: { ...operation, cancelAt: new Date().toISOString() } });
-      if (operation.kind === "COMMAND") {
-        void sessionJson(session, `/commands/${operation.id}/cancel`, "POST", {})
-          .catch(() => { /* Stop is independently confirmed below. */ });
-      }
-    } else if (Date.parse(operation.cancelAt) + 10_000 <= Date.now()) {
-      await closeSession(session);
+const deadlineChecks = new Set<string>();
+async function checkDeadline(session: Session): Promise<void> {
+  if (session.closeRequested || session.initializing) {
+    if (session.initializing && !session.closeRequested) {
+      save({ ...saved(session.id), failureCode: "START_DEADLINE_EXCEEDED" });
     }
-  }));
+    await closeSession(session);
+    return;
+  }
+  const operation = session.pendingOperation;
+  if (!operation) return;
+  if (!operation.cancelAt) {
+    save({ ...saved(session.id), pendingOperation: { ...operation, cancelAt: new Date().toISOString() } });
+    if (operation.kind === "COMMAND") {
+      try { await sessionJson(session, `/commands/${operation.id}/cancel`, "POST", {}); }
+      catch { /* The next check confirms physical shutdown independently. */ }
+    }
+  } else if (Date.parse(operation.cancelAt) + 10_000 <= Date.now()) {
+    save({ ...saved(session.id), failureCode: operation.kind + "_DEADLINE_EXCEEDED" });
+    await closeSession(session);
+  }
 }
-let checkingDeadlines = false;
 setInterval(() => {
-  if (checkingDeadlines) return;
-  checkingDeadlines = true;
-  void watchDeadlines().finally(() => { checkingDeadlines = false; });
+  const now = Date.now();
+  const due = summaries().filter(session => session.deadlineCheckAt <= now
+    && !deadlineChecks.has(session.id) && (session.closeRequested
+      || session.initializing && session.startDeadlineAt && Date.parse(session.startDeadlineAt) <= now
+      || session.pendingOperation && Date.parse(session.pendingOperation.deadlineAt) <= now))
+    .sort((left, right) => left.deadlineCheckAt - right.deadlineCheckAt);
+  for (const session of due.slice(0, Math.max(0, 8 - deadlineChecks.size))) {
+    deadlineChecks.add(session.id);
+    save({ ...session, deadlineCheckAt: now + 45_000 });
+    void checkDeadline(saved(session.id)).catch(() => {
+      console.warn(JSON.stringify({ event: "deadline_check_failed", sessionId: session.id }));
+    }).finally(() => {
+      try { save({ ...saved(session.id), deadlineCheckAt: Date.now() + 1000 }); }
+      finally { deadlineChecks.delete(session.id); }
+    }).catch(() => {
+      console.warn(JSON.stringify({ event: "deadline_check_persist_failed", sessionId: session.id }));
+    });
+  }
 }, 1000).unref();
 
 function recordRuntimeState(id: string, state: z.infer<typeof RuntimeState>): Session {
@@ -439,11 +479,18 @@ function recordRuntimeState(id: string, state: z.infer<typeof RuntimeState>): Se
   return save({ ...current, status: state.status, policy });
 }
 async function recoverSessionRoutes(): Promise<void> {
-  for (const session of summaries()) {
+  const pending = summaries().values();
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    for (const original of pending) {
+      let session = saved(original.id);
+      try {
+    if (session.initializing && !session.startDeadlineAt) {
+      session = save({ ...session, startDeadlineAt: new Date(Date.now() + 360_000).toISOString() });
+    }
     if (session.status === "CLOSING") { await closeSession(session); continue; }
     if (!session.containerId || !session.networkId) { save({ ...session, status: "UNKNOWN" }); continue; }
     const container = await inspect(session.containerId);
-    if (!container?.State.Running) { save({ ...session, status: "LOST" }); continue; }
+    if (!container?.State.Running) { await closeSession(saved(session.id)); continue; }
     const networkName = `helm-browser-${session.id}`;
     const manager = await inspect(config.self);
     if (!manager?.NetworkSettings.Networks[networkName]?.IPAddress) await docker(`/networks/${session.networkId}/connect`, "POST", { Container: config.self });
@@ -451,10 +498,13 @@ async function recoverSessionRoutes(): Promise<void> {
     if (!address) { save({ ...session, status: "UNKNOWN" }); continue; }
     const routed = save({ ...session, address });
     try { recordRuntimeState(session.id, RuntimeState.parse(await sessionJson(routed, "/health"))); }
-    catch { save({ ...routed, status: "UNKNOWN" }); }
-  }
+    catch { save({ ...saved(session.id), status: "UNKNOWN" }); }
+      } catch {
+        console.warn(JSON.stringify({ event: "session_route_unavailable", sessionId: session.id }));
+      }
+    }
+  }));
 }
-await recoverSessionRoutes();
 const mimeTypes: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".json": "application/json", ".woff2": "font/woff2" };
 async function assets(url: URL, response: ServerResponse): Promise<void> {
   const relative = decodeURIComponent(url.pathname.slice("/novnc/".length));
@@ -638,12 +688,19 @@ const server = http.createServer(async (request, response) => {
     }
     if (session.runtimeStoppedAt && request.method === "GET" && ["artifacts", "commands"].includes(segments[2] ?? "")) {
       const endpoint = '/' + segments.slice(2).join('/') + url.search;
-      await withArchive(session, async reader => {
+      const available = await withArchive(session, async reader => {
         const upstream = await sessionRequest(reader, endpoint);
         response.writeHead(upstream.status, { "Content-Type": upstream.headers.get("content-type") ?? "application/json",
           ...(upstream.headers.get("content-length") ? { "Content-Length": upstream.headers.get("content-length")! } : {}) });
         if (upstream.body) await pipeline(Readable.fromWeb(upstream.body), response); else response.end();
       });
+      if (!available) {
+        if (segments[2] === "artifacts" && segments.length === 3) {
+          reply(response, 200, { artifacts: [], nextCursor: 0, hasMore: false });
+        } else {
+          reply(response, 404, { error: "Browser never started; no stored result" });
+        }
+      }
       return;
     }
     if (segments.length === 2 && request.method === "DELETE") { reply(response, 200, summary(await closeSession(session))); return; }
@@ -660,11 +717,18 @@ const server = http.createServer(async (request, response) => {
         session = recordRuntimeState(session.id, state); reply(response, 200, { ...summary(session), ...(!session.policy.privateMode ? { currentUrl: state.currentUrl, navigationError: state.navigationError } : {}) });
       } catch {
         session = saved(session.id);
+        const container = await inspect(session.containerId ?? `helm-browser-${session.id}`);
+        if (!container?.State.Running) {
+          reply(response, 200, summary(await closeSession(session)));
+          return;
+        }
         reply(response, 200, summary(session.status === "CLOSED" || session.status === "CLOSING" ? session : save({ ...session, status: "UNKNOWN" })));
       }
       return;
     }
-    if (session.status === "CLOSED" || session.status === "CLOSING") throw new HttpError(409, "Session closed");
+    if (session.closeRequested || session.runtimeStoppedAt || session.status === "CLOSED" || session.status === "CLOSING") {
+      throw new HttpError(409, "Session closed");
+    }
     if (segments[2] === "bind" && request.method === "POST") {
       const input = z.object({ ownerId: z.string(), taskId: z.uuid() }).strict().parse(await body(request));
       if (input.ownerId !== session.ownerId || (session.taskId && session.taskId !== input.taskId)
@@ -713,14 +777,15 @@ const server = http.createServer(async (request, response) => {
       const policy = Policy.parse(input);
       const deadlineAt = input.deadlineAt ?? new Date(Date.now() + 30_000).toISOString();
       if (Date.parse(deadlineAt) <= Date.now()) throw new HttpError(408, "Control deadline exceeded");
-      save({ ...saved(session.id), pendingOperation: { id: `control:${policy.controlEpoch}`, kind: "CONTROL", deadlineAt } });
       if (policy.controlEpoch < session.policy.controlEpoch) throw new HttpError(409, "Stale control epoch");
       if (policy.owner === "USER" && !policy.controllerId) throw new HttpError(400, "Controller identity required");
+      save({ ...saved(session.id), pendingOperation: { id: `control:${policy.controlEpoch}`, kind: "CONTROL", deadlineAt } });
 
       disconnectViewers(session.id, "control_changed");
       const result = await sessionJson(session, "/control", "POST", policy);
       const current = saved(session.id);
-      if (!current.closeRequested && current.policy.controlEpoch <= policy.controlEpoch) save({ ...current, policy, pendingOperation: undefined });
+      if (current.closeRequested) throw new HttpError(409, "Browser closing");
+      if (current.policy.controlEpoch <= policy.controlEpoch) save({ ...current, policy });
       if (policy.owner === "USER" && policy.privateMode && current.connectionId) {
         try {
           const value = await credentials.read(current.connectionId, current.ownerId);
@@ -730,6 +795,10 @@ const server = http.createServer(async (request, response) => {
           // The control transition succeeded. Storage failure only prevents optional autofill.
           save({ ...saved(session.id), profileSaveError: error.code });
         }
+      }
+      const completed = saved(session.id);
+      if (!completed.closeRequested && completed.pendingOperation?.id === `control:${policy.controlEpoch}`) {
+        save({ ...completed, pendingOperation: undefined });
       }
       reply(response, 200, result); return;
     }
@@ -847,4 +916,5 @@ server.on("upgrade", (request, socket, head) => {
   } catch { socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"); }
 });
 server.listen(8090, "0.0.0.0");
+void recoverSessionRoutes();
 // Manager shutdown never terminates session containers; a replacement manager reconciles them.

@@ -876,7 +876,9 @@ class UsageAdministrationTest(unittest.TestCase):
         listed=[browser for node in nodes for browser in node["browsers"] if browser["ownerId"]==self.identity.id]
         self.assertEqual(3,len(listed))
         self.assertEqual(2,sum(browser["taskId"] is None for browser in listed))
-        self.assertTrue(all(set(browser)=={"id","taskId","ownerId","ownerName","ownerEmail","status","taskStatus"} for browser in listed))
+        self.assertTrue(all(set(browser)=={"id","taskId","ownerId","ownerName","ownerEmail","status","taskStatus",
+                                          "cleanupState","cleanupError"} for browser in listed))
+        self.assertTrue(all(browser['cleanupState'] == 'NONE' and browser['cleanupError'] is None for browser in listed))
         draft=self.create("Stop all keeps draft",prepare=False)
         self.assertEqual(200,self.admin_command("STOP_ALL",reason=None)[0])
         deadline=time.monotonic()+45

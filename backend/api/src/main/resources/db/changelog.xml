@@ -100,4 +100,7 @@
   <changeSet id="30-browser-lifecycle-deadlines" author="helmglass">
     <sqlFile path="030-browser-lifecycle-deadlines.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="31-operation-reconciliation" author="helmglass">
+    <sqlFile path="031-operation-reconciliation.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

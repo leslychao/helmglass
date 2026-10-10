@@ -38,6 +38,14 @@ class ConnectionContractTest(unittest.TestCase):
         return client,task
 
     def observe(self, client, task):
+        deadline = time.monotonic() + 40
+        while True:
+            error, task, _ = client.tool('tasks.get', {'taskId': task['id']})
+            self.assertFalse(error, task)
+            if not task.get('browser') or task['browser']['controlOwner'] != 'TRANSFERRING':
+                break
+            self.assertLess(time.monotonic(), deadline, 'Control adoption did not settle')
+            time.sleep(.2)
         operation = str(uuid.uuid4())
         action = {"operationId":operation,"type":"observe","arguments":{},"instructionRevision":task["instructionRevision"]}
         if task.get("browser"):
@@ -435,7 +443,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             + str(uuid.UUID(browser_id)) + "';"))
         removed = dev.subprocess.run([
             'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
-            'ps', '-aq', '--filter', 'name=helm-browser-' + browser_id],
+            'ps', '-q', '--filter', 'name=helm-browser-' + browser_id],
             capture_output=True, text=True, timeout=20)
         self.assertEqual((0, ''), (removed.returncode, removed.stdout.strip()))
         self.assertEqual(404, self.user.api(path)[0])
@@ -461,7 +469,7 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         ui = dev.subprocess.run([
             'docker', '--host', 'tcp://' + self.settings['DEV_HOST'] + ':2375',
             'run', '--rm', '-i', '--network', 'bridge', '--user', 'node',
-            '--security-opt', 'seccomp=backend/browser-node/seccomp-profile.json',
+            '--security-opt', 'seccomp=' + str(Path(__file__).resolve().parents[2] / 'browser-node' / 'seccomp-profile.json'),
             '--entrypoint', 'node', 'helmglass-browser-session:current', '--input-type=module', '-'],
             input='''
             import assert from 'node:assert/strict';
@@ -1194,7 +1202,14 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             status, value = primary.api("/api/tasks/" + stopped["id"] + "/commands", "POST", {
                 "type": "RESUME", "expectedVersion": value["version"], "confirmBrowserLoss": True})
             self.assertEqual(200, status, value)
-            operation = self.observe(transport, value)
+            operation = str(uuid.uuid4())
+            error, receipt, _ = transport.tool("browser.execute", {"taskId": value["id"], "action": {
+                "operationId": operation, "type": "observe", "arguments": {},
+                "instructionRevision": value["instructionRevision"],
+                "step": {"operationKey": "verify-reopened-connection", "objectKey": value["id"],
+                         "title": "Проверить подключение после продолжения",
+                         "completionCriterion": "Выбранное подключение открыто и страница прочитана"}}})
+            self.assertFalse(error, receipt)
             value = primary.api("/api/tasks/" + stopped["id"])[1]
             self.assertEqual("ACCOUNT_CHOICE", value["request"]["type"])
             self.assertEqual("WAITING_USER", value["status"])
@@ -1202,7 +1217,18 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
             self.assertEqual("CLOSED", primary.api("/api/connections/" + second)[1]["browser"]["status"])
             error, chosen, _ = transport.respond(value,{"connectionId":second})
             self.assertFalse(error, chosen)
-            self.assertEqual("SUCCEEDED", self.wait_operation(operation, transport)["status"])
+            receipt = self.wait_operation(operation, transport)
+            self.assertEqual("SUCCEEDED", receipt["status"])
+            error, page, _ = transport.tool("steps.list", {"taskId": value["id"]})
+            self.assertFalse(error, page)
+            step = next(item for item in page["items"] if item["id"] == receipt["stepId"])
+            error, completed, _ = transport.tool("steps.command", {
+                "taskId": value["id"], "operationKey": str(uuid.uuid4()), "command": {
+                    "type": "COMPLETE", "stepId": step["id"], "expectedVersion": step["version"],
+                    "instructionRevision": value["instructionRevision"], "outcome": "SUCCEEDED",
+                    "result": "Выбранное подключение открыто",
+                    "evidence": [{"type": "OPERATION", "operationId": operation}]}})
+            self.assertFalse(error, completed)
             finish(stopped["id"])
 
     def test_busy_connection_does_not_block_other_owner(self):

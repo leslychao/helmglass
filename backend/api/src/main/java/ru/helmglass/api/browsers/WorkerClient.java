@@ -1,7 +1,7 @@
 package ru.helmglass.api.browsers;
 
-import java.io.IOException;
 import java.io.FilterInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -9,11 +9,11 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.Set;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import ru.helmglass.api.JsonSupport;
@@ -23,10 +23,18 @@ import tools.jackson.databind.JsonNode;
 @Component
 public class WorkerClient {
   private static final int MAXIMUM_REPLY_BYTES = 2 * 1024 * 1024;
-  private static final Set<String> PROFILE_ERRORS = Set.of(
-      "PROFILE_TOO_LARGE", "PROFILE_RECORD_TOO_LARGE", "PROFILE_COMPLEXITY_LIMIT",
-      "PROFILE_STORAGE_UNAVAILABLE", "PROFILE_INVALID", "PROFILE_SNAPSHOT_CHANGED",
-      "PROFILE_REVISION_CHANGED", "PROFILE_UNSUPPORTED_VALUE", "PROFILE_SAVE_FAILED");
+  private static final long[] RETRY_DELAYS_MILLIS = {1000, 3000, 10000};
+  private static final Set<String> PROFILE_ERRORS =
+      Set.of(
+          "PROFILE_TOO_LARGE",
+          "PROFILE_RECORD_TOO_LARGE",
+          "PROFILE_COMPLEXITY_LIMIT",
+          "PROFILE_STORAGE_UNAVAILABLE",
+          "PROFILE_INVALID",
+          "PROFILE_SNAPSHOT_CHANGED",
+          "PROFILE_REVISION_CHANGED",
+          "PROFILE_UNSUPPORTED_VALUE",
+          "PROFILE_SAVE_FAILED");
   private final HttpClient http =
       HttpClient.newBuilder()
           .connectTimeout(Duration.ofSeconds(5))
@@ -36,8 +44,9 @@ public class WorkerClient {
   private final String baseUrl;
   private final String token;
   private final JsonSupport json;
-  private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor(
-      Thread.ofPlatform().daemon().name("worker-response-deadline").factory());
+  private final ScheduledExecutorService deadlines =
+      Executors.newSingleThreadScheduledExecutor(
+          Thread.ofPlatform().daemon().name("worker-response-deadline").factory());
 
   public WorkerClient(
       @Value("${helm.worker-url}") String baseUrl,
@@ -54,6 +63,40 @@ public class WorkerClient {
 
   public JsonNode call(String method, String path, Object body, Duration timeout) {
     long deadline = System.nanoTime() + timeout.toNanos();
+    boolean retryable =
+        "GET".equals(method)
+            || "DELETE".equals(method)
+            || "POST".equals(method)
+                && (path.endsWith("/control")
+                    || path.endsWith("/profile/export")
+                        && body instanceof java.util.Map<?, ?> values
+                        && values.containsKey("operationId"));
+    for (int attempt = 0; ; attempt++) {
+      try {
+        return callOnce(method, path, body, deadline);
+      } catch (WorkerException failure) {
+        if (!retryable
+            || attempt == RETRY_DELAYS_MILLIS.length
+            || !(failure.status() == 0 || Set.of(502, 503, 504).contains(failure.status()))
+            || "WORKER_INTERRUPTED".equals(failure.code())) {
+          throw failure;
+        }
+        long delay = RETRY_DELAYS_MILLIS[attempt];
+        if (deadline - System.nanoTime() <= TimeUnit.MILLISECONDS.toNanos(delay)) {
+          throw failure;
+        }
+        try {
+          Thread.sleep(delay);
+        } catch (InterruptedException exception) {
+          Thread.currentThread().interrupt();
+          throw new WorkerException("WORKER_INTERRUPTED", 0, exception);
+        }
+      }
+    }
+  }
+
+  private JsonNode callOnce(String method, String path, Object body, long deadline) {
+    Duration timeout = Duration.ofNanos(Math.max(1, deadline - System.nanoTime()));
     try {
       HttpRequest request = request(method, path, body).timeout(timeout).build();
       HttpResponse<InputStream> response =
@@ -66,8 +109,8 @@ public class WorkerClient {
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
           if (bytes.length > 0) {
             try {
-              String code = json.read(new String(bytes, StandardCharsets.UTF_8))
-                  .path("code").asString("");
+              String code =
+                  json.read(new String(bytes, StandardCharsets.UTF_8)).path("code").asString("");
               if (PROFILE_ERRORS.contains(code)) {
                 throw new WorkerException(code, response.statusCode());
               }
@@ -83,9 +126,9 @@ public class WorkerClient {
       }
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
-      throw new WorkerException("WORKER_INTERRUPTED", 0);
+      throw new WorkerException("WORKER_INTERRUPTED", 0, exception);
     } catch (IOException exception) {
-      throw new WorkerException("WORKER_UNREACHABLE", 0);
+      throw new WorkerException("WORKER_UNREACHABLE", 0, exception);
     }
   }
 
@@ -94,7 +137,9 @@ public class WorkerClient {
     long deadline = System.nanoTime() + timeout.toNanos();
     try {
       var response =
-          http.send(request("GET", path, null).timeout(timeout).build(), HttpResponse.BodyHandlers.ofInputStream());
+          http.send(
+              request("GET", path, null).timeout(timeout).build(),
+              HttpResponse.BodyHandlers.ofInputStream());
       if (response.statusCode() != 200) {
         response.body().close();
         throw new IOException("Worker artifact unavailable");
@@ -109,17 +154,23 @@ public class WorkerClient {
   private InputStream bounded(InputStream input, long deadline) {
     return new FilterInputStream(input) {
       private volatile boolean expired;
-      private final ScheduledFuture<?> timer = deadlines.schedule(() -> {
-        expired = true;
-        try {
-          input.close();
-        } catch (IOException exception) {
-          // The consuming read reports the deadline, independently of transport shutdown.
-        }
-      }, Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+      private final ScheduledFuture<?> timer =
+          deadlines.schedule(
+              () -> {
+                expired = true;
+                try {
+                  input.close();
+                } catch (IOException exception) {
+                  // The consuming read reports the deadline, independently of transport shutdown.
+                }
+              },
+              Math.max(0, deadline - System.nanoTime()),
+              TimeUnit.NANOSECONDS);
 
       private void checkDeadline() throws IOException {
-        if (expired || System.nanoTime() >= deadline) throw new IOException("Worker response timed out");
+        if (expired || System.nanoTime() >= deadline) {
+          throw new IOException("Worker response timed out");
+        }
       }
 
       @Override
@@ -172,7 +223,11 @@ public class WorkerClient {
     private final int status;
 
     public WorkerException(String code, int status) {
-      super(code);
+      this(code, status, null);
+    }
+
+    private WorkerException(String code, int status, Throwable cause) {
+      super(code, cause);
       this.code = code;
       this.status = status;
     }

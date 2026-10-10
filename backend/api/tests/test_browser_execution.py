@@ -136,7 +136,7 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
             'taskId': self.task['id'], 'actions': [conflict, *commands[1:]]})
         self.assertTrue(error, refusal)
         self.assertEqual('IDEMPOTENCY_CONFLICT', refusal['code'])
-        print(f'Three actions + final snapshot: {time.monotonic()-started:.3f}s', flush=True)
+        print(f'Sequence, replay and conflict checks: {time.monotonic()-started:.3f}s', flush=True)
 
     def test_media_reads_omit_redundant_dom_and_replay_preserves_observation(self):
         self.ready()
@@ -327,6 +327,9 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.assertEqual('region', region['scope']['type'])
         self.assertIn('Saved 1', str(region['snapshot']))
         self.assertLess(len(json.dumps(region)), len(json.dumps(observed)))
+        print(json.dumps({'pageObservationBytes': len(json.dumps(observed, ensure_ascii=False, separators=(',', ':')).encode()),
+                          'regionObservationBytes': len(json.dumps(region, ensure_ascii=False, separators=(',', ':')).encode()),
+                          'regionMetrics': region['metrics']}))
 
     def test_text_wait_timeout_preserves_success_and_rejects_invalid_combinations(self):
         self.ready()
@@ -339,6 +342,13 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
                 'action': self.action(kind, arguments)})
             self.assertTrue(error, refusal)
             self.assertEqual('VALIDATION', refusal['code'])
+        missing_arguments = self.action('observe')
+        missing_arguments['arguments'] = None
+        # Null is rejected by the published object schema before Helm's handler.
+        refusal = self.client.rpc('tools/call', {'name': 'browser.execute', 'arguments': {
+            'taskId': self.task['id'], 'actions': [missing_arguments]}})
+        self.assertTrue(refusal['isError'], refusal)
+        self.assertIn('/actions/0/arguments', refusal['content'][0]['text'])
         commands = [self.action('click', self.target(observed, 'Save delayed')),
                     self.action('waitFor', {**self.target(observed, 'Save status'), 'text': 'Never appears'})]
         pending = self.execute(actions=commands)

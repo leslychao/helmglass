@@ -102,7 +102,16 @@ class ChatTaskTest(unittest.TestCase):
 
     def test_bind_create_and_reopen_share_the_same_database_guard(self):
         first = self.start()["task"]
-        completed = self.command(first, "FINISH", outcome="SUCCEEDED", text="Recorded result A")
+        # Queue explanations may advance the version before this fixture finishes its empty task.
+        for attempt in range(3):
+            current = self.current(first)
+            status, completed = self.client.api('/api/tasks/' + first['id'] + '/commands', 'POST', {
+                'type': 'FINISH', 'expectedVersion': current['version'],
+                'outcome': 'SUCCEEDED', 'text': 'Recorded result A'})
+            if status == 200:
+                break
+            self.assertEqual('STALE_VERSION', completed.get('code'), completed)
+        self.assertEqual(200, status, completed)
         cabinet = self.create("Existing cabinet task", site=self.client.browser_fixture_url().removeprefix("https://"))
         commands = [
             ("tasks.command", {"taskId": first["id"], "operationKey": str(uuid.uuid4()),
@@ -131,6 +140,10 @@ class ChatTaskTest(unittest.TestCase):
         for i, (error, value, _) in enumerate(results):
             if i != index:
                 self.assertTrue(error)
+                if i == 0 and value.get('code') == 'STALE_VERSION':
+                    self.assertEqual('SUCCEEDED', self.current(first)['status'])
+                    continue
+                self.assertEqual("CHAT_TASK_IN_PROGRESS", value.get("code"), value)
                 self.assertEqual(("CHAT_TASK_IN_PROGRESS", task["id"]),
                     (value["code"], value["currentTaskId"]))
         self.assertEqual(3 if index == 2 else 2, self.client.api("/api/tasks")[1]["total"])

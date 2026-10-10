@@ -16,6 +16,70 @@ class TaskContinuationTest(unittest.TestCase):
     wait_operation = usage.UsageAdministrationTest.wait_operation
     command = usage.UsageAdministrationTest.command
 
+    def test_stalled_continuation_explains_each_stage_without_resending_or_extending_browser(self):
+        self.client.login_mcp()
+        error, shown, _ = self.client.tool('tasks.create', {
+            'operationKey': str(uuid.uuid4()), 'task': {
+                'title': 'Continuation delivery deadlines', 'goal': 'Read the public fixture',
+                'startUrl': self.client.browser_fixture_url(), 'prepare': True}})
+        self.assertFalse(error, shown)
+        task = shown['task']
+        widget = {'taskId': task['id'], 'generation': shown['generation']}
+        self.client.observe_task_browser(task['id'])
+        for stage, reason in (('PENDING', 'не запросил'), ('SENDING', 'неизвестен'),
+                              ('MESSAGE_SENT', 'новая команда не получена')):
+            with self.subTest(stage=stage):
+                self.client.return_control_without_continuing(task['id'])
+                self.command(task, 'RESUME')
+                error, state, _ = self.client.tool('widget.state', widget)
+                self.assertFalse(error, state)
+                self.assertEqual('PENDING', state['continuationStatus'])
+                attempt = {**widget, 'continuationId': state['continuationId']}
+                idle = state['task']['browser']['idleCloseAt']
+                if stage != 'PENDING':
+                    self.assertTrue(self.client.tool('widget.claim', attempt)[1]['claimed'])
+                if stage == 'MESSAGE_SENT':
+                    self.assertFalse(self.client.tool('widget.continuation', {**attempt, 'sent': True})[0])
+                self.assertEqual(stage, self.client.tool('widget.state', widget)[1]['continuationStatus'])
+                self.fixture_sql(self.identity,
+                    "UPDATE mcp_chats SET continuation_requested_at=clock_timestamp()-interval '61 seconds',"
+                    "continuation_claimed_at=CASE WHEN continuation_claimed_at IS NULL THEN NULL "
+                    "ELSE clock_timestamp()-interval '61 seconds' END WHERE owner_id=:owner AND task_id='"
+                    + task['id'] + "';")
+                until = time.monotonic() + 12
+                while time.monotonic() < until:
+                    state = self.client.tool('widget.state', widget)[1]
+                    if state['continuationStatus'] == 'UNAVAILABLE':
+                        break
+                    time.sleep(.2)
+                self.assertEqual('UNAVAILABLE', state['continuationStatus'])
+                self.assertIn(reason, state['continuationReason'])
+                self.assertEqual(idle, state['task']['browser']['idleCloseAt'])
+                self.assertFalse(self.client.tool('widget.claim', attempt)[1]['claimed'])
+                self.assertEqual('UNAVAILABLE', self.client.tool('widget.continuation',
+                    {**attempt, 'sent': True})[1]['continuationStatus'])
+                operation = str(uuid.uuid4())
+                error, receipt, _ = self.client.tool('browser.execute', {'taskId': task['id'], 'action': {
+                    'operationId': operation, 'type': 'observe', 'arguments': {},
+                    'instructionRevision': state['task']['instructionRevision'],
+                    'controlEpoch': state['task']['browser']['controlEpoch'],
+                    'step': {'operationKey': 'verify-continuation-' + stage.lower(), 'objectKey': task['id'],
+                             'title': 'Проверить принятое продолжение',
+                             'completionCriterion': 'Свежая страница прочитана после ожидания'}}})
+                self.assertFalse(error, receipt)
+                receipt = self.wait_operation(operation, self.client)
+                self.assertEqual('SUCCEEDED', receipt['status'])
+                self.assertEqual('ACCEPTED', self.client.tool('widget.state', widget)[1]['continuationStatus'])
+                step = next(item for item in self.client.tool('steps.list', {'taskId': task['id']})[1]['items']
+                            if item['id'] == receipt['stepId'])
+                error, completed, _ = self.client.tool('steps.command', {
+                    'taskId': task['id'], 'operationKey': str(uuid.uuid4()), 'command': {
+                        'type': 'COMPLETE', 'stepId': step['id'], 'expectedVersion': step['version'],
+                        'instructionRevision': state['task']['instructionRevision'], 'outcome': 'SUCCEEDED',
+                        'result': 'Продолжение принято и страница прочитана',
+                        'evidence': [{'type': 'OPERATION', 'operationId': operation}]}})
+                self.assertFalse(error, completed)
+
     def test_stale_widget_read_is_typed_but_stale_commands_remain_denied(self):
         self.client.login_mcp()
         error, initial, _ = self.client.tool("tasks.create", {

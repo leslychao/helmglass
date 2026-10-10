@@ -115,7 +115,13 @@ export function browserViewerId(): string {
     }
     @if (idleError()) { <p class="error-banner" role="alert">{{ idleError() }}</p> }
     @if (browser()?.cleanupState === 'FAILED') {
-      <p class="error-banner" role="alert">Браузер освобождён. Сохранение оставшихся файлов или очистка не завершены. Администратор может повторить операцию; исходные файлы сохранены.</p>
+      <p class="error-banner" role="alert">
+        @if (browser()?.cleanupError === 'CLEANUP_FAILED') {
+          Браузер освобождён, файлы перенесены, но очистка диска не завершена. Администратор может повторить очистку.
+        } @else {
+          Браузер освобождён, но перенос оставшихся файлов не завершён. Исходные файлы сохранены; администратор может повторить перенос.
+        }
+      </p>
     } @else if (browser()?.status === 'CLOSED' && browser()?.cleanupState === 'PENDING') {
       <p class="browser-inline-notice" role="status">Браузер освобождён. Завершаем сохранение файлов.</p>
     }
@@ -150,7 +156,7 @@ export function browserViewerId(): string {
               @else if (connection()?.profileSavedAt) { Подключение и сохранённый вход доступны. }
               @else { Откройте браузер и войдите на сайт, чтобы сохранить сессию. }
             </p>
-            @if (browser()?.closeReason === 'IDLE_TIMEOUT') { <p>Браузер закрыт после 15 минут бездействия.</p> }
+            @if (browser()?.closeReason === 'IDLE_TIMEOUT') { <p>Браузер закрыт по истечении срока бездействия.</p> }
             @if (canOpen()) {
               <button class="button" [disabled]="busy()" (click)="openBrowser.emit()"><hg-icon name="browser" />{{ browser() ? 'Возобновить браузер' : 'Открыть браузер' }}</button>
             }
