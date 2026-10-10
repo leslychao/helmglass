@@ -19,7 +19,7 @@
 
 ## Конфигурация и запуск
 
-Нужны Docker CLI с Compose v2 и Linux shell. В Windows используйте Git Bash или WSL.
+Нужны Docker CLI с Compose 2.30.0 или новее и Linux shell. В Windows используйте Git Bash или WSL.
 Сборка выполняется штатными Dockerfile; локальные Java и Maven для неё не нужны.
 
 1. Скопируйте `deploy/.env.dev.example` в `deploy/.env.dev`, а
@@ -44,10 +44,9 @@
 sh deploy/deploy-dev.sh deploy/.env.dev
 ```
 
-Для Docker Compose `2.29.7-desktop.1`, где наблюдался `concurrent map writes`,
-успешно проверен тот же запуск с `COMPOSE_PARALLEL_LIMIT=1` перед `sh`.
-Это [штатный предел параллелизма Compose](https://docs.docker.com/compose/how-tos/environment-variables/envvars/#compose_parallel_limit),
-а не изменение конфигурации приложения.
+Compose 2.30.0 содержит [исправление гонки при обновлении зависимых контейнеров](https://github.com/docker/compose/pull/12150).
+Скрипт отклоняет прежние версии до сборки и остановки сервисов: ограничение
+`COMPOSE_PARALLEL_LIMIT` не устраняет эту гонку.
 
 Скрипт выбирает env-файл явно, проверяет Compose, собирает образы, запрещает новые
 назначения и ждёт подтверждённого освобождения браузеров. Неизвестное состояние узла

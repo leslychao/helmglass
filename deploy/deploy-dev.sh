@@ -23,6 +23,12 @@ export MSYS2_ARG_CONV_EXCL='/usr/local/;/vault/'
 unset DOCKER_TLS_VERIFY DOCKER_CERT_PATH COMPOSE_PROFILES COMPOSE_FILE
 cd "$PROJECT_DIR"
 compose() { docker compose --env-file "$ENV_FILE" -f "$SCRIPT_DIR/docker-compose.yml" "$@"; }
+compose_version=$(docker compose version --short)
+if ! printf '%s\n' "$compose_version" | awk -F. \
+    '{ sub(/^v/, "", $1); exit !(($1 + 0) > 2 || (($1 + 0) == 2 && ($2 + 0) >= 30)) }'; then
+  printf '%s\n' 'Docker Compose 2.30.0 or newer is required; older versions can crash during up.' >&2
+  exit 1
+fi
 if [ "${2:-}" = '--vault-init' ]; then
   if [ -n "${VAULT_UNSEAL_KEY:-}" ] && [ -n "${VAULT_ROLE_ID:-}" ] && [ -n "${VAULT_SECRET_ID:-}" ]; then
     printf '%s\n' 'Vault credentials already exist; initialization was not repeated.'
