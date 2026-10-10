@@ -30,7 +30,6 @@
   .browser-toolbar { flex-wrap: wrap; gap: 8px; }
   .browser-address { flex: 1 1 230px; }
   .browser-controls { flex: 1 1 auto; justify-content: flex-end; }
-  .browser-step { display: none; }
 }
 @media(max-width:820px) {
   .browser-toolbar { padding: 10px; gap: 9px; }

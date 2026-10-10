@@ -148,7 +148,6 @@
       (openBrowser)="command('OPEN_BROWSER')"
       (stepsOpen)="historyOpen.set($event)"
       (sessionChanged)="sessionChanged($event)"
-      [summary]="task.summary || ''"
       [role]="controller() && task.browser?.controlOwner === 'USER' ? 'CONTROLLER' : 'VIEWER'"
       (controlLost)="controller.set(false)"
     >

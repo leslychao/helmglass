@@ -271,7 +271,10 @@ function render(next: Presentation): void {
   }
   if (finished || !browser || browser.status !== 'LIVE' || browser.privateMode || browserId && browser.id !== browserId) closeViewer();
   renderBrowser();
-  if (videoEnabled && !finished && syncReady && browser?.status === 'LIVE' && !browserId && !browserRetry && browserAttempts <= retryLimit) void openViewer();
+  if (videoEnabled && !finished && syncReady && browser?.status === 'LIVE'
+      && !browserConnected && !browserRetry && browserAttempts <= retryLimit) {
+    void openViewer(Boolean(browserId));
+  }
   if (historyDirty) void loadHistory();
   renderNotice();
   void continueTask();

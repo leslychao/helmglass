@@ -425,6 +425,43 @@ assert.ok(lastSource.closed); assert.equal(timers.size, 0);
 assert.equal(elements.get('cabinet').disabled, true);
 assert.deepEqual(frozenVisual(), beforeStaleRecovery, 'A stale recovery response preserves the last displayed state');
 
+for (const outage of ['snapshot', 'events']) {
+  await mount();
+  const recovering = presentation('IDLE', liveBrowser());
+  let stateUnavailable = false;
+  let viewerRequests = 0;
+  call = request => {
+    if (request.name === 'widget.state') return stateUnavailable
+      ? Promise.reject(new Error('Temporary state request failure')) : Promise.resolve(response(recovering));
+    if (request.name === 'widget.steps') return Promise.resolve(history());
+    if (request.name === 'widget.browser') { viewerRequests++; return Promise.resolve(ticket); }
+    throw new Error(request.name);
+  };
+  show(recovering); await settled(); viewerState('connected');
+  const originalSource = elements.get('viewer').src;
+  const originalViewerEpoch = new URL(originalSource).searchParams.get('viewerEpoch');
+  viewerState('disconnected');
+  const eventStream = sources.at(-1);
+  if (outage === 'events') eventStream.onerror();
+  else {
+    stateUnavailable = true;
+    eventStream.change('task'); await settled();
+  }
+  await nextTimer();
+  assert.equal(viewerRequests, 1, 'Viewer recovery waits for authoritative state');
+  assert.equal(elements.get('viewer').hidden, true, 'An unsynchronized frame stays hidden');
+  stateUnavailable = false;
+  await nextTimer();
+  assert.equal(viewerRequests, 2, outage + ': restored state resumes a skipped video retry');
+  assert.equal(viewerMessages.at(-1)?.type, 'helm-viewer-reconnect');
+  assert.equal(elements.get('viewer').src, originalSource, 'Recovery preserves the viewer iframe');
+  assert.equal(new URL(viewerMessages.at(-1).url).searchParams.get('viewerEpoch'), originalViewerEpoch);
+  viewerState('connected');
+  assert.equal(elements.get('viewer').hidden, false, outage + ': fresh video returns automatically');
+  assert.equal(timers.size, 0);
+  assert.equal(messages.length, 0, 'Restoring video does not continue the task or replay browser actions');
+}
+
 for (const outcome of ['SUCCEEDED', 'PARTIAL', 'NOT_ACHIEVED', 'FAILED', 'STOPPED', 'WAITING_CHATGPT']) {
   await mount();
   const recovered = presentation();

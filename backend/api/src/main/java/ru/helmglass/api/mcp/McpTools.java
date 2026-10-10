@@ -49,6 +49,17 @@ public class McpTools {
   private static final Logger log = LoggerFactory.getLogger(McpTools.class);
   private static final int IMAGE_LIMIT = 8 * 1024 * 1024;
   private static final int WIDGET_LIMIT = 1024 * 1024;
+  static final String OPERATION_RESULT_INSTRUCTIONS =
+      "Используйте уже выданный результат SUCCEEDED сразу и продолжайте задание."
+          + " Не вызывайте operations.get для повторного подтверждения готового результата."
+          + " Используйте выданное result.observation вместо отдельного observe."
+          + " operations.get нужен только для ACCEPTED/DISPATCHED, восстановления результата"
+          + " после потери ответа или контекста, либо ещё не выданного изображения screenshot"
+          + " (imageDelivery=PENDING; в пакете actions изображение получают отдельно)."
+          + " В незавершённом пакете не перепроверяйте уже готовые результаты: смотрите статус"
+          + " nextOperationId и возвращённую ошибку. Если ожидание истекло до отправки этой"
+          + " операции, продолжайте исходный пакет"
+          + " с теми же аргументами и operationId, без operations.get для неотправленной команды.";
   static final String WIDGET_PRESENTATION_INSTRUCTIONS =
       "Обновляемая карточка задачи Helm Glass с просмотром того же браузера."
           + " Текущие статус задачи, состояние браузера, прогресс и ожидание показывайте"
@@ -401,15 +412,13 @@ public class McpTools {
                 + " Ожидания выполняет штатный MCP на странице. Отсутствующие checked/selected"
                 + " означают false. selectOption принимает видимые названия options. Условные поля"
                 + " ищите в новом observation. Короткие команды возвращают готовый результат;"
-                + " Для ACCEPTED/DISPATCHED, потерянного ответа или screenshot с"
-                + " result.imageDelivery=PENDING нужен operations.get."
-                + " После изменения страницы возвращается observation: используйте её вместо"
-                + " отдельного observe. listMedia, captureAudio и screenshot по умолчанию"
+                + " " + OPERATION_RESULT_INSTRUCTIONS
+                + " listMedia, captureAudio и screenshot по умолчанию"
                 + " возвращают только свой результат. Шаг сохраняется автоматически. Группируйте заранее"
                 + " известные независимые заполнения в actions; не объединяйте действия, требующие"
                 + " промежуточного решения. Каждый элемент имеет свой стабильный operationId."
                 + " Последовательность останавливается на первом неподтверждённом успехе;"
-                + " complete=false и nextOperationId требуют проверки. confirmationPrompt"
+                + " complete=false и nextOperationId указывают место остановки. confirmationPrompt"
                 + " указывайте только если конкретный шаг требует решения пользователя: задайте"
                 + " этот вопрос в чате, получите ответ через tasks.respond с"
                 + " requestId/requestVersion. operationId сохраняется при повторе; при потере"
@@ -450,10 +459,8 @@ public class McpTools {
     result.add(
         tool(
             "operations.get",
-            "Проверить исход операции после ACCEPTED/DISPATCHED или потери ответа. Если"
-                + " screenshot вернул result.imageDelivery=PENDING, получить изображение этой же"
-                + " операции без повторного снимка. В остальных случаях SUCCEEDED с результатом"
-                + " повторно читать не нужно.",
+            "Получить сохранённый результат операции по её стабильному operationId. "
+                + OPERATION_RESULT_INSTRUCTIONS,
             object(Map.of("operationId", uuid()), "operationId"),
             true,
             false));
@@ -1203,7 +1210,10 @@ public class McpTools {
   private McpSchema.CallToolResult sequenceResult(
       UUID owner, UUID task, Map<String, Object> result) {
     actions.requireResultAccess(owner, task);
-    return textResult(result);
+    return McpSchema.CallToolResult.builder()
+        .addTextContent(json.write(modelData(json.tree(result))))
+        .addTextContent(OPERATION_RESULT_INSTRUCTIONS)
+        .build();
   }
 
   private Contracts.Operation executeAction(
@@ -1257,6 +1267,7 @@ public class McpTools {
       }
       Contracts.Artifact artifact = available.get();
       return response
+          .addTextContent(OPERATION_RESULT_INSTRUCTIONS)
           .addContent(
               McpSchema.ImageContent.builder(
                       Base64.getEncoder().encodeToString(imageBytes(owner, artifact)),
@@ -1264,7 +1275,10 @@ public class McpTools {
                   .build())
           .build();
     }
-    return textResult(operation);
+    return McpSchema.CallToolResult.builder()
+        .addTextContent(json.write(modelData(json.tree(operation))))
+        .addTextContent(OPERATION_RESULT_INSTRUCTIONS)
+        .build();
   }
 
   private byte[] imageBytes(UUID owner, Contracts.Artifact artifact) {

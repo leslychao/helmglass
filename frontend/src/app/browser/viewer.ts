@@ -39,12 +39,6 @@ export function browserViewerId(): string {
       inset: 0;
       background: #f7f9fc;
     }
-    .browser-step {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
   `,
   template: ` <section
     class="browser-card"
@@ -316,9 +310,6 @@ export function browserViewerId(): string {
       @if (browser(); as item) {
         <hg-status [value]="item.status" />
       }
-      @if (summary()) {
-        <span class="browser-step" [hgTooltip]="summary()">{{ summary() }}</span>
-      }
       <span class="spacer"></span>
       @if (steps()) {
         <button
@@ -516,7 +507,6 @@ export class BrowserViewer {
     };
     return messages[this.browser()?.profileSaveError ?? ''] ?? 'Не удалось сохранить сессию. Повторите сохранение.';
   });
-  readonly summary = input('');
   readonly browser = input<BrowserSession | null>(null);
   readonly connection = input<Connection | null>(null);
   readonly task = input<Pick<Task, 'id' | 'title'> | null>(null);
