@@ -608,14 +608,18 @@ public class McpTools {
       Map<String, Object> properties = new LinkedHashMap<>();
       if (schema.get("properties") instanceof Map<?, ?> supplied) {
         for (var entry : supplied.entrySet()) {
-          if (entry.getKey() instanceof String key) properties.put(key, entry.getValue());
+          if (entry.getKey() instanceof String key) {
+            properties.put(key, entry.getValue());
+          }
         }
       }
       properties.put("callId", uuid());
       List<String> required = new ArrayList<>();
       if (schema.get("required") instanceof List<?> supplied) {
         for (Object value : supplied) {
-          if (value instanceof String key) required.add(key);
+          if (value instanceof String key) {
+            required.add(key);
+          }
         }
       }
       required.add("callId");
@@ -719,7 +723,9 @@ public class McpTools {
         callId = uuid(input, "callId");
         if (!"tasks.create".equals(tool)) {
           task = steps.taskForCall(actor.id(), input);
-          if (task == null) throw ApiException.invalid("taskId", "Укажите ресурс задачи.");
+          if (task == null) {
+            throw ApiException.invalid("taskId", "Укажите ресурс задачи.");
+          }
           steps.begin(actor.id(), task, callId, tool, callTitle(tool, input), input);
         }
       }
