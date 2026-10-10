@@ -26,8 +26,8 @@ public class ChatBindings {
   @Transactional
   public void expireUnconfirmedContinuation() {
     var candidates = jdbc.sql("""
-            SELECT owner_id,chat_id FROM mcp_chats WHERE continuation_status='SENDING'
-              AND continuation_claimed_at<clock_timestamp()-interval '60 seconds'
+            SELECT owner_id,chat_id FROM mcp_chats WHERE continuation_status IN ('PENDING','SENDING','MESSAGE_SENT')
+              AND coalesce(continuation_claimed_at,continuation_requested_at)<clock_timestamp()-interval '60 seconds'
             ORDER BY owner_id,chat_id LIMIT 20
             """).query((row, index) -> Map.entry(row.getObject("owner_id", UUID.class),
                 row.getString("chat_id"))).list();
@@ -35,10 +35,14 @@ public class ChatBindings {
       lockOwner(candidate.getKey());
       jdbc.sql("""
               UPDATE mcp_chats SET continuation_status='UNAVAILABLE',
-                continuation_reason='Отправка не подтверждена. Продолжите задачу в исходном чате ChatGPT.',
+                continuation_reason=CASE continuation_status
+                  WHEN 'PENDING' THEN 'Клиент не запросил отправку продолжения.'
+                  WHEN 'MESSAGE_SENT' THEN 'Сообщение отправлено, но новая команда не получена.'
+                  ELSE 'Результат отправки неизвестен; повторная отправка отключена.' END
+                  || ' Продолжите задачу в исходном чате ChatGPT.',
                 updated_at=now() WHERE owner_id=:owner AND chat_id=:chat
-                  AND continuation_status='SENDING'
-                  AND continuation_claimed_at<clock_timestamp()-interval '60 seconds'
+                  AND continuation_status IN ('PENDING','SENDING','MESSAGE_SENT')
+                  AND coalesce(continuation_claimed_at,continuation_requested_at)<clock_timestamp()-interval '60 seconds'
               RETURNING task_id
               """).param("owner", candidate.getKey()).param("chat", candidate.getValue())
           .query(UUID.class).optional()

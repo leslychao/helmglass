@@ -108,6 +108,7 @@ function needsLogin(): boolean {
 
 function renderNotice(): void {
   if (connectionError) notice(connectionError, true);
+  else if (current?.task.browser?.cleanupState === 'FAILED') notice('Браузер освобождён, но сохранение файлов не завершено. Исходные файлы сохранены; требуется повтор администратора.', true);
   else if (current?.continuationStatus === 'MESSAGE_SENT') {
     notice('Запрос передан в исходный чат. Ожидаем следующую команду ChatGPT.');
   } else if (current?.continuationStatus === 'SENDING') {
@@ -126,7 +127,7 @@ function renderBrowser(): void {
     viewer.hidden = true;
     browserState.hidden = false;
     browserState.textContent = browser?.status === 'CLOSED'
-      ? (browser.closeReason === 'IDLE_TIMEOUT' ? 'Браузер закрыт после 15 минут бездействия. ' : 'Браузер закрыт. ')
+      ? (browser.closeReason === 'IDLE_TIMEOUT' ? 'Браузер закрыт после простоя. ' : 'Браузер закрыт. ')
         + (current?.task.status === 'STOPPED'
           ? 'Задача остановлена окончательно. Шаги и результаты доступны в Helm Glass.'
           : 'Возобновить браузер и задачу можно в Helm Glass; шаги и результаты сохранены.')
@@ -156,7 +157,8 @@ function renderIdle(): void {
   const browser = current?.task.browser;
   const seconds = browser?.idleCloseAt ? Math.max(0, Math.ceil((Date.parse(browser.idleCloseAt) - Date.now()) / 1000)) : null;
   idleWarning.hidden = !validated || !syncReady || superseded || tornDown || browser?.status !== 'LIVE'
-    || seconds === null || seconds > 300;
+    || seconds === null || !browser?.idleWarningAt || Date.parse(browser.idleWarningAt) > Date.now();
+  keepOpen.textContent = 'Оставить ещё на ' + ((browser?.idleTimeoutSeconds ?? 300) / 60) + ' минут';
   if (seconds !== null) idleCountdown.textContent = 'Браузер закроется из-за простоя через '
     + Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0') + '. Задача сохранится. ';
 }

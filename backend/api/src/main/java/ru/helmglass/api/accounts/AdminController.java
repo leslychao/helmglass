@@ -192,4 +192,11 @@ public class AdminController {
         JsonNode.class,
         () -> json.tree(accounts.stopTaskBrowser(actor, id)));
   }
+
+  @PostMapping("/browsers/{id}/retry-cleanup")
+  Object retryCleanup(@PathVariable UUID id, @RequestHeader("Idempotency-Key") String key) {
+    Actor actor = identity.administrator();
+    return idempotency.execute(actor.id(), key, "admin:browser:cleanup:" + id, Map.of(),
+        JsonNode.class, () -> json.tree(admission.retryCleanup(id)));
+  }
 }

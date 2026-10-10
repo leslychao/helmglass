@@ -205,12 +205,15 @@ public class TaskStepService {
   }
 
   public void requireSettled(UUID owner, UUID task, String outcome) {
-    boolean open = jdbc.sql("SELECT EXISTS(SELECT 1 FROM task_steps WHERE task_id=:task"
-            + " AND owner_id=:owner AND status IN ('PLANNED','RUNNING','WAITING','UNKNOWN'))")
-        .param("task", task).param("owner", owner).query(Boolean.class).single();
-    if (open) {
+    var open = jdbc.sql("SELECT sequence||': '||left(title,80)||' ('||status||')' FROM task_steps"
+            + " WHERE task_id=:task AND owner_id=:owner AND status IN ('PLANNED','RUNNING','WAITING','UNKNOWN')"
+            + " ORDER BY sequence LIMIT 10")
+        .param("task", task).param("owner", owner).query(String.class).list();
+    if (!open.isEmpty()) {
       throw ApiException.conflict("STEPS_UNFINISHED",
-          "Зафиксируйте результаты начатых шагов и причины пропуска остальных.");
+          "Незавершённые шаги: " + String.join("; ", open)
+              + ". Зафиксируйте результат или причину пропуска; UNKNOWN требует проверки."
+              + " Полный список доступен через steps.list.");
     }
     if ("SUCCEEDED".equals(outcome) && jdbc.sql("SELECT EXISTS(SELECT 1 FROM task_steps"
             + " WHERE task_id=:task AND status IN ('FAILED','PARTIAL'))")

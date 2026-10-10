@@ -41,12 +41,12 @@ import { Empty, Pager, Status } from '../shared/ui';
     <h1 class="sr-only">Подключения</h1>
     <header class="page-actions">
       <button
-        class="button primary page-create-action"
+        class="button page-create-action"
         (click)="create()"
         aria-label="Добавить подключение"
         hgTooltip="Добавить подключение"
       >
-        <span class="page-create-icon"><hg-icon name="plus" /></span>
+        <hg-icon name="plug" />
         Добавить подключение
       </button>
     </header>

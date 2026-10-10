@@ -14,6 +14,7 @@ async function fixture(viewOnly) {
   const frame = { width: 1280, height: 720,
     getBoundingClientRect: () => ({ left: 4, top: 8, width: 640, height: 360 }) };
   const document = {
+    addEventListener: (type, callback) => listeners.set('document:' + type, callback),
     body: { append: snapshot => snapshots.push(snapshot) },
     getElementById: () => ({}),
     querySelector: () => frame,

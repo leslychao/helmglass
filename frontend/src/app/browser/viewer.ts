@@ -19,6 +19,7 @@ import { Status } from '../shared/ui';
 import { A11yModule } from '@angular/cdk/a11y';
 import { Tooltip } from '../shared/tooltip';
 import { BrowserSessionPanel } from './session-panel';
+import { BrowserPageLifetime } from './page-lifetime';
 
 export function browserViewerId(): string {
   let id = sessionStorage.getItem('helm-viewer-id');
@@ -88,7 +89,7 @@ export function browserViewerId(): string {
         @if (canClose()) {
           <button class="icon-button browser-close"
             aria-label="Закрыть браузер" hgTooltip="Закрыть браузер"
-            [disabled]="busy() || sessionPanel()?.busy() || browser()?.controlOwner === 'TRANSFERRING'"
+            [disabled]="busy()"
             (click)="closeBrowser.emit()"><hg-icon name="power" /></button>
         }
         <button #expandButton
@@ -108,11 +109,16 @@ export function browserViewerId(): string {
     }
     @if (idleSeconds(); as seconds) {
       <div class="browser-inline-notice" role="status">
-        Браузер закроется из-за простоя через {{ idleCountdown() }}. Задача сохранится.
-        <button class="button small" [disabled]="busy() || extending()" (click)="keepOpen()">Оставить ещё на 15 минут</button>
+        Браузер закроется из-за простоя через {{ idleCountdown() }}. Задача сохранится; несохранённая страница будет потеряна.
+        <button class="button small" [disabled]="busy() || extending()" (click)="keepOpen()">Оставить ещё на {{ (browser()?.idleTimeoutSeconds ?? 300) / 60 }} минут</button>
       </div>
     }
     @if (idleError()) { <p class="error-banner" role="alert">{{ idleError() }}</p> }
+    @if (browser()?.cleanupState === 'FAILED') {
+      <p class="error-banner" role="alert">Браузер освобождён. Сохранение оставшихся файлов или очистка не завершены. Администратор может повторить операцию; исходные файлы сохранены.</p>
+    } @else if (browser()?.status === 'CLOSED' && browser()?.cleanupState === 'PENDING') {
+      <p class="browser-inline-notice" role="status">Браузер освобождён. Завершаем сохранение файлов.</p>
+    }
     @if (sessionPanel()?.error() || browser()?.profileSaveError) {
       <p class="error-banner" role="alert">
         @if (browser()?.status === 'CLOSED' && browser()?.profileSaveError) {
@@ -312,6 +318,7 @@ export function browserViewerId(): string {
   </section>`,
 })
 export class BrowserViewer {
+  private readonly pageLifetime = inject(BrowserPageLifetime);
   private readonly idleNow = signal(Date.now());
   readonly extending = signal(false);
   readonly idleError = signal('');
@@ -319,7 +326,7 @@ export class BrowserViewer {
     const browser = this.browser();
     if (browser?.status !== 'LIVE' || !browser.idleCloseAt) return null;
     const seconds = Math.max(1, Math.ceil((Date.parse(browser.idleCloseAt) - this.idleNow()) / 1000));
-    return seconds <= 300 ? seconds : null;
+    return browser.idleWarningAt && Date.parse(browser.idleWarningAt) <= this.idleNow() ? seconds : null;
   });
   readonly idleCountdown = computed(() => {
     const seconds = this.idleSeconds() ?? 0;
@@ -367,11 +374,19 @@ export class BrowserViewer {
     this.expanded.set(false);
     this.expandButton()?.nativeElement.focus();
   }
+  private manualActivity() {
+    const browser = this.browser();
+    if (browser) void this.pageLifetime.activity(browser).catch((error: unknown) => {
+      this.idleError.set(errorMessage(error));
+    });
+  }
   addressInput(event: Event) {
+    if (event.isTrusted) this.manualActivity();
     if (event.target instanceof HTMLInputElement) this.address.set(event.target.value);
   }
   navigate(event: Event) {
     event.preventDefault();
+    if (event.isTrusted) this.manualActivity();
     if (this.role() !== 'CONTROLLER' || !this.connected() || !this.viewAllowed()) return;
     try {
       const url = new URL(this.address());
@@ -523,6 +538,10 @@ export class BrowserViewer {
         return;
       const state = event.data.state;
       if (typeof state !== 'string') return;
+      if (state === 'activity') {
+        if (this.role() === 'CONTROLLER') this.manualActivity();
+        return;
+      }
       if (state === 'escape') {
         this.collapse();
         return;

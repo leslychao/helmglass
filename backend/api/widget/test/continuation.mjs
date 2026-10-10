@@ -80,7 +80,7 @@ const metadata = value => ({ publicUrl: 'https://helm.example',
 const show = value => app.ontoolresult({ structuredContent: value, _meta: metadata(value) });
 const stale = response({ code: 'STALE_WIDGET', message: 'Newer presentation exists' });
 const ticket = text({ url: 'https://helm.example/browser/view?ticket=fixture', expiresAt: '2099-01-01T00:00:00Z' });
-const liveBrowser = () => ({ id: crypto.randomUUID(), status: 'LIVE', privateMode: false, version: 1, controlOwner: 'CHATGPT', startedAt: '2026-10-09T00:00:00Z', closedAt: null, idleCloseAt: null, closeReason: null,
+const liveBrowser = () => ({ id: crypto.randomUUID(), status: 'LIVE', privateMode: false, version: 1, controlOwner: 'CHATGPT', startedAt: '2026-10-09T00:00:00Z', closedAt: null, idleCloseAt: null, idleTimeoutSeconds: 300, idleWarningAt: null, cleanupState: 'NONE', cleanupError: null, closeReason: null,
   currentUrl: 'https://secret-user:secret-password@site.example/work?token=secret#private' });
 const businessStepId = crypto.randomUUID();
 let businessStepVersion = 1;
@@ -616,7 +616,7 @@ for (const outcome of ['PARTIAL', 'NOT_ACHIEVED', 'FAILED', 'SUCCEEDED', 'STOPPE
   await app.onteardown();
 }
 await mount();
-let idle = presentation('IDLE', { ...liveBrowser(), idleCloseAt: new Date(Date.now() + 299000).toISOString() });
+let idle = presentation('IDLE', { ...liveBrowser(), idleCloseAt: new Date(Date.now() + 59000).toISOString(), idleWarningAt: new Date(Date.now() - 1000).toISOString() });
 const keepRequests = [];
 call = request => {
   if (request.name === 'widget.state') return Promise.resolve(response(idle));
@@ -625,14 +625,14 @@ call = request => {
   if (request.name === 'widget.keep-open') {
     keepRequests.push(request.arguments);
     idle = { ...idle, task: { ...idle.task, browser: { ...idle.task.browser,
-      idleCloseAt: new Date(Date.now() + 900000).toISOString() } } };
+      idleCloseAt: new Date(Date.now() + 300000).toISOString(), idleWarningAt: new Date(Date.now() + 240000).toISOString() } } };
     return Promise.resolve(response(idle));
   }
   throw new Error(request.name);
 };
 show(idle); await settled();
-assert.equal(elements.get('idle-warning').hidden, false, 'Five-minute warning is visible with session details folded');
-assert.match(elements.get('idle-countdown').textContent, /4:5/);
+assert.equal(elements.get('idle-warning').hidden, false, 'One-minute warning uses the server deadline with session details folded');
+assert.match(elements.get('idle-countdown').textContent, /0:5/);
 elements.get('keep-open').disabled = false;
 elements.get('keep-open').click(); await settled();
 assert.equal(keepRequests.length, 1);

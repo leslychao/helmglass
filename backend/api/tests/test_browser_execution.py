@@ -300,6 +300,56 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
         self.assertTrue(continued['complete'], continued)
         self.assertIn('"counter":1', str(continued['operations'][-1]['result']['observation']))
 
+    def test_scoped_observation_and_explicit_text_wait_replay_without_second_effect(self):
+        self.ready()
+        observed = self.observation()
+        commands = [self.action('click', self.target(observed, 'Save delayed')),
+                    self.action('waitFor', {**self.target(observed, 'Save status'), 'text': 'Saved 1'})]
+        result = self.execute(actions=commands)
+        self.assertTrue(result['complete'], result)
+        self.assertEqual(['SUCCEEDED', 'SUCCEEDED'], [item['status'] for item in result['operations']])
+        final = result['operations'][-1]['result']['observation']
+        self.assertEqual('region', final['scope']['type'])
+        self.assertIn('Saved 1', str(final['snapshot']))
+        self.assertNotIn('Recipient', str(final['snapshot']))
+        self.assertEqual(observed['metrics']['fullSnapshots'], final['metrics']['fullSnapshots'])
+        self.assertEqual(result, self.execute(actions=commands))
+        # A later retry through a different route cannot silently alter the trusted wait hint.
+        error, conflict, _ = self.client.tool('browser.execute', {'taskId': self.task['id'], 'action': commands[0]})
+        self.assertTrue(error, conflict)
+        self.assertEqual('IDEMPOTENCY_CONFLICT', conflict['code'])
+        observed = self.observation()
+        scoped = [self.action('click', self.target(observed, 'Read state')),
+                  self.action('observe', self.target(observed, 'Async result'))]
+        final_batch = self.execute(actions=scoped)
+        self.assertTrue(final_batch['complete'], final_batch)
+        region = final_batch['operations'][-1]['result']
+        self.assertEqual('region', region['scope']['type'])
+        self.assertIn('Saved 1', str(region['snapshot']))
+        self.assertLess(len(json.dumps(region)), len(json.dumps(observed)))
+
+    def test_text_wait_timeout_preserves_success_and_rejects_invalid_combinations(self):
+        self.ready()
+        observed = self.observation()
+        for kind, arguments in [
+            ('observe', {**self.target(observed, 'Async result'), 'cursor': 'conflict'}),
+            ('waitFor', {**self.target(observed, 'Save status'), 'state': 'visible', 'text': 'Saved'}),
+            ('waitFor', {**self.target(observed, 'Save status'), 'text': 'x' * 1001})]:
+            error, refusal, _ = self.client.tool('browser.execute', {'taskId': self.task['id'],
+                'action': self.action(kind, arguments)})
+            self.assertTrue(error, refusal)
+            self.assertEqual('VALIDATION', refusal['code'])
+        commands = [self.action('click', self.target(observed, 'Save delayed')),
+                    self.action('waitFor', {**self.target(observed, 'Save status'), 'text': 'Never appears'})]
+        pending = self.execute(actions=commands)
+        self.assertFalse(pending['complete'])
+        self.assertEqual('SUCCEEDED', pending['operations'][0]['status'])
+        failed = self.wait_operation(commands[1]['operationId'], self.client)
+        self.assertEqual('FAILED', failed['status'], failed)
+        replay = self.execute(actions=commands)
+        self.assertEqual(['SUCCEEDED', 'FAILED'], [item['status'] for item in replay['operations']])
+        self.assertIn('Saved 1', str(self.observation()['snapshot']))
+
     def test_concurrent_duplicate_has_one_effect(self):
         self.ready()
         action = self.action('click', self.target(self.observation(), 'Increment'))
@@ -322,6 +372,30 @@ console.log(JSON.stringify({rssKiB, leaked, files}));
             'action': self.action('click', self.target(self.observation(), 'Increment'))})
         self.assertTrue(error, refusal)
         self.assertEqual('UNKNOWN_RESULT', refusal['code'])
+
+        primary = self.tasks[0][0]
+        path = '/api/tasks/' + self.task['id']
+        before = primary.api(path)[1]
+        history = primary.api(path + '/history')[1]
+        # Make this disposable receipt eligible for two normal recovery sweeps.
+        self.fixture_sql(self.identity,
+            "UPDATE operations SET dispatched_at=clock_timestamp()-interval '1 minute' "
+            "WHERE owner_id=:owner AND id='" + action['operationId'] + "';")
+        time.sleep(12)
+        after = primary.api(path)[1]
+        for field in ('status', 'version', 'updatedAt', 'request'):
+            self.assertEqual(before[field], after[field], field)
+        self.assertEqual(before['browser']['idleCloseAt'], after['browser']['idleCloseAt'])
+        self.assertEqual(history, primary.api(path + '/history')[1])
+
+        error, resolved, _ = self.client.respond(before, {
+            'outcome': 'SUCCEEDED', 'evidence': 'Observed counter=1 after the uncertain click.'})
+        self.assertFalse(error, resolved)
+        self.assertEqual('WAITING_CHATGPT', resolved['status'])
+        self.assertIsNone(resolved['request'])
+        error, receipt, _ = self.client.tool('operations.get', {'operationId': action['operationId']})
+        self.assertFalse(error, receipt)
+        self.assertEqual('SUCCEEDED', receipt['status'])
 
     def test_rejected_command_rolls_back_inline_step(self):
         self.ready()

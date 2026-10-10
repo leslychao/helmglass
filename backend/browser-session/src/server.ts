@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createWriteStream } from "node:fs";
 import { mkdir, open, rename, rm } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net from "node:net";
@@ -19,6 +19,7 @@ import { importProfile } from "./profile-import.js";
 import { fillSavedCredential, type SavedCredential } from "./credential-autofill.js";
 import { CredentialCapture, CaptureConflict } from "./credential-capture.js";
 import { BrowserMcp, BrowserRejection } from "./browser-mcp.js";
+import { artifactResponse, operationReceipt } from "./session-records.js";
 
 function required(name: string): string { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return value; }
 const sessionId = z.uuid().parse(required("SESSION_ID"));
@@ -242,7 +243,7 @@ async function initialize(input: { startUrl: string }): Promise<void> {
   } catch { status = "LOST"; await browser?.close(); throw new HttpError(502, "Browser launch failed"); }
 }
 
-const Command = z.object({ operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "reload", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative(), observeAfter: z.boolean().default(true), sequence: z.object({ operationIds: z.array(z.uuid()).min(1).max(8) }).strict().optional() }).strict();
+const Command = z.object({ deadlineAt: z.string().datetime(), operationId: z.uuid(), type: z.enum(["navigate", "click", "fill", "press", "selectOption", "check", "scroll", "goBack", "reload", "newTab", "selectTab", "closeTab", "observe", "screenshot", "listMedia", "captureAudio", "waitFor", "applyConnection"]), arguments: z.record(z.string(), z.unknown()).default({}), instructionRevision: z.number().int().nonnegative(), controlEpoch: z.number().int().nonnegative(), observeAfter: z.boolean().default(true), explicitWait: z.boolean().default(false), sequence: z.object({ operationIds: z.array(z.uuid()).min(1).max(8) }).strict().optional() }).strict();
 type Command = z.infer<typeof Command>;
 const readCommands = new Set(["observe", "screenshot", "listMedia", "captureAudio", "waitFor"]);
 async function mcp(): Promise<BrowserMcp> {
@@ -255,10 +256,13 @@ async function closeMcp(): Promise<void> {
   await browserMcp?.close();
   browserMcp = undefined;
 }
-async function observe(args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<object> {
+async function observe(args: Record<string, unknown> = {}, signal?: AbortSignal, command?: Command): Promise<object> {
   observationAllowed();
   const page = selectedPage();
-  const snapshot = await (await mcp()).observe(args, signal);
+  const snapshot = await (await mcp()).observe(args, signal, command?.operationId, command?.sequence);
+  return observationEnvelope(snapshot, page);
+}
+function observationEnvelope(snapshot: object, page = selectedPage()): object {
   const tabs: { id: string; url?: string; active: boolean }[] = [];
   let tabBytes = 0;
   for (const [id, item] of pages) {
@@ -410,7 +414,7 @@ async function perform(command: Command, signal: AbortSignal): Promise<object> {
   const page = selectedPage(); const args = command.arguments;
   switch (command.type) {
     case "applyConnection": return applyConnection(args, signal);
-    case "observe": return observe(args, signal);
+    case "observe": return observe(args, signal, command);
     case "listMedia": return listMedia();
     case "captureAudio": return captureAudio(args, signal);
     case "screenshot": {
@@ -432,7 +436,9 @@ async function perform(command: Command, signal: AbortSignal): Promise<object> {
         await (await mcp()).act(command.type, input, command.operationId, command.sequence, signal);
         currentPage = tab;
       } else {
-        await (await mcp()).act(command.type, input, command.operationId, command.sequence, signal);
+        const observation = await (await mcp()).act(command.type, input, command.operationId, command.sequence, signal,
+          { explicitWait: command.explicitWait, observeAfter: command.observeAfter });
+        if (observation) return { url: snapshotUrl(selectedPage().url()), observation: observationEnvelope(observation) };
       }
     }
   }
@@ -442,9 +448,7 @@ async function perform(command: Command, signal: AbortSignal): Promise<object> {
   return { url: snapshotUrl(selectedPage().url()), ...(artifacts.length ? { artifacts } : {}) };
 }
 function receipt(id: string): object | undefined {
-  const row = db.prepare("SELECT status,result FROM operations WHERE id=?").get(id);
-  if (!row) return undefined;
-  return { operationId: id, status: row["status"], ...(typeof row["result"] === "string" ? JSON.parse(row["result"]) : {}) };
+  return operationReceipt(db, id);
 }
 async function execute(command: Command): Promise<object> {
   const fingerprint = createHash("sha256").update(JSON.stringify(command)).digest("hex");
@@ -453,6 +457,7 @@ async function execute(command: Command): Promise<object> {
     if (previous["fingerprint"] !== fingerprint) throw new HttpError(409, "Operation identity conflict");
     return receipt(command.operationId) ?? { operationId: command.operationId, status: "UNKNOWN" };
   }
+  if (Date.parse(command.deadlineAt) <= Date.now()) throw new BeforeEffectRejection(408, "Operation deadline exceeded");
   observationAllowed();
   if ((command.type !== "applyConnection" && policy.owner !== "CHATGPT") || command.controlEpoch !== policy.controlEpoch) throw new HttpError(409, "Control not granted for this epoch");
   if (activeOperation || exportingProfile) throw new HttpError(409, "Another command is running");
@@ -461,19 +466,30 @@ async function execute(command: Command): Promise<object> {
   selectedPage(); activeOperation = command.operationId; const abort = new AbortController(); activeAbort = abort;
   // Durable before external dispatch: restart or a lost response never replays a mutation.
   db.prepare("INSERT INTO operations(id,fingerprint,status) VALUES(?,?,'RUNNING')").run(command.operationId, fingerprint);
+  const deadlineTimer = setTimeout(() => abort.abort(new Error("Operation deadline exceeded")),
+    Math.max(0, Date.parse(command.deadlineAt) - Date.now()));
+  const terminationTimer = setTimeout(() => {
+    if (activeOperation === command.operationId) {
+      db.prepare("UPDATE operations SET status=? WHERE id=? AND status='RUNNING'")
+        .run(readCommands.has(command.type) ? "FAILED" : "UNKNOWN", command.operationId);
+      // The node also confirms and stops the entire container, including X11.
+      process.exit(1);
+    }
+  }, Math.max(0, Date.parse(command.deadlineAt) + 10_000 - Date.now()));
   try {
     let result = await perform(command, abort.signal);
-    if (command.observeAfter && command.type !== "observe") {
+    if (command.observeAfter && command.type !== "observe" && !("observation" in result)) {
       try { result = { ...result, observation: await observe() }; }
       catch (error) { result = { ...result, observationError: error instanceof BrowserRejection && error.code ? error.code : "OBSERVATION_UNAVAILABLE" }; }
     }
+    abort.signal.throwIfAborted();
     if (command.controlEpoch !== policy.controlEpoch) throw new HttpError(409, "Control changed while the action was in progress; verify its result");
     db.prepare("UPDATE operations SET status='SUCCEEDED',result=? WHERE id=?").run(JSON.stringify({ result }), command.operationId);
   } catch (error) {
     const outcome = readCommands.has(command.type) || error instanceof z.ZodError || error instanceof BeforeEffectRejection || error instanceof BrowserRejection ? "FAILED" : "UNKNOWN";
     db.prepare("UPDATE operations SET status=?,result=? WHERE id=?").run(outcome, JSON.stringify({ error: error instanceof HttpError || error instanceof BrowserRejection ? error.message : outcome === "UNKNOWN" ? "The action may have reached the site; verify its result before continuing" : "Browser read failed", ...(error instanceof BrowserRejection && error.code ? { code: error.code } : {}) }), command.operationId);
     if (outcome === "UNKNOWN") await closeMcp();
-  } finally { activeOperation = undefined; activeAbort = undefined; }
+  } finally { clearTimeout(deadlineTimer); clearTimeout(terminationTimer); activeOperation = undefined; activeAbort = undefined; }
   return receipt(command.operationId) ?? { operationId: command.operationId, status: "UNKNOWN" };
 }
 
@@ -649,6 +665,13 @@ const server = http.createServer(async (request, response) => {
     }
     const command = /^\/commands\/([^/]+)$/.exec(url.pathname);
     if (command?.[1] && request.method === "GET") { const result = receipt(z.uuid().parse(command[1])); if (!result) throw new HttpError(404, "Operation not found"); reply(response, 200, result); return; }
+    const cancel = /^\/commands\/([^/]+)\/cancel$/.exec(url.pathname);
+    if (cancel?.[1] && request.method === "POST") {
+      const id = z.uuid().parse(cancel[1]);
+      if (activeOperation === id) activeAbort?.abort(new Error("Operation cancelled"));
+      reply(response, 200, receipt(id) ?? { operationId: id, status: "FAILED", code: "NOT_DISPATCHED" });
+      return;
+    }
     const resolve = /^\/commands\/([^/]+)\/resolve$/.exec(url.pathname);
     if (resolve?.[1] && request.method === "POST") {
       const input = z.object({ outcome: z.enum(["SUCCEEDED", "FAILED"]), evidence: z.string().min(1).max(4000) }).parse(await body(request));
@@ -658,23 +681,9 @@ const server = http.createServer(async (request, response) => {
       if (changed.changes !== 1) throw new HttpError(409, "Operation is not awaiting verification");
       reply(response, 200, receipt(resolve[1])); return;
     }
-    const artifact = /^\/artifacts\/([^/]+)$/.exec(url.pathname);
-    if (url.pathname === "/artifacts" && request.method === "GET") {
-      // Only the authenticated backend storage receiver may archive immutable records
-      // during private input. saveArtifact never commits a private-mode record.
+    if (url.pathname.startsWith("/artifacts") && request.method === "GET") {
       if (url.searchParams.get("archive") !== "true") observationAllowed();
-      const after = z.coerce.number().int().nonnegative().safe().parse(url.searchParams.get("after") ?? "0");
-      const rows = db.prepare("SELECT rowid,document FROM artifacts WHERE rowid>? ORDER BY rowid LIMIT 101").all(after);
-      const page = rows.slice(0, 100);
-      reply(response, 200, { artifacts: page.map((row) => JSON.parse(z.string().parse(row["document"]))), nextCursor: page.at(-1)?.["rowid"] ?? after, hasMore: rows.length > 100 }); return;
-    }
-    if (artifact?.[1] && request.method === "GET") {
-      if (url.searchParams.get("archive") !== "true") observationAllowed();
-      const id = z.uuid().parse(artifact[1]); const row = db.prepare("SELECT document FROM artifacts WHERE id=?").get(id);
-      if (!row) throw new HttpError(404, "Artifact not found");
-      const metadata = z.object({ mimeType: z.string(), sizeBytes: z.number() }).parse(JSON.parse(z.string().parse(row["document"])));
-      response.writeHead(200, { "Content-Type": metadata.mimeType, "Content-Length": metadata.sizeBytes, "Cache-Control": "no-store" });
-      await pipeline(createReadStream(path.join(dataDirectory, "artifacts", id)), response); return;
+      if (await artifactResponse(db, dataDirectory, url, response)) return;
     }
     throw new HttpError(404, "Route not found");
   } catch (error) {

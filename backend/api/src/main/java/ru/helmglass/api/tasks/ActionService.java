@@ -2,6 +2,8 @@ package ru.helmglass.api.tasks;
 
 import jakarta.annotation.PreDestroy;
 import java.sql.Types;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -102,12 +104,12 @@ public class ActionService {
 
   @Transactional
   public Contracts.Operation submit(UUID owner, UUID taskId, Contracts.BrowserAction action) {
-    return submit(owner, taskId, action, List.of());
+    return submit(owner, taskId, action, List.of(), false);
   }
 
   @Transactional
   public Contracts.Operation submit(UUID owner, UUID taskId, Contracts.BrowserAction action,
-      List<UUID> sequence) {
+      List<UUID> sequence, boolean explicitWait) {
     identity.requireActive(owner);
     tasks.lockOwner(owner);
     tasks.lockTask(owner, taskId);
@@ -125,6 +127,7 @@ public class ActionService {
     if (action.arguments().has("selector") || action.arguments().has("_meta")) {
       throw ApiException.invalid("arguments", "Используйте observationId и ref из наблюдения.");
     }
+    validateObservationArguments(action.type(), action.arguments());
     String confirmation = action.confirmationPrompt() == null ? null
         : TaskService.required(action.confirmationPrompt(), "confirmationPrompt", 4000);
     if ((action.stepId() == null) == (action.step() == null)) {
@@ -146,6 +149,7 @@ public class ActionService {
                       + " coalesce((instruction_snapshot->>'observeAfter')::boolean,true)=:observe)"
                       + " AND coalesce(instruction_snapshot->'sequence','[]'::jsonb)="
                       + " CAST(:sequence AS jsonb) AND type=:type"
+                      + " AND coalesce((instruction_snapshot->>'explicitWait')::boolean,false)=:explicitWait"
                       + " AND arguments=CAST(:arguments AS jsonb) AND"
                       + " instruction_revision=:revision AND requested_control_epoch IS NOT"
                       + " DISTINCT FROM CAST(:epoch AS bigint) AND instruction_snapshot->>'confirmationPrompt'"
@@ -155,6 +159,7 @@ public class ActionService {
               .param("definition", action.step() == null ? null : json.write(action.step()))
               .param("observe", action.observeAfter(), Types.BOOLEAN)
               .param("sequence", json.write(sequence))
+              .param("explicitWait", explicitWait)
               .param("type", action.type())
               .param("arguments", json.write(action.arguments()))
               .param("revision", action.instructionRevision())
@@ -205,9 +210,11 @@ public class ActionService {
     }
     Map<String, Object> instruction = new HashMap<>();
     instruction.put("revision", task.instructionRevision());
+    if (task.browser() != null) instruction.put("browserId", task.browser().id());
     instruction.put("title", task.title());
     instruction.put("goal", task.goal());
     instruction.put("sequence", sequence);
+    instruction.put("explicitWait", explicitWait);
     instruction.put("observeAfter", action.observeAfter() == null
         ? !Set.of("listMedia", "captureAudio", "screenshot").contains(action.type())
         : action.observeAfter());
@@ -243,6 +250,7 @@ public class ActionService {
     } else {
       ensureBrowser(owner, task);
     }
+    if (task.browser() != null) browsers.refreshIdle(owner, task.browser().id(), true);
     return operation(owner, action.operationId());
   }
 
@@ -271,7 +279,7 @@ public class ActionService {
     if ("CHOOSE_CONNECTION".equals(command)) {
       return selectConnection(actor.id(), task.id(), task.instructionRevision(), connection, null);
     }
-    return prepareBrowser(actor.id(), task.id());
+    return task;
   }
 
   @Transactional
@@ -572,6 +580,42 @@ public class ActionService {
     }
   }
 
+  private static void validateObservationArguments(String type, JsonNode arguments) {
+    if (!Set.of("observe", "waitFor").contains(type)) {
+      return;
+    }
+    boolean target = arguments.has("observationId") && arguments.has("ref");
+    if ("observe".equals(type)) {
+      boolean valid = arguments.isEmpty()
+          || arguments.size() == 1 && arguments.path("cursor").isString()
+              && !arguments.path("cursor").asText().isEmpty()
+              && arguments.path("cursor").asText().length() <= 100
+          || arguments.size() == 2 && target;
+      if (!valid) {
+        throw ApiException.invalid("arguments", "Укажите страницу, observationId/ref или cursor.");
+      }
+    } else {
+      boolean text = arguments.has("text");
+      boolean state = arguments.has("state");
+      if (!target || text && state || arguments.size() != (text || state ? 3 : 2)
+          || text && (!arguments.path("text").isString()
+              || arguments.path("text").asText().isEmpty()
+              || arguments.path("text").asText().length() > 1000)
+          || state && !Set.of("visible", "hidden", "attached", "detached")
+              .contains(arguments.path("state").asText())) {
+        throw ApiException.invalid("arguments", "waitFor требует observationId/ref и state либо text.");
+      }
+    }
+    if (target && (!arguments.path("observationId").isString()
+        || !arguments.path("observationId").asText().matches(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+        || !arguments.path("ref").isString()
+        || arguments.path("ref").asText().length() > 40
+        || !arguments.path("ref").asText().matches("(f[0-9]+)?e[0-9]+"))) {
+      throw ApiException.invalid("arguments", "Некорректные observationId/ref.");
+    }
+  }
+
   private void send(Dispatch dispatch) {
     Map<String, Object> request = new HashMap<>();
     request.put("operationId", dispatch.id());
@@ -580,12 +624,26 @@ public class ActionService {
     request.put("instructionRevision", dispatch.revision());
     request.put("controlEpoch", dispatch.epoch());
     request.put("observeAfter", dispatch.observeAfter());
+    request.put("explicitWait", dispatch.explicitWait());
+    Instant deadline = jdbc.sql("SELECT deadline_at FROM operations WHERE id=:id")
+        .param("id", dispatch.id()).query((row, index) -> Database.instant(row, "deadline_at")).single();
+    request.put("deadlineAt", deadline.toString());
     if (!dispatch.sequence().isMissingNode() && !dispatch.sequence().isEmpty()) {
       request.put("sequence", Map.of("operationIds", dispatch.sequence()));
     }
     try {
-      JsonNode response =
-          worker.call("POST", "/sessions/" + dispatch.session() + "/commands", request);
+      if ("applyConnection".equals(dispatch.type())
+          && !browsers.refreshProfile(dispatch.owner(), dispatch.session(), dispatch.id() + ":before-switch")) {
+        complete(dispatch, "FAILED", null, "PROFILE_SAVE_FAILED",
+            "Не удалось сохранить текущее подключение. Смена аккаунта не выполнялась.");
+        return;
+      }
+      if (browsers.reference(dispatch.session()).closeRequested() || !deadline.isAfter(Instant.now())) {
+        complete(dispatch, "FAILED", null, "CANCELLED_BEFORE_DISPATCH", "Действие не отправлено.");
+        return;
+      }
+      JsonNode response = worker.call("POST", "/sessions/" + dispatch.session() + "/commands", request,
+          Duration.between(Instant.now(), deadline));
       acceptResponse(dispatch, response);
     } catch (WorkerClient.WorkerException exception) {
       complete(
@@ -681,7 +739,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                       epoch,
                       row.getBoolean("mutating"),
                       instruction.path("observeAfter").asBoolean(true),
-                      instruction.path("sequence"));
+                      instruction.path("sequence"), instruction.path("explicitWait").asBoolean(false));
                 })
             .single();
     if (command.revision() != task.instructionRevision()
@@ -689,6 +747,14 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       jdbc.sql("UPDATE operations SET status='CANCELLED',completed_at=now() WHERE id=:id")
           .param("id", command.id())
           .update();
+      return null;
+    }
+    String boundSession = jdbc.sql("SELECT instruction_snapshot->>'browserId' FROM operations WHERE id=:id")
+        .param("id", command.id()).query((row, index) -> row.getString(1)).optional().orElse(null);
+    if (boundSession != null && !sessionId.toString().equals(boundSession)) {
+      jdbc.sql("UPDATE operations SET status='CANCELLED',completed_at=now(),error_code='STALE_BROWSER' WHERE id=:id")
+          .param("id", command.id()).update();
+      tasks.requestContinuation(task.id());
       return null;
     }
     Long boundEpoch =
@@ -726,11 +792,6 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
             "Выбранное подключение занято другой работой");
         return null;
       }
-      if (!browsers.refreshProfile(candidate.owner(), sessionId, command.id() + ":before-switch")) {
-        complete(command, "FAILED", null, "PROFILE_SAVE_FAILED",
-            "Не удалось сохранить текущее подключение. Смена аккаунта не выполнялась.");
-        return null;
-      }
       jdbc.sql("UPDATE browser_sessions SET pending_connection_id=:connection WHERE id=:id")
           .param("connection", connection)
           .param("id", task.browser().id())
@@ -739,7 +800,9 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
     jdbc.sql(
             "UPDATE operations SET"
                 + " status='DISPATCHED',session_id=:session,control_epoch=:epoch,"
-                + " dispatched_at=clock_timestamp()"
+                + " dispatched_at=clock_timestamp(),next_check_at=clock_timestamp()+interval '5 seconds',"
+                + " deadline_at=clock_timestamp()+CASE WHEN type IN ('captureAudio','applyConnection')"
+                + " THEN interval '6 minutes' ELSE interval '90 seconds' END"
                 + " WHERE id=:id")
         .param("session", task.browser().id())
         .param("epoch", epoch)
@@ -770,7 +833,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
     var operations =
         jdbc.sql(
                 "SELECT * FROM operations WHERE status IN ('DISPATCHED','UNKNOWN') AND"
-                    + " dispatched_at<now()-interval '45 seconds' ORDER BY dispatched_at LIMIT 20")
+                    + " next_check_at<=clock_timestamp() ORDER BY next_check_at,id LIMIT 20")
             .query(
                 (row, index) -> {
                   JsonNode instruction = json.read(row.getString("instruction_snapshot"));
@@ -785,10 +848,12 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                       row.getLong("control_epoch"),
                       row.getBoolean("mutating"),
                       instruction.path("observeAfter").asBoolean(true),
-                      instruction.path("sequence"));
+                      instruction.path("sequence"), instruction.path("explicitWait").asBoolean(false));
                 })
             .list();
     for (Dispatch operation : operations) {
+      jdbc.sql("UPDATE operations SET next_check_at=clock_timestamp()+interval '15 seconds' WHERE id=:id")
+          .param("id", operation.id()).update();
       try {
         JsonNode receipt =
             worker.call(
@@ -813,10 +878,6 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       return;
     }
     JsonNode result = response.get("result");
-    if ("SUCCEEDED".equals(status)) {
-      artifacts.importResults(
-          operation.owner(), operation.task(), operation.session(), operation.id(), result);
-    }
     String errorCode = null;
     String errorMessage = null;
     if ("FAILED".equals(status)) {
@@ -837,7 +898,85 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
         result,
         errorCode,
         errorMessage);
+    if ("SUCCEEDED".equals(status)) {
+      try {
+        artifacts.importResults(operation.owner(), operation.task(), operation.session(), operation.id(), result);
+      } catch (RuntimeException exception) {
+        log.warn("Confirmed operation {} awaits artifact delivery: {}", operation.id(),
+            exception.getClass().getSimpleName());
+      }
+    }
   }
+
+  /** Recover final receipts before the node removes the original session volume. */
+  public boolean archiveReceipts(UUID session) {
+    var ids = jdbc.sql("SELECT id FROM operations WHERE session_id=:session"
+            + " AND status IN ('DISPATCHED','UNKNOWN') ORDER BY next_check_at,id LIMIT 20")
+        .param("session", session).query(UUID.class).list();
+    for (UUID id : ids) {
+      Dispatch operation = savedDispatch(id);
+      try {
+        acceptResponse(operation, worker.call("GET", "/sessions/" + session + "/commands/" + id, null));
+      } catch (WorkerClient.WorkerException exception) {
+        if (exception.status() != 404) throw exception;
+        // A missing receipt cannot prove that an already dispatched external change failed.
+        complete(operation, operation.mutating() ? "UNKNOWN" : "FAILED", null,
+            "RECEIPT_UNAVAILABLE", "Браузер остановлен; квитанция действия отсутствует.");
+      }
+    }
+    return ids.size() < 20;
+  }
+
+  @Scheduled(fixedDelay = 1000)
+  public void expireOperations() {
+    var expired = jdbc.sql("""
+            SELECT o.id,o.cancel_requested_at FROM operations o
+            JOIN tasks t ON t.id=o.task_id JOIN browser_sessions b ON b.id=o.session_id
+            WHERE o.status IN ('DISPATCHED','UNKNOWN') AND b.status<>'CLOSED'
+              AND o.deadline_at IS NOT NULL
+              AND (o.deadline_at<=clock_timestamp() OR t.status='STOPPING')
+              AND o.next_check_at<=clock_timestamp()
+            ORDER BY o.next_check_at,o.id LIMIT 20
+            """).query((row, index) -> new ExpiredOperation(row.getObject("id", UUID.class),
+                Database.instant(row, "cancel_requested_at"))).list();
+    for (ExpiredOperation candidate : expired) {
+      Dispatch operation = savedDispatch(candidate.id());
+      jdbc.sql("UPDATE operations SET next_check_at=clock_timestamp()+interval '1 second',"
+              + "cancel_requested_at=coalesce(cancel_requested_at,clock_timestamp()) WHERE id=:id")
+          .param("id", candidate.id()).update();
+      if (candidate.cancelAt() == null) {
+        try {
+          JsonNode result = worker.call("POST", "/sessions/" + operation.session()
+              + "/commands/" + operation.id() + "/cancel", Map.of(), Duration.ofSeconds(2));
+          acceptResponse(operation, result);
+        } catch (WorkerClient.WorkerException exception) {
+          log.debug("Cancellation acknowledgement unavailable for {}", candidate.id());
+        }
+      } else if (!candidate.cancelAt().plusSeconds(10).isAfter(Instant.now())) {
+        complete(operation, operation.mutating() ? "UNKNOWN" : "FAILED", null,
+            "OPERATION_DEADLINE_EXCEEDED", "Срок операции истёк. Браузер закрывается.");
+        transactions.executeWithoutResult(transaction -> {
+          tasks.lockOwner(operation.owner());
+          browsers.closeForFailure(operation.owner(), operation.session(), "OPERATION_DEADLINE_EXCEEDED");
+        });
+      }
+    }
+  }
+
+  private Dispatch savedDispatch(UUID id) {
+    return jdbc.sql("SELECT * FROM operations WHERE id=:id").param("id", id)
+        .query((row, index) -> {
+          JsonNode instruction = json.read(row.getString("instruction_snapshot"));
+          return new Dispatch(id, row.getObject("owner_id", UUID.class),
+              row.getObject("task_id", UUID.class), row.getObject("session_id", UUID.class),
+              row.getString("type"), json.read(row.getString("arguments")),
+              row.getLong("instruction_revision"), row.getLong("control_epoch"),
+              row.getBoolean("mutating"), instruction.path("observeAfter").asBoolean(true),
+              instruction.path("sequence"), instruction.path("explicitWait").asBoolean(false));
+        }).single();
+  }
+
+  private record ExpiredOperation(UUID id, Instant cancelAt) {}
 
   private void complete(
       Dispatch operation, String status, JsonNode result, String error, String message) {
@@ -846,6 +985,10 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
           tasks.lockOwner(operation.owner());
           tasks.lockTask(operation.owner(), operation.task());
           String previous = operation(operation.owner(), operation.id()).status();
+          // Repeated recovery observations are not new task or browser activity.
+          if (previous.equals(status)) {
+            return;
+          }
           if (!Set.of("DISPATCHED", "UNKNOWN").contains(previous)
               && !("ACCEPTED".equals(previous) && "FAILED".equals(status))) {
             return;
@@ -1143,5 +1286,6 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
       long epoch,
       boolean mutating,
       boolean observeAfter,
-      JsonNode sequence) {}
+      JsonNode sequence,
+      boolean explicitWait) {}
 }

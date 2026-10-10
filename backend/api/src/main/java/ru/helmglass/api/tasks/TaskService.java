@@ -37,6 +37,7 @@ SELECT t.*,
     END elapsed_seconds,
   (SELECT count(*) FROM task_steps s WHERE s.task_id=t.id) step_count,
   EXISTS(SELECT 1 FROM operations o WHERE o.task_id=t.id AND o.status='UNKNOWN') unknown_action,
+  EXISTS(SELECT 1 FROM operations o WHERE o.task_id=t.id AND o.status='DISPATCHED') dispatched_action,
   EXISTS(SELECT 1 FROM mcp_task_chats c WHERE c.task_id=t.id) chat_bound,
   (SELECT jsonb_build_object('status',c.continuation_status,'reason',c.continuation_reason)
     FROM mcp_chats c JOIN mcp_task_chats binding
@@ -63,7 +64,9 @@ SELECT t.*,
     'canView',b.status='LIVE','canControl',b.status='LIVE','version',b.version,
     'profileSaveError',c.profile_save_error,'taskId',b.task_id,'connectionId',b.connection_id,
     'loginConfirmed',b.login_confirmed,'startedAt',b.started_at,'closedAt',b.closed_at,
-    'idleCloseAt',b.idle_close_at,'closeReason',b.close_reason)
+    'idleCloseAt',b.idle_close_at,'idleTimeoutSeconds',b.idle_timeout_seconds,
+    'idleWarningAt',b.idle_warning_at,'cleanupState',b.cleanup_state,
+    'cleanupError',b.cleanup_error,'closeReason',b.close_reason)
     FROM browser_sessions b
     LEFT JOIN connections c ON c.id=coalesce(b.pending_connection_id,b.connection_id)
     WHERE b.id=t.browser_session_id)::text browser_json,
@@ -122,7 +125,7 @@ FROM tasks t
             .single();
     String order = switch (query.sort() == null ? "" : query.sort()) {
       case "title" -> "coalesce(nullif(title,''),nullif(goal,''),'Черновик без названия')";
-      case "status" -> "coalesce(outcome,status)";
+      case "status" -> "status";
       case "site" -> "site";
       case "source" -> "source";
       case "createdAt" -> "created_at";
@@ -331,11 +334,8 @@ VALUES (:id,:owner,:title,:goal,:url,:site,:format,CAST(:connections AS jsonb),
       suspendBrowserWork(id);
       change(owner, id, hasDispatched(id) ? "PAUSING" : "PAUSED", task.waitReason(),
           "IDLE_TIMEOUT".equals(reason)
-              ? "Браузер закрывается после 15 минут бездействия. Задача сохранена."
+              ? "Браузер закрывается после простоя. Задача сохранена."
               : "Закрытие браузера запрошено. Задача остаётся на паузе.");
-    }
-    if ("TRANSFERRING".equals(task.browser().controlOwner())) {
-      throw ApiException.conflict("CONTROL_CHANGED", "Дождитесь передачи управления.");
     }
     closeTaskBrowsers(id);
     jdbc.sql("UPDATE browser_sessions SET close_reason=:reason,idle_close_at=NULL WHERE id=:id")
@@ -905,7 +905,7 @@ completed_at=now() WHERE id=:id AND status='UNKNOWN'
   private void closeTaskBrowsers(UUID task) {
     // An unallocated browser has no worker to acknowledge closure.
     jdbc.sql("""
-            UPDATE browser_sessions SET close_requested=true,
+            UPDATE browser_sessions SET close_requested=true,pending_control=NULL,control_deadline_at=NULL,
               version=version+1,
               closed_at=CASE WHEN status='QUEUED' THEN now() ELSE closed_at END,
               control_owner=CASE WHEN status='QUEUED' THEN 'NONE' ELSE control_owner END,
@@ -1010,7 +1010,7 @@ WHERE id=:id AND owner_id=:owner RETURNING version
               """
 UPDATE mcp_chats SET continuation_status='PENDING',continuation_revision=t.instruction_revision,
   continuation_id=:continuation,continuation_reason=NULL,
-  continuation_requested_at=clock_timestamp(),updated_at=now() FROM tasks t
+  continuation_claimed_at=NULL,continuation_requested_at=clock_timestamp(),updated_at=now() FROM tasks t
 WHERE mcp_chats.task_id=t.id AND t.id=:id AND NOT t.paused_explicitly
   AND t.status='WAITING_CHATGPT'
 """)
@@ -1250,6 +1250,10 @@ VALUES (:id,:task,:owner,(SELECT coalesce(max(sequence),0)+1 FROM task_history W
         && Set.of("CLOSED", "LOST").contains(browserState.status())
         && !row.getBoolean("unknown_action")) {
       commands.add("OPEN_BROWSER");
+    }
+    if (row.getBoolean("unknown_action") || row.getBoolean("dispatched_action")) {
+      commands.removeAll(List.of("RESUME", "OPEN_BROWSER", "TAKE_CONTROL", "BEGIN_LOGIN",
+          "RETURN_CONTROL", "FINISH_LOGIN"));
     }
     JsonNode usage = json.read(row.getString("usage_json"));
     JsonNode result = json.read(row.getString("result"));

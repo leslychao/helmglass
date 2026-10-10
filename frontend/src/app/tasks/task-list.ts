@@ -17,7 +17,7 @@ import { Page, Task, kpiSchema, pageSchema, taskSchema } from '../core/models';
 import { MultiFilter, Option } from '../shared/multi-filter';
 import { QueryState } from '../shared/query-state';
 import { Tooltip } from '../shared/tooltip';
-import { DurationPipe, Empty, Pager, Status, states } from '../shared/ui';
+import { DurationPipe, Empty, MegabytesPipe, Pager, Status, states } from '../shared/ui';
 import { TaskStop } from './task-stop';
 import { TaskDuration } from './task-duration';
 
@@ -36,6 +36,7 @@ import { TaskDuration } from './task-duration';
     RouterLink,
     MultiFilter,
     DurationPipe,
+    MegabytesPipe,
     TaskDuration,
     Empty,
     Pager,
@@ -136,7 +137,7 @@ export class TaskList {
       help: 'Суммарное время выполнения команд браузера, без ожиданий между командами и работы ChatGPT.' },
     { key: 'manualSeconds', label: 'Человек', width: 150, hidden: true },
     { key: 'mediaSeconds', label: 'Медиа', width: 150, hidden: true },
-    { key: 'mediaBytes', label: 'Байты медиа', width: 160, hidden: true },
+    { key: 'mediaBytes', label: 'Объём медиа', width: 160, hidden: true },
     { key: 'updatedAt', label: 'Обновлено', width: 190 },
     { key: 'summary', label: 'Текущий шаг / итог', width: 300, className: 'summary-cell' },
     { key: 'actions', label: 'Действия', width: 58, action: true },

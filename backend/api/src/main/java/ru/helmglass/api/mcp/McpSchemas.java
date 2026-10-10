@@ -117,6 +117,10 @@ final class McpSchemas {
             Map.entry("startedAt", nullable(string())),
             Map.entry("closedAt", nullable(string())),
             Map.entry("idleCloseAt", nullable(string())),
+            Map.entry("idleTimeoutSeconds", integer()),
+            Map.entry("idleWarningAt", nullable(string())),
+            Map.entry("cleanupState", string()),
+            Map.entry("cleanupError", nullable(string())),
             Map.entry("closeReason", nullable(string()))));
   }
 

@@ -4,6 +4,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -37,6 +38,13 @@ public class BrowserPageController {
     return Map.of("active", false);
   }
 
+  @PostMapping("/activity")
+  Map<String, Boolean> activity(
+      @PathVariable UUID session, @PathVariable UUID visit, @RequestBody ActivityInput input) {
+    pages.activity(owner(), session, visit, input.controlEpoch(), input.sequence());
+    return Map.of("active", true);
+  }
+
   private UUID owner() {
     var actor = identity.current();
     if (!"WEB".equals(actor.channel())) {
@@ -46,4 +54,6 @@ public class BrowserPageController {
   }
 
   public record PageInput(UUID viewerId) {}
+
+  public record ActivityInput(long controlEpoch, long sequence) {}
 }

@@ -5,6 +5,11 @@ import { Tooltip } from './tooltip';
 
 export const states: Record<string, string> = {
   BROWSER_CAPACITY: 'Ожидание свободного браузера или освобождения лимита',
+  ADMIN_PAUSED: 'Новые назначения приостановлены администратором',
+  DEPLOYMENT_DRAIN: 'Новые назначения приостановлены для развёртывания',
+  ADMIN_PAUSED_DEPLOYMENT_DRAIN: 'Действуют административная пауза и пауза развёртывания',
+  USER_BROWSER_LIMIT: 'Достигнут лимит браузеров пользователя',
+  NODE_UNAVAILABLE: 'Нет доступного узла для запуска',
   CONNECTION_BUSY: 'Выбранное подключение занято другой задачей',
   QUESTION: 'Нужен ответ на вопрос',
   CONFIRMATION: 'Нужно подтверждение действия',
@@ -76,6 +81,21 @@ export class LabelPipe implements PipeTransform {
     return value ? (states[value.toUpperCase()] ?? value) : '—';
   }
 }
+@Pipe({ name: 'megabytes' })
+export class MegabytesPipe implements PipeTransform {
+  private readonly format = new Intl.NumberFormat('ru-RU', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+  transform(bytes: number | null | undefined): string {
+    if (bytes === null || bytes === undefined) return 'Нет данных';
+    const megabytes = bytes / 1_000_000;
+    if (megabytes > 0 && megabytes < 0.01) return '< 0,01 МБ';
+    return `${this.format.format(megabytes)} МБ`;
+  }
+}
+
 @Pipe({ name: 'duration' })
 export class DurationPipe implements PipeTransform {
   transform(value: number | null | undefined) {

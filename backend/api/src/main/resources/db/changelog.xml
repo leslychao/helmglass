@@ -97,4 +97,7 @@
   <changeSet id="29-profile-on-close" author="helmglass">
     <sqlFile path="029-profile-on-close.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="30-browser-lifecycle-deadlines" author="helmglass">
+    <sqlFile path="030-browser-lifecycle-deadlines.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

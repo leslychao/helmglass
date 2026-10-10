@@ -31,7 +31,7 @@ public class ConnectionService {
       """
       SELECT c.*,b.id browser_id,b.status browser_status,b.node_id,b.control_owner,b.control_epoch,
         b.private_mode,b.current_url,b.version browser_version,b.task_id,b.login_confirmed,
-        b.started_at browser_started_at,b.closed_at browser_closed_at,b.idle_close_at,b.close_reason,
+        b.started_at browser_started_at,b.closed_at browser_closed_at,b.idle_close_at,b.idle_timeout_seconds,b.idle_warning_at,b.cleanup_state,b.cleanup_error,b.close_reason,
         (SELECT count(*) FROM tasks t WHERE t.owner_id=c.owner_id
           AND (t.selected_connection_id=c.id OR t.preferred_connection_ids @> jsonb_build_array(c.id))) task_count
         FROM connections c
@@ -470,7 +470,8 @@ WHERE t.owner_id=:owner AND (t.selected_connection_id=:id OR b.connection_id=:id
                 row.getObject("task_id", UUID.class), row.getObject("id", UUID.class),
                 row.getBoolean("login_confirmed"), Database.instant(row, "browser_started_at"),
                 Database.instant(row, "browser_closed_at"), Database.instant(row, "idle_close_at"),
-                row.getString("close_reason"));
+                row.getInt("idle_timeout_seconds"), Database.instant(row, "idle_warning_at"),
+                row.getString("cleanup_state"), row.getString("cleanup_error"), row.getString("close_reason"));
     return new Contracts.Connection(
         row.getObject("id", UUID.class),
         row.getLong("version"),

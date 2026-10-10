@@ -11,7 +11,7 @@ import { Api, errorMessage } from '../core/api';
 import { LiveEvents } from '../core/live-events';
 import { usageReportSchema } from '../core/models';
 import { QueryState } from '../shared/query-state';
-import { DurationPipe, Empty, Pager } from '../shared/ui';
+import { DurationPipe, Empty, MegabytesPipe, Pager } from '../shared/ui';
 import { Dialog } from '../shared/dialog';
 import { Tooltip } from '../shared/tooltip';
 
@@ -25,6 +25,7 @@ import { Tooltip } from '../shared/tooltip';
     DecimalPipe,
     DateFilter,
     DurationPipe,
+    MegabytesPipe,
     Empty,
     Pager,
     Tooltip,
@@ -131,10 +132,10 @@ import { Tooltip } from '../shared/tooltip';
             <span class="metric-icon"><hg-icon name="database" /></span>
           </div>
           <strong class="metric-value">{{
-            report.usage.mediaBytes === null ? '—' : (report.usage.mediaBytes | number)
+            report.usage.mediaBytes | megabytes
           }}</strong>
           <p class="metric-context">
-            {{ report.usage.mediaBytes === null ? 'Нет данных' : 'байт передано' }}
+            Переданные файлы
           </p>
         </div>
       </section>
@@ -342,7 +343,7 @@ import { Tooltip } from '../shared/tooltip';
               site.mediaSeconds | duration
             }}</ng-template>
             <ng-template hgCell="mediaBytes" [hgCellOf]="report.sites.items" let-site>
-              {{ site.mediaBytes === null ? 'Нет данных' : (site.mediaBytes | number) + ' байт' }}
+              {{ site.mediaBytes | megabytes }}
             </ng-template>
           </hg-data-table>
         } @else {

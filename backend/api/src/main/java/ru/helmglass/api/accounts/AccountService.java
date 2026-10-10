@@ -554,31 +554,12 @@ FROM accounts a
         .param("status", status)
         .param("id", target)
         .update();
-    var sessions =
-        jdbc.sql(
-                "UPDATE browser_sessions SET"
-                    + " control_epoch=control_epoch+1,control_owner='NONE',controller_id=NULL,private_mode=true,pending_control=NULL,close_requested=true"
-                    + " WHERE owner_id=:owner AND status NOT IN ('CLOSED','LOST') RETURNING"
-                    + " id,control_epoch")
-            .param("owner", target)
-            .query(
-                (row, index) ->
-                    new Revocation(row.getObject("id", UUID.class), row.getLong("control_epoch")))
-            .list();
-    for (Revocation session : sessions) {
-      try {
-        worker.call(
-            "POST",
-            "/sessions/" + session.id() + "/control",
-            Map.of("controlEpoch", session.epoch(), "owner", "NONE", "privateMode", true));
-      } catch (WorkerClient.WorkerException exception) {
-        jdbc.sql(
-                "UPDATE browser_sessions SET status='UNREACHABLE' WHERE id=:id AND status NOT IN"
-                    + " ('CLOSED','LOST','QUEUED')")
-            .param("id", session.id())
-            .update();
-      }
-    }
+    jdbc.sql("""
+            UPDATE browser_sessions SET control_epoch=control_epoch+1,control_owner='NONE',
+              controller_id=NULL,private_mode=true,pending_control=NULL,control_deadline_at=NULL,
+              close_requested=true,next_check_at=clock_timestamp()
+            WHERE owner_id=:owner AND status NOT IN ('CLOSED','LOST')
+            """).param("owner", target).update();
   }
 
   private void stopAll(UUID target, String type) {
@@ -837,7 +818,7 @@ FROM accounts a
                     boolean stopped =
                         jdbc.sql(
                                 "SELECT NOT EXISTS(SELECT 1 FROM browser_sessions WHERE"
-                                    + " owner_id=:owner AND status<>'CLOSED')")
+                                    + " owner_id=:owner AND (status<>'CLOSED' OR cleanup_state NOT IN ('NONE','COMPLETE')))")
                             .param("owner", owner)
                             .query(Boolean.class)
                             .single();
@@ -1070,5 +1051,4 @@ FROM accounts a
 
   private record Job(UUID id, UUID owner, long cutoff) {}
 
-  private record Revocation(UUID id, long epoch) {}
 }

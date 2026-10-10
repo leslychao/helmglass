@@ -204,6 +204,35 @@ class UsageAdministrationTest(unittest.TestCase):
                          self.client.api("/api/tasks/" + task["id"])[1]["timing"])
         self.assertEqual(.366, self.usage()["usage"]["executionSeconds"])
 
+    def test_task_state_sorting_and_filtering_preserve_prior_outcomes(self):
+        partial = self.create("Partial result", prepare=False)
+        paused = self.create("Paused after a prior result", prepare=False)
+        stopped = self.create("Stopped after success", prepare=False)
+        waiting = self.create("Waiting for ChatGPT", prepare=False)
+        for task, state, outcome in (
+                (partial, "PARTIAL", "PARTIAL"), (paused, "PAUSED", "NOT_ACHIEVED"),
+                (stopped, "STOPPED", "SUCCEEDED"), (waiting, "WAITING_CHATGPT", None)):
+            saved_outcome = "NULL" if outcome is None else "'" + outcome + "'"
+            self.sql(f"UPDATE tasks SET status='{state}',outcome={saved_outcome},"
+                     f"completed_at=CASE WHEN '{state}' IN ('PARTIAL','STOPPED') "
+                     "THEN now() ELSE NULL END WHERE owner_id=:owner "
+                     f"AND id='{task['id']}';")
+
+        for direction, expected in (
+                ("asc", [partial, paused, stopped, waiting]),
+                ("desc", [waiting, stopped, paused, partial])):
+            with self.subTest(direction=direction):
+                status, listing = self.client.api(f"/api/tasks?sort=status&direction={direction}")
+                self.assertEqual(200, status, listing)
+                self.assertEqual(4, listing["total"])
+                self.assertEqual([task["id"] for task in expected],
+                                 [task["id"] for task in listing["items"]])
+        status, listing = self.client.api("/api/tasks?status=STOPPED")
+        self.assertEqual(200, status, listing)
+        self.assertEqual([stopped["id"]], [task["id"] for task in listing["items"]])
+        self.assertEqual(("STOPPED", "SUCCEEDED"),
+                         (listing["items"][0]["status"], listing["items"][0]["outcome"]))
+
     def admin_command(self, kind, **fields):
         path = "/api/admin/users/" + self.identity.id
         status, detail = self.admin.api(path)

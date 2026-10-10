@@ -339,6 +339,15 @@ export class Nodes {
       this.busy.set('');
     }
   }
+  async retryCleanup(browser: AdminBrowser, nodeId: string) {
+    if (this.busy() || !this.available() || browser.cleanupState !== 'FAILED') return;
+    this.busy.set(browser.id);
+    try {
+      await this.api.mutate('/api/admin/browsers/' + browser.id + '/retry-cleanup', {}, z.unknown());
+      await this.loadBrowsers(nodeId);
+    } catch (error: unknown) { this.error.set(errorMessage(error)); }
+    finally { this.busy.set(''); }
+  }
   async stop(browser: AdminBrowser, nodeId: string) {
     if (this.busy() || !this.available() || !browser.taskId || this.stopped(browser)) return;
     if (

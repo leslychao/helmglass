@@ -516,22 +516,23 @@ dd {
 }
 .button.page-create-action {
   min-height: 44px;
-  border-radius: 11px;
-  padding: 9px 16px 9px 12px;
-  gap: 10px;
+  padding: 10px 16px;
+  gap: 8px;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+  font-weight: 600;
 }
-.page-create-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background: #ffffff26;
+.button.page-create-action:hover {
+  background: #344054;
+  border-color: #344054;
 }
-.page-create-icon .icon {
-  width: 16px;
-  height: 16px;
+.button.page-create-action:active {
+  background: #101828;
+  border-color: #101828;
+}
+.button.page-create-action:focus-visible {
+  outline-color: var(--ink);
 }
 @media (max-width: 560px) {
   .button.page-create-action {

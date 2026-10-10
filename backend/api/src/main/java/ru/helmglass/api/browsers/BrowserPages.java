@@ -82,6 +82,34 @@ public class BrowserPages {
   }
 
   @Transactional
+  public void activity(UUID owner, UUID session, UUID visit, long epoch, long sequence) {
+    tasks.lockOwner(owner);
+    Contracts.Browser browser = browsers.get(owner, session);
+    if (sequence < 1 || !"LIVE".equals(browser.status())
+        || !"USER".equals(browser.controlOwner()) || browser.controlEpoch() != epoch
+        || browsers.reference(session).closeRequested()) {
+      throw ApiException.conflict("CONTROL_CHANGED", "Управление просмотром уже изменилось.");
+    }
+    var previous = jdbc.sql("""
+            SELECT v.activity_sequence FROM browser_page_visits v
+            JOIN browser_sessions b ON b.id=v.session_id
+            WHERE v.id=:visit AND v.session_id=:session AND NOT v.leaving
+              AND v.expires_at>clock_timestamp() AND v.control_epoch=:epoch
+              AND v.viewer_id::text=b.controller_id FOR UPDATE OF v
+            """).param("visit", visit).param("session", session).param("epoch", epoch)
+        .query(Long.class).optional();
+    if (previous.isEmpty()) {
+      throw Identity.denied("Только действующий управляющий просмотр может продлить сессию.");
+    }
+    if (sequence <= previous.get()) {
+      return;
+    }
+    jdbc.sql("UPDATE browser_page_visits SET activity_sequence=:sequence WHERE id=:visit")
+        .param("sequence", sequence).param("visit", visit).update();
+    browsers.refreshIdle(owner, session, true);
+  }
+
+  @Transactional
   public void leave(UUID owner, UUID session, UUID visit) {
     tasks.lockOwner(owner);
     browsers.get(owner, session);

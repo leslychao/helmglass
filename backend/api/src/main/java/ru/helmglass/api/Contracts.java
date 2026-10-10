@@ -133,6 +133,10 @@ public final class Contracts {
       Instant startedAt,
       Instant closedAt,
       Instant idleCloseAt,
+      int idleTimeoutSeconds,
+      Instant idleWarningAt,
+      String cleanupState,
+      String cleanupError,
       String closeReason) {}
 
   public record CookieCheck(int usableCount, Instant checkedAt) {

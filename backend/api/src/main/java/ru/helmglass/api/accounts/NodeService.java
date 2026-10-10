@@ -38,10 +38,10 @@ public class NodeService {
               boolean reachable = row.getBoolean("reachable");
               var sessions =
                   jdbc.sql(
-                          "SELECT b.id,b.task_id,b.owner_id,a.name,a.email,b.status,t.status"
+                          "SELECT b.id,b.task_id,b.owner_id,a.name,a.email,b.status,b.cleanup_state,b.cleanup_error,t.status"
                               + " task_status FROM browser_sessions b JOIN accounts a ON"
                               + " a.id=b.owner_id LEFT JOIN tasks t ON t.id=b.task_id WHERE"
-                              + " b.node_id=:node AND b.status NOT IN ('CLOSED','QUEUED') ORDER BY"
+                              + " b.node_id=:node AND (b.status NOT IN ('CLOSED','QUEUED') OR b.cleanup_state IN ('PENDING','RUNNING','FAILED')) ORDER BY"
                               + " b.created_at")
                       .param("node", id)
                       .query(
@@ -53,7 +53,7 @@ public class NodeService {
                                   browser.getString("name"),
                                   browser.getString("status"),
                                   browser.getString("email"),
-                                  browser.getString("task_status")))
+                                  browser.getString("task_status"), browser.getString("cleanup_state"), browser.getString("cleanup_error")))
                       .list();
               return new Node(
                   id,
@@ -128,7 +128,7 @@ public class NodeService {
     String from =
         " FROM browser_sessions b JOIN accounts a ON a.id=b.owner_id"
             + " LEFT JOIN tasks t ON t.id=b.task_id WHERE b.node_id=:node"
-            + " AND b.status NOT IN ('CLOSED','QUEUED')";
+            + " AND (b.status NOT IN ('CLOSED','QUEUED') OR b.cleanup_state IN ('PENDING','RUNNING','FAILED'))";
     long total = jdbc.sql("SELECT count(*)" + from).param("node", node).query(Long.class).single();
     String order =
         switch (query.sort() == null ? "" : query.sort()) {
@@ -138,7 +138,7 @@ public class NodeService {
         };
     var items =
         jdbc.sql(
-                "SELECT b.id,b.task_id,b.owner_id,a.name,a.email,b.status,t.status task_status"
+                "SELECT b.id,b.task_id,b.owner_id,a.name,a.email,b.status,b.cleanup_state,b.cleanup_error,t.status task_status"
                     + from
                     + " ORDER BY "
                     + order
@@ -156,7 +156,7 @@ public class NodeService {
                         row.getString("name"),
                         row.getString("status"),
                         row.getString("email"),
-                        row.getString("task_status")))
+                        row.getString("task_status"), row.getString("cleanup_state"), row.getString("cleanup_error")))
             .list();
     return new Contracts.Page<>(items, total, query.page(), query.pageSize());
   }
@@ -219,7 +219,7 @@ public class NodeService {
       String ownerName,
       String status,
       String ownerEmail,
-      String taskStatus) {}
+      String taskStatus, String cleanupState, String cleanupError) {}
 
   public record Node(
       UUID id,

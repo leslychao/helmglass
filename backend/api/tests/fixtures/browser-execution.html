@@ -31,6 +31,11 @@
 <button onclick="for(let i=0;i<21;i++){document.body.appendChild(document.createElement('iframe')).srcdoc='<p>Frame '+i+'</p>'}">Many frames</button>
 <button onclick="const frame=document.createElement('iframe'); frame.srcdoc='<script>document.addEventListener(&quot;DOMContentLoaded&quot;,()=>document.body.remove())<\/script>'; document.body.appendChild(frame)">Unavailable frame</button>
 <button onclick="window.open(location.href+'?popup=1')">Popup</button>
+<section aria-label="Async result">
+  <button onclick="counter++;setTimeout(()=>{document.querySelector('#async-result').textContent='Saved '+counter},700)">Save delayed</button>
+  <button onclick="document.querySelector('#async-result').textContent='Waiting'">Reset result</button>
+  <output id="async-result" aria-label="Save status">Waiting</output>
+</section>
 <iframe title="Frame" srcdoc="<label>Frame value<input></label><button onclick='this.textContent=&quot;Frame clicked&quot;'>Frame action</button>"></iframe>
 <pre id="state" role="status"></pre>
 <script>

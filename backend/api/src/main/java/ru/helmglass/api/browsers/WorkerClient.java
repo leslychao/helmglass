@@ -1,6 +1,7 @@
 package ru.helmglass.api.browsers;
 
 import java.io.IOException;
+import java.io.FilterInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -8,6 +9,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.Set;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -31,6 +36,8 @@ public class WorkerClient {
   private final String baseUrl;
   private final String token;
   private final JsonSupport json;
+  private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor(
+      Thread.ofPlatform().daemon().name("worker-response-deadline").factory());
 
   public WorkerClient(
       @Value("${helm.worker-url}") String baseUrl,
@@ -46,11 +53,12 @@ public class WorkerClient {
   }
 
   public JsonNode call(String method, String path, Object body, Duration timeout) {
+    long deadline = System.nanoTime() + timeout.toNanos();
     try {
       HttpRequest request = request(method, path, body).timeout(timeout).build();
       HttpResponse<InputStream> response =
           http.send(request, HttpResponse.BodyHandlers.ofInputStream());
-      try (InputStream input = response.body()) {
+      try (InputStream input = bounded(response.body(), deadline)) {
         byte[] bytes = input.readNBytes(MAXIMUM_REPLY_BYTES + 1);
         if (bytes.length > MAXIMUM_REPLY_BYTES) {
           throw new WorkerException("WORKER_REPLY_TOO_LARGE", response.statusCode());
@@ -82,18 +90,65 @@ public class WorkerClient {
   }
 
   public InputStream artifact(String path) throws IOException {
+    Duration timeout = Duration.ofMinutes(6);
+    long deadline = System.nanoTime() + timeout.toNanos();
     try {
       var response =
-          http.send(request("GET", path, null).build(), HttpResponse.BodyHandlers.ofInputStream());
+          http.send(request("GET", path, null).timeout(timeout).build(), HttpResponse.BodyHandlers.ofInputStream());
       if (response.statusCode() != 200) {
         response.body().close();
         throw new IOException("Worker artifact unavailable");
       }
-      return response.body();
+      return bounded(response.body(), deadline);
     } catch (InterruptedException exception) {
       Thread.currentThread().interrupt();
       throw new IOException("Worker artifact interrupted", exception);
     }
+  }
+
+  private InputStream bounded(InputStream input, long deadline) {
+    return new FilterInputStream(input) {
+      private volatile boolean expired;
+      private final ScheduledFuture<?> timer = deadlines.schedule(() -> {
+        expired = true;
+        try {
+          input.close();
+        } catch (IOException exception) {
+          // The consuming read reports the deadline, independently of transport shutdown.
+        }
+      }, Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+
+      private void checkDeadline() throws IOException {
+        if (expired || System.nanoTime() >= deadline) throw new IOException("Worker response timed out");
+      }
+
+      @Override
+      public int read() throws IOException {
+        checkDeadline();
+        int result = input.read();
+        checkDeadline();
+        return result;
+      }
+
+      @Override
+      public int read(byte[] bytes, int offset, int length) throws IOException {
+        checkDeadline();
+        int result = input.read(bytes, offset, length);
+        checkDeadline();
+        return result;
+      }
+
+      @Override
+      public void close() throws IOException {
+        timer.cancel(false);
+        input.close();
+      }
+    };
+  }
+
+  @jakarta.annotation.PreDestroy
+  void closeDeadlines() {
+    deadlines.shutdownNow();
   }
 
   private HttpRequest.Builder request(String method, String path, Object body) {

@@ -9,7 +9,7 @@ import { Api, errorMessage } from '../core/api';
 import { Page, Task, artifactSchema, pageSchema, resultRowSchema } from '../core/models';
 import { ColumnPicker } from '../shared/column-picker';
 import { Dialog } from '../shared/dialog';
-import { Empty, Pager, Status } from '../shared/ui';
+import { Empty, MegabytesPipe, Pager, Status } from '../shared/ui';
 import { QueryState } from '../shared/query-state';
 import { TextArtifact } from './text-artifact';
 import { AudioAnalysis } from './audio-analysis';
@@ -24,6 +24,7 @@ import { Tooltip } from '../shared/tooltip';
     SearchInput,
     ColumnPicker,
     Empty,
+    MegabytesPipe,
     Pager,
     Status,
     RouterLink,
@@ -156,7 +157,7 @@ import { Tooltip } from '../shared/tooltip';
                     <span class="file-mark"><hg-icon name="file" /></span
                     ><span
                       ><strong>{{ file.name }}</strong
-                      ><small>{{ file.mimeType }} · {{ file.sizeBytes ?? '—' }} байт</small></span
+                      ><small>{{ file.mimeType }} · {{ file.sizeBytes | megabytes }}</small></span
                     ><span class="spacer"></span
                     ><hg-status
                       [value]="

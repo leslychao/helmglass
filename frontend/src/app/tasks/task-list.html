@@ -56,10 +56,10 @@
 </hg-kpi-section>
 <header class="page-actions">
   <a
-    class="button primary page-create-action"
+    class="button page-create-action"
     routerLink="/tasks/new"
     [queryParams]="{ back: query.context() }"
-    ><span class="page-create-icon"><hg-icon name="plus" /></span>Добавить задачу</a
+    ><hg-icon name="tasks" />Добавить задачу</a
   >
 </header>
 <section class="card table-card" [attr.aria-busy]="loading()">
@@ -140,7 +140,7 @@
           >
         </ng-template>
         <ng-template hgCell="status" [hgCellOf]="page.items" let-task
-          ><hg-status [value]="task.outcome || task.status"
+          ><hg-status [value]="task.status"
         /></ng-template>
         <ng-template hgCell="elapsedSeconds" [hgCellOf]="page.items" let-task>
           <hg-task-duration [timing]="task.timing" />
@@ -155,7 +155,7 @@
           task.usage.mediaSeconds | duration
         }}</ng-template>
         <ng-template hgCell="mediaBytes" [hgCellOf]="page.items" let-task>{{
-          task.usage.mediaBytes ?? 'Нет данных'
+          task.usage.mediaBytes | megabytes
         }}</ng-template>
         <ng-template hgCell="updatedAt" [hgCellOf]="page.items" let-task>{{
           task.updatedAt | date: 'dd.MM.yyyy HH:mm'

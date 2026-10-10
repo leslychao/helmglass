@@ -50,6 +50,10 @@ export const browserSchema = z.object({
   startedAt: z.nullable(z.string()),
   closedAt: z.nullable(z.string()),
   idleCloseAt: z.nullable(z.string()),
+  idleTimeoutSeconds: z.number(),
+  idleWarningAt: z.nullable(z.string()),
+  cleanupState: z.enum(['NONE', 'PENDING', 'RUNNING', 'FAILED', 'COMPLETE']),
+  cleanupError: z.nullable(z.string()),
   closeReason: z.nullable(z.enum(['USER', 'IDLE_TIMEOUT'])),
 });
 export type BrowserSession = z.infer<typeof browserSchema>;
@@ -233,6 +237,8 @@ export const adminBrowserSchema = z.object({
   ownerName: z.string(),
   ownerEmail: z.string(),
   taskStatus: z.nullable(z.string()),
+  cleanupState: z.string(),
+  cleanupError: z.nullable(z.string()),
   status: z.string(),
 });
 export const nodeSchema = z.object({

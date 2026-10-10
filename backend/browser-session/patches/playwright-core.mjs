@@ -92,7 +92,7 @@ for (const [signature, guard] of [
   ['function belongsToDisplayNoneOrAriaHiddenOrNonSlotted(element) {', 'helmNode(element);']
 ]) inject(signature, signature + '\n  ' + guard);
 inject('function generateAriaTree(rootElement, publicOptions) {\n  const options = toInternalOptions(publicOptions);', `function generateAriaTree(rootElement, publicOptions) {\n  const options = toInternalOptions(publicOptions);
-  if (helmBudget && rootElement.ownerDocument.getElementsByTagName("*").length > helmBudget.maxNodes) helmLimit();`);
+  if (helmBudget && [rootElement.ownerDocument.body, rootElement.ownerDocument.documentElement].includes(rootElement) && rootElement.ownerDocument.getElementsByTagName("*").length > helmBudget.maxNodes) helmLimit();`);
 inject('  const visit = (ariaNode, node, parentElementVisible) => {', '  const visit = (ariaNode, node, parentElementVisible) => {\n    helmNode(node);');
 inject('    const element = node;\n    const isElementVisibleForAria', '    const element = node;\n    if (helmBudget && element.getAttribute("type") === "hidden") return;\n    const isElementVisibleForAria');
 inject('      const text = node.nodeValue;\n      if (ariaNode.role', '      const text = helmText(node.nodeValue);\n      if (ariaNode.role');
@@ -158,9 +158,25 @@ inject('  ariaSnapshotJSON(node, options) {', `  ariaSnapshotJSON(node, options)
 patch(sourceMatch[0], '    source5 = ' + JSON.stringify(injected) + ';');
 
 section('async function ariaSnapshotJSONForFrame(', '\nfunction ensureArrayLimit(', text => {
-  text = text.replace('options = {}) {', `options = {}, helmBudget = { maxNodes: 20000, maxChars: 262144, frames: 20, deadline: Date.now() + 20000 }) {
+  text = text.replace('options = {}) {', `options = {}, helmBudget) {
+  const outer = !helmBudget;
+  helmBudget ??= { maxNodes: 20000, maxChars: 262144, frames: 20, deadline: Date.now() + 20000, caches: new Map() };
+  let publish = false;
+  try {
   if (--helmBudget.frames < 0 || Date.now() > helmBudget.deadline) throw new Error("HELM_SNAPSHOT_LIMIT");`);
-  text = text.replace('boxes: options.boxes\n', 'boxes: options.boxes, helmBudget\n');
+  text = text.replace('      const resolved = await progress3.race(', `      if (options.helmPreserveRefs) {
+        const targets = await progress3.race(frame.selectors.resolveFramesForSelector({ selector: selector || "body,frameset", strict: options.strict ?? !!selector }));
+        for (const target of targets) {
+          const context = await progress3.race(target.frame.context(target.info.world));
+          if (!helmBudget.caches.has(context)) {
+            const injected = await context.injectedScript();
+            const saved = await injected.evaluateHandle(injected => injected._lastAriaSnapshotForQuery);
+            helmBudget.caches.set(context, { injected, saved });
+          }
+        }
+      }
+      const resolved = await progress3.race(`);
+  text = text.replace('boxes: options.boxes\n', 'boxes: options.boxes, helmBudget: { maxNodes: helmBudget.maxNodes, maxChars: helmBudget.maxChars, deadline: helmBudget.deadline }\n');
   text = text.replace('      if (frame.isNonRetriableError(e))', '      if (String(e).includes("HELM_SNAPSHOT_") || frame.isNonRetriableError(e))');
   text = text.replace('  const renderedIframeRefs =', `  if (snapshot3.helmUsage) {
     helmBudget.maxNodes -= snapshot3.helmUsage.nodes;
@@ -176,8 +192,39 @@ section('async function ariaSnapshotJSONForFrame(', '\nfunction ensureArrayLimit
     childSnapshots.push(await ariaSnapshotJSONForFrame(progress2, snapshot3.resolvedFrame, frameRootSelector, { ...options, depth: childDepth, strict: false }, helmBudget));
   }
 ` + text.slice(to);
+  text = text.replace('  return snapshot3.json;\n}', `  if (outer && options.helmPublishText) {
+    const contains = nodes => nodes.some(node => typeof node === "string"
+      ? node.includes(options.helmPublishText)
+      : [node.name, node.text].some(value => typeof value === "string" && value.includes(options.helmPublishText)) || contains(node.children || []));
+    publish = contains(snapshot3.json);
+  }
+  return snapshot3.json;
+  } finally {
+    if (outer) {
+      let failure;
+      for (const [context, { injected, saved }] of helmBudget.caches) {
+        try {
+          if (!publish) await injected.evaluate((injected, saved) => { injected._lastAriaSnapshotForQuery = saved; }, saved);
+        } catch (error) {
+          // A destroyed execution context cannot retain a usable ref map.
+          if (!context._contextDestroyedScope.isClosed()) failure ??= error;
+        } finally {
+          try { await saved.dispose(); } catch (error) { failure ??= error; }
+        }
+      }
+      helmBudget.caches.clear();
+      if (failure) throw new Error("HELM_REFERENCE_RESTORE_FAILED", { cause: failure });
+    }
+  }
+}`);
   return text;
 });
+
+// Internal only: no public tool schema accepts these metadata/protocol fields.
+section('    scheme.FrameAriaSnapshotJSONParams =', '    scheme.FrameAriaSnapshotJSONResult =', text => text
+  .replace('boxes: tOptional(tBoolean)', 'boxes: tOptional(tBoolean), helmPreserveRefs: tOptional(tBoolean), helmPublishText: tOptional(tString)'));
+section('      async ariaSnapshotJSON(options = {}) {', '      async scrollIntoViewIfNeeded(', text => text
+  .replace('boxes: options.boxes', 'boxes: options.boxes, helmPreserveRefs: options.helmPreserveRefs, helmPublishText: options.helmPublishText'));
 
 section('    Tab = class _Tab ', '// packages/playwright-core/src/tools/backend/context.ts', text => {
   text = text.replace(/^          eventsHelper.addEventListener\(p, "(?:console|pageerror|request|response|requestfailed)".*\n/gm, '');
@@ -203,7 +250,7 @@ section('    Tab = class _Tab ', '// packages/playwright-core/src/tools/backend/
   // element. Actions must retain the native identity-bound aria-ref locator.
   text = text.replace('const resolved = await locator2.normalize();', 'const resolved = locator2;');
   text = text.replace('      logErrorMessage(text2) {\n        this._handleConsoleMessage(pageErrorToConsoleMessage(new Error(text2)));\n      }', '      logErrorMessage() {}');
-  text = text.replaceAll('{ mode: "ai", depth, boxes }', '{ mode: "ai", depth, boxes, timeout: 20000, signal: this.context.helmSignal }');
+  text = text.replaceAll('{ mode: "ai", depth, boxes }', '{ mode: "ai", depth, boxes, timeout: 20000, signal: this.context.helmSignal, helmPreserveRefs: this.context.helmPreserveRefs, helmPublishText: this.context.helmPublishText }');
   const raceStart = text.indexOf('      async _raceAgainstModalStates(action) {');
   const raceEnd = text.indexOf('      async waitForCompletion(callback) {', raceStart);
   if (raceStart < 0 || raceEnd < 0) throw new Error('Modal race patch anchor changed');
@@ -219,7 +266,7 @@ section('    Tab = class _Tab ', '// packages/playwright-core/src/tools/backend/
 // every request and leaves response promises pending after a race timeout.
 section('async function waitForCompletion(tab2, callback) {', '\nfunction eventWaiter(', () => `async function waitForCompletion(tab2, callback) {
   const result = await callback();
-  await new Promise(resolve => setTimeout(resolve, tab2.context.config.timeouts?.settle ?? 500));
+  if (!tab2.context.helmExplicitWait) await new Promise(resolve => setTimeout(resolve, tab2.context.config.timeouts?.settle ?? 500));
   return result;
 }
 `);
@@ -249,8 +296,8 @@ patch(`      async dispose() {
           await this._disposeCallback?.();
         })();
       }`);
-patch('        const context = this._context;\n        let parsedArguments;', '        const context = this._context;\n        if (this._disposed) throw new Error("HELM_MCP_CLOSED");\n        context.helmSignal = signal;\n        let parsedArguments;');
-patch('          context.setRunningTool(void 0);', '          context.setRunningTool(void 0);\n          context.helmSignal = undefined;');
+patch('        const context = this._context;\n        let parsedArguments;', '        const context = this._context;\n        if (this._disposed) throw new Error("HELM_MCP_CLOSED");\n        context.helmSignal = signal;\n        context.helmPreserveRefs = rawArguments._meta?.helmPreserveRefs;\n        context.helmPublishText = rawArguments._meta?.helmPublishText;\n        context.helmExplicitWait = rawArguments._meta?.helmExplicitWait;\n        let parsedArguments;');
+patch('          context.setRunningTool(void 0);', '          context.setRunningTool(void 0);\n          context.helmSignal = undefined;\n          context.helmPreserveRefs = undefined;\n          context.helmPublishText = undefined;\n          context.helmExplicitWait = undefined;');
 section('    Context = class {', '// packages/playwright-core/src/tools/backend/response.ts', text => text
   .replace('        this._tabs = [];', '        this._tabs = [];\n        this._helmClosedDisposals = new Set();')
   .replace('          this._pendingUnhandledRejections.push(reason);', '          if (!this._pendingUnhandledRejections.length) this._pendingUnhandledRejections.push(new Error("HELM_MCP_FAILED"));')

@@ -248,11 +248,19 @@ public class McpTools {
     result.add(
         tool(
             "tasks.command",
-            "Изменить поручение или жизненный цикл задачи. STOP окончателен; RESUME завершённой задачи"
-                + " допускается только по явной просьбе пользователя в свободном исходном чате."
-                + " REQUIRE_LOGIN приостанавливает задачу для защищённого входа в её браузере."
+            "Изменить поручение или жизненный цикл задачи. STOP окончателен; RESUME завершённой"
+                + " задачи допускается только по явной просьбе пользователя в свободном исходном чате."
+                + " REQUIRE_LOGIN приостанавливает задачу и показывает «Войти на сайт»"
+                + " в текущем виджете. Кнопка открывает подключение в Helm Glass;"
+                + " отсутствующее подключение создаётся автоматически."
+                + " Для LOGIN не вызывайте tasks.respond: нативная форма не нужна."
+                + " После «Завершить вход» виджет запрашивает продолжение той же задачи"
+                + " в исходном чате."
                 + " FINISH с SUCCEEDED закрывает браузер; подтверждайте CLOSED через tasks.get."
-                + " Ответы и согласие пользователя принимаются только через tasks.respond.",
+                + " При FINISH command.text заменяет result.summary: передайте полный итог"
+                + " с полученными данными, а не сообщение «результат сохранён»."
+                + " Ответы на вопросы и согласие пользователя принимаются только"
+                + " через tasks.respond.",
             object(
                 Map.of("taskId", uuid(), "operationKey", key(), "command", commandSchema()),
                 "taskId",
@@ -282,7 +290,9 @@ public class McpTools {
             false,
             false));
     result.add(tool("tasks.respond",
-        "Показать текущий вопрос пользователя в нативной форме GPT. Сервер получает ответ напрямую"
+        "Показать QUESTION, ACCOUNT_CHOICE, CONFIRMATION или UNKNOWN_RESULT в нативной форме GPT."
+            + " LOGIN и MANUAL_CONTROL выполняются в Helm Glass через кнопку текущего виджета;"
+            + " не вызывайте этот инструмент для входа. Сервер получает ответ напрямую"
             + " от host; не передавайте ответ, согласие или выбор аккаунта аргументами."
             + " После отмены или таймаута повторный показ допустим только по новому обращению пользователя.",
         object(Map.of("taskId", uuid(), "requestId", uuid(), "requestVersion",
@@ -295,6 +305,10 @@ public class McpTools {
                 + " click/fill/press/check/selectOption/waitFor требуют в arguments одновременно"
                 + " observationId и ref из выданного наблюдения; одного ref недостаточно."
                 + " snapshot содержит native ARIA nodes с path;"
+                + " observe.arguments: {} — страница, {observationId,ref} — область, {cursor} — продолжение;"
+                + " варианты несовместимы. scope определяет область полноты. Адресный observe может завершать пакет."
+                + " waitFor: state visible/hidden/attached/detached либо text (буквальный текст 1–1000 символов)"
+                + " внутри безопасного snapshot указанного ref. Действие→waitFor в одном пакете заменяет фиксированную паузу."
                 + " отсутствующие checked/selected означают false."
                 + " selectOption принимает видимые названия options."
                 + " Условные поля ищите в новом observation."
@@ -469,7 +483,26 @@ public class McpTools {
     } else if (Set.of("tasks.create", "tasks.view", "widget.continuation").contains(name)) {
       builder.outputSchema(McpSchemas.presentation());
     }
-    return new SyncToolSpecification(builder.build(), this::call);
+    return new SyncToolSpecification(builder.build(),
+        (exchange, request) -> measuredCall(name, exchange, request));
+  }
+
+  private McpSchema.CallToolResult measuredCall(String tool,
+      McpSyncServerExchange exchange, McpSchema.CallToolRequest request) {
+    UUID callId = UUID.randomUUID();
+    long started = System.nanoTime();
+    String outcome = "ERROR";
+    Object suppliedTask = request.arguments() == null ? null : request.arguments().get("taskId");
+    String taskId = suppliedTask instanceof String value
+        && value.matches("[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}") ? value : "-";
+    try {
+      McpSchema.CallToolResult result = call(exchange, request);
+      outcome = Boolean.TRUE.equals(result.isError()) ? "ERROR" : "OK";
+      return result;
+    } finally {
+      log.info("MCP_CALL id={} tool={} task={} durationMs={} outcome={}", callId, tool, taskId,
+          TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), outcome);
+    }
   }
 
   private McpSchema.CallToolResult call(
@@ -481,9 +514,6 @@ public class McpTools {
       JsonNode input = json.tree(arguments);
       UUID owner = actor.id();
       String name = request.name();
-      if (!name.startsWith("widget.") && input.has("taskId")) {
-        browsers.modelActivity(owner, uuid(input, "taskId"));
-      }
       if ("tasks.respond".equals(name)
           && !arguments.keySet().equals(Set.of("taskId", "requestId", "requestVersion", "operationKey"))) {
         throw ApiException.invalid("arguments", "Ответ пользователя нельзя передать аргументами модели.");
@@ -789,7 +819,7 @@ public class McpTools {
       }
       Contracts.BrowserAction action = json.convert(input.path("action"), Contracts.BrowserAction.class);
       return operationResponse(
-          owner, executeAction(owner, task, chat, action, deadline, List.of()));
+          owner, executeAction(owner, task, chat, action, deadline, List.of(), false));
     }
     JsonNode supplied = input.path("actions");
     if (!supplied.isArray() || supplied.isEmpty() || supplied.size() > 8) {
@@ -805,6 +835,10 @@ public class McpTools {
       if (action.operationId() == null || !identifiers.add(action.operationId())) {
         throw ApiException.invalid("operationId", "Каждому действию нужен уникальный operationId.");
       }
+      if ("observe".equals(action.type()) && action.arguments().has("ref")
+          && commands.size() != supplied.size() - 1) {
+        throw ApiException.invalid("actions", "Адресный observe должен завершать последовательность.");
+      }
       commands.add(new Contracts.BrowserAction(action.operationId(), action.stepId(), action.type(),
           action.arguments(), action.instructionRevision(), action.controlEpoch(),
           action.confirmationPrompt(), action.step(),
@@ -813,14 +847,17 @@ public class McpTools {
     }
     List<UUID> sequenceIds = commands.stream().map(Contracts.BrowserAction::operationId).toList();
     List<Contracts.Operation> completed = new ArrayList<>();
-    for (Contracts.BrowserAction action : commands) {
+    for (int index = 0; index < commands.size(); index++) {
+      Contracts.BrowserAction action = commands.get(index);
       if (!completed.isEmpty() && System.nanoTime() >= deadline) {
         return sequenceResult(owner, task, Map.of("operations", completed, "complete", false,
             "nextOperationId", action.operationId()));
       }
       Contracts.Operation result;
       try {
-        result = executeAction(owner, task, chat, action, deadline, sequenceIds);
+        boolean explicitWait = index + 1 < commands.size()
+            && "waitFor".equals(commands.get(index + 1).type());
+        result = executeAction(owner, task, chat, action, deadline, sequenceIds, explicitWait);
       } catch (ApiException exception) {
         if (completed.isEmpty()) {
           throw exception;
@@ -843,9 +880,9 @@ public class McpTools {
   }
 
   private Contracts.Operation executeAction(UUID owner, UUID task, String chat,
-      Contracts.BrowserAction action, long deadline, List<UUID> sequence) {
+      Contracts.BrowserAction action, long deadline, List<UUID> sequence, boolean explicitWait) {
     chats.requireCurrent(owner, task, chat);
-    Contracts.Operation result = actions.submit(owner, task, action, sequence);
+    Contracts.Operation result = actions.submit(owner, task, action, sequence, explicitWait);
     if (Set.of("ACCEPTED", "DISPATCHED", "SUCCEEDED").contains(result.status())) {
       chats.accepted(owner, task, chat, action.instructionRevision(), action.operationId());
     }
@@ -854,7 +891,6 @@ public class McpTools {
 
   private McpSchema.CallToolResult operation(UUID owner, UUID id) {
     Contracts.Operation operation = actions.result(owner, id);
-    browsers.modelActivity(owner, operation.taskId());
     return operationResponse(owner, operation);
   }
 
@@ -1086,7 +1122,10 @@ public class McpTools {
             Map.entry("outputFormat", choice("TEXT", "TABLE", "REPORT")),
             Map.entry("preferredConnectionIds", array(uuid(), 50)),
             Map.entry("confirmBrowserLoss", bool()),
-            Map.entry("text", text(20000)),
+            Map.entry("text", Map.of("type", "string", "maxLength", 20000,
+                "description", "Для FINISH — полный итог с полученными данными и ограничениями;"
+                    + " заменяет result.summary, включая ранее опубликованный."
+                    + " Для REQUIRE_LOGIN — объяснение необходимости входа.")),
             Map.entry("outcome", choice("SUCCEEDED", "PARTIAL", "NOT_ACHIEVED"))),
         "type",
         "expectedVersion");

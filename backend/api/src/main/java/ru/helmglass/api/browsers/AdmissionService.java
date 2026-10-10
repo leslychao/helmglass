@@ -1,6 +1,9 @@
 package ru.helmglass.api.browsers;
 
 import java.util.HashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -17,6 +20,7 @@ import ru.helmglass.api.auth.Actor;
 import ru.helmglass.api.auth.Identity;
 import ru.helmglass.api.events.EventService;
 import ru.helmglass.api.tasks.TaskService;
+import ru.helmglass.api.tasks.ActionService;
 import tools.jackson.databind.JsonNode;
 
 @Service
@@ -28,6 +32,10 @@ public class AdmissionService {
   private final TaskService tasks;
   private final TransactionTemplate transactions;
   private final ArtifactService artifacts;
+  private final ActionService actions;
+  private final ExecutorService reconciler = Executors.newVirtualThreadPerTaskExecutor();
+  private final Semaphore reconciliationSlots = new Semaphore(4);
+  private final Semaphore archiveSlot = new Semaphore(1);
   private final EventService events;
   private final JsonSupport json;
   private static final UUID PLATFORM_ID = new UUID(0, 0);
@@ -38,6 +46,7 @@ public class AdmissionService {
       BrowserService browsers,
       TaskService tasks,
       ArtifactService artifacts,
+      ActionService actions,
       EventService events,
       JsonSupport json,
       org.springframework.transaction.PlatformTransactionManager manager) {
@@ -46,6 +55,7 @@ public class AdmissionService {
     this.browsers = browsers;
     this.tasks = tasks;
     this.artifacts = artifacts;
+    this.actions = actions;
     this.events = events;
     this.json = json;
     this.transactions = new TransactionTemplate(manager);
@@ -141,46 +151,27 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
       JsonNode health = worker.call("GET", "/health", null);
       UUID node = UUID.fromString(health.path("nodeId").asString());
       recordHealth(node, health);
-      var sessions =
-          jdbc.sql(
-                  "SELECT id,(close_requested AND NOT EXISTS(SELECT 1 FROM operations o JOIN tasks"
-                      + " t ON t.id=o.task_id WHERE o.session_id=browser_sessions.id AND"
-                      + " o.status='DISPATCHED' AND t.status='PAUSING')) close_requested"
-                      + " FROM browser_sessions WHERE node_id=:node AND status<>'CLOSED'"
-                      + " ORDER BY last_seen_at NULLS FIRST LIMIT 20")
-              .param("node", node)
-              .query(
-                  (row, index) ->
-                      new Pending(
-                          row.getObject("id", UUID.class), row.getBoolean("close_requested")))
-              .list();
-      for (Pending session : sessions) {
-        try {
-          JsonNode result = worker.call("GET", "/sessions/" + session.id(), null);
-          browsers.reconcile(session.id(), result);
-          String state = result.path("status").asString("UNKNOWN");
-          if (!Set.of("LIVE", "CLOSING", "LOST").contains(state)) {
-            continue;
+      var sessions = jdbc.sql("""
+              SELECT id FROM browser_sessions WHERE node_id=:node AND status<>'CLOSED'
+                AND next_check_at<=clock_timestamp() ORDER BY next_check_at,id LIMIT 20
+              """).param("node", node).query(UUID.class).list();
+      for (UUID session : sessions) {
+        if (!reconciliationSlots.tryAcquire()) break;
+        int claimed = jdbc.sql("""
+                UPDATE browser_sessions SET next_check_at=clock_timestamp()+interval '45 seconds'
+                WHERE id=:id AND next_check_at<=clock_timestamp()
+                """).param("id", session).update();
+        if (claimed == 0) { reconciliationSlots.release(); continue; }
+        reconciler.execute(() -> {
+          try { reconcileSession(session); }
+          catch (RuntimeException exception) {
+            log.warn("Session reconciliation failed for {}: {}", session, exception.getClass().getSimpleName());
+          } finally {
+            jdbc.sql("UPDATE browser_sessions SET next_check_at=clock_timestamp()+interval '3 seconds' WHERE id=:id")
+                .param("id", session).update();
+            reconciliationSlots.release();
           }
-          boolean archived = artifacts.importSessionBatch(session.id());
-          if ((session.close() || "LOST".equals(state)) && archived) {
-            if ("LIVE".equals(state) && !browsers.prepareClose(session.id())) {
-              continue;
-            }
-            browsers.reconcile(
-                session.id(), worker.call("DELETE", "/sessions/" + session.id(), null));
-          }
-        } catch (WorkerClient.WorkerException exception) {
-          if (exception.status() == 404) {
-            browsers.reconcile(
-                session.id(),
-                tools.jackson.databind.node.JsonNodeFactory.instance
-                    .objectNode()
-                    .put("status", "LOST"));
-          }
-        } catch (ApiException exception) {
-          log.warn("Session reconciliation failed for {}: {}", session.id(), exception.code());
-        }
+        });
       }
     } catch (RuntimeException exception) {
       transactions.executeWithoutResult(
@@ -198,6 +189,94 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
       log.debug("Worker reconciliation unavailable: {}", exception.getClass().getSimpleName());
     }
   }
+
+  private void reconcileSession(UUID session) {
+    JsonNode result = worker.call("GET", "/sessions/" + session, null);
+    browsers.reconcile(session, result);
+    if ("CLOSED".equals(browsers.get(browsers.reference(session).ownerId(), session).status())) {
+      actions.executionStopped(session);
+    }
+    String state = result.path("status").asString("UNKNOWN");
+    boolean close = jdbc.sql("""
+            SELECT close_requested AND NOT EXISTS(SELECT 1 FROM operations o JOIN tasks t ON t.id=o.task_id
+              WHERE o.session_id=b.id AND o.status='DISPATCHED' AND t.status='PAUSING'
+                AND o.deadline_at+interval '10 seconds'>clock_timestamp())
+            FROM browser_sessions b WHERE b.id=:id
+            """).param("id", session).query(Boolean.class).single();
+    if ((close || "LOST".equals(state)) && !"CLOSED".equals(state)) {
+      if ("LIVE".equals(state) && !browsers.prepareClose(session)) return;
+      JsonNode stopped = worker.call("DELETE", "/sessions/" + session, null);
+      browsers.reconcile(session, stopped);
+      if (stopped.path("runtimeStoppedAt").isString()) actions.executionStopped(session);
+    }
+  }
+
+  @Scheduled(fixedDelay = 1000)
+  public void archiveSessions() {
+    if (!archiveSlot.tryAcquire()) return;
+    try {
+      var candidate = jdbc.sql("""
+              UPDATE browser_sessions SET next_check_at=clock_timestamp()+interval '7 minutes'
+              WHERE id=(SELECT id FROM browser_sessions WHERE status='CLOSED'
+                AND cleanup_state IN ('PENDING','RUNNING') AND next_check_at<=clock_timestamp()
+                ORDER BY next_check_at,id LIMIT 1 FOR UPDATE SKIP LOCKED)
+              RETURNING id
+              """).query(UUID.class).optional();
+      if (candidate.isEmpty()) { archiveSlot.release(); return; }
+      UUID session = candidate.get();
+      reconciler.execute(() -> {
+        try {
+          boolean receipts = actions.archiveReceipts(session);
+          boolean files = artifacts.importSessionBatch(session);
+          if (receipts && files) {
+            JsonNode cleaned = worker.call("DELETE", "/sessions/" + session + "/cleanup", null);
+            if (!"COMPLETE".equals(cleaned.path("cleanupState").asString())) {
+              throw new IllegalStateException("Cleanup was not confirmed");
+            }
+            cleanupState(session, "COMPLETE", null, false);
+          } else {
+            cleanupState(session, "PENDING", null, false);
+          }
+        } catch (RuntimeException exception) {
+          cleanupState(session, "PENDING", "ARTIFACT_DELIVERY_OR_CLEANUP_FAILED", true);
+        } finally { archiveSlot.release(); }
+      });
+    } catch (RuntimeException exception) {
+      archiveSlot.release(); throw exception;
+    }
+  }
+
+  private void cleanupState(UUID session, String state, String error, boolean failed) {
+    transactions.executeWithoutResult(transaction -> {
+      var reference = browsers.reference(session);
+      tasks.lockOwner(reference.ownerId());
+      jdbc.sql("""
+              UPDATE browser_sessions SET cleanup_attempts=cleanup_attempts+CASE WHEN :failed THEN 1 ELSE 0 END,
+                cleanup_state=CASE WHEN :failed AND cleanup_attempts>=2 THEN 'FAILED' ELSE :state END,
+                cleanup_error=:error,next_check_at=clock_timestamp()+
+                  (CASE WHEN :failed THEN CASE cleanup_attempts WHEN 0 THEN 1 WHEN 1 THEN 3 ELSE 10 END ELSE 1 END)*interval '1 second',
+                version=version+1 WHERE id=:id
+              """).param("id", session).param("failed", failed).param("state", state).param("error", error).update();
+      events.emit(reference.ownerId(), "browser", session, 0);
+      events.emitAdministrators("node", session, 0);
+    });
+  }
+
+  @org.springframework.transaction.annotation.Transactional
+  public Object retryCleanup(UUID session) {
+    var reference = browsers.reference(session);
+    tasks.lockOwner(reference.ownerId());
+    int changed = jdbc.sql("""
+            UPDATE browser_sessions SET cleanup_state='PENDING',cleanup_error=NULL,cleanup_attempts=0,
+              next_check_at=clock_timestamp(),version=version+1 WHERE id=:id AND cleanup_state='FAILED'
+            """).param("id", session).update();
+    if (changed != 1) throw ApiException.conflict("CLEANUP_NOT_FAILED", "Повтор очистки сейчас не требуется.");
+    events.emit(reference.ownerId(), "browser", session, 0);
+    return browsers.get(reference.ownerId(), session);
+  }
+
+  @jakarta.annotation.PreDestroy
+  void stopReconciler() { reconciler.shutdownNow(); }
 
   private void recordHealth(UUID node, JsonNode health) {
     transactions.executeWithoutResult(
@@ -242,6 +321,8 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
       payload.put("taskId", allocation.task());
     }
     payload.put("startUrl", allocation.url());
+    payload.put("deadlineAt", jdbc.sql("SELECT start_deadline_at FROM browser_sessions WHERE id=:id")
+        .param("id", allocation.id()).query((row, index) -> ru.helmglass.api.Database.instant(row, "start_deadline_at")).single().toString());
     if (allocation.connection() != null) {
       payload.put("connectionId", allocation.connection());
       payload.put("restoreProfile", allocation.restoreProfile());
@@ -254,6 +335,39 @@ SELECT drain,(SELECT count(*) FROM browser_sessions WHERE status NOT IN ('CLOSED
           .update();
     }
   }
+
+  @Scheduled(fixedDelay = 3000)
+  public void explainQueue() {
+    var changes = jdbc.sql("""
+            WITH waiting AS (
+              SELECT t.id,t.owner_id,t.wait_reason,CASE
+                WHEN s.admin_paused AND s.drain THEN 'ADMIN_PAUSED_DEPLOYMENT_DRAIN'
+                WHEN s.admin_paused THEN 'ADMIN_PAUSED'
+                WHEN s.drain THEN 'DEPLOYMENT_DRAIN'
+                WHEN a.browser_limit_mode<>'UNLIMITED' AND
+                  (SELECT count(*) FROM browser_sessions used WHERE used.owner_id=a.id
+                    AND used.status NOT IN ('CLOSED','QUEUED')) >=
+                  CASE WHEN a.browser_limit_mode='CUSTOM' THEN a.browser_limit ELSE 2 END THEN 'USER_BROWSER_LIMIT'
+                WHEN NOT EXISTS(SELECT 1 FROM browser_nodes n WHERE n.reachable AND n.accepts_new
+                  AND n.last_seen_at>clock_timestamp()-interval '15 seconds') THEN 'NODE_UNAVAILABLE'
+                ELSE 'BROWSER_CAPACITY' END reason
+              FROM tasks t JOIN browser_sessions b ON b.id=t.browser_session_id
+              JOIN accounts a ON a.id=t.owner_id CROSS JOIN scheduler_state s
+              WHERE t.status='QUEUED' AND b.status='QUEUED' AND NOT b.close_requested)
+            SELECT id,owner_id,reason FROM waiting WHERE wait_reason IS DISTINCT FROM reason LIMIT 50
+            """).query((row, index) -> new QueueReason(row.getObject("id", UUID.class),
+                row.getObject("owner_id", UUID.class), row.getString("reason"))).list();
+    for (QueueReason change : changes) {
+      transactions.executeWithoutResult(transaction -> {
+        tasks.lockOwner(change.owner());
+        if ("QUEUED".equals(tasks.get(change.owner(), change.id()).status())) {
+          tasks.change(change.owner(), change.id(), "QUEUED", change.reason(), "Ожидание назначения браузера");
+        }
+      });
+    }
+  }
+
+  private record QueueReason(UUID id, UUID owner, String reason) {}
 
   private Allocation claim() {
     var scheduler =
@@ -312,7 +426,7 @@ ORDER BY CASE WHEN CAST(:last AS uuid) IS NULL OR b.owner_id>CAST(:last AS uuid)
       return null;
     }
     Allocation allocation = candidate.get();
-    jdbc.sql("UPDATE browser_sessions SET status='STARTING',node_id=:node WHERE id=:id")
+    jdbc.sql("UPDATE browser_sessions SET status='STARTING',start_deadline_at=clock_timestamp()+interval '6 minutes',node_id=:node WHERE id=:id")
         .param("node", node.get())
         .param("id", allocation.id())
         .update();
@@ -330,8 +444,6 @@ ORDER BY CASE WHEN CAST(:last AS uuid) IS NULL OR b.owner_id>CAST(:last AS uuid)
 
   private record Allocation(
       UUID id, UUID owner, UUID task, UUID connection, boolean restoreProfile, String url) {}
-
-  private record Pending(UUID id, boolean close) {}
 
   private record Scheduler(UUID lastOwner, boolean drain) {}
 

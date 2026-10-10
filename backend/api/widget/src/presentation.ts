@@ -3,7 +3,8 @@ import { z } from 'zod';
 const browserSchema = z.object({ id: z.uuid(), status: z.string(), privateMode: z.boolean(),
   currentUrl: z.string().nullable(), version: z.number().int(), controlOwner: z.string(),
   startedAt: z.string().nullable(), closedAt: z.string().nullable(),
-  idleCloseAt: z.string().nullable(), closeReason: z.enum(['USER', 'IDLE_TIMEOUT']).nullable() });
+  idleCloseAt: z.string().nullable(), idleTimeoutSeconds: z.number(), idleWarningAt: z.string().nullable(),
+  cleanupState: z.string(), cleanupError: z.string().nullable(), closeReason: z.enum(['USER', 'IDLE_TIMEOUT']).nullable() });
 export const presentationSchema = z.object({
   generation: z.uuid(), continuationStatus: z.string(), continuationRevision: z.number().nullable(),
   continuationId: z.uuid().nullable(),

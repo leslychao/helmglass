@@ -19,6 +19,8 @@ export class BrowserPageLifetime {
   private epoch = -1;
   private controlOwner: BrowserSession['controlOwner'] = null;
   private registered = false;
+  private activitySequence = 0;
+  private lastActivity = 0;
   private pending: Promise<void> = Promise.resolve();
 
   constructor() {
@@ -86,6 +88,15 @@ export class BrowserPageLifetime {
       }
     });
     return this.pending;
+  }
+
+  async activity(browser: BrowserSession): Promise<void> {
+    if (!this.registered || browser.id !== this.session || browser.controlEpoch !== this.epoch
+      || this.controlOwner !== 'USER' || Date.now() - this.lastActivity < 1000) return;
+    this.lastActivity = Date.now();
+    await this.api.mutate(this.path() + '/activity', {
+      controlEpoch: this.epoch, sequence: ++this.activitySequence,
+    }, pageSchema);
   }
 
   async leave() {
