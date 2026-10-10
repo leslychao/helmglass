@@ -914,7 +914,7 @@ ORDER BY o.created_at,o.id LIMIT 1 FOR UPDATE OF a SKIP LOCKED
                       instruction.path("sequence"));
                 })
             .single();
-    boolean supported = ACTIONS.contains(command.type());
+    boolean supported = ACTIONS.contains(command.type()) || "applyConnection".equals(command.type());
     try {
       validateObservationArguments(command.type(), command.arguments());
     } catch (ApiException exception) {

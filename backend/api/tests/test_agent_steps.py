@@ -1,6 +1,7 @@
 """Automatic per-tool accounting through the deployed dev REST/MCP contracts."""
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 import unittest
 import uuid
 
@@ -22,10 +23,11 @@ class AgentStepsTest(unittest.TestCase):
             "operationKey": str(uuid.uuid4()), "task": {
                 "title": "Учёт вызовов агента", "goal": "Прочитать страницу два раза",
                 "startUrl": "https://example.com", "prepare": prepare}}
-        error, presentation, _ = self.client.tool("tasks.create", self.creation_request)
+        error, presentation, result = self.client.tool("tasks.create", self.creation_request)
         self.assertFalse(error, presentation)
         self.task = presentation["task"]
         self.widget = {"taskId": self.task["id"], "generation": presentation["generation"]}
+        self.events_url = result["_meta"]["eventsUrl"]
         return self.task
 
     def listing(self, **query):
@@ -214,9 +216,45 @@ class AgentStepsTest(unittest.TestCase):
                                          + "/keep-open", "POST", {})
         self.assertEqual(200, status, browser)
         self.assertEqual(expected, browser["connectionInfo"])
-        status, renamed = self.client.api("/api/connections/" + connection["id"], "PATCH", {
-            "name": "Обновлённое подключение", "expectedVersion": connection["version"]})
-        self.assertEqual(200, status, renamed)
+        def event(stream):
+            for _ in range(100):
+                line = stream.readline()
+                if not line:
+                    self.fail("The connection event stream ended unexpectedly")
+                if line.startswith(b"data:"):
+                    return json.loads(line[5:])
+            self.fail("The connection event stream did not deliver metadata")
+
+        with (
+            self.client.http.open(self.client.base + "/api/events", timeout=10) as cabinet_stream,
+            self.client.http.open(self.events_url, timeout=10) as widget_stream,
+        ):
+            self.assertEqual("sync", event(cabinet_stream)["resource"])
+            self.assertEqual("sync", event(widget_stream)["resource"])
+            status, unrelated = self.client.api("/api/connections", "POST", {
+                "name": "Unrelated connection", "site": "iana.org",
+                "startUrl": "https://www.iana.org"})
+            self.assertEqual(200, status, unrelated)
+            status, renamed = self.client.api("/api/connections/" + connection["id"], "PATCH", {
+                "name": "Обновлённое подключение", "expectedVersion": connection["version"]})
+            self.assertEqual(200, status, renamed)
+            delivered = []
+            for _ in range(20):
+                change = event(cabinet_stream)
+                if change["resource"] == "connection":
+                    delivered.append(change)
+                    if change["entityId"] == connection["id"]:
+                        break
+            self.assertEqual([unrelated["id"], connection["id"]],
+                             [change["entityId"] for change in delivered])
+            for _ in range(20):
+                change = event(widget_stream)
+                if change["resource"] == "connection":
+                    self.assertEqual(connection["id"], change["entityId"])
+                    self.assertEqual(renamed["version"], change["version"])
+                    break
+            else:
+                self.fail("The widget did not receive its associated connection change")
         expected.update(name=renamed["name"], version=renamed["version"])
         self.assertEqual(expected, self.current()["browser"]["connectionInfo"])
         self.assertEqual(404, self.admin.api("/api/connections/" + connection["id"])[0])

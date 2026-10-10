@@ -501,7 +501,8 @@ SELECT gen_random_uuid(),:owner,'BROWSER',
         self.assertFalse(error, operations)
         switches = [item for item in operations['items'] if item['type'] == 'applyConnection']
         self.assertEqual(1, len(switches))
-        self.assertEqual('SUCCEEDED', self.wait_operation(switches[0]['id'], client)['status'])
+        switched = self.wait_operation(switches[0]['id'], client)
+        self.assertEqual('SUCCEEDED', switched['status'], switched)
         current = primary.api('/api/tasks/' + task['id'])[1]
         self.assertEqual((browser_id, second, target),
             (current['browser']['id'], current['browser']['connectionId'],
